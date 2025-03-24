@@ -1,5 +1,5 @@
 # Common dependencies
--r common.txt
+-r requirements/common.txt
 
 # Dependencies for HPU code
 ray
