@@ -37,7 +37,7 @@ from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TypeVar, Union, cast, overload)
+                    Optional, TypeVar, Union, cast)
 from uuid import uuid4
 
 import cachetools
@@ -256,15 +256,9 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
     def touch(self, key: _K) -> None:
         self._LRUCache__update(key)  # type: ignore
 
-    @overload
-    def get(self, key: _K, /) -> Optional[_V]:
-        ...
-
-    @overload
-    def get(self, key: _K, /, default: Optional[_V]) -> Optional[_V]:
-        ...
-
-    def get(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
+    def get(self,
+            key: _K,
+            default: Optional[_V] = None) -> Optional[_V]:  # type: ignore
         value: Optional[_V]
         if key in self:
             value = self.__getitem__(key)
@@ -274,6 +268,16 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
             value = default
 
         self._total += 1
+        return value
+
+    def pop(self,
+            key: _K,
+            default: Optional[_V] = None) -> Optional[_V]:  # type: ignore
+        if key in self:
+            value = self[key]
+            del self[key]
+        else:
+            value = default
         return value
 
     def put(self, key: _K, value: _V) -> None:
@@ -302,17 +306,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         if len(self) == 0:
             return
 
-        if not remove_pinned:
-            # pop the oldest item in the cache that is not pinned
-            lru_key = next(
-                (key for key in self.order if key not in self.pinned_items),
-                ALL_PINNED_SENTINEL)
-            if lru_key is ALL_PINNED_SENTINEL:
-                raise RuntimeError("All items are pinned, "
-                                   "cannot remove oldest from the cache.")
-        else:
-            lru_key = next(iter(self.order))
-        self.pop(cast(_K, lru_key), None)
+        self.popitem(remove_pinned=remove_pinned)
 
     def _remove_old_if_needed(self) -> None:
         if len(self) > self.capacity:
@@ -334,7 +328,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
                                    "cannot remove oldest from the cache.")
         else:
             lru_key = next(iter(self.order))
-        value = self.pop(cast(_K, lru_key), None)
+        value = self.pop(cast(_K, lru_key))
         return (lru_key, value)
 
 
