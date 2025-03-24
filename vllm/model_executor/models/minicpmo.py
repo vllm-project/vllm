@@ -642,10 +642,9 @@ class MiniCPMO(MiniCPMV2_6):
                                   chunk_length: int) -> torch.Tensor:
         device, dtype = vlm_embedding.device, vlm_embedding.dtype
         if audio_inputs["type"] == "audio_embeds":
-            audio_embeddings = audio_inputs["audio_features"]
             audio_embeddings = [
-                audio_embeddings[i].to(device=device, dtype=dtype)
-                for i in range(len(audio_embeddings))
+                item.to(device=device, dtype=dtype)
+                for item in audio_inputs["audio_features"]
             ]
         else:
             audio_embeddings = self.get_audio_hidden_states(
@@ -730,20 +729,11 @@ class MiniCPMO(MiniCPMV2_6):
                 raise ValueError("Incorrect type of audio_feature_lens. "
                                  f"Got type: {type(audio_feature_lens)}")
 
-            audio_features_all = [
-                i.permute(1, 0) for audio_feature in audio_features
-                for i in audio_feature
-            ]
-            audio_features = torch.nn.utils.rnn.pad_sequence(
-                audio_features_all, batch_first=True,
-                padding_value=0.0).permute(0, 2, 1)
-            audio_feature_lens = torch.cat(
-                [item for item in audio_feature_lens])
-
             return MiniCPMOAudioFeatureInputs(
                 type="audio_features",
-                audio_features=audio_features,
-                audio_feature_lens=audio_feature_lens,
+                audio_features=flatten_bn(audio_features, concat=True),
+                audio_feature_lens=flatten_bn(
+                    flatten_2d_lists(audio_feature_lens), concat=True),
                 audio_bounds=self._get_audio_bounds(input_ids, audio_start_id,
                                                     audio_end_id),
             )

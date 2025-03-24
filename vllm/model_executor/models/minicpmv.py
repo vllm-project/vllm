@@ -624,7 +624,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 )
 
                 for k, v in inputs_one.items():
-                    inputs[k].append(v)
+                    assert len(v) == 1, (k, len(v))
+                    inputs[k].append(v[0])
 
         return {k: inputs[k] for k in out_keys}
 
@@ -787,8 +788,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
             vision_hidden_states = torch.tensor([], device=input_ids.device)
         else:
             if image_inputs["type"] == "image_embeds":
-                vision_hidden_states = (image_inputs["image_embeds"].type(
-                    vlm_embedding.dtype).to(vlm_embedding.device))
+                vision_hidden_states = [
+                    item.to(device=vlm_embedding.device,
+                            dtype=vlm_embedding.dtype)
+                    for item in image_inputs["image_embeds"]
+                ]
             else:
                 vision_hidden_states = self.get_vision_hidden_states(
                     image_inputs)
@@ -910,7 +914,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
             )
 
         order_data = dict[str, Union[torch.Tensor, list[torch.Tensor]]]()
-        for modality in ("image", "video", "audio"):
+        for modality in ("image", "video"):
             modality_orders = kwargs.pop(f"{modality}_orders", None)
             if modality_orders is not None:
                 if not isinstance(modality_orders, (torch.Tensor, list)):
@@ -950,10 +954,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
                         f"Incorrect type of tgt_sizes for {modality=}. "
                         f"Got type: {type(modality_tgt_sizes)}")
 
-                pixel_values_flat += flatten_2d_lists(
-                    flatten_2d_lists(modality_pixel_values[b]))
-                tgt_sizes_flat += flatten_2d_lists(
-                    flatten_2d_lists(modality_tgt_sizes[b]))
+                pixel_values_flat += flatten_2d_lists(modality_pixel_values[b])
+                tgt_sizes_flat += flatten_2d_lists(modality_tgt_sizes[b])
 
         # NOTE: Input IDs does not contain image tokens during memory profiling,
         # so we allow it to be empty
