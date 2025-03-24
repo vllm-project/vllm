@@ -598,8 +598,8 @@ def get_dummy_processor_inputs(
 
 ## 4. Specify processing details
 
-Afterwards, create a subclass of {class}`~vllm.multimodal.processing.BaseMultiModalProcessor`
-to fill in the missing details about HF processing.
+Afterwards, create a subclass of {class}`~vllm.multimodal.processing.BaseMultiModalProcessor` (decoder-only models) /
+{class}`~vllm.multimodal.processing.EncDecMultiModalProcessor` (encoder-decoder models) to fill in the missing details about HF processing.
 
 :::{seealso}
 [Multi-Modal Data Processing](#mm-processing)
@@ -929,6 +929,49 @@ def _get_prompt_updates(
 ```
 
 :::
+
+::::
+
+### (Optional) Encoder-Decoder prompt construction
+If your model is encoder-decoder architecture, you need to also implement `create_encoder_prompt` about
+how to create econder prompt from an implicit text/tokens prompt.
+
+::::{tab-set}
+:::{tab-item} Cross modality example: Mllama
+:sync: mllama
+
+For models like Mllama and Whisper, their encoder only accept processed modality data. However, to support cross-attention
+profiling, we still need to provide a "fake" encoder prompt to profile the sequence length occupied by encoder hidden states.
+
+In this case, we can treat encoder prompt as features tokens created by prompt updates.
+
+Therefore, we just need to provide image token for number of images as encoder prompt. And let prompt updates construct
+the final encoder prompt for us automatically.
+
+```python
+def create_encoder_prompt(
+    self,
+    prompt: Union[str, list[int]],
+    mm_data: MultiModalDataDict,
+) -> Union[str, list[int]]:
+    data = mm_data.get("image", [])
+    num_images = 1 if isinstance(data, Image) else len(data)
+    image_token_id = self.info.get_hf_config().image_token_index
+    return [image_token_id] * num_images
+```
+
+:::
+
+:::{tab-item} Cross text-only: Florence-2
+:sync: florence2
+
+For Florence-2, cross-attention only occurs in its text backbone (Bart), and it uses both
+`encoder_input_ids` and `input_ids`(decoder) in forwarding.
+
+In this case, we need to provide appropriate encoder prompt and decoder prompt to make sure
+correct `encoder_input_ids` and `input_ids` are fed to Bart backbone.
+
+Let's take a look at Florence-2's processed prompts:
 
 ::::
 
