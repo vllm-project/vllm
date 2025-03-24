@@ -54,12 +54,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
     """
 
     def __init__(self, model_runner: ModelRunnerBase):
-        if hasattr(
-                model_runner,
-                "return_hidden_states") and model_runner.return_hidden_states:
-            raise ValueError(
-                "return_hidden_states is not supported for TP1DraftModelRunner."
-            )
         super().__init__(model_runner)
 
         self.indices_of_seq_with_bonus_tokens = None
@@ -143,7 +137,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
     def supports_gpu_multi_step(self, execute_model_req: ExecuteModelRequest):
         """Determines if draft_model_runner GPU multi-step can be used.
         Currently required conditions are:
-            1. Only decodes 
+            1. Only decodes
             2. Only flash-attn
             3. No LORA
             4. No prompt_adapter_config
@@ -157,7 +151,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 return False
 
         # TODO: Add support for other attn backends
-        if self.attn_backend.get_name() != "FLASH_ATTN":
+        if self.attn_backend.get_name() not in ("FLASH_ATTN", ):
             return False
 
         # TODO: Add support for LORA
@@ -179,13 +173,14 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs,
     ) -> Optional[List[SamplerOutput]]:
-        """Executes num_steps forward passes with advacement of input tensors 
+        """Executes num_steps forward passes with advacement of input tensors
         on the GPU. Look at supports_gpu_multi_step(..) for pre-conditions.
 
         Optimizations used:
             1. Input tensors are updated on the GPU directly
-            2. Skips GPU=>CPU serialization of sampler outputs (we don't need 
+            2. Skips GPU=>CPU serialization of sampler outputs (we don't need
                 them since we do batch expansion later that uses GPU outputs)
             3. Reuses sampling tensors (since we run only decodes and they have
                 a repeating sampling logic)
@@ -275,33 +270,48 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
-            kwargs = {"previous_hidden_states": hidden_states} \
+            model_execute_kwargs = {"previous_hidden_states": hidden_states} \
                 if previous_hidden_states is not None else {}
 
+            compute_logits_kwargs = {}
             # Run model
+            if hasattr(self.model.config, "num_nextn_predict_layers"):
+                # for DeepSeek MTP only to use the corresponding layer for
+                # each step
+                spec_step_idx = kwargs.get("spec_step_idx", step)
+                model_execute_kwargs["spec_step_idx"] = spec_step_idx
+                compute_logits_kwargs["spec_step_idx"] = spec_step_idx
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config):
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
-                    kv_caches=kv_caches,
-                    attn_metadata=model_input.attn_metadata,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
-                    **kwargs,
+                    **model_execute_kwargs,
                 )
 
             # Compute the logits.
             logits = self.model.compute_logits(hidden_states,
-                                               model_input.sampling_metadata)
-
+                                               model_input.sampling_metadata,
+                                               **compute_logits_kwargs)
+            if not self.is_driver_worker:
+                return []
             # Sample the next token.
             output = self.model.sample(
                 logits=logits,
                 sampling_metadata=model_input.sampling_metadata,
             )
             outputs.append(output)
+
+            if self.return_hidden_states and is_fallback:
+                if use_cuda_graph:
+                    indices = model_input.sampling_metadata\
+                      .selected_token_indices
+                    output.hidden_states = hidden_states[:len(indices)]
+                else:
+                    output.hidden_states = hidden_states
 
             if model_input.attn_metadata.num_prefills == 0 \
                 and self.indices_of_seq_with_bonus_tokens is not None:

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
-from typing import Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
@@ -43,6 +44,19 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
             raise RuntimeError(
                 "DeepSeek R1 reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
+
+    # TODO: need to rebase by PR #14428
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        return self.think_end_token_id in input_ids
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        """
+        Extract the content after the end tokens
+        """
+        if self.think_end_token_id not in input_ids[:-1]:
+            return []
+        else:
+            return input_ids[input_ids.index(self.think_end_token_id) + 1:]
 
     def extract_reasoning_content_streaming(
         self,
@@ -122,7 +136,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str]]:
 
         # DeepSeek R1 doesn't generate <think> now.
         # Thus we assume the reasoning content is always at the start.

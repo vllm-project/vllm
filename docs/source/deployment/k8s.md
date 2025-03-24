@@ -2,17 +2,23 @@
 
 # Using Kubernetes
 
-Using Kubernetes to deploy vLLM is a scalable and efficient way to serve machine learning models. This guide will walk you through the process of deploying vLLM with Kubernetes, including the necessary prerequisites, steps for deployment, and testing.
+Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 
-## Prerequisites
+Alternatively, you can deploy vLLM to Kubernetes using any of the following:
+* [Helm](frameworks/helm.md)
+* [InftyAI/llmaz](integrations/llmaz.md)
+* [KServe](integrations/kserve.md)
+* [kubernetes-sigs/lws](frameworks/lws.md)
+* [meta-llama/llama-stack](integrations/llamastack.md)
+* [substratusai/kubeai](integrations/kubeai.md)
+* [vllm-project/aibrix](https://github.com/vllm-project/aibrix)
+* [vllm-project/production-stack](integrations/production-stack.md)
 
-Before you begin, ensure that you have the following:
+## Pre-requisite
 
-- A running Kubernetes cluster
-- NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/`
-- Available GPU resources in your cluster
+Ensure that you have a running [Kubernetes cluster with GPUs](https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/).
 
-## Deployment Steps
+## Deployment using native K8s
 
 1. Create a PVC, Secret and Deployment for vLLM
 

@@ -94,20 +94,20 @@ pynccl.disabled = False
 s = torch.cuda.Stream()
 with torch.cuda.stream(s):
     data.fill_(1)
-    pynccl.all_reduce(data, stream=s)
-    value = data.mean().item()
+    out = pynccl.all_reduce(data, stream=s)
+    value = out.mean().item()
     assert value == world_size, f"Expected {world_size}, got {value}"
 
 print("vLLM NCCL is successful!")
 
 g = torch.cuda.CUDAGraph()
 with torch.cuda.graph(cuda_graph=g, stream=s):
-    pynccl.all_reduce(data, stream=torch.cuda.current_stream())
+    out = pynccl.all_reduce(data, stream=torch.cuda.current_stream())
 
 data.fill_(1)
 g.replay()
 torch.cuda.current_stream().synchronize()
-value = data.mean().item()
+value = out.mean().item()
 assert value == world_size, f"Expected {world_size}, got {value}"
 
 print("vLLM NCCL with cuda graph is successful!")
@@ -253,6 +253,10 @@ ValueError: Model architectures ['<arch>'] are not supported for now. Supported 
 ```
 
 But you are sure that the model is in the [list of supported models](#supported-models), there may be some issue with vLLM's model resolution. In that case, please follow [these steps](#model-resolution) to explicitly specify the vLLM implementation for the model.
+
+## Failed to infer device type
+
+If you see an error like `RuntimeError: Failed to infer device type`, it means that vLLM failed to infer the device type of the runtime environment. You can check [the code](gh-file:vllm/platforms/__init__.py) to see how vLLM infers the device type and why it is not working as expected. After [this PR](gh-pr:14195), you can also set the environment variable `VLLM_LOGGING_LEVEL=DEBUG` to see more detailed logs to help debug the issue.
 
 ## Known Issues
 
