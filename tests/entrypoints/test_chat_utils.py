@@ -27,6 +27,7 @@ QWEN25VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
 COMMAND_R_MODEL_ID = "CohereForAI/c4ai-command-r7b-12-2024"
+HERMES_MODEL_ID = "NousResearch/Hermes-3-Llama-3.1-8B"
 
 
 @pytest.fixture(scope="function")
@@ -720,6 +721,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     [
         QWEN2VL_MODEL_ID,  # tokenizer.chat_template is of type str
         COMMAND_R_MODEL_ID,  # tokenizer.chat_template is of type dict
+        HERMES_MODEL_ID,  # tokenizer.chat_template is of type dict
     ])
 @pytest.mark.parametrize("use_tools", [True, False])
 def test_apply_hf_chat_template(sample_json_schema, model, use_tools):
