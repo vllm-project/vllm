@@ -46,13 +46,13 @@ stages:
         flavor: g3
         command: >
           cd .jenkins/lm-eval-harness && 
-          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          PT_HPU_LAZY_MODE=0 
           bash run-tests.sh -c configs/models-fp8.txt -t 1
       - name: gsm8k_small_g3_tp2_fp8
         flavor: g3.s
         command: >
           cd .jenkins/lm-eval-harness && 
-          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          PT_HPU_LAZY_MODE=0 
           bash run-tests.sh -c configs/models-fp8.txt -t 2
   - name: test_gsm8k_mss
     steps:
