@@ -21,14 +21,15 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv, kill_process_tree
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.output_processor import (OutputProcessor,
+                                             RequestOutputCollector)
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
@@ -176,11 +177,14 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> asyncio.Queue[RequestOutput]:
+    ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
-        # Create a new output queue for the request.
-        queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
+        assert isinstance(params, SamplingParams), \
+            "Pooling is not supported in V1"
+
+        # Create a new output collector for the request.
+        queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
         request = self.processor.process_inputs(request_id, prompt, params,
@@ -189,17 +193,15 @@ class AsyncLLM(EngineClient):
                                                 prompt_adapter_request,
                                                 priority)
 
-        n = params.n if isinstance(params, SamplingParams) else 1
-
-        if n == 1:
+        if params.n == 1:
             await self._add_request(request, None, 0, queue)
             return queue
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request_id, params)
-        for idx in range(n):
+        for idx in range(params.n):
             request_id, params = parent_request.get_child_info(idx)
-            child_request = request if idx == n - 1 else copy(request)
+            child_request = request if idx == params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = params
             await self._add_request(child_request, parent_request, idx, queue)
@@ -207,7 +209,7 @@ class AsyncLLM(EngineClient):
 
     async def _add_request(self, request: EngineCoreRequest,
                            parent_req: Optional[ParentRequest], index: int,
-                           queue: asyncio.Queue[RequestOutput]):
+                           queue: RequestOutputCollector):
 
         # Add the request to OutputProcessor (this process).
         self.output_processor.add_request(request, parent_req, index, queue)
@@ -272,15 +274,7 @@ class AsyncLLM(EngineClient):
             while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() if not q.empty() else await q.get()
-
-                # Coalesce any additional queued outputs
-                while not q.empty():
-                    next_out = q.get_nowait()
-                    if sampling_params.output_kind == RequestOutputKind.DELTA:
-                        out.add(next_out)
-                    else:
-                        out = next_out
+                out = q.get_nowait() or await q.get()
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
