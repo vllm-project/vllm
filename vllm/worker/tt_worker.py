@@ -80,9 +80,9 @@ class TTCacheEngine:
         """
         # K and V each have the following shape: (num_blocks, num_kv_heads, block_size, head_size)
         kv_cache_shape = (num_blocks, self.num_kv_heads, self.block_size, self.head_size)
-        kv_cache: List[torch.Tensor] = []
         num_layers = self.num_attention_layers
         if device == "cpu":
+            kv_cache: List[torch.Tensor] = []
             for _ in range(num_layers):
                 # null block in CpuGpuBlockAllocator requires at least that
                 # block to be zeroed-out.
@@ -95,20 +95,7 @@ class TTCacheEngine:
                                       device=device)
                 kv_cache.append([cache_k, cache_v])
         else:
-            cache_kv = torch.zeros(kv_cache_shape, dtype=self.dtype)
-            for _ in tqdm(range(num_layers), desc="Allocating TT kv caches for each layer"):
-                kv_tt = [ttnn.as_tensor(
-                    lp,
-                    device=self.device_config.device,
-                    # TODO: this could be ShardTensorToMesh, removing need for init to know about TP=8. Could affect other calculations which use self.num_kv_heads, though.
-                    mesh_mapper=ReplicateTensorToMesh(self.device_config.device),
-                    layout=ttnn.TILE_LAYOUT,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    dtype=ttnn.bfloat8_b,
-                    cache_file_name = self.cache_config.tt_cache_path / f"empty_cache_paged_attention{kv_cache_shape}"
-                ) for lp in (cache_kv, cache_kv)]
-                
-                kv_cache.append(kv_tt)
+            kv_cache = self.cache_config.tt_allocate_kv_cache(kv_cache_shape, self.dtype, num_layers, self.device_config.device)
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
@@ -270,8 +257,8 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         
-        # Get cache path from TT model for caching kv blocks
-        self.cache_config.tt_cache_path = self.model_runner.model.cache_path
+        # Get helper function from TT model for allocating the kv cache
+        self.cache_config.tt_allocate_kv_cache = self.model_runner.model.allocate_kv_cache
         
         self.cache_engine = TTCacheEngine(
             self.cache_config, 

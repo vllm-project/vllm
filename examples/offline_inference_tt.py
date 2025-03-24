@@ -59,10 +59,10 @@ def get_sample_multi_modal_llama_inputs():
 
 def check_tt_model_supported(model):
     supported_models = [
-        "meta-llama/Meta-Llama-3.1-70B",
-        "meta-llama/Meta-Llama-3.1-70B-Instruct",
-        "meta-llama/Meta-Llama-3.1-8B",
-        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "meta-llama/Llama-3.1-70B",
+        "meta-llama/Llama-3.1-70B-Instruct",
+        "meta-llama/Llama-3.1-8B",
+        "meta-llama/Llama-3.1-8B-Instruct",
         "meta-llama/Llama-3.2-1B",
         "meta-llama/Llama-3.2-1B-Instruct",
         "meta-llama/Llama-3.2-3B",
@@ -277,7 +277,7 @@ async def generate_tokens_async(llm : MQLLMEngineClient, prompts, sampling_param
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="meta-llama/Meta-Llama-3.1-70B", help="Model name")
+    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.1-70B", help="Model name")
     parser.add_argument("--prompts_json", type=str, default="tt_metal/prompts.json", help="Path to JSON file containing prompts")
     parser.add_argument("--measure_perf", action="store_true", help="Measure performance")
     parser.add_argument("--perf_prompt_len", type=int, default=128, help="Length of dummy prompts for performance measurement")

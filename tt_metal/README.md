@@ -2,7 +2,7 @@
 ## vLLM and tt-metal Branches
 Git-checkout the following branches in each repo separately:
 - vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (last verified commit: [b9564bf](https://github.com/tenstorrent/vllm/tree/b9564bf364e95a3850619fc7b2ed968cc71e30b7))
-- tt-metal branch: [main](https://github.com/tenstorrent/tt-metal) (last verified commit: [70206b9](https://github.com/tenstorrent/tt-metal/tree/70206b9cf11172d4aecf9cda556ef2ef7cbe69f6))
+- tt-metal branch: [main](https://github.com/tenstorrent/tt-metal) (last verified commit: [v0.57.0-rc23](https://github.com/tenstorrent/tt-metal/tree/v0.57.0-rc23))
 
 ## Environment Creation
 
@@ -34,7 +34,7 @@ Git-checkout the following branches in each repo separately:
 
 To run Meta-Llama-3.1/3.2, it is required to have access to the model on Hugging Face. To gain access:
 1. Request access on Hugging Face:
-    - Llama-3.1: [https://huggingface.co/meta-llama/Meta-Llama-3.1-70B](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B)
+    - Llama-3.1: [https://huggingface.co/meta-llama/Llama-3.1-70B](https://huggingface.co/meta-llama/Llama-3.1-70B)
     - Llama-3.2: [https://huggingface.co/meta-llama/Llama-3.2-1B](https://huggingface.co/meta-llama/Llama-3.2-1B)
     - Llama-3.2-Vision: [https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct](https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct)
 2. Once you have received access, create and copy your access token from the settings tab on Hugging Face.
@@ -47,7 +47,7 @@ To run Meta-Llama-3.1/3.2, it is required to have access to the model on Hugging
 ## Preparing the tt-metal models
 
 1. Ensure that `$PYTHONPATH` contains the path to tt-metal (should already have been done when installing tt-metal)
-2. For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1/3.2 and Qwen-2.5, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3) for preparing the weights and environment variables, and install any extra requirements (e.g. `pip install -r models/demos/llama3/requirements.txt`).
+2. For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1/3.2 and Qwen-2.5, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers) for preparing the weights and environment variables, and install any extra requirements (e.g. `pip install -r models/tt_transformers/requirements.txt`).
 
 ## Running the offline inference example
 
@@ -65,10 +65,10 @@ MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python exampl
 
 **Note 1 (Llama70B)**: To run Llama70B on Galaxy, set `MESH_DEVICE=TG` and do not set `WH_ARCH_YAML=...`.
 
-**Note 2 (Llama70B)**: By default, this will run the newer tt-metal implementation of Llama70B from the [Llama3 demo](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3). To run with the [old Llama70B implemenentation](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/t3000/llama3_70b), modify the `TtLlamaForCausalLM` model import in [offline_inference_tt.py](https://github.com/tenstorrent/vllm/blob/dev/examples/offline_inference_tt.py) to `from models.demos.t3000.llama2_70b.tt.generator_vllm import TtLlamaForCausalLM`.
+**Note 2 (Llama70B)**: By default, this will run the newer tt-metal implementation of Llama70B from the [Llama3 demo](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers). To run with the [old Llama70B implemenentation](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/t3000/llama3_70b), modify the `LlamaForCausalLM` model import in [offline_inference_tt.py](https://github.com/tenstorrent/vllm/blob/dev/examples/offline_inference_tt.py) to `from models.demos.t3000.llama2_70b.tt.generator_vllm import TtLlamaForCausalLM as LlamaForCausalLM`.
 
-**Note 3 (Other Models)**: By default, the inference example will run with Llama-3.1-70B. To run with other Llama models, or Qwen-2.5, ensure that the apprioriate environment variables are set as per the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3), then set `MESH_DEVICE=<device>` (valid options for `<device>` are `N150`, `N300`, `T3K`, or `TG`) and one of the following:
-- Llama-3.1-8B: `--model "meta-llama/Meta-Llama-3.1-8B"`
+**Note 3 (Other Models)**: By default, the inference example will run with Llama-3.1-70B. To run with other Llama models, or Qwen-2.5, ensure that the apprioriate environment variables are set as per the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers), then set `MESH_DEVICE=<device>` (valid options for `<device>` are `N150`, `N300`, `T3K`, or `TG`) and one of the following:
+- Llama-3.1-8B: `--model "meta-llama/Llama-3.1-8B"`
 - Llama-3.2-1B: `--model "meta-llama/Llama-3.2-1B"`
 - Llama-3.2-3B: `--model "meta-llama/Llama-3.2-3B"`
 - Qwen-2.5-7B: `--model "Qwen/Qwen2.5-7B"` (currently only supported on N300)
