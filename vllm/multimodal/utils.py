@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from functools import lru_cache
 from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, TypeVar, Union
@@ -8,22 +7,21 @@ from urllib.parse import ParseResult, urlparse
 
 import numpy as np
 import numpy.typing as npt
+import torch
 from PIL import Image
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .audio import AudioMediaIO
 from .base import MediaIO
-from .image import ImageMediaIO
+from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .inputs import PlaceholderRange
 from .video import VideoMediaIO
 
 logger = init_logger(__name__)
-
-cached_get_tokenizer = lru_cache(get_tokenizer)
 
 _M = TypeVar("_M")
 
@@ -247,6 +245,17 @@ class MediaConnector:
             video_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
         )
+
+    def fetch_image_embedding(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Load image embedding from a URL.
+        """
+        image_embedding_io = ImageEmbeddingMediaIO()
+
+        return image_embedding_io.load_base64("", data)
 
 
 global_media_connector = MediaConnector()

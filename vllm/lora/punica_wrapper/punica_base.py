@@ -147,7 +147,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                                               dtype=torch.long,
                                               device=device)
 
-        # 5 is the number of indicies tensors.
+        # 5 is the number of indices tensors.
         # base_indices, sampler_indices, sampler_indices_padded,
         # embeddings_indices,long_lora_indices
         self.indices_len: List[Optional[int]] = [None] * 5
@@ -314,7 +314,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
     def long_lora_indices(self) -> torch.Tensor:
         """ 
         This property provides access to the indices used for long context 
-        lora, specifically for LinearScalingRotaryEmbeddingWithLora.
+        lora, specifically for LinearScalingRotaryEmbeddingWithLoRA.
         """
         long_lora_len = self.indices_len[4]
         return self._long_lora_indices[:long_lora_len]

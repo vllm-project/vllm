@@ -11,7 +11,7 @@ from enum import Enum, auto
 from functools import partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import cloudpickle
 
@@ -63,7 +63,7 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
-        unready_workers: List[UnreadyWorkerProcHandle] = []
+        unready_workers: list[UnreadyWorkerProcHandle] = []
         for rank in range(self.world_size):
             unready_worker = WorkerProc.make_worker_process(
                 vllm_config=self.vllm_config,
@@ -76,7 +76,7 @@ class MultiprocExecutor(Executor):
 
         # Workers must be created before wait_for_ready to avoid
         # deadlock, since worker.init_device() does a device sync.
-        self.workers: List[WorkerProcHandle] = []
+        self.workers: list[WorkerProcHandle] = []
         for unready_worker in unready_workers:
             # NOTE: the WorkerProc wraps startup in a try ... catch
             # so if there are any issues in loading in a WorkerProcess
@@ -93,8 +93,8 @@ class MultiprocExecutor(Executor):
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       args: tuple = (),
+                       kwargs: Optional[dict] = None) -> list[Any]:
         start_time = time.monotonic()
         kwargs = kwargs or {}
 
@@ -178,7 +178,7 @@ class UnreadyWorkerProcHandle:
     """WorkerProcess handle before READY."""
     proc: BaseProcess
     rank: int
-    ready_pipe: Tuple[Connection, Connection]
+    ready_pipe: tuple[Connection, Connection]
 
 
 @dataclass
@@ -215,8 +215,9 @@ class WorkerProc:
         try:
             self.rank = rank
             wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
-            # TODO: move `init_worker` to executor as a collective rpc call
-            all_kwargs: List[Dict] = [
+            # TODO: move `init_worker` to executor level as a collective rpc
+            # call
+            all_kwargs: list[dict] = [
                 {} for _ in range(vllm_config.parallel_config.world_size)
             ]
             all_kwargs[rank] = {
@@ -224,9 +225,10 @@ class WorkerProc:
                 "local_rank": local_rank,
                 "rank": rank,
                 "distributed_init_method": distributed_init_method,
+                "is_driver_worker": rank == 0,
             }
             wrapper.init_worker(all_kwargs)
-            self.worker = wrapper.worker
+            self.worker = wrapper
 
             pid = os.getpid()
             _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)

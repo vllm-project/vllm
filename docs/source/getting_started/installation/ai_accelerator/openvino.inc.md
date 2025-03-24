@@ -19,18 +19,20 @@ Currently, there are no pre-built OpenVINO wheels.
 
 ### Build wheel from source
 
-First, install Python. For example, on Ubuntu 22.04, you can run:
+First, install Python and ensure you have the latest pip. For example, on Ubuntu 22.04, you can run:
 
 ```console
 sudo apt-get update  -y
 sudo apt-get install python3
+pip install --upgrade pip
 ```
 
-Second, install prerequisites vLLM OpenVINO backend installation:
+Second, clone vLLM and install prerequisites for the vLLM OpenVINO backend installation:
 
 ```console
-pip install --upgrade pip
-pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 Finally, install vLLM with OpenVINO backend:
