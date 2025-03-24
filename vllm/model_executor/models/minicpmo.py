@@ -638,13 +638,13 @@ class MiniCPMO(MiniCPMV2_6):
             return []
 
     def get_embedding_with_audios(self, vlm_embedding: torch.Tensor,
-                                  audio_inputs: Optional[MiniCPMOAudioInputs],
+                                  audio_inputs: MiniCPMOAudioInputs,
                                   chunk_length: int) -> torch.Tensor:
         device, dtype = vlm_embedding.device, vlm_embedding.dtype
         if audio_inputs["type"] == "audio_embeds":
             audio_embeddings = [
                 item.to(device=device, dtype=dtype)
-                for item in audio_inputs["audio_features"]
+                for item in audio_inputs["audio_embeds"]
             ]
         else:
             audio_embeddings = self.get_audio_hidden_states(
@@ -762,7 +762,7 @@ class MiniCPMO(MiniCPMV2_6):
         else:
             image_inputs, audio_inputs = \
                 self._parse_and_validate_inputs(input_ids, **kwargs)
-            vlm_embeddings, _ = self.get_embedding_with_vision(
+            vlm_embeddings = self.get_embedding_with_vision(
                 input_ids, image_inputs)
 
             if audio_inputs is not None:

@@ -781,38 +781,35 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
         self,
         input_ids: torch.Tensor,
         image_inputs: Optional[MiniCPMVImageInputs],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         vlm_embedding: torch.Tensor = self.llm.get_input_embeddings(input_ids)
 
-        if image_inputs is None:  # No image
-            vision_hidden_states = torch.tensor([], device=input_ids.device)
+        if image_inputs is None:
+            return vlm_embedding
+
+        if image_inputs["type"] == "image_embeds":
+            vision_hidden_states = torch.cat([
+                item.to(device=vlm_embedding.device, dtype=vlm_embedding.dtype)
+                for item in image_inputs["image_embeds"]
+            ])
         else:
-            if image_inputs["type"] == "image_embeds":
-                vision_hidden_states = [
-                    item.to(device=vlm_embedding.device,
-                            dtype=vlm_embedding.dtype)
-                    for item in image_inputs["image_embeds"]
-                ]
-            else:
-                vision_hidden_states = self.get_vision_hidden_states(
-                    image_inputs)
+            vision_hidden_states = self.get_vision_hidden_states(image_inputs)
 
-            # See NOTE in _parse_and_validate_inputs
-            image_bounds = image_inputs["image_bounds"]
-            if len(image_bounds) > 0:
-                image_indices = torch.stack([
-                    torch.arange(start, end, dtype=torch.long)
-                    for start, end in image_bounds.tolist()
-                ]).to(vlm_embedding.device)
-                vlm_embedding.scatter_(
-                    0,
-                    image_indices.view(-1, 1).repeat(1,
-                                                     vlm_embedding.shape[-1]),
-                    vision_hidden_states.view(-1,
-                                              vision_hidden_states.shape[-1]),
-                )
+        # See NOTE in _parse_and_validate_inputs
+        image_bounds = image_inputs["image_bounds"]
+        if len(image_bounds) > 0:
+            image_indices = torch.stack([
+                torch.arange(start, end, dtype=torch.long)
+                for start, end in image_bounds.tolist()
+            ]).to(vlm_embedding.device)
 
-        return vlm_embedding, vision_hidden_states
+            vlm_embedding.scatter_(
+                0,
+                image_indices.view(-1, 1).repeat(1, vlm_embedding.shape[-1]),
+                vision_hidden_states.view(-1, vision_hidden_states.shape[-1]),
+            )
+
+        return vlm_embedding
 
     def _get_image_bounds(
             self,
@@ -992,7 +989,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
         else:
             image_inputs = \
                 self._parse_and_validate_inputs(input_ids, **kwargs)
-            vlm_embeddings, _ = self.get_embedding_with_vision(
+            vlm_embeddings = self.get_embedding_with_vision(
                 input_ids, image_inputs)
 
         # always pass the input via `inputs_embeds`
