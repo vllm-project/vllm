@@ -69,7 +69,6 @@ class TPUModelRunner:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
-        self.compilation_config = vllm_config.compilation_config
 
         model_config = self.model_config
         cache_config = self.cache_config
