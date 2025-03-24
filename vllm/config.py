@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import ast
 import copy
 import enum
@@ -80,8 +82,8 @@ _TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
     for task in tasks
 }
 
-HfOverrides = Union[dict[str, Any], Callable[["PretrainedConfig"],
-                                             "PretrainedConfig"]]
+HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
+                                             PretrainedConfig]]
 
 
 class SupportsHash(Protocol):
@@ -252,7 +254,7 @@ class ModelConfig:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         disable_mm_preprocessor_cache: bool = False,
         override_neuron_config: Optional[dict[str, Any]] = None,
-        override_pooler_config: Optional["PoolerConfig"] = None,
+        override_pooler_config: Optional[PoolerConfig] = None,
         logits_processor_pattern: Optional[str] = None,
         generation_config: str = "auto",
         enable_sleep_mode: bool = False,
@@ -459,7 +461,7 @@ class ModelConfig:
 
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
-    ) -> Optional["MultiModalConfig"]:
+    ) -> Optional[MultiModalConfig]:
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
 
@@ -475,8 +477,8 @@ class ModelConfig:
 
     def _init_pooler_config(
         self,
-        override_pooler_config: Optional["PoolerConfig"],
-    ) -> Optional["PoolerConfig"]:
+        override_pooler_config: Optional[PoolerConfig],
+    ) -> Optional[PoolerConfig]:
 
         if self.runner_type == "pooling":
             user_config = override_pooler_config or PoolerConfig()
@@ -750,7 +752,7 @@ class ModelConfig:
 
     def verify_with_parallel_config(
         self,
-        parallel_config: "ParallelConfig",
+        parallel_config: ParallelConfig,
     ) -> None:
         total_num_attention_heads = getattr(self.hf_text_config,
                                             "num_attention_heads", 0)
@@ -881,7 +883,7 @@ class ModelConfig:
         # equal to the number of attention heads.
         return self.hf_text_config.num_attention_heads
 
-    def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
+    def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
         """Returns the number of KV heads per GPU."""
         if self.use_mla:
             # When using MLA during decode it becomes MQA
@@ -895,13 +897,12 @@ class ModelConfig:
         return max(1,
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
 
-    def get_num_attention_heads(self,
-                                parallel_config: "ParallelConfig") -> int:
+    def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_layers_start_end_indices(
-            self, parallel_config: "ParallelConfig") -> tuple[int, int]:
+            self, parallel_config: ParallelConfig) -> tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
         if self.hf_text_config.model_type == "deepseek_mtp":
             total_num_hidden_layers = getattr(self.hf_text_config,
@@ -916,13 +917,13 @@ class ModelConfig:
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
         return start, end
 
-    def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
+    def get_num_layers(self, parallel_config: ParallelConfig) -> int:
         start, end = self.get_layers_start_end_indices(parallel_config)
         return end - start
 
     def get_num_layers_by_block_type(
         self,
-        parallel_config: "ParallelConfig",
+        parallel_config: ParallelConfig,
         block_type: LayerBlockType = LayerBlockType.attention,
     ) -> int:
         # This function relies on 'layers_block_type' in hf_config,
@@ -961,7 +962,7 @@ class ModelConfig:
             return sum(t == block_type.value
                        for t in layers_block_type_value[start:end])
 
-    def get_multimodal_config(self) -> "MultiModalConfig":
+    def get_multimodal_config(self) -> MultiModalConfig:
         """
         Get the multimodal configuration of the model.
 
@@ -1180,7 +1181,7 @@ class CacheConfig:
 
     def verify_with_parallel_config(
         self,
-        parallel_config: "ParallelConfig",
+        parallel_config: ParallelConfig,
     ) -> None:
         total_cpu_memory = get_cpu_memory()
         # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel
@@ -1209,7 +1210,7 @@ class TokenizerPoolConfig:
             pool type.
     """
     pool_size: int
-    pool_type: Union[str, type["BaseTokenizerGroup"]]
+    pool_type: Union[str, type[BaseTokenizerGroup]]
     extra_config: dict
 
     def compute_hash(self) -> str:
@@ -1240,9 +1241,9 @@ class TokenizerPoolConfig:
     @classmethod
     def create_config(
         cls, tokenizer_pool_size: int,
-        tokenizer_pool_type: Union[str, type["BaseTokenizerGroup"]],
+        tokenizer_pool_type: Union[str, type[BaseTokenizerGroup]],
         tokenizer_pool_extra_config: Optional[Union[str, dict]]
-    ) -> Optional["TokenizerPoolConfig"]:
+    ) -> Optional[TokenizerPoolConfig]:
         """Create a TokenizerPoolConfig from the given parameters.
 
         If tokenizer_pool_size is 0, return None.
@@ -1309,7 +1310,7 @@ class LoadConfig:
             loading. Default to True
     """
 
-    load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    load_format: Union[str, LoadFormat, BaseModelLoader] = LoadFormat.AUTO
     download_dir: Optional[str] = None
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
@@ -1379,7 +1380,7 @@ class ParallelConfig:
     ray_workers_use_nsight: bool = False
 
     # ray distributed model workers placement group.
-    placement_group: Optional["PlacementGroup"] = None
+    placement_group: Optional[PlacementGroup] = None
 
     # Backend to use for distributed model
     # workers, either "ray" or "mp" (multiprocessing). If the product
@@ -1389,7 +1390,7 @@ class ParallelConfig:
     # to "ray" if Ray is installed and fail otherwise. Note that tpu
     # and hpu only support Ray for distributed inference.
     distributed_executor_backend: Optional[Union[str,
-                                                 type["ExecutorBase"]]] = None
+                                                 type[ExecutorBase]]] = None
 
     # the full name of the worker class to use. If "auto", the worker class
     # will be determined based on the platform.
@@ -1418,7 +1419,7 @@ class ParallelConfig:
         self.data_parallel_master_port += 1
         return answer
 
-    def stateless_init_dp_group(self) -> "ProcessGroup":
+    def stateless_init_dp_group(self) -> ProcessGroup:
         from vllm.distributed.utils import (
             stateless_init_torch_distributed_process_group)
 
@@ -1433,7 +1434,7 @@ class ParallelConfig:
         return dp_group
 
     @staticmethod
-    def has_unfinished_dp(dp_group: "ProcessGroup",
+    def has_unfinished_dp(dp_group: ProcessGroup,
                           has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished],
                               dtype=torch.int32,
@@ -1837,8 +1838,7 @@ class SpeculativeConfig:
         return hash_str
 
     @staticmethod
-    def hf_config_override(
-            hf_config: "PretrainedConfig") -> "PretrainedConfig":
+    def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         if hf_config.model_type == "deepseek_v3":
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
@@ -1869,7 +1869,7 @@ class SpeculativeConfig:
         typical_acceptance_sampler_posterior_threshold: Optional[float],
         typical_acceptance_sampler_posterior_alpha: Optional[float],
         disable_logprobs: Optional[bool],
-    ) -> Optional["SpeculativeConfig"]:
+    ) -> Optional[SpeculativeConfig]:
         """Create a SpeculativeConfig if possible, else return None.
 
         This function attempts to create a SpeculativeConfig object based on the
@@ -2113,7 +2113,7 @@ class SpeculativeConfig:
     def _verify_and_get_draft_model_tensor_parallel_size(
             target_parallel_config: ParallelConfig,
             speculative_draft_tensor_parallel_size: Optional[int],
-            draft_hf_config: "PretrainedConfig") -> int:
+            draft_hf_config: PretrainedConfig) -> int:
         """
         Verifies and adjusts the tensor parallel size for a draft model
         specified using speculative_draft_tensor_parallel_size.
@@ -2142,7 +2142,7 @@ class SpeculativeConfig:
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int,
-        draft_hf_config: "PretrainedConfig",
+        draft_hf_config: PretrainedConfig,
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
@@ -2506,7 +2506,7 @@ class PoolerConfig:
         return hash_str
 
     @staticmethod
-    def from_json(json_str: str) -> "PoolerConfig":
+    def from_json(json_str: str) -> PoolerConfig:
         return PoolerConfig(**json.loads(json_str))
 
 
@@ -2522,7 +2522,7 @@ _ROCM_NOT_SUPPORTED_DTYPE: list[str] = []  #
 
 
 def _get_and_verify_dtype(
-    config: "PretrainedConfig",
+    config: PretrainedConfig,
     dtype: Union[str, torch.dtype],
 ) -> torch.dtype:
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
@@ -2604,7 +2604,7 @@ def _get_and_verify_dtype(
 
 
 def _get_and_verify_max_len(
-    hf_config: "PretrainedConfig",
+    hf_config: PretrainedConfig,
     max_model_len: Optional[int],
     disable_sliding_window: bool,
     sliding_window_len: Optional[Union[int, list[Optional[int]]]],
@@ -2892,7 +2892,7 @@ class KVTransferConfig(BaseModel):
         return hash_str
 
     @classmethod
-    def from_cli(cls, cli_value: str) -> "KVTransferConfig":
+    def from_cli(cls, cli_value: str) -> KVTransferConfig:
         """Parse the CLI value for the kv cache transfer config."""
         return KVTransferConfig.model_validate_json(cli_value)
 
@@ -3136,7 +3136,7 @@ class CompilationConfig(BaseModel):
     __str__ = __repr__
 
     @classmethod
-    def from_cli(cls, cli_value: str) -> "CompilationConfig":
+    def from_cli(cls, cli_value: str) -> CompilationConfig:
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
@@ -3188,7 +3188,7 @@ class CompilationConfig(BaseModel):
         self.static_forward_context = {}
         self.compilation_time = 0.0
 
-    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
+    def init_backend(self, vllm_config: VllmConfig) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
@@ -3426,9 +3426,9 @@ class VllmConfig:
 
     def with_hf_config(
         self,
-        hf_config: "PretrainedConfig",
+        hf_config: PretrainedConfig,
         architectures: Optional[list[str]] = None,
-    ) -> "VllmConfig":
+    ) -> VllmConfig:
         if architectures is not None:
             hf_config = copy.deepcopy(hf_config)
             hf_config.architectures = architectures

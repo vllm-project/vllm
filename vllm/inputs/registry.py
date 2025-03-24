@@ -45,7 +45,7 @@ class InputContext:
 
     def get_hf_config(
         self,
-        typ: Union[type[_C], tuple[type[_C], ...], None] = None,
+        typ: Optional[Union[type[_C], tuple[type[_C], ...]]] = None,
         /,
     ) -> _C:
         """
@@ -90,7 +90,7 @@ class InputContext:
 
     def get_hf_processor(
         self,
-        typ: Union[type[_P], tuple[type[_P], ...], None] = None,
+        typ: Optional[Union[type[_P], tuple[type[_P], ...]]] = None,
         /,
         **kwargs: object,
     ) -> _P:

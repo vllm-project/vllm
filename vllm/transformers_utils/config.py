@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
+import importlib
 import json
 import os
 import time
@@ -58,10 +59,11 @@ _CONFIG_REGISTRY: Dict[str, str] = {
 def get_config_class(key: str) -> Type:
     config_class_name = _CONFIG_REGISTRY[key]
     module_path = "vllm.transformers_utils.configs"
+
     try:
-        module = __import__(module_path, fromlist=[config_class_name])
+        module = importlib.import_module(module_path)
         config_class = getattr(module, config_class_name)
-    except (ImportError, AttributeError) as e:
+    except (ModuleNotFoundError, AttributeError) as e:
         raise ValueError(
             f"Failed to import config class '{config_class_name}' "
             f"from module '{module_path}'."
