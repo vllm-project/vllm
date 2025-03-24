@@ -11,6 +11,14 @@ from vllm.model_executor.utils import set_random_seed
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1)]
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This file tests V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 def get_zero_temperature_prob_dist(batch_size, k, vocab_size):
     """
     Generates a fake temperature zero probability distribution.

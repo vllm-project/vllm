@@ -2,17 +2,19 @@
 
 import functools
 from collections import UserDict
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Mapping, NamedTuple,
-                    Optional, Protocol, Union)
+from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional,
+                    Protocol, Union)
 
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.processor import cached_get_processor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               cached_tokenizer_from_config)
 from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
                         resolve_mm_processor_kwargs)
 
@@ -27,19 +29,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-C = TypeVar("C", bound=PretrainedConfig, default=PretrainedConfig)
-P = TypeVar("P", bound=ProcessorMixin, default=ProcessorMixin)
-
-
-class HashableDict(dict):
-    """
-    A dictionary that can be hashed by lru_cache.
-    """
-
-    # NOTE: pythonic dict is not hashable,
-    # we override on it directly for simplicity
-    def __hash__(self) -> int:  # type: ignore[override]
-        return hash(frozenset(self.items()))
+_T = TypeVar("_T")
+_C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
+_P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 
 
 @dataclass(frozen=True)
@@ -54,9 +46,9 @@ class InputContext:
 
     def get_hf_config(
         self,
-        typ: Union[type[C], tuple[type[C], ...]] = PretrainedConfig,
+        typ: Union[type[_C], tuple[type[_C], ...]] = PretrainedConfig,
         /,
-    ) -> C:
+    ) -> _C:
         """
         Get the HuggingFace configuration
         (:class:`transformers.PretrainedConfig`) of the model,
@@ -94,10 +86,10 @@ class InputContext:
 
     def get_hf_processor(
         self,
-        typ: Union[type[P], tuple[type[P], ...]] = ProcessorMixin,
+        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
         /,
         **kwargs: object,
-    ) -> P:
+    ) -> _P:
         """
         Get the HuggingFace processor
         (:class:`transformers.ProcessorMixin`) of the model,
@@ -106,33 +98,29 @@ class InputContext:
         Raises:
             TypeError: If the processor is not of the specified type.
         """
+        return cached_processor_from_config(
+            self.model_config,
+            processor_cls=typ,
+            **kwargs,
+        )
+
+    def init_processor(
+        self,
+        typ: type[_T],
+        /,
+        **kwargs: object,
+    ) -> _T:
+        """
+        Initialize a HuggingFace-like processor class, merging the
+        keyword arguments with those in the model's configuration.
+        """
         base_kwargs = self.model_config.mm_processor_kwargs
         if base_kwargs is None:
             base_kwargs = {}
 
         merged_kwargs = {**base_kwargs, **kwargs}
 
-        if isinstance(typ, type):
-            merged_kwargs["processor_cls"] = typ
-
-        # NOTE: Pythonic dict is not hashable and will raise unhashable type
-        # error when calling `cached_get_processor`, therefore we need to
-        # wrap it to a hashable dict.
-        for key, value in merged_kwargs.items():
-            if isinstance(value, dict):
-                merged_kwargs[key] = HashableDict(value)
-
-        hf_processor = cached_get_processor(
-            self.model_config.model,
-            trust_remote_code=self.model_config.trust_remote_code,
-            **merged_kwargs,
-        )
-        if not isinstance(hf_processor, typ):
-            raise TypeError("Invalid type of HuggingFace processor. "
-                            f"Expected type: {typ}, but "
-                            f"found type: {type(hf_processor)}")
-
-        return hf_processor
+        return typ(**merged_kwargs)
 
 
 @dataclass(frozen=True)
@@ -142,10 +130,10 @@ class InputProcessingContext(InputContext):
 
     def get_hf_processor(
         self,
-        typ: Union[type[P], tuple[type[P], ...]] = ProcessorMixin,
+        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
         /,
         **kwargs: object,
-    ) -> P:
+    ) -> _P:
         return super().get_hf_processor(
             typ,
             tokenizer=self.tokenizer,
@@ -341,16 +329,17 @@ class InputRegistry:
         from vllm.model_executor.model_loader import get_model_architecture
         from vllm.multimodal import MultiModalKwargs
         from vllm.multimodal.profiling import MultiModalProfiler
-        from vllm.multimodal.utils import cached_get_tokenizer
 
         if mm_registry.has_processor(model_config):
-            tokenizer = cached_get_tokenizer(
-                model_config.tokenizer,
-                trust_remote_code=model_config.trust_remote_code,
-            )
-            processor = mm_registry.create_processor(model_config, tokenizer)
+            tokenizer = cached_tokenizer_from_config(model_config)
+            processor = mm_registry.create_processor(model_config,
+                                                     tokenizer,
+                                                     disable_cache=True)
             profiler = MultiModalProfiler(processor)
-            dummy_data = profiler.get_dummy_data(seq_len)
+            dummy_data_factory = (profiler.get_encoder_dummy_data
+                                  if is_encoder_data else
+                                  profiler.get_decoder_dummy_data)
+            dummy_data = dummy_data_factory(seq_len)
         else:
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:
@@ -359,7 +348,11 @@ class InputRegistry:
                 dummy_factory = self._get_dummy_data_factory(model_cls)
             mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-                dummy_factory, overrides=model_config.mm_processor_kwargs)
+                dummy_factory,
+                overrides=model_config.mm_processor_kwargs,
+                requires_kw_only=False,
+                allow_var_kwargs=True,
+            )
 
             dummy_data = dummy_factory(InputContext(model_config), seq_len,
                                        _MultiModalCounts(mm_counts),
@@ -392,6 +385,7 @@ class InputRegistry:
         self,
         ctx: InputContext,
         inputs: ProcessorInputs,
+        **kwargs: object,
     ) -> ProcessorInputs:
         """The default input processor is a no-op."""
         return inputs
@@ -458,6 +452,8 @@ class InputRegistry:
             model_config.mm_processor_kwargs,
             inputs.get("mm_processor_kwargs", {}),  # type: ignore
             processor,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
         )
 
         processed_inputs = processor(

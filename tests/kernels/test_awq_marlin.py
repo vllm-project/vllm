@@ -99,13 +99,8 @@ def test_fused_marlin_moe_awq(
         num_bits=num_bits,
     )
 
-    torch_output = torch_moe(
-        a,
-        w_ref1.transpose(1, 2),
-        w_ref2.transpose(1, 2),
-        score,
-        topk,
-    )
+    torch_output = torch_moe(a, w_ref1.transpose(1, 2), w_ref2.transpose(1, 2),
+                             score, topk, None)
 
     assert compute_max_diff(marlin_output, torch_output) < 4e-2
 

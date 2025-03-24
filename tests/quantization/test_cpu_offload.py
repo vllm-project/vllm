@@ -10,17 +10,24 @@ from tests.quantization.utils import is_quant_method_supported
 from ..utils import compare_two_settings
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    # Fall back to V0 if cpu offloading is enabled.
+    # Fixture is required to that baseline uses V0.
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 def test_cpu_offload_fp8():
     # Test quantization of an unquantized checkpoint
-    compare_two_settings("meta-llama/Meta-Llama-3-8B-Instruct",
+    compare_two_settings("meta-llama/Llama-3.2-1B-Instruct",
                          ["--quantization", "fp8"],
-                         ["--quantization", "fp8", "--cpu-offload-gb", "2"],
+                         ["--quantization", "fp8", "--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
     # Test loading a quantized checkpoint
-    compare_two_settings("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", [],
-                         ["--cpu-offload-gb", "2"],
+    compare_two_settings("neuralmagic/Qwen2-1.5B-Instruct-FP8", [],
+                         ["--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
 
 

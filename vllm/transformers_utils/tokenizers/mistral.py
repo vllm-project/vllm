@@ -68,6 +68,36 @@ def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
             request.messages[i]["tool_calls"] = validated_tool_calls
 
 
+def truncate_tool_call_ids(request: "ChatCompletionRequest"):
+    """Truncates tool call IDs for Mistral's ID requirements."""
+    for i, message in enumerate(request.messages):
+        if message.get("role") == 'assistant':
+            tool_calls = message.get("tool_calls", [])
+            for tool_call in tool_calls:
+                if len(tool_call["id"]) > 9:
+                    logger.warning(
+                        "Truncating tool call ID: %s to %s",
+                        tool_call["id"],
+                        tool_call["id"][-9:],
+                    )
+                    tool_call["id"] = tool_call["id"][-9:]
+
+            request.messages[i]["tool_calls"] = tool_calls
+
+        elif message.get("role") in {"tool_results", "tool"}:
+            if "tool_call_id" in message:
+                tool_call_id = message["tool_call_id"]
+
+                if len(tool_call_id) > 9:
+                    logger.warning(
+                        "Truncating tool_call_id: %s to %s",
+                        tool_call_id,
+                        tool_call_id[-9:],
+                    )
+                    tool_call_id = tool_call_id[-9:]
+                request.messages[i]["tool_call_id"] = tool_call_id
+
+
 def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
     repo_cache = os.path.join(
         huggingface_hub.constants.HF_HUB_CACHE,
@@ -113,10 +143,6 @@ def make_mistral_chat_completion_request(
     if last_message["role"] == "assistant":
         last_message["prefix"] = True
 
-        last_message = cast(Dict[str, Any], messages[-1])
-        if last_message["role"] == "assistant":
-            last_message["prefix"] = True
-
     # mistral-common requires AssistantMessage content to be string [1].
     #
     # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
@@ -134,7 +160,8 @@ def make_mistral_chat_completion_request(
                 tool["function"] for tool in tools
                 if tool["type"] == "function"
         ]:
-            function.setdefault("parameters", {})
+            if function.get("parameters") is None:
+                function["parameters"] = {}
 
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     return ChatCompletionRequest(messages=messages,
@@ -218,7 +245,7 @@ class MistralTokenizer(TokenizerBase):
                                          revision=revision)
         return tokenizer_file
 
-    # the following attributes are set to fit VLLM's design and are used
+    # the following attributes are set to fit vLLM's design and are used
     # by the guided structured output backends.
     @property
     def all_special_tokens_extended(self) -> List[str]:

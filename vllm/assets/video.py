@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import List, Literal
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -58,7 +58,7 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
 
 
 def video_to_pil_images_list(path: str,
-                             num_frames: int = -1) -> List[Image.Image]:
+                             num_frames: int = -1) -> list[Image.Image]:
     frames = video_to_ndarrays(path, num_frames)
     return [
         Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -72,7 +72,7 @@ class VideoAsset:
     num_frames: int = -1
 
     @property
-    def pil_images(self) -> List[Image.Image]:
+    def pil_images(self) -> list[Image.Image]:
         video_path = download_video_asset(self.name)
         ret = video_to_pil_images_list(video_path, self.num_frames)
         return ret

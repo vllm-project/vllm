@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import concurrent
@@ -8,6 +10,7 @@ import datetime
 import enum
 import gc
 import getpass
+import importlib
 import importlib.metadata
 import importlib.util
 import inspect
@@ -23,18 +26,18 @@ import tempfile
 import threading
 import time
 import traceback
+import types
 import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
+                             Iterable, Iterator, Mapping)
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
-from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
-                    Dict, Generator, Generic, Iterator, List, Literal,
-                    NamedTuple, Optional, Tuple, Type, TypeVar, Union,
-                    overload)
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
+                    Optional, TypeVar, Union)
 from uuid import uuid4
 
 import cloudpickle
@@ -150,6 +153,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8": torch.uint8,
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
+    "int8": torch.int8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -401,13 +405,18 @@ def _next_task(iterator: AsyncGenerator[T, None],
 
 async def merge_async_iterators(
     *iterators: AsyncGenerator[T,
-                               None], ) -> AsyncGenerator[Tuple[int, T], None]:
+                               None], ) -> AsyncGenerator[tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
     This method handle the case where some iterators finish before others.
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
     """
+    if len(iterators) == 1:
+        # Fast-path single iterator case.
+        async for item in iterators[0]:
+            yield 0, item
+        return
 
     loop = asyncio.get_running_loop()
 
@@ -434,7 +443,7 @@ async def merge_async_iterators(
 
 
 async def collect_from_async_generator(
-        iterator: AsyncGenerator[T, None]) -> List[T]:
+        iterator: AsyncGenerator[T, None]) -> list[T]:
     """Collect all items from an async generator into a list."""
     items = []
     async for item in iterator:
@@ -448,7 +457,7 @@ def get_ip() -> str:
         logger.warning(
             "The environment variable HOST_IP is deprecated and ignored, as"
             " it is often used by Docker and other software to"
-            "interact with the container's network stack. Please "
+            " interact with the container's network stack. Please "
             "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
             " to communicate with each other.")
     if host_ip:
@@ -501,7 +510,30 @@ def get_open_zmq_ipc_path() -> str:
     return f"ipc://{base_rpc_path}/{uuid4()}"
 
 
+def get_open_zmq_inproc_path() -> str:
+    return f"inproc://{uuid4()}"
+
+
 def get_open_port() -> int:
+    """
+    Get an open port for the vLLM process to listen on.
+    An edge case to handle, is when we run data parallel,
+    we need to avoid ports that are potentially used by
+    the data parallel master process.
+    Right now we reserve 10 ports for the data parallel master
+    process. Currently it uses 2 ports.
+    """
+    if "VLLM_DP_MASTER_PORT" in os.environ:
+        dp_port = envs.VLLM_DP_MASTER_PORT
+        while True:
+            port = _get_open_port()
+            if port >= dp_port and port < dp_port + 10:
+                continue
+            return port
+    return _get_open_port()
+
+
+def _get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
         while True:
@@ -542,7 +574,7 @@ def find_process_using_port(port: int) -> Optional[psutil.Process]:
     return None
 
 
-def update_environment_variables(envs: Dict[str, str]):
+def update_environment_variables(envs: dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
@@ -551,7 +583,7 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
-def chunk_list(lst: List[T], chunk_size: int):
+def chunk_list(lst: list[T], chunk_size: int):
     """Yield successive chunk_size chunks from lst."""
     for i in range(0, len(lst), chunk_size):
         yield lst[i:i + chunk_size]
@@ -564,6 +596,10 @@ def cdiv(a: int, b: int) -> int:
 
 def round_up(x: int, y: int) -> int:
     return ((x + y - 1) // y) * y
+
+
+def round_down(x: int, y: int) -> int:
+    return (x // y) * y
 
 
 def _generate_random_fp8(
@@ -618,9 +654,9 @@ def create_kv_caches_with_random_flash(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
+    seed: Optional[int] = None,
     device: Optional[str] = "cuda",
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
 
@@ -628,8 +664,8 @@ def create_kv_caches_with_random_flash(
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
     scale = head_size**-0.5
 
-    key_caches: List[torch.Tensor] = []
-    value_caches: List[torch.Tensor] = []
+    key_caches: list[torch.Tensor] = []
+    value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
         key_value_cache = torch.empty(size=key_value_cache_shape,
@@ -655,9 +691,9 @@ def create_kv_caches_with_random(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
+    seed: Optional[int] = None,
     device: Optional[str] = "cuda",
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
 
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
@@ -671,7 +707,7 @@ def create_kv_caches_with_random(
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
-    key_caches: List[torch.Tensor] = []
+    key_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape,
                                 dtype=torch_dtype,
@@ -686,7 +722,7 @@ def create_kv_caches_with_random(
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
-    value_caches: List[torch.Tensor] = []
+    value_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
         value_cache = torch.empty(size=value_cache_shape,
                                   dtype=torch_dtype,
@@ -732,7 +768,7 @@ class DeviceMemoryProfiler:
 
 
 def make_ndarray_with_pad(
-    x: List[List[T]],
+    x: list[list[T]],
     pad: T,
     dtype: npt.DTypeLike,
     *,
@@ -757,7 +793,7 @@ def make_ndarray_with_pad(
 
 
 def make_tensor_with_pad(
-    x: List[List[T]],
+    x: list[list[T]],
     pad: T,
     dtype: torch.dtype,
     *,
@@ -797,19 +833,13 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
-def align_to_256bytes(extent: int, dtype: torch.dtype) -> int:
-    dtype_size = get_dtype_size(dtype)
-    eles_per_256bytes = 256 // dtype_size
-    return round_up(extent, eles_per_256bytes)
-
-
 # `collections` helpers
 def is_list_of(
     value: object,
     typ: Union[type[T], tuple[type[T], ...]],
     *,
     check: Literal["first", "all"] = "first",
-) -> TypeIs[List[T]]:
+) -> TypeIs[list[T]]:
     if not isinstance(value, list):
         return False
 
@@ -821,55 +851,7 @@ def is_list_of(
     assert_never(check)
 
 
-JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
-                 Tuple["JSONTree[T]", ...], T]
-"""A nested JSON structure where the leaves need not be JSON-serializable."""
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Dict[str, JSONTree[T]],
-) -> Dict[str, JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: List[JSONTree[T]],
-) -> List[JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Tuple[JSONTree[T], ...],
-) -> Tuple[JSONTree[U], ...]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: JSONTree[T],
-) -> JSONTree[U]:
-    ...
-
-
-def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
-    if isinstance(value, dict):
-        return {k: json_map_leaves(func, v) for k, v in value.items()}
-    elif isinstance(value, list):
-        return [json_map_leaves(func, v) for v in value]
-    elif isinstance(value, tuple):
-        return tuple(json_map_leaves(func, v) for v in value)
-    else:
-        return func(value)
-
-
-def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
+def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
     """Flatten a list of lists to a single list."""
     return [item for sublist in lists for item in sublist]
 
@@ -975,15 +957,20 @@ def current_stream() -> torch.cuda.Stream:
     the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
     from C/C++ code.
     """
+    from vllm.platforms import current_platform
     global _current_stream
     if _current_stream is None:
         # when this function is called before any stream is set,
         # we return the default stream.
-        _current_stream = torch.cuda.current_stream()
+        # On ROCm using the default 0 stream in combination with RCCL
+        # is hurting performance. Therefore creating a dedicated stream
+        # per process
+        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
+        ) else torch.cuda.current_stream()
     return _current_stream
 
 
-def enable_trace_function_call_for_thread(vllm_config: "VllmConfig") -> None:
+def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
     """Set up function tracing for the current thread,
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
@@ -1218,7 +1205,20 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return super().parse_args(processed_args, namespace)
 
-    def _pull_args_from_config(self, args: List[str]) -> List[str]:
+    def check_port(self, value):
+        try:
+            value = int(value)
+        except ValueError:
+            msg = "Port must be an integer"
+            raise argparse.ArgumentTypeError(msg) from None
+
+        if not (1024 <= value <= 65535):
+            raise argparse.ArgumentTypeError(
+                "Port must be between 1024 and 65535")
+
+        return value
+
+    def _pull_args_from_config(self, args: list[str]) -> list[str]:
         """Method to pull arguments specified in the config file
         into the command-line args variable.
 
@@ -1283,7 +1283,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return args
 
-    def _load_config_file(self, file_path: str) -> List[str]:
+    def _load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
@@ -1305,9 +1305,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                               %s supplied", extension)
 
         # only expecting a flat dictionary of atomic types
-        processed_args: List[str] = []
+        processed_args: list[str] = []
 
-        config: Dict[str, Union[int, str]] = {}
+        config: dict[str, Union[int, str]] = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -1391,7 +1391,7 @@ def resolve_mm_processor_kwargs(
     *,
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Applies filtering to eliminate invalid mm_processor_kwargs, i.e.,
     those who are not explicit keywords to the given callable (of one is
     given; otherwise no filtering is done), then merges the kwarg dicts,
@@ -1432,7 +1432,7 @@ def get_allowed_kwarg_only_overrides(
     *,
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Given a callable which has one or more keyword only params and a dict
     mapping param names to values, drop values that can be not be kwarg
@@ -1472,11 +1472,11 @@ def get_allowed_kwarg_only_overrides(
         if requires_kw_only:
             logger.warning(
                 "The following intended overrides are not keyword-only args "
-                "and and will be dropped: %s", dropped_keys)
+                "and will be dropped: %s", dropped_keys)
         else:
             logger.warning(
                 "The following intended overrides are not keyword args "
-                "and and will be dropped: %s", dropped_keys)
+                "and will be dropped: %s", dropped_keys)
 
     return filtered_overrides
 
@@ -1523,9 +1523,9 @@ class AtomicCounter:
 # Adapted from: https://stackoverflow.com/a/47212782/5082708
 class LazyDict(Mapping[str, T], Generic[T]):
 
-    def __init__(self, factory: Dict[str, Callable[[], T]]):
+    def __init__(self, factory: dict[str, Callable[[], T]]):
         self._factory = factory
-        self._dict: Dict[str, T] = {}
+        self._dict: dict[str, T] = {}
 
     def __getitem__(self, key: str) -> T:
         if key not in self._dict:
@@ -1544,9 +1544,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[Type[T], _V]):
+class ClassRegistry(UserDict[type[T], _V]):
 
-    def __getitem__(self, key: Type[T]) -> _V:
+    def __getitem__(self, key: type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
@@ -1576,8 +1576,8 @@ def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def weak_ref_tensors(
-    tensors: Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]
-) -> Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]:
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
@@ -1849,7 +1849,7 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 def direct_register_custom_op(
     op_name: str,
     op_func: Callable,
-    mutates_args: List[str],
+    mutates_args: list[str],
     fake_impl: Optional[Callable] = None,
     target_lib: Optional[Library] = None,
     dispatch_key: str = "CUDA",
@@ -1965,7 +1965,7 @@ class MemorySnapshot:
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
 
-    def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
+    def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
             cuda_memory=self.cuda_memory - other.cuda_memory,
@@ -2083,8 +2083,8 @@ def set_ulimit(target_soft_limit=65535):
                                (target_soft_limit, current_hard))
         except ValueError as e:
             logger.warning(
-                "Found ulimit of %s and failed to automatically increase"
-                "with error %s. This can cause fd limit errors like"
+                "Found ulimit of %s and failed to automatically increase "
+                "with error %s. This can cause fd limit errors like "
                 "`OSError: [Errno 24] Too many open files`. Consider "
                 "increasing with ulimit -n", current_soft, e)
 
@@ -2100,12 +2100,12 @@ def get_exception_traceback():
 def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
     path: str,
-    type: Any,
+    socket_type: Any,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
     mem = psutil.virtual_memory()
-    socket = ctx.socket(type)
+    socket = ctx.socket(socket_type)
 
     # Calculate buffer size based on system memory
     total_mem = mem.total / 1024**3
@@ -2119,29 +2119,27 @@ def make_zmq_socket(
     else:
         buf_size = -1  # Use system default buffer size
 
-    if type == zmq.constants.PULL:
+    if socket_type == zmq.constants.PULL:
         socket.setsockopt(zmq.constants.RCVHWM, 0)
         socket.setsockopt(zmq.constants.RCVBUF, buf_size)
         socket.connect(path)
-    elif type == zmq.constants.PUSH:
+    elif socket_type == zmq.constants.PUSH:
         socket.setsockopt(zmq.constants.SNDHWM, 0)
         socket.setsockopt(zmq.constants.SNDBUF, buf_size)
         socket.bind(path)
     else:
-        raise ValueError(f"Unknown Socket Type: {type}")
+        raise ValueError(f"Unknown Socket Type: {socket_type}")
 
     return socket
 
 
 @contextlib.contextmanager
-def zmq_socket_ctx(
-        path: str,
-        type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
+def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
-    ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
+    ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
-        yield make_zmq_socket(ctx, path, type)
+        yield make_zmq_socket(ctx, path, socket_type)
 
     except KeyboardInterrupt:
         logger.debug("Got Keyboard Interrupt.")
@@ -2150,27 +2148,60 @@ def zmq_socket_ctx(
         ctx.destroy(linger=0)
 
 
-def _check_multiproc_method():
-    if (cuda_is_initialized()
-            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
-        logger.warning("CUDA was previously initialized. We must use "
-                       "the `spawn` multiprocessing start method. Setting "
-                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                       "See https://docs.vllm.ai/en/latest/getting_started/"
-                       "troubleshooting.html#python-multiprocessing "
-                       "for more information.")
+def is_in_ray_actor():
+    """Check if we are in a Ray actor."""
+
+    try:
+        import ray
+        return (ray.is_initialized()
+                and ray.get_runtime_context().get_actor_id() is not None)
+    except ImportError:
+        return False
+
+
+def _maybe_force_spawn():
+    """Check if we need to force the use of the `spawn` multiprocessing start
+    method.
+    """
+    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
+        return
+
+    reason = None
+    if cuda_is_initialized():
+        reason = "CUDA is initialized"
+    elif is_in_ray_actor():
+        # even if we choose to spawn, we need to pass the ray address
+        # to the subprocess so that it knows how to connect to the ray cluster.
+        # env vars are inherited by subprocesses, even if we use spawn.
+        import ray
+        os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
+        reason = "In a Ray actor and can only be spawned"
+
+    if reason is not None:
+        logger.warning(
+            "We must use the `spawn` multiprocessing start method. "
+            "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+            "See https://docs.vllm.ai/en/latest/getting_started/"
+            "troubleshooting.html#python-multiprocessing "
+            "for more information. Reason: %s", reason)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def get_mp_context():
-    _check_multiproc_method()
+    """Get a multiprocessing context with a particular method (spawn or fork).
+    By default we follow the value of the VLLM_WORKER_MULTIPROC_METHOD to
+    determine the multiprocessing method (default is fork). However, under
+    certain conditions, we may enforce spawn and override the value of
+    VLLM_WORKER_MULTIPROC_METHOD.
+    """
+    _maybe_force_spawn()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
     return multiprocessing.get_context(mp_method)
 
 
 def bind_kv_cache(
-        ctx: Dict[str, Any],
-        kv_cache: List[List[torch.Tensor]],  # [virtual_engine][layer_index]
+        ctx: dict[str, Any],
+        kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -2186,8 +2217,8 @@ def bind_kv_cache(
     from vllm.model_executor.models.utils import extract_layer_index
     layer_need_kv_cache = [
         layer_name for layer_name in ctx
-        if ctx[layer_name].attn_type in (AttentionType.DECODER,
-                                         AttentionType.ENCODER_DECODER)
+        if (hasattr(ctx[layer_name], 'attn_type') and ctx[layer_name].attn_type
+            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER))
     ]
     layer_index_sorted = sorted(
         set(
@@ -2202,8 +2233,8 @@ def bind_kv_cache(
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
 
 
-def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
-               kwargs: Dict[str, Any]) -> Any:
+def run_method(obj: Any, method: Union[str, bytes, Callable], args: tuple[Any],
+               kwargs: dict[str, Any]) -> Any:
     """
     Run a method of an object with the given arguments and keyword arguments.
     If the method is string, it will be converted to a method using getattr.
@@ -2253,3 +2284,161 @@ def import_pynvml():
     """
     import vllm.third_party.pynvml as pynvml
     return pynvml
+
+
+def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
+    """
+    A replacement for `abc.ABC`.
+    When we use `abc.ABC`, subclasses will fail to instantiate
+    if they do not implement all abstract methods.
+    Here, we only require `raise NotImplementedError` in the
+    base class, and log a warning if the method is not implemented
+    in the subclass.
+    """
+
+    original_init = cls.__init__
+
+    def find_unimplemented_methods(self: object):
+        unimplemented_methods = []
+        for attr_name in dir(self):
+            # bypass inner method
+            if attr_name.startswith('_'):
+                continue
+
+            try:
+                attr = getattr(self, attr_name)
+                # get the func of callable method
+                if callable(attr):
+                    attr_func = attr.__func__
+            except AttributeError:
+                continue
+            src = inspect.getsource(attr_func)
+            if "NotImplementedError" in src:
+                unimplemented_methods.append(attr_name)
+        if unimplemented_methods:
+            method_names = ','.join(unimplemented_methods)
+            msg = (f"Methods {method_names} not implemented in {self}")
+            logger.warning(msg)
+
+    @wraps(original_init)
+    def wrapped_init(self, *args, **kwargs) -> None:
+        original_init(self, *args, **kwargs)
+        find_unimplemented_methods(self)
+
+    type.__setattr__(cls, '__init__', wrapped_init)
+    return cls
+
+
+class LazyLoader(types.ModuleType):
+    """
+    LazyLoader module borrowed from Tensorflow
+    https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
+    with a addition of "module caching".
+
+    Lazily import a module, mainly to avoid pulling in large dependencies.
+    Modules such as `xgrammar` might do additional side effects, so we
+    only want to use this when it is needed, delaying all eager effects
+    """
+
+    def __init__(
+        self,
+        local_name: str,
+        parent_module_globals: dict[str, Any],
+        name: str,
+    ):
+        self._local_name = local_name
+        self._parent_module_globals = parent_module_globals
+        self._module: types.ModuleType | None = None
+
+        super().__init__(str(name))
+
+    def _load(self) -> types.ModuleType:
+        # Import the target module and insert it into the parent's namespace
+        try:
+            module = importlib.import_module(self.__name__)
+            self._parent_module_globals[self._local_name] = module
+            # The additional add to sys.modules
+            # ensures library is actually loaded.
+            sys.modules[self._local_name] = module
+        except ModuleNotFoundError as err:
+            raise err from None
+
+        # Update this object's dict so that if someone keeps a
+        # reference to the LazyLoader, lookups are efficient
+        # (__getattr__ is only called on lookups that fail).
+        self.__dict__.update(module.__dict__)
+        return module
+
+    def __getattr__(self, item: Any) -> Any:
+        if self._module is None:
+            self._module = self._load()
+        return getattr(self._module, item)
+
+    def __dir__(self) -> list[str]:
+        if self._module is None:
+            self._module = self._load()
+        return dir(self._module)
+
+
+def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
+    """
+    Helper function to swap values for two keys
+    """
+    v1 = obj.get(key1)
+    v2 = obj.get(key2)
+    if v1 is not None:
+        obj[key2] = v1
+    else:
+        obj.pop(key2, None)
+    if v2 is not None:
+        obj[key1] = v2
+    else:
+        obj.pop(key1, None)
+
+
+@contextlib.contextmanager
+def cprofile_context(save_file: Optional[str] = None):
+    """Run a cprofile
+
+    Args:
+        save_file: path to save the profile result. "1" or
+          None will result in printing to stdout.
+    """
+    import cProfile
+
+    prof = cProfile.Profile()
+    prof.enable()
+
+    try:
+        yield
+    finally:
+        prof.disable()
+        if save_file and save_file != "1":
+            prof.dump_stats(save_file)
+        else:
+            prof.print_stats(sort="cumtime")
+
+
+def cprofile(save_file: Optional[str] = None, enabled: bool = True):
+    """Decorator to profile a Python method using cProfile.
+
+    Args:
+        save_file: Path to save the profile result.
+            If "1", None, or "", results will be printed to stdout.
+        enabled: Set to false to turn this into a no-op
+    """
+
+    def decorator(func: Callable):
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if not enabled:
+                # If profiling is disabled, just call the function directly.
+                return func(*args, **kwargs)
+
+            with cprofile_context(save_file):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator

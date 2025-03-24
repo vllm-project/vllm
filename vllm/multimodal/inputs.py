@@ -16,7 +16,8 @@ from PIL.Image import Image
 from transformers import BatchFeature
 from typing_extensions import NotRequired, TypeAlias
 
-from vllm.utils import JSONTree, full_groupby, is_list_of, json_map_leaves
+from vllm.jsontree import JSONTree, json_map_leaves
+from vllm.utils import full_groupby, is_list_of
 
 if TYPE_CHECKING:
     from .hasher import MultiModalHashDict
@@ -353,17 +354,17 @@ class MultiModalFieldConfig:
 
         Example:
 
-        .. code-block::
+            .. code-block::
 
-            Input:
-                Data: [[AAAA]
-                       [BBBB]
-                       [CCCC]]
+                Input:
+                    Data: [[AAAA]
+                        [BBBB]
+                        [CCCC]]
 
-            Output:
-                Element 1: [AAAA]
-                Element 2: [BBBB]
-                Element 3: [CCCC]
+                Output:
+                    Element 1: [AAAA]
+                    Element 2: [BBBB]
+                    Element 3: [CCCC]
         """
         return MultiModalFieldConfig(
             field=MultiModalBatchedField(),
@@ -384,18 +385,18 @@ class MultiModalFieldConfig:
 
         Example:
 
-        .. code-block::
-    
-            Given:
-                slices: [slice(0, 3), slice(3, 7), slice(7, 9)]
+            .. code-block::
+        
+                Given:
+                    slices: [slice(0, 3), slice(3, 7), slice(7, 9)]
 
-            Input:
-                Data: [AAABBBBCC]
+                Input:
+                    Data: [AAABBBBCC]
 
-            Output:
-                Element 1: [AAA]
-                Element 2: [BBBB]
-                Element 3: [CC]
+                Output:
+                    Element 1: [AAA]
+                    Element 2: [BBBB]
+                    Element 3: [CC]
         """
         return MultiModalFieldConfig(
             field=MultiModalFlatField(slices=slices),
@@ -416,22 +417,26 @@ class MultiModalFieldConfig:
 
         Example:
 
-        .. code-block::
-    
-            Given:
-                size_per_item: [3, 4, 2]
+            .. code-block::
+        
+                Given:
+                    size_per_item: [3, 4, 2]
 
-            Input:
-                Data: [AAABBBBCC]
+                Input:
+                    Data: [AAABBBBCC]
 
-            Output:
-                Element 1: [AAA]
-                Element 2: [BBBB]
-                Element 3: [CC]
+                Output:
+                    Element 1: [AAA]
+                    Element 2: [BBBB]
+                    Element 3: [CC]
     
         See also:
             :func:`MultiModalFieldConfig.flat`
         """
+
+        if size_per_item.ndim != 1:
+            raise ValueError("size_per_item should be a 1-D tensor, "
+                             f"but found shape: {size_per_item.shape}")
 
         slice_idxs = [0, *accumulate(size_per_item)]
         slices = [
@@ -456,19 +461,19 @@ class MultiModalFieldConfig:
 
         Example:
 
-        .. code-block::
-    
-            Given:
-                batch_size: 4
+            .. code-block::
+        
+                Given:
+                    batch_size: 4
 
-            Input:
-                Data: [XYZ]
+                Input:
+                    Data: [XYZ]
 
-            Output:
-                Element 1: [XYZ]
-                Element 2: [XYZ]
-                Element 3: [XYZ]
-                Element 4: [XYZ]
+                Output:
+                    Element 1: [XYZ]
+                    Element 2: [XYZ]
+                    Element 3: [XYZ]
+                    Element 4: [XYZ]
         """
         return MultiModalFieldConfig(
             field=MultiModalSharedField(batch_size),
@@ -739,3 +744,19 @@ class MultiModalInputs(TypedDict):
     For each modality, information about the placeholder tokens in
     :code:`prompt_token_ids`.
     """
+
+
+class MultiModalEncDecInputs(MultiModalInputs):
+    """
+    Represents the outputs of :class:`vllm.multimodal.EncDecMultiModalProcessor`
+    ready to be passed to vLLM internals.
+    """
+
+    encoder_prompt: str
+    """The processed encoder prompt text."""
+
+    encoder_prompt_token_ids: list[int]
+    """The processed token IDs of the encoder prompt."""
+
+    encoder_token_type_ids: NotRequired[list[int]]
+    """The token type IDs of the encoder prompt."""

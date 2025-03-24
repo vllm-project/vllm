@@ -2,7 +2,7 @@
 """
 Simple KV Cache Connector for Distributed Machine Learning Inference
 
-The SimpleConnector transfers KV caches between prefill vLLM worker (KV cache 
+The SimpleConnector transfers KV caches between prefill vLLM worker (KV cache
 producer) and decode vLLM worker (KV cache consumer) using PyNcclPipe or
 MooncakePipe.
 
@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
@@ -37,6 +38,8 @@ class SimpleConnector(KVConnectorBase):
 
         self.config = config.kv_transfer_config
         self.tp_size = config.parallel_config.tensor_parallel_size
+        self.is_deepseek_mla = config.model_config.is_deepseek_mla
+        self.use_mla_opt = not envs.VLLM_MLA_DISABLE
 
         if self.config.kv_connector == "PyNcclConnector":
             from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import (
@@ -159,6 +162,7 @@ class SimpleConnector(KVConnectorBase):
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
+        num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
 
@@ -166,7 +170,26 @@ class SimpleConnector(KVConnectorBase):
         num_heads = int(model_config.num_key_value_heads / self.tp_size)
         hidden_size = model_config.hidden_size
         num_attention_heads = model_config.num_attention_heads
-        head_size = int(hidden_size / num_attention_heads)
+
+        # Deepseek's MLA (Multi-head Latent Attention) uses two different
+        # kv_cache shapes based on whether VLLM_MLA_DISABLE is set to 0.
+        # When VLLM_MLA_DISABLE=0 (default), forward absorb is applied,
+        # resulting in a kv_cache shape of [num_blks, blk_size, 1,
+        # kv_lora_rank + qk_rope_head_dim].
+        # When VLLM_MLA_DISABLE=1, standard FA is used instead, leading
+        # to a kv_cache shape of [2, num_blks, blk_size,
+        # num_key_value_heads / tp, qk_nope_head_dim + qk_rope_head_dim].
+        # For more details, see vllm/attention/backends/mla/common.py.
+        if self.is_deepseek_mla and self.use_mla_opt:
+            head_size = model_config.kv_lora_rank + \
+                model_config.qk_rope_head_dim
+            num_heads = 1
+        elif self.is_deepseek_mla and not self.use_mla_opt:
+            head_size = model_config.qk_nope_head_dim + \
+                model_config.qk_rope_head_dim
+        else:
+            head_size = getattr(model_config, "head_dim",
+                                int(hidden_size // num_attention_heads))
 
         # query_lens contains new KV caches that are added to vLLM.
         # so we will send them to decode instance
@@ -174,6 +197,15 @@ class SimpleConnector(KVConnectorBase):
         for idx, slen in enumerate(seq_lens):
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
+
+            if start_pos >= num_prefill_tokens:
+                # vllm/worker/model_runner.py::_prepare_model_input_tensors:
+                # - input_tokens[:num_prefill_tokens] contains prefill tokens.
+                # - input_tokens[num_prefill_tokens:] contains decode tokens.
+                logger.warning("You have some decode requests while using "
+                               "SimpleConnector. Their KVCache won't be sent.")
+                break
+
             current_tokens = input_tokens_tensor[start_pos:end_pos]
 
             keys, values = [], []
@@ -181,8 +213,12 @@ class SimpleConnector(KVConnectorBase):
             for layer_id in range(start_layer, end_layer):
                 kv_cache = kv_caches[layer_id - start_layer]
 
-                key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
-                value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
+                if self.is_deepseek_mla and self.use_mla_opt:
+                    key_cache = kv_cache.reshape(-1, num_heads, head_size)
+                    value_cache = kv_cache.reshape(-1, num_heads, head_size)
+                else:
+                    key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
+                    value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
 
                 current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
@@ -212,8 +248,11 @@ class SimpleConnector(KVConnectorBase):
         # and hidden states.
         bypass_model_exec = True
 
+        model_config = model_executable.model.config
+
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
+        num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
 
         hidden_or_intermediate_states_for_one_req = []
@@ -225,9 +264,21 @@ class SimpleConnector(KVConnectorBase):
         # enumerate different requests
         # FIXME(Kuntai): This impl assumes that all requests are prefill.
         for idx, slen in enumerate(seq_lens):
-
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
+
+            if start_pos >= num_prefill_tokens:
+                # This can happen during inflight batching. See:
+                # vllm/worker/model_runner.py::_prepare_model_input_tensors:
+                # - input_tokens[:num_prefill_tokens] contains prefill tokens.
+                # - input_tokens[num_prefill_tokens:] contains decode tokens.
+                logger.warning("You should set --enable_chunked_prefill=False "
+                               "and --max_num_batched_tokens "
+                               "should be equal to --max_seq_len_to_capture")
+                bypass_model_exec = False
+                assert start_pos == num_prefill_tokens
+                break
+
             current_tokens = input_tokens_tensor[start_pos:end_pos]
             num_tokens = slen
 
@@ -267,19 +318,35 @@ class SimpleConnector(KVConnectorBase):
                 kv_cache = kv_caches[i - model_executable.model.start_layer]
                 layer = model_executable.model.layers[i]
 
-                key_cache, value_cache = kv_cache[0], kv_cache[1]
-                ops.reshape_and_cache_flash(
-                    keys[i - model_executable.model.start_layer].to(
-                        key_cache.device),
-                    values[i - model_executable.model.start_layer].to(
-                        value_cache.device),
-                    key_cache,
-                    value_cache,
-                    slot_mapping[start_pos:end_pos],
-                    layer.self_attn.attn.kv_cache_dtype,
-                    layer.self_attn.attn._k_scale,
-                    layer.self_attn.attn._v_scale,
-                )
+                if self.is_deepseek_mla and self.use_mla_opt:
+                    layer.self_attn.attn = layer.self_attn.mla_attn
+                    k_c_normed_k_pe = keys[
+                        i - model_executable.model.start_layer].to(
+                            kv_cache.device).squeeze(1)
+                    k_c_normed = k_c_normed_k_pe[:, :model_config.kv_lora_rank]
+                    k_pe = k_c_normed_k_pe[:, model_config.kv_lora_rank:]
+                    ops.concat_and_cache_mla(
+                        k_c_normed,
+                        k_pe,
+                        kv_cache,
+                        slot_mapping[start_pos:end_pos],
+                        layer.self_attn.attn.kv_cache_dtype,
+                        layer.self_attn.attn._k_scale,
+                    )
+                else:
+                    key_cache, value_cache = kv_cache[0], kv_cache[1]
+                    ops.reshape_and_cache_flash(
+                        keys[i - model_executable.model.start_layer].to(
+                            key_cache.device),
+                        values[i - model_executable.model.start_layer].to(
+                            value_cache.device),
+                        key_cache,
+                        value_cache,
+                        slot_mapping[start_pos:end_pos],
+                        layer.self_attn.attn.kv_cache_dtype,
+                        layer.self_attn.attn._k_scale,
+                        layer.self_attn.attn._v_scale,
+                    )
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
@@ -288,7 +355,7 @@ class SimpleConnector(KVConnectorBase):
             # Here we will fall back to normal model forwarding
             # But optionally you can adjust model_input so that you only do
             # prefilling on those tokens that are missing KV caches.
-            logger.debug(
+            logger.warning(
                 "[rank%d]: Failed to receive all KVs and hidden "
                 "states, redo model forwarding.", torch.distributed.get_rank())
             hidden_or_intermediate_states = None

@@ -59,7 +59,7 @@ def main(args):
     # Dump worker states to output directory
 
     # Check which engine version is being used
-    is_v1_engine = os.environ.get("VLLM_USE_V1") == "1"
+    is_v1_engine = hasattr(llm.llm_engine, "engine_core")
     
     if is_v1_engine:
         # For V1 engine, we need to use engine_core.save_sharded_state
