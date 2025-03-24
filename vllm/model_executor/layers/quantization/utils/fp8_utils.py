@@ -63,19 +63,20 @@ def rocm_aiter_gemm_w8a8_blockscale(A: torch.Tensor,
                                     **kwargs) -> torch.Tensor:
     import aiter as rocm_aiter
 
-    output = torch.zeros([A.shape[0], B.shape[0]],
-                         dtype=output_dtype,
-                         device=A.device)
-    return rocm_aiter.gemm_a8w8_blockscale(A, B, As, Bs, output)
+    return rocm_aiter.gemm_a8w8_blockscale_CK(A, B, As, Bs, dtype=output_dtype)
+
+
+def is_rocm_aiter_gemm_w8a8_blockscale_enabled() -> bool:
+    return current_platform.is_rocm() \
+        and envs.VLLM_ROCM_USE_AITER \
+        and envs.VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE
 
 
 def dispatch_w8a8_blockscale_func(
         use_cutlass: bool) -> Callable[..., torch.Tensor]:
-    use_aiter_gemm_w8a8_blockscale = (current_platform.is_rocm() and \
-                                       envs.VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE)
     if use_cutlass:
         return cutlass_scaled_mm
-    if use_aiter_gemm_w8a8_blockscale:
+    if is_rocm_aiter_gemm_w8a8_blockscale_enabled():
         return rocm_aiter_gemm_w8a8_blockscale
     return w8a8_block_fp8_matmul
 

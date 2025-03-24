@@ -534,9 +534,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is disabled by default.
     "VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE":
     lambda:
-    (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-     ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE",
-                                 "False").lower() in ("true", "1")),
+    (os.getenv("VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE", "False").lower() in
+     ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
