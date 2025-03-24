@@ -775,6 +775,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             torch._dynamo.mark_dynamic(input_ids, 0)
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+        
+        punica_wrapper = self.lora_manager._adapter_manager.punica_wrapper
+        torch._dynamo.mark_dynamic(punica_wrapper._embeddings_indices, 1)
+        torch._dynamo.mark_dynamic(punica_wrapper._sampler_indices_padded, 0)
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             self.model(input_ids=input_ids,
