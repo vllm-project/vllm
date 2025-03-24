@@ -42,7 +42,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
+from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
+                        is_list_of)
 
 logger = init_logger(__name__)
 
@@ -689,8 +690,10 @@ class LLM:
         model_config = self.llm_engine.get_model_config()
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
+            tools,
             chat_template_content_format,
             tokenizer,
+            trust_remote_code=model_config.trust_remote_code,
         )
 
         prompts: list[Union[TokensPrompt, TextPrompt]] = []
@@ -712,18 +715,19 @@ class LLM:
                     tokenizer,
                     messages=msgs,
                     chat_template=chat_template,
+                    tools=tools,
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
-                    tools=tools,
                 )
             else:
                 prompt_data = apply_hf_chat_template(
                     tokenizer,
+                    trust_remote_code=model_config.trust_remote_code,
                     conversation=conversation,
                     chat_template=chat_template,
+                    tools=tools,
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
-                    tools=tools,
                 )
 
             prompt: Union[TokensPrompt, TextPrompt]
@@ -1187,8 +1191,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self) -> bool:
-        return self.llm_engine.reset_prefix_cache()
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+        return self.llm_engine.reset_prefix_cache(device)
 
     def sleep(self, level: int = 1):
         """
