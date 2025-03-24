@@ -155,12 +155,12 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: BitsAndBytesConfig):
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.45.0":
+            if bitsandbytes.__version__ < "0.45.3":
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.45.0.")
+                                  "install bitsandbytes>=0.45.3.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.45.0 via "
-                              "`pip install bitsandbytes>=0.45.0` to use "
+            raise ImportError("Please install bitsandbytes>=0.45.3 via "
+                              "`pip install bitsandbytes>=0.45.3` to use "
                               "bitsandbytes quantizer.") from err
 
         self.quant_config = quant_config
