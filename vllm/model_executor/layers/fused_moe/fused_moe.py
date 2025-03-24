@@ -3,6 +3,7 @@
 import functools
 import json
 import os
+from math import prod
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -1408,8 +1409,8 @@ def fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
 # TODO: can indices be chunked?
 def _moe_permute(
     curr_hidden_states: torch.Tensor, a1q_scale: Optional[torch.Tensor],
-    curr_topk_ids: torch.Tensor, curr_topk_weights: torch.Tensor,
-    global_num_experts: int, n_local_experts: int,
+    curr_topk_ids: torch.Tensor,
+    global_num_experts: int, 
     expert_map: Optional[torch.Tensor], top_k_num: int, block_m: int,
     use_dg: bool
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
@@ -1472,17 +1473,27 @@ def _moe_unpermute(out: torch.Tensor,
     ops.moe_sum(out_C, out)
 
 
-def _resize_caches(intermediate_cache1, intermediate_cache2,
-                   intermediate_cache3, N, K, top_k_num, topk_ids,
-                   tokens_in_chunk, sorted_token_ids, block_m, chunked_dg,
+def _resize_cache(x, v):
+    assert prod(v) <= x.numel()
+    return x.flatten()[:prod(v)].view(*v)
+
+
+def _resize_caches(intermediate_cache1,
+                   intermediate_cache2,
+                   intermediate_cache3,
+                   tokens_in_chunk,
+                   N,
+                   K,
+                   top_k_num,
+                   new_M,
+                   chunked_dg,
                    skip_dg):
     if chunked_dg:
-        slice_size = (
-            (sorted_token_ids.numel() + block_m - 1) // block_m) * block_m
+        slice_size = new_M
         slice_topk = 1
     else:
         slice_size = tokens_in_chunk
-        slice_topk = topk_ids.shape[1]
+        slice_topk = top_k_num
 
     # Adjust the intermediate cache size and config for the last
     # chunk. Note that in most cases we only have one chunk
@@ -1543,6 +1554,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
+    K = w2.shape[1]
     if global_num_experts == -1:
         global_num_experts = E
     top_k_num = topk_ids.shape[1]
@@ -1587,13 +1599,9 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == dg.get_m_alignment_for_contiguous_layout()
 
-    chunked_dg = False
     if use_dg:
         if M % block_m != 0:
             CHUNK_SIZE = min((M // block_m) * block_m, CHUNK_SIZE)
-
-        num_chunks = (num_tokens // CHUNK_SIZE) + 1
-        chunked_dg = num_chunks > 1
 
         assert w1_scale is not None
         assert w2_scale is not None
@@ -1604,41 +1612,30 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
-        # TODO: computing new_M could be smarter
-        sorted_token_ids, _, _ = (moe_align_block_size(topk_ids, block_m,
-                                                       global_num_experts,
-                                                       expert_map))
+        M_sum = topk_ids.numel() + global_num_experts * (block_m - 1)
+        M_sum = ((M_sum + block_m - 1) // block_m) * block_m
 
-        new_M = ((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m
-
-        # We can reuse the memory between these because by the time we need
-        # cache3, we're done with cache1
-        cache13 = torch.empty(new_M * max(N, w2.shape[1]),
-                              device=hidden_states.device,
-                              dtype=hidden_states.dtype)
-
-        intermediate_cache1 = cache13[:(new_M * N)].view(new_M, N)
-        intermediate_cache2 = torch.empty((new_M, N // 2),
-                                          device=hidden_states.device,
-                                          dtype=hidden_states.dtype)
-        intermediate_cache3 = cache13[:(new_M * w2.shape[1])].view(
-            new_M, w2.shape[1])
+        cache1_view = (M_sum, N)
+        cache3_view = (M_sum, K)
     else:
-        # We can reuse the memory between these because by the time we need
-        # cache3, we're done with cache1
-        cache13 = torch.empty(M * top_k_num * max(N, w2.shape[1]),
-                              device=hidden_states.device,
-                              dtype=hidden_states.dtype)
+        M_sum = M * top_k_num
+        cache1_view = (M, top_k_num, N)
+        cache3_view = (M, top_k_num, K)
 
-        intermediate_cache1 = cache13[:M * top_k_num * N].view(
-            (M, topk_ids.shape[1], N))
-        intermediate_cache2 = torch.empty((M * top_k_num, N // 2),
-                                          device=hidden_states.device,
-                                          dtype=hidden_states.dtype)
-        intermediate_cache3 = cache13[:M * top_k_num * w2.shape[1]].view(
-            (M, topk_ids.shape[1], w2.shape[1]))
+    num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
-        num_chunks = (num_tokens // CHUNK_SIZE) + 1
+    # We can reuse the memory between these because by the time we need
+    # cache3, we're done with cache1
+    cache13 = torch.empty(M_sum * max(N, K),
+                          device=hidden_states.device,
+                          dtype=hidden_states.dtype)
+
+    intermediate_cache1 = cache13[:M_sum * N].view(*cache1_view)
+    intermediate_cache2 = torch.empty((M_sum, N // 2),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+    intermediate_cache3 = cache13[:M_sum * K].view(*cache3_view)
+
 
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
@@ -1665,18 +1662,45 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         (qcurr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
          num_tokens_post_padded,
          inv_perm) = _moe_permute(qcurr_hidden_states, a1q_scale, curr_topk_ids,
-                                  curr_topk_weights, global_num_experts,
-                                  0, expert_map, top_k_num,
+                                  global_num_experts,
+                                   expert_map, top_k_num,
                                   block_m, use_dg and not skip_dg)
 
-        if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or chunked_dg:
-            (intermediate_cache1, intermediate_cache2,
-             intermediate_cache3, slice_size) = _resize_caches(
-                 intermediate_cache1, intermediate_cache2, intermediate_cache3,
-                 N, w2.shape[1], top_k_num, topk_ids, tokens_in_chunk,
-                 sorted_token_ids, block_m, chunked_dg, skip_dg)
+        # if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or (use_dg and num_chunks > 1):
+        #     (intermediate_cache1, intermediate_cache2,
+        #      intermediate_cache3, slice_size) = _resize_caches(
+        #          intermediate_cache1,
+        #          intermediate_cache2,
+        #          intermediate_cache3,
+        #          tokens_in_chunk, N, K, top_k_num,
+        #          sorted_token_ids.numel(),
+        #          use_dg and num_chunks > 1,
+        #          skip_dg)
 
-            config = get_config_func(slice_size)
+        #     config = get_config_func(slice_size)
+
+        if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or (use_dg and num_chunks > 1):
+            if use_dg and num_chunks > 1:
+                curr_M = sorted_token_ids.numel()
+                curr_top_k_num = 1
+            else:
+                curr_M = tokens_in_chunk
+                curr_top_k_num = top_k_num
+
+            if skip_dg:
+                cache1_view = (tokens_in_chunk, top_k_num, N)
+                cache2_view = intermediate_cache2.shape
+                cache3_view = (tokens_in_chunk, top_k_num, K)
+            else:
+                cache1_view = (curr_M, N)
+                cache2_view = (curr_M * curr_top_k_num, N // 2)
+                cache3_view = (curr_M, K)
+
+            config = get_config_func(curr_M)
+            intermediate_cache1 = _resize_cache(intermediate_cache1, cache1_view)
+            intermediate_cache2 = _resize_cache(intermediate_cache2, cache2_view)
+            intermediate_cache3 = _resize_cache(intermediate_cache3, cache3_view)
+
 
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
@@ -1745,7 +1769,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                            expert_ids,
                            top_k_num,
                            global_num_experts,
-                           w2.shape[1],
+                           K,
                            curr_topk_weights,
                            curr_topk_ids)
         else:

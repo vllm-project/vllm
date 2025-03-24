@@ -396,7 +396,6 @@ def test_moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
 
 def test_moe_unpermute(out, inv_perm, m_indices, topk, num_groups, M, K,
                        topk_weight, topk_ids):
-    # TODO use moe_sum?
     out = out[inv_perm, ...]
     tmp_out = out.view(-1, topk, K)
     return (tmp_out * topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
@@ -414,16 +413,10 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
     _, block_k = block_shape[0], block_shape[1]
 
-    if False:
-        # quantize before permute
-        a_q, a_s = per_token_group_quant_fp8(a, block_m)
-        a_q, a_s, m_indices, inv_perm = test_moe_permute(
-            a_q, a_s, topk_ids, num_groups, topk, block_m)
-    else:
-        # quantize after permute
-        a_q, a_s, m_indices, inv_perm = test_moe_permute(
-            a, None, topk_ids, num_groups, topk, block_m)
-        a_q, a_s = per_token_group_quant_fp8(a_q, block_m)
+    a_q, a_s = per_token_group_quant_fp8(a, block_m)
+
+    a_q, a_s, m_indices, inv_perm = test_moe_permute(
+        a_q, a_s, topk_ids, num_groups, topk, block_m)
 
     # Fix this assert
     #assert a_s.shape[1] == K // 128 and a_q.shape[0] == a_s.shape[0] == M * topk
