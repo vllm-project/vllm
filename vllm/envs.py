@@ -340,7 +340,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
 
     # (CPU backend only) CPU key-value cache space.
-    # default is 4GB
+    # default is 4 GiB
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
 
@@ -412,9 +412,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
     # Cache size (in GiB) for multimodal input cache
-    # Default is 8GiB
+    # Default is 4 GiB
     "VLLM_MM_INPUT_CACHE_GIB":
-    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "8")),
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
