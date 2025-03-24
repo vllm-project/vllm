@@ -483,14 +483,14 @@ def _test_masked_logits(
                              device=DEVICE)
     draft_probs = F.softmax(draft_probs, dim=-1)
 
-    # Create logits with a clear distinction between masked and unmasked values
-    target_logits = torch.full((num_tokens, vocab_size),
-                               -float("inf"),
-                               device=DEVICE)
+    # Create logits with the uniform distribution.
+    target_logits = torch.zeros((num_tokens, vocab_size), device=DEVICE)
 
-    # Set high logits for unmasked indices
+    # Increment the logits for unmasked indices, a little bit more than the
+    # masked ones. If the masking is effective, the masked indices will never
+    # be sampled despite the small difference in logits.
     for i in range(num_tokens):
-        target_logits[i, unmasked_indices[i]] = 100.0
+        target_logits[i, unmasked_indices[i]] += 0.1
 
     # Randomly sample draft token ids from draft probs
     draft_token_ids = torch.multinomial(draft_probs, num_samples=1)
@@ -532,7 +532,7 @@ def _test_masked_logits(
 def test_top_k(rejection_sampler, top_k):
     """Test rejection sampling with top-k sampling"""
     vocab_size = 100
-    batch_size = 10
+    batch_size = 100
     num_draft_tokens = 3
     num_tokens = batch_size * num_draft_tokens
 
@@ -567,7 +567,7 @@ def test_top_k(rejection_sampler, top_k):
 def test_top_p(rejection_sampler, top_p):
     """Test rejection sampling with top-p sampling"""
     vocab_size = 100
-    batch_size = 10
+    batch_size = 100
     num_draft_tokens = 3
     num_tokens = batch_size * num_draft_tokens
 
