@@ -31,13 +31,13 @@ import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
-from collections import UserDict, defaultdict
+from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
                              Iterable, Iterator, Mapping)
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TypeVar, Union, cast)
+                    Optional, TypeVar, Union, cast, overload)
 from uuid import uuid4
 
 import cachetools
@@ -217,7 +217,7 @@ class CacheInfo(NamedTuple):
         return self.hits / self.total
 
 
-class LRUCache(cachetools.LRUCache, Generic[_K, _V]):
+class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
     """LRU Cache"""
 
     def __init__(self,
@@ -232,7 +232,7 @@ class LRUCache(cachetools.LRUCache, Generic[_K, _V]):
 
     def __delitem__(self, key: _K) -> None:
         run_on_remove = key in self
-        value = super().__getitem__(key)
+        value = self.__getitem__(key)
         super().__delitem__(key)
         if key in self.pinned_items:
             # Todo: add warning to inform that del pinned item
@@ -240,15 +240,23 @@ class LRUCache(cachetools.LRUCache, Generic[_K, _V]):
         if run_on_remove:
             self._on_remove(key, value)
 
-    @property
-    def cache(self) -> dict[_K, _V]:
-        """Return the internal cache dictionary (read-only)."""
-        return cast(dict[_K, _V], self._Cache__data)  # type: ignore
+    @overload
+    def get(self, key: _K, /) -> Any | None:
+        ...
+
+    @overload
+    def get(self, key: _K, /, default: _V | None) -> _V | None:
+        ...
 
     @property
-    def order(self) -> dict:
+    def cache(self) -> OrderedDict[_K, _V]:
+        """Return the internal cache dictionary (read-only)."""
+        return cast(OrderedDict[_K, _V], self._Cache__data)  # type: ignore
+
+    @property
+    def order(self) -> OrderedDict:
         """Return the internal order dictionary (read-only)."""
-        return cast(dict, self._LRUCache__order)  # type: ignore
+        return cast(OrderedDict, self._LRUCache__order)  # type: ignore
 
     def stat(self) -> CacheInfo:
         return CacheInfo(hits=self._hits, total=self._total)
@@ -256,7 +264,7 @@ class LRUCache(cachetools.LRUCache, Generic[_K, _V]):
     def touch(self, key: _K) -> None:
         self._LRUCache__update(key)  # type: ignore
 
-    def get(self, key, default=None):
+    def get(self, key: _K, default: _V | None = ...) -> _V | None:
         value: Optional[_V]
         if key in self:
             value = self.__getitem__(key)
