@@ -777,12 +777,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
         with self.maybe_dummy_run_with_lora(
-                self.lora_config, np.array([num_tokens], dtype=np.int32)):
-            with set_forward_context(attn_metadata, self.vllm_config, 0):
-                self.model(input_ids=input_ids,
-                           positions=position_ids,
-                           kv_caches=kv_caches,
-                           inputs_embeds=inputs_embeds)
+                self.lora_config,
+                np.array([num_tokens], dtype=np.int32)), set_forward_context(
+                    attn_metadata, self.vllm_config, 0):
+            self.model(input_ids=input_ids,
+                       positions=position_ids,
+                       kv_caches=kv_caches,
+                       inputs_embeds=inputs_embeds)
 
     def capture_model(self) -> None:
         """Compile the model."""
