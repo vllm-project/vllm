@@ -10,10 +10,10 @@ Reasoning models return a additional `reasoning_content` field in their outputs,
 
 vLLM currently supports the following reasoning models:
 
-| Model Series | Parser Name | Structured Output Support |
-|--------------|-------------|------------------|
-| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` |
-| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` |
+| Model Series | Parser Name | Structured Output Support | Tool Calling |
+|--------------|-------------|------------------|-------------|
+| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` | ❌ |
+| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` | ✅ |
 
 ## Quickstart
 
@@ -170,10 +170,51 @@ print("reasoning_content: ", completion.choices[0].message.reasoning_content)
 print("content: ", completion.choices[0].message.content)
 ```
 
+## Tool Calling
+
+The reasoning content is also available when both tool calling and the reasoning parser are enabled. Additionally, tool calling only parses functions from the `content` field, not from the `reasoning_content`.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather in a given location",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
+                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+            },
+            "required": ["location", "unit"]
+        }
+    }
+}]
+
+response = client.chat.completions.create(
+    model=client.models.list().data[0].id,
+    messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
+    tools=tools,
+    tool_choice="auto"
+)
+
+print(response)
+tool_call = response.choices[0].message.tool_calls[0].function
+
+print(f"reasoning_content: {response.choices[0].message.reasoning_content}")
+print(f"Function called: {tool_call.name}")
+print(f"Arguments: {tool_call.arguments}")
+```
+
+For more examples, please refer to <gh-file:examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py> .
+
 ## Limitations
 
 - The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).
-- It is not compatible with [`tool_calling`](#tool_calling).
 
 ## How to support a new reasoning model
 

@@ -26,7 +26,7 @@ from vllm.plugins import load_general_plugins
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, StoreBoolean
+from vllm.utils import FlexibleArgumentParser, StoreBoolean, is_in_ray_actor
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -40,7 +40,6 @@ DEVICE_OPTIONS = [
     "cuda",
     "neuron",
     "cpu",
-    "openvino",
     "tpu",
     "xpu",
     "hpu",
@@ -120,6 +119,7 @@ class EngineArgs:
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
     disable_sliding_window: bool = False
+    disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
@@ -177,7 +177,10 @@ class EngineArgs:
 
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
-    # Speculative decoding configuration.
+
+    speculative_config: Optional[Union[str, Dict[str, Any]]] = None
+
+    # TODO(Shangming): Deprecate these out-of-date params after next release
     speculative_model: Optional[str] = None
     speculative_model_quantization: Optional[str] = None
     speculative_draft_tensor_parallel_size: Optional[int] = None
@@ -190,9 +193,9 @@ class EngineArgs:
     spec_decoding_acceptance_method: str = 'rejection_sampler'
     typical_acceptance_sampler_posterior_threshold: Optional[float] = None
     typical_acceptance_sampler_posterior_alpha: Optional[float] = None
-    qlora_adapter_name_or_path: Optional[str] = None
     disable_logprobs_during_spec_decoding: Optional[bool] = None
 
+    qlora_adapter_name_or_path: Optional[str] = None
     show_hidden_metrics_for_version: Optional[str] = None
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
@@ -338,9 +341,15 @@ class EngineArgs:
             'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
             '* "runai_streamer" will load the Safetensors weights using Run:ai'
-            'Model Streamer \n'
+            'Model Streamer.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
-            'quantization.\n')
+            'quantization.\n'
+            '* "sharded_state" will load weights from pre-sharded checkpoint '
+            'files, supporting efficient loading of tensor-parallel models\n'
+            '* "gguf" will load weights from GGUF format files (details '
+            'specified in https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n'
+            '* "mistral" will load weights from consolidated safetensors files '
+            'used by Mistral models.\n')
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -774,7 +783,11 @@ class EngineArgs:
             const="True",
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
-
+        parser.add_argument('--speculative-config',
+                            type=nullable_str,
+                            default=None,
+                            help='The configurations for speculative decoding.'
+                            ' Should be a JSON string.')
         parser.add_argument(
             '--speculative-model',
             type=nullable_str,
@@ -1096,6 +1109,16 @@ class EngineArgs:
             "using. This is used to parse the reasoning content into OpenAI "
             "API format. Required for ``--enable-reasoning``.")
 
+        parser.add_argument(
+            "--disable-cascade-attn",
+            action="store_true",
+            default=False,
+            help="Disable cascade attention for V1. While cascade attention "
+            "does not change the mathematical correctness, disabling it "
+            "could be useful for preventing potential numerical issues. "
+            "Note that even if this is set to False, cascade attention will be "
+            "only used when the heuristic tells that it's beneficial.")
+
         return parser
 
     @classmethod
@@ -1141,6 +1164,7 @@ class EngineArgs:
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
             disable_sliding_window=self.disable_sliding_window,
+            disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
@@ -1158,22 +1182,15 @@ class EngineArgs:
         )
 
     def create_load_config(self) -> LoadConfig:
-        # bitsandbytes quantization needs a specific model loader
-        # so we make sure the quant method and the load format are consistent
-        if (self.quantization == "bitsandbytes" or
-           self.qlora_adapter_name_or_path is not None) and \
-           self.load_format != "bitsandbytes":
-            raise ValueError(
-                "BitsAndBytes quantization and QLoRA adapter only support "
-                f"'bitsandbytes' load format, but got {self.load_format}")
 
-        if (self.load_format == "bitsandbytes" or
-            self.qlora_adapter_name_or_path is not None) and \
+        if(self.qlora_adapter_name_or_path is not None) and \
             self.quantization != "bitsandbytes":
             raise ValueError(
-                "BitsAndBytes load format and QLoRA adapter only support "
+                "QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
 
+        if self.quantization == "bitsandbytes":
+            self.load_format = "bitsandbytes"
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
@@ -1181,6 +1198,82 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
         )
+
+    def create_speculative_config(
+        self,
+        target_model_config: ModelConfig,
+        target_parallel_config: ParallelConfig,
+        enable_chunked_prefill: bool,
+        disable_log_stats: bool,
+    ) -> Optional["SpeculativeConfig"]:
+        """Initializes and returns a SpeculativeConfig object based on
+        `speculative_config`.
+
+        This function utilizes `speculative_config` to create a
+        SpeculativeConfig object. The `speculative_config` can either be
+        provided as a JSON string input via CLI arguments or directly as a
+        dictionary from the engine. If `speculative_config` is not set, this
+        function will attempt to construct a configuration dictionary using
+        certain parameters, which are scheduled for deprecation in the next
+        release. Note that in next releases, `speculative_config` must be
+        provided, and the deprecated standalone speculative-related parameters
+        will be removed.
+        """
+        if self.speculative_config is None:
+            if (self.speculative_model is None
+                    and self.num_speculative_tokens is None):
+                return None
+
+            # TODO(Shangming): Deprecate this way of setting SpeculativeConfig,
+            # only allow '--speculative-config' after next release
+            logger.warning_once(
+                "Please use '--speculative-config' to set all configurations "
+                "related to speculative decoding. The current method of "
+                "specifying the model through '--speculative-model' and "
+                "adding related parameters (e.g., '--num-speculative-tokens') "
+                "separately will be deprecated in the next release.")
+
+            spec_config_dict = {
+                "model": self.speculative_model,
+                "quantization": self.speculative_model_quantization,
+                "max_model_len": self.speculative_max_model_len,
+                "draft_tensor_parallel_size":
+                self.speculative_draft_tensor_parallel_size,
+                "num_speculative_tokens": self.num_speculative_tokens,
+                "disable_mqa_scorer": self.speculative_disable_mqa_scorer,
+                "disable_by_batch_size":
+                self.speculative_disable_by_batch_size,
+                "prompt_lookup_max": self.ngram_prompt_lookup_max,
+                "prompt_lookup_min": self.ngram_prompt_lookup_min,
+                "acceptance_method": self.spec_decoding_acceptance_method,
+                "posterior_threshold":
+                self.typical_acceptance_sampler_posterior_threshold,
+                "posterior_alpha":
+                self.typical_acceptance_sampler_posterior_alpha,
+                "disable_logprobs": self.disable_logprobs_during_spec_decoding,
+            }
+
+            self.speculative_config = spec_config_dict
+        else:
+            if isinstance(self.speculative_config, str):
+                import ast
+                self.speculative_config = ast.literal_eval(
+                    self.speculative_config)
+        # Note(Shangming): These parameters are not obtained from the cli arg
+        # '--speculative-config' and must be passed in when creating the engine
+        # config.
+
+        assert isinstance(self.speculative_config, dict)
+        self.speculative_config.update({
+            "target_model_config": target_model_config,
+            "target_parallel_config": target_parallel_config,
+            "enable_chunked_prefill": enable_chunked_prefill,
+            "disable_log_stats": disable_log_stats,
+        })
+        speculative_config = SpeculativeConfig.from_dict(
+            self.speculative_config)
+
+        return speculative_config
 
     def create_engine_config(
         self,
@@ -1228,6 +1321,8 @@ class EngineArgs:
         else:
             self._set_default_args_v0(model_config)
 
+        assert self.enable_chunked_prefill is not None
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1240,6 +1335,18 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
         )
+
+        # Get the current placement group if Ray is initialized and
+        # we are in a Ray actor. If so, then the placement group will be
+        # passed to spawned processes.
+        placement_group = None
+        if is_in_ray_actor():
+            import ray
+
+            # This call initializes Ray automatically if it is not initialized,
+            # but we should not do this here.
+            placement_group = ray.util.get_current_placement_group()
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1252,36 +1359,17 @@ class EngineArgs:
                 self.tokenizer_pool_extra_config,
             ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
+            placement_group=placement_group,
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
         )
 
-        speculative_config = SpeculativeConfig.maybe_create_spec_config(
+        speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
-            target_dtype=self.dtype,
-            speculative_model=self.speculative_model,
-            speculative_model_quantization = \
-                self.speculative_model_quantization,
-            speculative_draft_tensor_parallel_size = \
-                self.speculative_draft_tensor_parallel_size,
-            num_speculative_tokens=self.num_speculative_tokens,
-            speculative_disable_mqa_scorer=self.speculative_disable_mqa_scorer,
-            speculative_disable_by_batch_size=self.
-            speculative_disable_by_batch_size,
-            speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_log_stats=self.disable_log_stats,
-            ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
-            ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
-            draft_token_acceptance_method=\
-                self.spec_decoding_acceptance_method,
-            typical_acceptance_sampler_posterior_threshold=self.
-            typical_acceptance_sampler_posterior_threshold,
-            typical_acceptance_sampler_posterior_alpha=self.
-            typical_acceptance_sampler_posterior_alpha,
-            disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
         # Reminder: Please update docs/source/features/compatibility_matrix.md
@@ -1436,16 +1524,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        if self.worker_cls != EngineArgs.worker_cls:
-            _raise_or_fallback(feature_name="--worker-cls",
-                               recommend_to_remove=False)
-            return False
-
-        if self.worker_extension_cls != EngineArgs.worker_extension_cls:
-            _raise_or_fallback(feature_name="--worker-extension-cls",
-                               recommend_to_remove=False)
-            return False
-
         if self.num_scheduler_steps != EngineArgs.num_scheduler_steps:
             _raise_or_fallback(feature_name="--num-scheduler-steps",
                                recommend_to_remove=True)
@@ -1462,7 +1540,9 @@ class EngineArgs:
             return False
 
         # Only support Xgrammar for guided decoding so far.
-        SUPPORTED_GUIDED_DECODING = ["xgrammar", "xgrammar:nofallback"]
+        SUPPORTED_GUIDED_DECODING = [
+            "xgrammar", "xgrammar:disable-any-whitespace"
+        ]
         if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
             _raise_or_fallback(feature_name="--guided-decoding-backend",
                                recommend_to_remove=False)
@@ -1482,9 +1562,20 @@ class EngineArgs:
 
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
-            _raise_or_fallback(feature_name="--kv-cache-dtype",
-                               recommend_to_remove=False)
-            return False
+            fp8_attention = self.kv_cache_dtype.startswith("fp8")
+            will_use_fa = (
+                current_platform.is_cuda()
+                and not envs.is_set("VLLM_ATTENTION_BACKEND")
+            ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
+            supported = False
+            if fp8_attention and will_use_fa:
+                from vllm.vllm_flash_attn.fa_utils import (
+                    flash_attn_supports_fp8)
+                supported = flash_attn_supports_fp8()
+            if not supported:
+                _raise_or_fallback(feature_name="--kv-cache-dtype",
+                                   recommend_to_remove=False)
+                return False
 
         # No Prompt Adapter so far.
         if self.enable_prompt_adapter:
@@ -1554,7 +1645,7 @@ class EngineArgs:
         if (self.speculative_model is not None
                 or self.num_speculative_tokens is not None):
             # This is supported but experimental (handled below).
-            if self.speculative_model == "[ngram]":
+            if self.speculative_model in ("ngram", "[ngram]"):
                 pass
             else:
                 _raise_or_fallback(feature_name="Speculative Decoding",
@@ -1570,7 +1661,7 @@ class EngineArgs:
         # No FlashInfer or XFormers so far.
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1", "FLASH_ATTN", "PALLAS", "PALLAS_VLLM_V1",
-            "TRITON_MLA", "FLASHMLA"
+            "TRITON_ATTN_VLLM_V1", "TRITON_MLA", "FLASHMLA"
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
@@ -1602,7 +1693,8 @@ class EngineArgs:
             return False
 
         # ngram is supported on V1, but off by default for now.
-        if self.speculative_model == "[ngram]" and _warn_or_fallback("ngram"):
+        if self.speculative_model in (
+                "ngram", "[ngram]") and _warn_or_fallback("ngram"):
             return False
 
         # Non-CUDA is supported on V1, but off by default for now.
@@ -1683,7 +1775,7 @@ class EngineArgs:
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default
         if self.scheduler_cls == EngineArgs.scheduler_cls:
-            self.scheduler_cls = "vllm.v1.core.scheduler.Scheduler"
+            self.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
 
         # When no user override, set the default values based on the usage
         # context.

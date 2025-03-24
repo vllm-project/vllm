@@ -251,6 +251,9 @@ class MambaMixer2(CustomOp):
                 "then num_groups must equal 1."
             )
 
+        assert self.tp_size == 1 or quant_config is None, \
+            "Tensor parallel currently not supported for quantized models."
+
         self.ssm_state_size = ssm_state_size
         self.activation = activation
 
@@ -331,22 +334,24 @@ class MambaMixer2(CustomOp):
                 ], self.tp_size, tp_rank)
             })
 
-        delattr(self.in_proj.weight, "weight_loader")
-        set_weight_attrs(
-            self.in_proj.weight,
-            {
-                "weight_loader":
-                mamba_v2_sharded_weight_loader(
-                    [
-                        intermediate_settings,  # for gate
-                        intermediate_settings,
-                        group_shard_settings,
-                        group_shard_settings,
-                        head_setings,  # for dt
-                    ],
-                    self.tp_size,
-                    tp_rank)
-            })
+        if quant_config is None:
+            # - quant layers do not have a weight loader
+            delattr(self.in_proj.weight, "weight_loader")
+            set_weight_attrs(
+                self.in_proj.weight,
+                {
+                    "weight_loader":
+                    mamba_v2_sharded_weight_loader(
+                        [
+                            intermediate_settings,  # for gate
+                            intermediate_settings,
+                            group_shard_settings,
+                            group_shard_settings,
+                            head_setings,  # for dt
+                        ],
+                        self.tp_size,
+                        tp_rank)
+                })
 
         # - these are TPed by heads to reduce the size of the
         #   temporal shape
@@ -465,10 +470,11 @@ class MambaMixer2(CustomOp):
         if has_prefill:
 
             initial_states = None
-            if has_initial_states is not None and any(has_initial_states):
-                for idx in mamba_cache_params.state_indices_tensor[
-                        ~has_initial_states]:
-                    mamba_cache_params.ssm_state[idx].zero_()
+            if has_initial_states is not None and torch.any(
+                    has_initial_states):
+                zero_init_indices = mamba_cache_params.state_indices_tensor[
+                    ~has_initial_states]
+                mamba_cache_params.ssm_state[zero_init_indices] = 0
                 initial_states = mamba_cache_params.ssm_state[
                     mamba_cache_params.state_indices_tensor]
 
@@ -494,8 +500,8 @@ class MambaMixer2(CustomOp):
 
             # update ssm states
             # - varlen state is a (batch, nheads, headdim, dstate) tensor
-            for i, idx in enumerate(mamba_cache_params.state_indices_tensor):
-                mamba_cache_params.ssm_state[idx].copy_(varlen_state[i])
+            mamba_cache_params.ssm_state[
+                mamba_cache_params.state_indices_tensor] = varlen_state
 
             # - reshape
             hidden_states = scan_output.view(seq_len, -1)
