@@ -39,6 +39,7 @@ from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
                     Optional, TypeVar, Union)
 from uuid import uuid4
+from cachetools import Cache
 
 import cloudpickle
 import numpy as np
@@ -216,7 +217,127 @@ class CacheInfo(NamedTuple):
         return self.hits / self.total
 
 
-class LRUCache(Generic[_K, _V]):
+class LRUCache(Cache):
+    """LRU Cache """
+    def __init__(self, capacity: int, getsizeof=None):
+        Cache.__init__(self, capacity, getsizeof)
+        self.ordered_items = OrderedDict[_K]()
+        self.pinned_items = set[_K]()
+        self.capacity = capacity
+        
+        self._hits = 0
+        self._total = 0
+        
+    def __getitem__(self, key: _K, cache_getitem=Cache.__getitem__) -> _V:
+        value = cache_getitem(self, key)  # Raise KeyError if not exists
+        if key in self:
+            self.__update(key)
+        return value
+
+    def __setitem__(self, key: _K, value: _V, cache_setitem=Cache.__setitem__) -> None:
+        cache_setitem(self, key, value)
+        self.__update(key)
+
+    def __delitem__(self, key: _K, cache_getitem=Cache.__getitem__, cache_delitem=Cache.__delitem__) -> None:
+        run_on_remove = key in self
+        value = cache_getitem(self, key)
+        cache_delitem(self, key)
+        if key in self.pinned_items:
+            # Todo: add warning to inform that del pinned item
+            self._unpin(key)
+        if run_on_remove:
+            self._on_remove(key, value)
+        del self.ordered_items[key]
+
+    def stat(self) -> CacheInfo:
+        return CacheInfo(hits=self._hits, total=self._total)
+
+    def touch(self, key: _K) -> None:
+        self.__update(key)
+
+    def get(self, key: _K, default: Optional[_V] = None, cache_getitem=Cache.__getitem__) -> Optional[_V]:
+        value: Optional[_V]
+        if key in self:
+            value = cache_getitem(self, key)
+            self.__update(key)
+
+            self._hits += 1
+        else:
+            value = default
+
+        self._total += 1
+        return value
+
+    def put(self, key: _K, value: _V, cache_setitem=Cache.__setitem__) -> None:
+        cache_setitem(self, key, value)
+        self.__update(key)
+
+    def pin(self, key: _K) -> None:
+        """
+        Pins a key in the cache preventing it from being
+        evicted in the LRU order.
+        """
+        if key not in self:
+            raise ValueError(f"Cannot pin key: {key} not in cache.")
+        self.pinned_items.add(key)
+
+    def _unpin(self, key: _K) -> None:
+        """
+        Unpins a key in the cache allowing it to be
+        evicted in the LRU order.
+        """
+        self.pinned_items.remove(key)
+
+    def _on_remove(self, key: _K, value: Optional[_V]) -> None:
+        pass
+
+    def remove_oldest(self, *, remove_pinned: bool = False) -> None:
+        if len(self) == 0:
+            return
+
+        if not remove_pinned:
+            # pop the oldest item in the cache that is not pinned
+            lru_key = next(
+                (key for key in self.ordered_items if key not in self.pinned_items),
+                ALL_PINNED_SENTINEL)
+            if lru_key is ALL_PINNED_SENTINEL:
+                raise RuntimeError("All items are pinned, "
+                                   "cannot remove oldest from the cache.")  
+        else:
+            lru_key = next(iter(self.ordered_items))
+        self.pop(lru_key, None)
+
+    def _remove_old_if_needed(self) -> None:
+        if len(self) > self.capacity:
+            self.remove_oldest()
+
+    def clear(self) -> None:
+        while len(self) > 0:
+            self.remove_oldest(remove_pinned=True)
+
+    def popitem(self, remove_pinned: bool = False):
+        """Remove and return the `(key, value)` pair least recently used."""
+        if not remove_pinned:
+                # pop the oldest item in the cache that is not pinned
+                lru_key = next(
+                    (key for key in self.ordered_items if key not in self.pinned_items),
+                    ALL_PINNED_SENTINEL)
+                if lru_key is ALL_PINNED_SENTINEL:
+                    raise RuntimeError("All items are pinned, "
+                                    "cannot remove oldest from the cache.")  
+        else:
+                lru_key = next(iter(self.ordered_items))
+        value = self.pop(lru_key, None)
+        return (lru_key, value)                
+
+    def __update(self, key):
+        try:
+            self.ordered_items.move_to_end(key)
+        except KeyError:
+            self.ordered_items[key] = None
+
+
+class LRUCache_back(Generic[_K, _V]):
     """Note: This class is not thread safe!"""
 
     def __init__(self, capacity: int) -> None:
