@@ -220,9 +220,9 @@ class CacheInfo(NamedTuple):
 class LRUCache(Cache, Generic[_K, _V]):
     """LRU Cache """
 
-    def __init__(self, capacity: int, getsizeof=None):
+    def __init__(self, capacity: Union[int, float], getsizeof=None):
         Cache.__init__(self, capacity, getsizeof)
-        self.__orders = OrderedDict()
+        self.__orders = OrderedDict[_K, None]()
         self.pinned_items = set[_K]()
         self.capacity = capacity
 
@@ -262,14 +262,10 @@ class LRUCache(Cache, Generic[_K, _V]):
     def touch(self, key: _K) -> None:
         self.__update(key)
 
-    def get(self,
-            key: _K,
-            default: Optional[_V] = None,
-            cache_getitem=Cache.__getitem__) -> Optional[_V]:
+    def get(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
         value: Optional[_V]
         if key in self:
-            value = cache_getitem(self, key)
-            self.__update(key)
+            value = self.__getitem__(key)
 
             self._hits += 1
         else:
