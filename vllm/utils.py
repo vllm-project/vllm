@@ -243,18 +243,18 @@ class LRUCache(cachetools.LRUCache, Generic[_K, _V]):
     @property
     def cache(self) -> dict[_K, _V]:
         """Return the internal cache dictionary (read-only)."""
-        return cast(dict[_K, _V], self._Cache__data)
+        return cast(dict[_K, _V], self._Cache__data)  # type: ignore
 
     @property
     def order(self) -> dict:
         """Return the internal order dictionary (read-only)."""
-        return cast(dict, self._LRUCache__order)
+        return cast(dict, self._LRUCache__order)  # type: ignore
 
     def stat(self) -> CacheInfo:
         return CacheInfo(hits=self._hits, total=self._total)
 
     def touch(self, key: _K) -> None:
-        self.__update(key)
+        self._LRUCache__update(key)  # type: ignore
 
     def get(self, key, default=None):
         value: Optional[_V]
