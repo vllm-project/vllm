@@ -1,17 +1,66 @@
 name: Trigger Jenkins Tests
 on:
-    pull_request:
-        types: [opened, reopened, edited, synchronize]
+  issue_comment:
+    types: [created]
 
 permissions:
     pull-requests: write
+    statuses: write
+    actions: read
 jobs:
-  DependencyReview:
-    name: Dependency Review
-    runs-on: ubuntu-latest
+  read_codeowners:
+    name: Check Commenter
+    runs-on: generic-runner
+    if: ${{ contains(github.event.comment.body, '/run-gaudi-tests') && github.event.issue.pull_request }}
+    outputs:
+      pr_number: ${{ steps.extract_pr.outputs.pr_number }}
+      pr_branch: ${{ steps.extract_pr.outputs.pr_branch }}
+      pr_target_branch: ${{ steps.extract_pr.outputs.pr_target_branch }}
+      pr_sha: ${{ steps.extract_pr.outputs.pr_sha }}
     steps:
       - name: 'Checkout Repository'
         uses: actions/checkout@v4
+        with:
+          ref: habana_main
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+      - name: Parse Comment
+        run: |
+          MAINTAINERS=$(grep -E '^[^#]' .github/CODEOWNERS | tr -d '@*')
+          COMMENTER=${{ github.event.comment.user.login }}
+          echo "Maintainers are: ${MAINTAINERS}"
+          echo "Commenter Is: ${COMMENTER}"
+          if ! echo "$MAINTAINERS" | grep -q "$COMMENTER"; then
+            echo "❌ User $COMMENTER is not authorized to trigger tests."
+            exit 1
+          fi
+      - name: Extract PR Number
+        id: extract_pr
+        run: |
+            PR_NUMBER="${{ github.event.issue.number }}"
+            echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            # It will work only on open PR's
+            random_string=$(tr -dc 'a-z0-9' </dev/urandom | head -c 10)
+            pr_temp_branch=$(echo "pr-${PR_NUMBER}-${random_string}")
+            git fetch origin pull/${PR_NUMBER}/merge
+            git checkout -b $pr_temp_branch FETCH_HEAD
+            git push origin $pr_temp_branch
+            echo "pr_branch=$pr_temp_branch" >> "$GITHUB_OUTPUT"
+            echo "Parsing The Base Branch"
+            target_branch=$(curl -sH "Authorization: token ${{ secrets.GH_PAT }}" https://api.github.com/repos/${{github.repository}}/pulls/${PR_NUMBER} | jq -r '.base.ref')
+            echo "pr_target_branch=$target_branch" >> "$GITHUB_OUTPUT"
+            pr_sha=$(curl -sH "Authorization: token ${{ secrets.GH_PAT }}" https://api.github.com/repos/${{github.repository}}/pulls/${PR_NUMBER} | jq -r '.head.sha')
+            echo "pr_sha=$pr_sha" >> $GITHUB_OUTPUT
+  DependencyReview:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    needs: [read_codeowners]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.read_codeowners.outputs.pr_branch }}
+          token: ${{ secrets.GH_PAT }}
       - name: 'Dependency Review'
         uses: actions/dependency-review-action@v4
         with:
@@ -19,9 +68,13 @@ jobs:
   CodeQLScan:
     name: CodeQL Scan
     runs-on: ubuntu-latest
+    needs: [read_codeowners]
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4      
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.read_codeowners.outputs.pr_branch }}
+        token: ${{ secrets.GH_PAT }}
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
       with:
@@ -35,12 +88,15 @@ jobs:
   CalculateJobs:
     runs-on: generic-runner
     name: Calculate Tests To Trigger
-    needs: [DependencyReview,CodeQLScan]
+    needs: [DependencyReview,CodeQLScan,read_codeowners]
     outputs:
         tests_list: ${{ steps.tests.outputs.tests_list }}
     steps:
-        - name: Checkout
+        - name: Checkout Repository
           uses: actions/checkout@v4
+          with:
+            ref: ${{ needs.read_codeowners.outputs.pr_branch }}
+            token: ${{ secrets.GH_PAT }}
         - name: Install YQ
           run: |
             wget https://github.com/mikefarah/yq/releases/download/v4.14.1/yq_linux_amd64.tar.gz -O - |\
@@ -50,9 +106,10 @@ jobs:
           run: |
             test_list=$(yq -oj e .jenkins/test_config.yaml  | jq -c "[.stages[].steps[]]")
             echo "tests_list=${test_list}" >> "$GITHUB_OUTPUT"
+            
   TestRun:
     name: Test / ${{matrix.tests.name}}
-    needs: [CalculateJobs]
+    needs: [CalculateJobs,read_codeowners]
     runs-on: generic-runner
     strategy:
       fail-fast: false
@@ -64,6 +121,73 @@ jobs:
         POD_TEMPLATE: ${{ secrets.POD_TEMPLATE }}
         TEST_COMMAND: ${{ matrix.tests.command }}
     steps:
+        - name: Get Job ID
+          uses: actions/github-script@v7
+          id: fetch_job_id
+          with:
+            script: |
+              async function getJobIdWithRetry(retries = 5, delay = 5000) {
+                const run_id = context.runId;
+                const matrix_test_name = process.env.MATRIX_TEST_NAME;
+
+                console.log(`Searching for job: Test / ${matrix_test_name} in run: ${run_id}`);
+
+                for (let i = 0; i < retries; i++) {
+                  console.log(`Attempt ${i + 1}...`);
+
+                  const response = await github.rest.actions.listJobsForWorkflowRun({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: run_id
+                  });
+
+                  console.log("All Jobs:", response.data.jobs.map(j => j.name));
+
+                  // Match job with correct naming convention
+                  const job = response.data.jobs.find(j => 
+                    j.name.trim() === `Test / ${matrix_test_name}`
+                  );
+
+                  if (job) {
+                    console.log(`Found Job ID: ${job.id}`);
+                    return job.id;
+                  }
+
+                  console.log(`Job not found, retrying in ${delay / 1000} seconds...`);
+                  await new Promise(res => setTimeout(res, delay));
+                }
+
+                throw new Error(`Job ID not found after ${retries} attempts`);
+              }
+
+              const job_id = await getJobIdWithRetry();
+              core.setOutput("job_id", job_id);
+          env:
+            MATRIX_TEST_NAME: ${{ matrix.tests.name }}      
+        - name: Get Job URL
+          id: job_url
+          run: |
+             url=$(echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${{ steps.fetch_job_id.outputs.job_id }}")
+             echo "url=$url" >> $GITHUB_OUTPUT
+
+        - name: Create Commit Status(Pending)
+          uses: actions/github-script@v7
+          env:
+            GIT_SHA: ${{ needs.read_codeowners.outputs.pr_sha }}
+            TARGET_URL: ${{ steps.job_url.outputs.url }}
+            JOB_NAME: ${{matrix.tests.name}}
+          with:
+            script: |
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha:  process.env.GIT_SHA,
+                state: 'pending',
+                description: `Running ${process.env.JOB_NAME}`,
+                target_url: process.env.TARGET_URL,
+                context: `Test / ${process.env.JOB_NAME}`
+              });
+
         - name: Download Hlctl
           run: |
             curl --show-error --silent ${{ secrets.HLCTL_ADDRESS }} | bash &> /dev/null
@@ -72,9 +196,9 @@ jobs:
             ${{ secrets.HLCTL_COMMAND }} &> /dev/null
         - name: Create Pod Template
           env:
-            TARGET_BRANCH: ${{ github.base_ref }}
+            TARGET_BRANCH: ${{ needs.read_codeowners.outputs.pr_target_branch }}
             RELEASED_SYNAPSE_VERSION: ${{ vars.RELEASED_SYNAPSE_VERSION }}
-            BASE_BRANCH: ${{github.head_ref}}      
+            BASE_BRANCH: ${{ needs.read_codeowners.outputs.pr_branch }}      
           run: |
             if [[ $TARGET_BRANCH == "habana_main" ]]; then
               synapse_version=${RELEASED_SYNAPSE_VERSION#v}
@@ -99,14 +223,101 @@ jobs:
             echo "Pod Template Created"
         - name: Run Test
           run: |
-            converted_test_name=$(echo ${{ matrix.tests.name }} | tr "_" "-")
-            if [[ ${#converted_test_name} -ge 33 ]];then
-              converted_test_name=${converted_test_name:12}
-            fi
+            random_string=$(tr -dc 'a-z0-9' </dev/urandom | head -c 10)
             hlctl create containers \
                 --file=pod.yml \
                 --flavor=${{ matrix.tests.flavor}} \
-                --name="vllm-fork-${{github.event.number}}-${converted_test_name}" \
+                --name="vllm-fork-${{github.event.issue.number}}-${random_string}" \
                 --namespace="framework" \
                 --retry \
-                --shm=10240           
+                --shm=10240
+        - name: Create Commit Status(Failure)
+          uses: actions/github-script@v7
+          if: failure()
+          env:
+            GIT_SHA: ${{ needs.read_codeowners.outputs.pr_sha }}
+            TARGET_URL: ${{ steps.job_url.outputs.url }}
+            JOB_NAME: ${{matrix.tests.name}}
+          with:
+            script: |
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha:  process.env.GIT_SHA,
+                state: 'failure',
+                description: `${process.env.JOB_NAME} Test Failed!`,
+                target_url: process.env.TARGET_URL,
+                context: `Test / ${process.env.JOB_NAME}`
+              });                
+        - name: Create Commit Status(Success)
+          uses: actions/github-script@v7
+          if: success()
+          env:
+            GIT_SHA: ${{ needs.read_codeowners.outputs.pr_sha }}
+            TARGET_URL: ${{ steps.job_url.outputs.url }}
+            JOB_NAME: ${{matrix.tests.name}}
+          with:
+            script: |
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha:  process.env.GIT_SHA,
+                state: 'success',
+                description: `${process.env.JOB_NAME} Test Has Finished Successfully`,
+                target_url: process.env.TARGET_URL,
+                context: `Test / ${process.env.JOB_NAME}`
+              });                             
+  Summarize:
+      name: Summarize Test Results
+      runs-on: generic-runner
+      needs: [TestRun,read_codeowners]
+      if: always()
+      steps:
+        - name: Checkout Repository
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+            token: ${{ secrets.GH_PAT }}
+        - name: Delete Temp Branch
+          run: |
+              git push origin --delete ${{ needs.read_codeowners.outputs.pr_branch }}
+        - name: Check Test Results
+          run: |
+            test_result="${{ needs.TestRun.result }}"
+            echo "Test Finished with status ${test_result}"
+            if [[ "${test_result}" != "success" ]]; then
+              exit 1
+            fi
+        - name: Create Commit Status(Success)
+          uses: actions/github-script@v7
+          if: success()
+          env:
+            GIT_SHA: ${{ needs.read_codeowners.outputs.pr_sha }}
+          with:
+            script: |
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha:  process.env.GIT_SHA,
+                state: 'success',
+                description: 'All Tests Passed Successfully!',
+                context: 'Summarize Test Results'
+              });
+        - name: Create Commit Status(Failure)
+          uses: actions/github-script@v7
+          if: failure()
+          env:
+            GIT_SHA: ${{ needs.read_codeowners.outputs.pr_sha }}
+          with:
+            script: |
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha:  process.env.GIT_SHA,
+                state: 'failure',
+                description: 'Test Failure! Check Jobs To See Why',
+                context: 'Summarize Test Results'
+              });                
+    
+
+          
