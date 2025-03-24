@@ -178,7 +178,7 @@ For ARM or Apple silicon, use `docker/Dockerfile.arm`
 ::::
 
 ::::{tip}
-For IBM Z (s390x), use `Dockerfile.s390x` and in `docker run` use flag `--dtype float`
+For IBM Z (s390x), use `docker/Dockerfile.s390x` and in `docker run` use flag `--dtype float`
 ::::
 
 ## Supported features
