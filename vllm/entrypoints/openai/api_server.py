@@ -885,6 +885,10 @@ async def init_app_state(
     if resolved_chat_template is not None:
         logger.info("Using supplied chat template:\n%s",
                     resolved_chat_template)
+        logger.info(
+            "It is different from official chat template '%s'. "
+            "This discrepancy may lead to performance degradation.",
+            args.model)
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
