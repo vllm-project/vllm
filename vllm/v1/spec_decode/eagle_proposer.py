@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections import defaultdict
-from typing import List, Tuple
+from typing import Any
 
 import torch
 from torch import Tensor, nn
@@ -15,20 +15,21 @@ class EagleProposer:
 
     def __init__(self, vllm_config: VllmConfig, model: nn.Module,
                  sampling_metadata: SamplingMetadata):
-        self._partial_prefill_last_token_hidden_states = defaultdict(
-            lambda: torch.zeros(256, dtype=torch.float32))
+        self._partial_prefill_last_token_hidden_states: defaultdict[
+            Any, torch.Tensor] = defaultdict(
+                lambda: torch.zeros(256, dtype=torch.float32))
         self._vllm_config = vllm_config
         self._model = model
         self._sampling_metadata = sampling_metadata
 
     def propose(
-            self, req_ids: List, target_model_input_ids: Tensor,
+            self, req_ids: list, target_model_input_ids: Tensor,
             target_model_positions: Tensor, target_model_hidden_states: Tensor,
             target_model_cumulative_seq_lens: Tensor,
             accepted_token_ids: Tensor, prefill_mask: Tensor,
             num_lookahead_slots: int,
             attention_metadata: FlashAttentionMetadata
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         target_model_seq_lens = torch.diff(
             target_model_cumulative_seq_lens,
             prepend=torch.tensor(
@@ -72,10 +73,12 @@ class EagleProposer:
             eagle_num_tokens, completed_prefill_mask, partial_prefill_mask,
             zero_position_mask, accepted_token_ids)
 
-        eagle_prefill_attn_metadata = self._construct_eagle_prefill_attn_metadata(
-            attention_metadata, eagle_num_tokens, target_model_start_locs,
-            target_model_seq_lens, eagle_start_locs, eagle_seq_lens,
-            partial_prefill_mask, completed_prefill_mask, zero_position_mask)
+        eagle_prefill_attn_metadata = \
+            self._construct_eagle_prefill_attn_metadata(
+                attention_metadata, eagle_num_tokens,
+                target_model_start_locs, target_model_seq_lens,
+                eagle_start_locs, eagle_seq_lens, partial_prefill_mask,
+                completed_prefill_mask, zero_position_mask)
 
         # We will sample everything except partial prefills
         eagle_hidden_states = None
@@ -88,7 +91,8 @@ class EagleProposer:
                 previous_hidden_states=eagle_previous_hidden_state,
             )
             logits_indices = \
-                eagle_start_locs[seq_to_sample_mask] + eagle_seq_lens[seq_to_sample_mask] - 1
+                eagle_start_locs[seq_to_sample_mask] + \
+                    eagle_seq_lens[seq_to_sample_mask] - 1
             sample_hidden_states = eagle_hidden_states[logits_indices]
             logits = self._model.compute_logits(sample_hidden_states, None)
             sampler_output = self._model.sample(
@@ -96,9 +100,12 @@ class EagleProposer:
                 sampling_metadata=self._sampling_metadata,
             )
 
-        eagle_speculation_attn_metadata = self._construct_eagle_speculate_attn_metadata(
-            eagle_prefill_attn_metadata, seq_to_sample_mask, eagle_start_locs,
-            eagle_seq_lens)
+        eagle_speculation_attn_metadata =\
+            self._construct_eagle_speculate_attn_metadata(
+                eagle_prefill_attn_metadata,
+                seq_to_sample_mask, eagle_start_locs,
+                eagle_seq_lens
+            )
         eagle_input_ids = sampler_output.sampled_token_ids.squeeze(1)
         eagle_positions = torch.arange(0, seq_to_sample_mask.sum() + 1)
         eagle_previous_hidden_state = eagle_hidden_states
@@ -129,22 +136,29 @@ class EagleProposer:
     def _construct_masks(
         self, prefill_mask: Tensor, target_model_positions: Tensor,
         target_model_start_locs: Tensor, accepted_token_lengths: Tensor
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         Constructs various boolean masks based on input conditions.
 
         Args:
-            prefill_mask: A boolean tensor indicating which sequences are in the prefill phase.
-            target_model_positions: Token positions as passed to the target model.
-            target_model_start_locs: Indices indicating the starting positions of sequences.
-            accepted_token_lengths: A tensor representing the number of accepted tokens per sequence.
+            prefill_mask: A boolean tensor indicating which sequences are
+                in the prefill phase.
+            target_model_positions: Token positions as passed to the
+                target model.
+            target_model_start_locs: Indices indicating the starting
+                positions of sequences.
+            accepted_token_lengths: A tensor representing the number of
+                accepted tokens per sequence.
 
         Returns:
             Tuple[Tensor, Tensor, Tensor, Tensor]: 
-                - completed_prefill_mask: Mask for prefill sequences with accepted tokens.
-                - partial_prefill_mask: Mask for prefill sequences with no accepted tokens.
+                - completed_prefill_mask: Mask for prefill sequences with
+                    accepted tokens.
+                - partial_prefill_mask: Mask for prefill sequences with no
+                    accepted tokens.
                 - non_prefill_mask: Mask for non-prefill sequences.
-                - zero_position_mask: Mask indicating sequences that start at position 0.
+                - zero_position_mask: Mask indicating sequences that start at
+                    position 0.
         """
         completed_prefill_mask = prefill_mask.bool() & (accepted_token_lengths
                                                         > 0)
@@ -162,16 +176,17 @@ class EagleProposer:
         accepted_token_lengths: Tensor,
         prefill_mask: Tensor,
         zero_position_mask: Tensor,
-    ) -> Tuple[Tensor, Tensor, int]:
+    ) -> tuple[Tensor, Tensor, int]:
         """
-        Constructs sequence metadata for the Eagle model, including sequence lengths, 
-        start locations, and total token count.
+        Constructs sequence metadata for the Eagle model, including
+        sequence lengths, start locations, and total token count.
 
         Args:
             target_model_seq_lens: Sequence lengths from the target model.
             accepted_token_lengths: Number of accepted tokens per sequence.
             prefill_mask: Mask indicating prefill sequences.
-            zero_position_mask: Mask indicating sequences whose first positon is 0.
+            zero_position_mask: Mask indicating sequences whose first
+                position is 0.
 
         Returns:
             Tuple[Tensor, Tensor, int]: 
@@ -316,7 +331,8 @@ class EagleProposer:
             ends: A tensor containing the end indices for each range.
 
         Returns:
-            Tensor: A flattened tensor containing all indices from the specified ranges.
+            Tensor: A flattened tensor containing all indices from the
+                specified ranges.
         """
         indices = torch.cat([
             torch.arange(start, end, dtype=torch.long)
@@ -336,13 +352,15 @@ class EagleProposer:
             zero_position_mask: torch.Tensor, req_ids: list) -> torch.Tensor:
         """
         Constructs the previous hidden states tensor for the Eagle model. 
-        Copies hidden states for both prefill and non-prefill sequences, maintaining 
-        last token hidden states for partial prefills to be used in subsequent forward passes.
+        Copies hidden states for both prefill and non-prefill sequences,
+        maintaining last token hidden states for partial prefills to be
+        used in subsequent forward passes.
         
         Args:
             eagle_num_tokens: Number of tokens in this forward pass.
             target_model_hidden_state: Hidden states from the target model.
-            target_model_start_locs: Start locations of sequences in the target model.
+            target_model_start_locs: Start locations of sequences in the
+                target model.
             target_model_seq_lens: Sequence lengths in the target model.
             accepted_token_lengths: Number of accepted tokens per sequence.
             eagle_start_locs: Start locations in the Eagle model.
@@ -367,14 +385,18 @@ class EagleProposer:
         eagle_starts = eagle_start_locs[non_prefill_mask]
         eagle_ends = eagle_starts + accepted_token_lengths[non_prefill_mask]
 
-        eagle_prev_hidden_states[self._expand_indices(eagle_starts, eagle_ends)] = \
-            target_model_hidden_state[self._expand_indices(target_model_starts, target_model_ends)]
+        eagle_prev_hidden_states[self._expand_indices(
+            eagle_starts, eagle_ends)] = \
+                target_model_hidden_state[self._expand_indices(
+                    target_model_starts, target_model_ends)]
 
-        # Prefill: Copy hidden states for both partial and completed prefill sequences.
+        # Prefill: Copy hidden states for both partial and completed
+        # prefill sequences.
         prefill_mask = partial_prefill_mask | completed_prefill_mask
 
         target_model_starts = target_model_start_locs[prefill_mask]
-        target_model_ends_all = target_model_start_locs + target_model_seq_lens
+        target_model_ends_all = target_model_start_locs + \
+            target_model_seq_lens
         target_model_ends = torch.where(
             completed_prefill_mask,
             target_model_ends_all,
@@ -390,8 +412,10 @@ class EagleProposer:
         eagle_ends = eagle_start_locs[prefill_mask] + eagle_seq_lens[
             prefill_mask]
 
-        eagle_prev_hidden_states[self._expand_indices(eagle_starts, eagle_ends)] = \
-            target_model_hidden_state[self._expand_indices(target_model_starts, target_model_ends)]
+        eagle_prev_hidden_states[self._expand_indices(
+            eagle_starts, eagle_ends)] = \
+                target_model_hidden_state[self._expand_indices(
+                    target_model_starts, target_model_ends)]
 
         # Append last hidden state for non-first prefill sequences.
         non_zero_prefill_mask = prefill_mask & ~zero_position_mask
@@ -429,7 +453,8 @@ class EagleProposer:
                             start_indices: Tensor, lengths: Tensor,
                             start_positions: Tensor) -> Tensor:
         """
-        Populates the position tensor by assigning position values at the corresponding indices.
+        Populates the position tensor by assigning position values at the
+        corresponding indices.
 
         Args:
             position_tensor: Tensor that will be populated with positions.
@@ -438,7 +463,8 @@ class EagleProposer:
             start_positions: Starting positions for each range.
 
         Returns:
-            Tensor: The updated position tensor with the assigned position values.
+            Tensor: The updated position tensor with the assigned
+                position values.
         """
         position_values = torch.cat([
             torch.arange(start_position,
@@ -471,7 +497,8 @@ class EagleProposer:
         partial_prefill_mask: Tensor,
     ) -> Tensor:
         """
-        Generates position tensor for the Eagle model based on the target model positions.
+        Generates position tensor for the Eagle model based on the target 
+        model positions.
 
         Args:
             target_model_positions: Positions from the target model.
@@ -530,9 +557,9 @@ class EagleProposer:
         accepted_token_ids: Tensor,
     ) -> Tensor:
         """
-        Constructs input tokens for the Eagle model by copying input tokens for both 
-        prefill and non-prefill sequences. Additionally, appends accepted tokens 
-        for completed prefills.
+        Constructs input tokens for the Eagle model by copying input 
+        tokens for both prefill and non-prefill sequences. Additionally,
+        appends accepted tokens for completed prefills.
 
         Args:
             target_model_input_ids: Input token IDs used by the target model.
@@ -555,7 +582,7 @@ class EagleProposer:
 
         # Handle Prefill Sequences (Completed + Partial)
         prefill_mask = partial_prefill_mask | completed_prefill_mask
-        # For prefills starting at zero positon drop the first token.
+        # For prefills starting at zero position drop the first token.
         target_model_starts = torch.where(
             zero_position_mask, target_model_start_locs + 1,
             target_model_start_locs)[prefill_mask]
@@ -569,7 +596,8 @@ class EagleProposer:
 
         # Copy input IDs from target model to Eagle model
         eagle_input_ids[self._expand_indices(eagle_starts, eagle_ends)] = \
-            target_model_input_ids[self._expand_indices(target_model_starts, target_model_ends)]
+            target_model_input_ids[self._expand_indices(
+                target_model_starts, target_model_ends)]
 
         # Append accepted tokens for completed prefills
         completed_start_locs = eagle_start_locs[completed_prefill_mask]
