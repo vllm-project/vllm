@@ -7,7 +7,8 @@ import pytest
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
+from vllm.entrypoints.chat_utils import (_resolve_hf_chat_template,
+                                         _try_extract_ast, load_chat_template,
                                          parse_chat_messages,
                                          parse_chat_messages_futures,
                                          resolve_chat_template_content_format)
@@ -722,7 +723,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
         HERMES_MODEL_ID,  # tokenizer.chat_template is of type dict
     ])
 @pytest.mark.parametrize("use_tools", [True, False])
-def test_apply_hf_chat_template(sample_json_schema, model, use_tools):
+def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
     """checks that chat_template is a dict type for HF models."""
 
     # Build the tokenizer group and grab the underlying tokenizer
@@ -734,17 +735,6 @@ def test_apply_hf_chat_template(sample_json_schema, model, use_tools):
     )
     tokenizer = tokenizer_group.tokenizer
 
-    conversation = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant."
-        },
-        {
-            "role": "user",
-            "content": "Hello, how are you?"
-        },
-    ]
-
     tools = [{
         "type": "function",
         "function": {
@@ -754,13 +744,12 @@ def test_apply_hf_chat_template(sample_json_schema, model, use_tools):
         }
     }] if use_tools else None
 
-    chat_template = apply_hf_chat_template(
+    # Test detecting the tokenizer's chat_template
+    chat_template = _resolve_hf_chat_template(
         tokenizer,
-        conversation=conversation,
-        # test that chat_template is None. use default chat_template.
         chat_template=None,
         tools=tools,
-        add_generation_prompt=True,
+        trust_remote_code=True,
     )
     assert isinstance(chat_template, str)
 
@@ -785,7 +774,13 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     )
     tokenizer = tokenizer_group.tokenizer
 
-    chat_template = tokenizer.chat_template
+    # Test detecting the tokenizer's chat_template
+    chat_template = _resolve_hf_chat_template(
+        tokenizer,
+        chat_template=None,
+        tools=None,
+        trust_remote_code=True,
+    )
     assert isinstance(chat_template, str)
 
     print("[TEXT]")
