@@ -58,7 +58,7 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch):
         more_args = None
         if current_platform.is_tpu():
             # Limit compilation time for TPU V1
-            more_args = "max_num_seqs=64"
+            more_args = "max_model_len=2048,max_num_seqs=64"
 
             # Add TP test (if provided)
             if TPU_TP_TEST_STR:
