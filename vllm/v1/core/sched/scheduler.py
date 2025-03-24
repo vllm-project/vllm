@@ -235,12 +235,12 @@ class Scheduler(SchedulerInterface):
                 encoder_budget = new_encoder_budget
 
         # Record the LoRAs in scheduled_running_reqs
-        requested_loras: set[int] = set()
+        scheduled_loras: set[int] = set()
         if self.lora_config:
-            requested_loras = set(
+            scheduled_loras = set(
                 req.lora_request.lora_int_id for req in scheduled_running_reqs
                 if req.lora_request and req.lora_request.lora_int_id > 0)
-            assert len(requested_loras) <= self.lora_config.max_loras
+            assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
@@ -268,8 +268,8 @@ class Scheduler(SchedulerInterface):
                 # constraint.
                 if self.lora_config and request.lora_request:
                     req_lora_id = request.lora_request.lora_int_id
-                    if len(requested_loras) == self.lora_config.max_loras and (
-                            req_lora_id not in requested_loras):
+                    if len(scheduled_loras) == self.lora_config.max_loras and (
+                            req_lora_id not in scheduled_loras):
                         # Cannot schedule.
                         # TODO (varun): This means all the other requests in
                         # the WAITING queue will be blocked by this request,
@@ -336,7 +336,7 @@ class Scheduler(SchedulerInterface):
                         f"Invalid request status: {request.status}")
 
                 if self.lora_config and request.lora_request:
-                    requested_loras.add(request.lora_request.lora_int_id)
+                    scheduled_loras.add(request.lora_request.lora_int_id)
                 req_to_new_block_ids[request.request_id] = [
                     b.block_id for b in computed_blocks + new_blocks
                 ]
