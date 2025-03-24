@@ -84,12 +84,14 @@ def v1(run_with_both_engines_lora):
 @create_new_process_for_each_test()
 def test_llama_lora(sql_lora_files):
 
-    llm = vllm.LLM(MODEL_PATH,
-                   enable_lora=True,
-                   max_num_seqs=16,
-                   max_loras=4,
-                   tensor_parallel_size=1,
-                   enable_chunked_prefill=True)
+    llm = vllm.LLM(
+        MODEL_PATH,
+        enable_lora=True,
+        # also test odd max_num_seqs
+        max_num_seqs=13,
+        max_loras=4,
+        tensor_parallel_size=1,
+        enable_chunked_prefill=True)
     generate_and_test(llm, sql_lora_files)
 
 

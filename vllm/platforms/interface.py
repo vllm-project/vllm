@@ -29,10 +29,10 @@ def in_wsl() -> bool:
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
     FLASH_ATTN_VLLM_V1 = enum.auto()
+    TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
-    OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
     FLASHMLA = enum.auto()  # Supported by V1
@@ -52,7 +52,6 @@ class PlatformEnum(enum.Enum):
     XPU = enum.auto()
     CPU = enum.auto()
     NEURON = enum.auto()
-    OPENVINO = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -134,9 +133,6 @@ class Platform:
 
     def is_neuron(self) -> bool:
         return self._enum == PlatformEnum.NEURON
-
-    def is_openvino(self) -> bool:
-        return self._enum == PlatformEnum.OPENVINO
 
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
