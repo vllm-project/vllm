@@ -332,6 +332,7 @@ class LlamaModel(nn.Module):
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
+                padding_size=32 * get_tensor_model_parallel_world_size() # Padding for un-even world size
             )
         else:
             self.embed_tokens = PPMissingLayer()

@@ -186,7 +186,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
+        weight = Parameter(torch.zeros(sum(output_partition_sizes),
                                        input_size_per_partition,
                                        dtype=params_dtype),
                            requires_grad=False)
@@ -295,7 +295,7 @@ class ReplicatedLinear(LinearBase):
 
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size, dtype=self.params_dtype))
+                torch.zeros(self.output_size, dtype=self.params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,
@@ -419,7 +419,7 @@ class ColumnParallelLinear(LinearBase):
                 in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size_per_partition,
+                torch.zeros(self.output_size_per_partition,
                             dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
@@ -457,8 +457,11 @@ class ColumnParallelLinear(LinearBase):
         if output_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[output_dim]
             start_idx = tp_rank * shard_size
+            actual_shard_size = min(
+                loaded_weight.size(output_dim) - start_idx, shard_size)
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                 shard_size)
+                                                 actual_shard_size)
+            param_data = param_data.narrow(output_dim, 0, actual_shard_size)
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
@@ -680,9 +683,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
             start_idx = tp_rank * shard_size
+            actual_shard_size = min(shard_size,
+                                    loaded_weight.size(output_dim) - start_idx)
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                     shard_size)
+                                                     actual_shard_size)
+            param_data = param_data.narrow(output_dim, 0, actual_shard_size)
         # Special case for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
@@ -1108,10 +1114,12 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_id = tp_rank // self.num_kv_head_replicas
             start_idx = shard_id * shard_size
 
+            actual_shard_size = min(shard_size,
+                                    loaded_weight.size(output_dim) - start_idx)
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                     shard_size)
-
+                                                     actual_shard_size)
+            param_data = param_data.narrow(output_dim, 0, actual_shard_size)
         # Special case for for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
@@ -1216,7 +1224,7 @@ class RowParallelLinear(LinearBase):
 
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size, dtype=params_dtype))
+                torch.zeros(self.output_size, dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,
@@ -1251,8 +1259,11 @@ class RowParallelLinear(LinearBase):
         if input_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_rank * shard_size
+            actual_shard_size = min(shard_size,
+                                    loaded_weight.size(input_dim) - start_idx)
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
-                                                 shard_size)
+                                                 actual_shard_size)
+            param_data = param_data.narrow(input_dim, 0, actual_shard_size)
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).

@@ -1023,10 +1023,40 @@ class ModelConfig:
                                             "num_attention_heads", 0)
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
-            raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size}).")
+
+            def round_to_size(num, round_size):
+                return ((num + round_size - 1) // round_size) * round_size
+
+            tp_size = parallel_config.tensor_parallel_size
+            query_heads_per_kv = total_num_attention_heads // self.get_total_num_kv_heads(
+            )
+            total_kv_heads = self.get_total_num_kv_heads()
+            head_dim = self.get_head_size()
+
+            setattr(self.hf_text_config, "head_dim", head_dim)
+            setattr(self.hf_config, "num_key_value_heads",
+                    round_to_size(total_kv_heads, tp_size))
+            setattr(
+                self.hf_config, "num_attention_heads",
+                round_to_size(total_kv_heads, tp_size) * query_heads_per_kv)
+            setattr(
+                self.hf_text_config, "num_attention_heads",
+                round_to_size(total_kv_heads, tp_size) * query_heads_per_kv)
+            if hasattr(self.hf_config, "intermediate_size"):
+                intermediate_size = getattr(self.hf_config,
+                                            "intermediate_size")
+                setattr(self.hf_config, "intermediate_size",
+                        round_to_size(intermediate_size, tp_size * 8))
+            if hasattr(self.hf_config, "moe_intermediate_size"):
+                moe_intermediate_size = getattr(self.hf_config,
+                                                "moe_intermediate_size")
+                setattr(self.hf_config, "moe_intermediate_size",
+                        round_to_size(moe_intermediate_size, tp_size * 8))
+
+            # raise ValueError(
+            #     f"Total number of attention heads ({total_num_attention_heads})"
+            #     " must be divisible by tensor parallel size "
+            #     f"({tensor_parallel_size}).")
 
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()

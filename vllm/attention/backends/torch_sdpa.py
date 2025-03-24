@@ -431,12 +431,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         self.need_mask = (self.alibi_slopes is not None
                           or self.sliding_window is not None)
 
-        supported_head_sizes = PagedAttention.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            raise ValueError(
-                f"Head size {head_size} is not supported by PagedAttention. "
-                f"Supported head sizes are: {supported_head_sizes}.")
-
         if is_quantized_kv_cache(kv_cache_dtype) and not _use_ipex:
             raise NotImplementedError(
                 "Torch SDPA backend FP8 KV cache requires "
