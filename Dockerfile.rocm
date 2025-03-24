@@ -40,7 +40,7 @@ ARG USE_CYTHON
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
     && python3 setup.py clean --all  \
-    && if [ ${USE_CYTHON} -eq "1" ]; then python3 setup_cython.py build_ext --inplace; fi \
+    && if [ ${USE_CYTHON} -eq "1" ]; then python3 tests/build_cython.py build_ext --inplace; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
