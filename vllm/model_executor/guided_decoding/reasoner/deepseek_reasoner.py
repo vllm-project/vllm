@@ -26,3 +26,13 @@ class DeepSeekReasoner(Reasoner):
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.end_token_id in input_ids
+
+    def extract_content(self, input_ids: list[int]) -> list[int]:
+        """
+        Extract the content after the end tokens
+        """
+        if self.end_token_id not in input_ids or \
+            input_ids.index(self.end_token_id) + 1 == len(input_ids):
+            return []
+        else:
+            return input_ids[input_ids.index(self.end_token_id) + 1:]

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
-    from vllm.v1.output_processor import RequestState
+    from vllm.v1.engine.output_processor import RequestState
 
 
 @dataclass
@@ -100,15 +100,8 @@ class IterationStats:
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
-        if is_prefilling and num_new_generation_tokens > 0:
-            # TODO(andy): we used to assert that num_new_generation_tokens
-            # > 0 with an invariant that EngineCore does not stream outputs
-            # for partially completed prefills (scheduler.update_from_output
-            # makes EngineCoreOutput iff num_computed_tokens == num_tokens).
-            # When prompt logprobs are enabled, we currently stream out the
-            # partially completed prompt.
-            # This will be reverted in a follow up PR and we should re-enable
-            # this assertion / invariant.
+        if is_prefilling:
+            assert num_new_generation_tokens > 0
             self.num_prompt_tokens += prompt_len
 
             first_token_latency = self._time_since(req_stats.arrival_time)
@@ -123,16 +116,12 @@ class IterationStats:
 
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:
-            # TODO: re-enable no-output-for-partial-prefills invariant as above
-            if num_new_generation_tokens > 0:
-                req_stats.first_token_ts = engine_core_timestamp
+            req_stats.first_token_ts = engine_core_timestamp
         else:
             tpot = engine_core_timestamp - req_stats.last_token_ts
             self.time_per_output_tokens_iter.append(tpot)
 
-        # TODO: re-enable no-output-for-partial-prefills invariant as above
-        if num_new_generation_tokens > 0:
-            req_stats.last_token_ts = engine_core_timestamp
+        req_stats.last_token_ts = engine_core_timestamp
 
     def update_from_events(self, req_id: str, events: list["EngineCoreEvent"],
                            is_prefilling: bool, req_stats: RequestStateStats,
@@ -150,6 +139,7 @@ class IterationStats:
                 LoRARequestStates.scheduled_request(lora_stats, req_id)
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
+                LoRARequestStates.preempted_request(lora_stats, req_id)
 
     def update_from_finished_request(self, finish_reason: "FinishReason",
                                      num_prompt_tokens: int,
@@ -223,6 +213,13 @@ class LoRARequestStates:
             return
         lora_stats.waiting_requests.remove(request_id)
         lora_stats.running_requests.add(request_id)
+
+    @staticmethod
+    def preempted_request(lora_stats: Optional[LoRAStats], request_id: str):
+        if lora_stats is None:
+            return
+        lora_stats.running_requests.remove(request_id)
+        lora_stats.waiting_requests.add(request_id)
 
     def update_iteration_stats(self,
                                iteration_stats: Optional[IterationStats]):

@@ -10,6 +10,8 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.utils import swap_dict_values
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import BlockTable
@@ -196,6 +198,9 @@ class InputBatch:
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
 
+        # To accumulate prompt logprobs tensor chunks across prefill steps.
+        self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
+
         self.logit_bias: list[Optional[dict[int,
                                             float]]] = [None] * max_num_reqs
         self.has_allowed_token_ids: set[str] = set()
@@ -203,6 +208,9 @@ class InputBatch:
         # the value is False. Since we use masked_fill_ to set -inf.
         self.allowed_token_ids_mask: Optional[torch.Tensor] = None
         self.allowed_token_ids_mask_cpu_tensor: Optional[torch.Tensor] = None
+
+        # req_index -> bad_words_token_ids
+        self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
@@ -264,9 +272,12 @@ class InputBatch:
         self.top_p_cpu[req_index] = sampling_params.top_p
         if sampling_params.top_p < 1:
             self.top_p_reqs.add(req_id)
-        self.top_k_cpu[req_index] = sampling_params.top_k
-        if sampling_params.top_k > 0:
+        top_k = sampling_params.top_k
+        if 0 < top_k < self.vocab_size:
             self.top_k_reqs.add(req_id)
+        else:
+            top_k = self.vocab_size
+        self.top_k_cpu[req_index] = top_k
         self.min_p_cpu[req_index] = sampling_params.min_p
         self.frequency_penalties_cpu[
             req_index] = sampling_params.frequency_penalty
@@ -298,11 +309,6 @@ class InputBatch:
         if sampling_params.logit_bias is not None:
             self.logit_bias[req_index] = sampling_params.logit_bias
 
-        # FIXME: this implementation is incorrect. We create this mask
-        # then apply -inf to these specific tokens, which means we never
-        # select the allowed tokens! We cannot do the reverse, since
-        # this will impact the requests that do not have allowed_token_ids.
-        # This feature is currently disabled on V1 (we reject in Processor).
         if sampling_params.allowed_token_ids:
             self.has_allowed_token_ids.add(req_id)
             if self.allowed_token_ids_mask_cpu_tensor is None:
@@ -321,6 +327,10 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index][
                 sampling_params.allowed_token_ids] = False
+
+        if sampling_params.bad_words_token_ids:
+            self.bad_words_token_ids[
+                req_index] = sampling_params.bad_words_token_ids
 
         # Add request lora ID
         if request.lora_request:
@@ -356,6 +366,7 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
+        self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -371,6 +382,7 @@ class InputBatch:
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
+        self.bad_words_token_ids.pop(req_index, None)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -385,8 +397,6 @@ class InputBatch:
             self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
         self.num_tokens[i1], self.num_tokens[i2] =\
             self.num_tokens[i2], self.num_tokens[i1]
-        self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
-            self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
         self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] =\
             self.num_tokens_no_spec[i2], self.num_tokens_no_spec[i1]
         self.num_prompt_tokens[i1], self.num_prompt_tokens[i2] =\
@@ -408,24 +418,29 @@ class InputBatch:
         self.min_p_cpu[i1], self.min_p_cpu[i2] =\
             self.min_p_cpu[i2], self.min_p_cpu[i1]
 
-        g1 = self.generators.get(i1)
-        g2 = self.generators.get(i2)
-        if g1 is not None:
-            self.generators[i2] = g1
-        if g2 is not None:
-            self.generators[i1] = g2
+        # NOTE: the following is unsafe
+        # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
+        #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
+        # instead, we need to temporiarily copy the data for one of the indices
+        # TODO(lucas): optimize this by only copying valid indices
+        tmp = self.token_ids_cpu[i1, ...].copy()
+        self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
+        self.token_ids_cpu[i2, ...] = tmp
 
-        t1 = self.min_tokens.get(i1)
-        t2 = self.min_tokens.get(i2)
-        if t1 is not None:
-            self.min_tokens[i2] = t1
-        if t2 is not None:
-            self.min_tokens[i1] = t2
+        swap_dict_values(self.generators, i1, i2)
+        swap_dict_values(self.min_tokens, i1, i2)
+        swap_dict_values(self.bad_words_token_ids, i1, i2)
 
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
             self.request_lora_mapping[i2], self.request_lora_mapping[i1]
         self.logit_bias[i1], self.logit_bias[i2] =\
             self.logit_bias[i2], self.logit_bias[i1]
+
+        if self.allowed_token_ids_mask_cpu_tensor is not None:
+            self.allowed_token_ids_mask_cpu_tensor[i1], \
+                self.allowed_token_ids_mask_cpu_tensor[i2] =\
+                self.allowed_token_ids_mask_cpu_tensor[i2], \
+                    self.allowed_token_ids_mask_cpu_tensor[i1]
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
@@ -499,6 +514,10 @@ class InputBatch:
                     empty_index] = self.allowed_token_ids_mask_cpu_tensor[
                         last_req_index]
 
+            bad_words_token_ids = self.bad_words_token_ids.pop(
+                last_req_index, None)
+            if bad_words_token_ids is not None:
+                self.bad_words_token_ids[empty_index] = bad_words_token_ids
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
@@ -566,6 +585,7 @@ class InputBatch:
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
             allowed_token_ids_mask=allowed_token_ids_mask,
+            bad_words_token_ids=self.bad_words_token_ids,
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:

@@ -46,6 +46,11 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+:::{important}
+By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the huggingface model repository if it exists. In most cases, this will provide you with the best results by default if {class}`~vllm.SamplingParams` is not specified.
+
+However, if vLLM's default sampling parameters are preferred, please pass `generation_config="vllm"` when creating the {class}`~vllm.LLM` instance.
+:::
 A code example can be found here: <gh-file:examples/offline_inference/basic/basic.py>
 
 ### `LLM.beam_search`
@@ -54,14 +59,16 @@ The {class}`~vllm.LLM.beam_search` method implements [beam search](https://huggi
 For example, to search using 5 beams and output at most 50 tokens:
 
 ```python
+from vllm import LLM
+from vllm.sampling_params import BeamSearchParams
+
 llm = LLM(model="facebook/opt-125m")
 params = BeamSearchParams(beam_width=5, max_tokens=50)
-outputs = llm.generate("Hello, my name is", params)
+outputs = llm.beam_search([{"prompt": "Hello, my name is "}], params)
 
 for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    generated_text = output.sequences[0].text
+    print(f"Generated text: {generated_text!r}")
 ```
 
 ### `LLM.chat`

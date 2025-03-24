@@ -23,7 +23,6 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from functools import partial
 from typing import (Any, Callable, Dict, List, Literal, Optional, Set, Tuple,
                     TypedDict, Union)
 
@@ -36,11 +35,12 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.multimodal.parse import (AudioItem, DictEmbeddingItems, ModalityData,
+from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
+from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
+                                   DictEmbeddingItems, ModalityData,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser)
-from vllm.multimodal.processing import PromptReplacement
+from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.profiling import ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -201,9 +201,9 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
 
     def get_num_frames_with_most_features(self, seq_len: int) -> int:
         mm_config = self.ctx.get_mm_config()
-        max_images = mm_config.limit_per_prompt.get("image", 1)
-        max_videos = mm_config.limit_per_prompt.get("video", 1)
-        max_audios = mm_config.limit_per_prompt.get("audio", 1)
+        max_images = mm_config.get_limit_per_prompt("image")
+        max_videos = mm_config.get_limit_per_prompt("video")
+        max_audios = mm_config.get_limit_per_prompt("audio")
 
         # count <image_idx></image_idx> tokens
         # which are not in get_max_image_tokens
@@ -272,8 +272,13 @@ class MiniCPMOMultiModalProcessor(
                 tokenizer.audio_end_id)
         return special_tokens
 
-    def process_audios(self, mm_data: Mapping[str, object],
-                       mm_kwargs: Mapping[str, object]) -> Dict[str, object]:
+    def process_audios(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        mm_data = dict(mm_data)
+
         audios = mm_data.pop("audios", [])
         audio_embeds = mm_data.pop("audio_embeds", [])
         if isinstance(audios, (list, torch.Tensor)) and len(audios) > 0:
@@ -332,11 +337,15 @@ class MiniCPMOMultiModalProcessor(
     def get_placeholder_split_pattern(self) -> str:
         return r"\(<(?:image|video|audio)>./</(?:image|video|audio)>\)"
 
-    def process_mm_inputs(self, mm_data, mm_kwargs) -> object:
+    def process_mm_inputs(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, Mapping[str, NestedTensors]]:
         return {
             "image": self.process_images(mm_data, mm_kwargs),
             "video": self.process_videos(mm_data, mm_kwargs),
-            "audio": self.process_audios(mm_data, mm_kwargs)
+            "audio": self.process_audios(mm_data, mm_kwargs),
         }
 
     def get_modality_num_counter(self, modality: str) -> str:
@@ -358,39 +367,38 @@ class MiniCPMOMultiModalProcessor(
         return super().get_prompt_texts_by_modality(inputs, modality, index)
 
     def _get_prompt_updates(
-            self, mm_items: MultiModalDataItems,
-            hf_processor_mm_kwargs: Mapping[str, Any],
-            out_mm_kwargs: MultiModalKwargs) -> Sequence[PromptReplacement]:
-        placeholder = {
-            "image": self.info.image_pattern,
-            "video": self.info.video_pattern,
-            "audio": self.info.audio_pattern
-        }
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
+        base_updates = super()._get_prompt_updates(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            out_mm_kwargs=out_mm_kwargs,
+        )
 
-        def get_replacement_minicpmv(item_idx: int, modality: str):
-            if modality == "image":
-                return self.get_image_prompt_texts(
-                    mm_items["image"].get_image_size(item_idx), item_idx)
-            elif modality == "video":
-                return self.get_video_prompt_texts(
-                    mm_items["video"].get_frame_size(item_idx),
-                    mm_items["video"].get_num_frames(item_idx))
-            else:  # audio
-                if isinstance(mm_items["audio"], MiniCPMOAudioEmbeddingItems):
-                    single_audio_embeds = mm_items["audio"].get(item_idx)
-                    audio_len = self.info.get_audio_len_by_num_chunks(
-                        sum(chunk_embeds.shape[0]
-                            for chunk_embeds in single_audio_embeds))
-                    return self.get_audio_prompt_texts(audio_len)
-                return self.get_audio_prompt_texts(
-                    len(mm_items["audio"].get(item_idx)))
+        audio_placeholder = self.info.audio_pattern
+
+        def get_audio_replacement(item_idx: int):
+            audios = mm_items.get_items(
+                "audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems))
+
+            if isinstance(audios, MiniCPMOAudioEmbeddingItems):
+                single_audio_embeds = audios.get(item_idx)["audio_embeds"]
+                audio_len = self.info.get_audio_len_by_num_chunks(
+                    sum(chunk_embeds.shape[0]
+                        for chunk_embeds in single_audio_embeds))
+            else:
+                audio_len = audios.get_audio_length(item_idx)
+
+            return self.get_audio_prompt_texts(audio_len)
 
         return [
-            PromptReplacement(modality=modality,
-                              target=placeholder[modality],
-                              replacement=partial(get_replacement_minicpmv,
-                                                  modality=modality))
-            for modality in ("image", "video", "audio")
+            *base_updates,
+            PromptReplacement(modality="audio",
+                              target=audio_placeholder,
+                              replacement=get_audio_replacement),
         ]
 
     def _get_mm_fields_config(

@@ -29,6 +29,15 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message)
 ```
 
+:::{tip}
+vLLM supports some parameters that are not supported by OpenAI, `top_k` for example.
+You can pass these parameters to vLLM using the OpenAI client in the `extra_body` parameter of your requests, i.e. `extra_body={"top_k": 50}` for `top_k`.
+:::
+:::{important}
+By default, the server applies `generation_config.json` from the Hugging Face model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
+
+To disable this behavior, please pass `--generation-config vllm` when launching the server.
+:::
 ## Supported APIs
 
 We currently support the following OpenAI APIs:
@@ -378,6 +387,10 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 
 Our Transcriptions API is compatible with [OpenAI's Transcriptions API](https://platform.openai.com/docs/api-reference/audio/createTranscription);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+
+:::{note}
+To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
+:::
 
 <!-- TODO: api enforced limits + uploading audios -->
 
