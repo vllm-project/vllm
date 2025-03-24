@@ -4,6 +4,7 @@ import ast
 import copy
 import enum
 import hashlib
+import importlib.metadata
 import json
 import sys
 import warnings
@@ -17,6 +18,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
                     Optional, Protocol, Union)
 
 import torch
+from packaging.version import Version
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
@@ -51,8 +53,6 @@ if TYPE_CHECKING:
         BaseTokenizerGroup)
 else:
     QuantizationConfig = None
-
-from packaging.version import Version
 
 logger = init_logger(__name__)
 
@@ -3088,8 +3088,7 @@ class CompilationConfig(BaseModel):
             compilation.
             """
             dict_ = self.model_dump(include={"enable_fusion", "enable_noop"})
-            encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
-            return hashlib.sha256(encoded).digest()
+            return InductorPass.hash_dict(dict_)
 
         def model_post_init(self, __context: Any) -> None:
             if not self.enable_noop and self.enable_fusion:
@@ -3178,7 +3177,7 @@ class CompilationConfig(BaseModel):
         #    and it is not yet a priority. RFC here:
         #    https://github.com/vllm-project/vllm/issues/14703
 
-        if Version(torch.__version__) >= Version("2.6"):
+        if Version(importlib.metadata.version('torch')) >= Version("2.6"):
             KEY = 'enable_auto_functionalized_v2'
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False
