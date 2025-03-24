@@ -37,7 +37,7 @@ from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TypeVar, Union, cast)
+                    Optional, TypeVar, Union, cast, overload)
 from uuid import uuid4
 
 import cachetools
@@ -172,6 +172,7 @@ U = TypeVar("U")
 
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
+_T = TypeVar("_T")
 
 
 class _Sentinel:
@@ -256,9 +257,16 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
     def touch(self, key: _K) -> None:
         self._LRUCache__update(key)  # type: ignore
 
-    def get(self,
-            key: _K,
-            default: Optional[_V] = None) -> Optional[_V]:  # type: ignore
+    @overload
+    def get(self, key: _K, /) -> Optional[_V]:
+        ...
+
+    @overload
+    def get(self, key: _K, /,
+            default: Optional[_V]) -> Optional[_V]:  # type: ignore
+        ...
+
+    def get(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
         value: Optional[_V]
         if key in self:
             value = self.__getitem__(key)
@@ -270,9 +278,16 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         self._total += 1
         return value
 
-    def pop(self,
-            key: _K,
-            default: Optional[_V] = None) -> Optional[_V]:  # type: ignore
+    @overload
+    def pop(self, key: _K, /) -> Optional[_V]:
+        ...
+
+    @overload
+    def pop(self, key: _K, /,
+            default: Optional[_V]) -> Optional[_V]:  # type: ignore
+        ...
+
+    def pop(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
         if key in self:
             value = self[key]
             del self[key]
