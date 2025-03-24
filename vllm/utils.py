@@ -262,7 +262,7 @@ class LRUCache(Cache, Generic[_K, _V]):
     def touch(self, key: _K) -> None:
         self.__update(key)
 
-    def get(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
+    def get(self, key, default=None):
         value: Optional[_V]
         if key in self:
             value = self.__getitem__(key)
@@ -336,7 +336,7 @@ class LRUCache(Cache, Generic[_K, _V]):
         value = self.pop(lru_key, None)
         return (lru_key, value)
 
-    def __update(self, key):
+    def __update(self, key: _K):
         try:
             self.__orders.move_to_end(key)
         except KeyError:
