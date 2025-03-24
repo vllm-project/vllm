@@ -88,8 +88,11 @@ class LoRAKernelMeta:
 
         self._reset()
 
-        self.no_lora_flag_cpu[0] = torch.all(token_lora_mapping == -1)
-        if self.no_lora_flag_cpu.item():
+        # Check and record no-lora case.
+        no_lora = torch.all(token_lora_mapping == -1)
+        self.no_lora_flag_cpu[0] = no_lora
+
+        if no_lora:
             # Early exit. LoRA kernels will not be run.
             return
 

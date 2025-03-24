@@ -166,6 +166,7 @@ def _lora_expand(
             output tensor. Defaults to False.
     """
 
+    assert no_lora_flag_cpu.numel() == 1
     if no_lora_flag_cpu.item():
         # None of the inputs require LoRA.
         return
