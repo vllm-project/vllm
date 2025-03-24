@@ -379,14 +379,18 @@ class OpenAIServing:
         add_special_tokens: bool = False,
     ) -> tuple[list[ConversationMessage], Sequence[RequestPrompt],
                list[TokensPrompt]]:
+        model_config = self.model_config
+
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
+            tool_dicts,
             chat_template_content_format,
             tokenizer,
+            trust_remote_code=model_config.trust_remote_code,
         )
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
-            self.model_config,
+            model_config,
             tokenizer,
             content_format=resolved_content_format,
         )
@@ -410,6 +414,7 @@ class OpenAIServing:
         else:
             request_prompt = apply_hf_chat_template(
                 tokenizer,
+                trust_remote_code=model_config.trust_remote_code,
                 conversation=conversation,
                 **_chat_template_kwargs,
             )
