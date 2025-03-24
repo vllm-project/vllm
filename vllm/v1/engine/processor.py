@@ -134,8 +134,8 @@ class Processor:
         else:
             params.guided_decoding.backend = engine_level_backend
 
-        if vllm.platforms.current_platform.is_tpu():
-            raise ValueError("Structured output is not supported on TPU.")
+        # if vllm.platforms.current_platform.is_tpu():
+        #     raise ValueError("Structured output is not supported on TPU.")
 
         validate_structured_output_request(params)
 
