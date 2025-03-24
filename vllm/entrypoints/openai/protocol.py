@@ -802,6 +802,13 @@ class CompletionRequest(OpenAIBaseModel):
             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
             "{'param': 'value'}}."))
 
+    return_tokens_as_token_ids: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If specified with 'logprobs', tokens are represented "
+            " as strings of the form 'token_id:{token_id}' so that tokens "
+            "that are not JSON-encodable can be identified."))
+
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests
