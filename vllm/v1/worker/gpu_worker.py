@@ -277,6 +277,7 @@ class Worker(WorkerBase):
     ) -> None:
         self.model_runner.save_sharded_state(path, pattern, max_size)
 
+
 def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,

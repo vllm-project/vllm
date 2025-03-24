@@ -60,7 +60,7 @@ def main(args):
 
     # Check which engine version is being used
     is_v1_engine = hasattr(llm.llm_engine, "engine_core")
-    
+
     if is_v1_engine:
         # For V1 engine, we need to use engine_core.save_sharded_state
         print("Using V1 engine save path")
@@ -75,10 +75,9 @@ def main(args):
         # For V0 engine
         print("Using V0 engine save path")
         model_executor = llm.llm_engine.model_executor
-        model_executor.save_sharded_state(
-            path=args.output,
-            pattern=args.file_pattern,
-            max_size=args.max_file_size)
+        model_executor.save_sharded_state(path=args.output,
+                                          pattern=args.file_pattern,
+                                          max_size=args.max_file_size)
 
     # Copy metadata files to output directory
     for file in os.listdir(model_path):

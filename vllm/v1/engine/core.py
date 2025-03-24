@@ -280,8 +280,9 @@ class EngineCore:
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        self.model_executor.save_sharded_state(
-            path=path, pattern=pattern, max_size=max_size)
+        self.model_executor.save_sharded_state(path=path,
+                                               pattern=pattern,
+                                               max_size=max_size)
 
 
 class EngineCoreProc(EngineCore):
