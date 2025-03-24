@@ -471,6 +471,7 @@ def _test_masked_logits(
     batch_size: int,
     num_draft_tokens: int,
     vocab_size: int,
+    target_logits: torch.Tensor,
     unmasked_indices: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ):
@@ -482,15 +483,6 @@ def _test_masked_logits(
                              dtype=torch.float32,
                              device=DEVICE)
     draft_probs = F.softmax(draft_probs, dim=-1)
-
-    # Create logits with the uniform distribution.
-    target_logits = torch.zeros((num_tokens, vocab_size), device=DEVICE)
-
-    # Increment the logits for unmasked indices, a little bit more than the
-    # masked ones. If the masking is effective, the masked indices will never
-    # be sampled despite the small difference in logits.
-    for i in range(num_tokens):
-        target_logits[i, unmasked_indices[i]] += 0.1
 
     # Randomly sample draft token ids from draft probs
     draft_token_ids = torch.multinomial(draft_probs, num_samples=1)
@@ -536,12 +528,21 @@ def test_top_k(rejection_sampler, top_k):
     num_draft_tokens = 3
     num_tokens = batch_size * num_draft_tokens
 
-    # Randomly create unmasked indices.
-    unmasked_indices = [
+    # Randomly create top-k indices.
+    top_k_indices = [
         torch.randperm(vocab_size, device=DEVICE)[:top_k]
         for _ in range(num_tokens)
     ]
-    unmasked_indices = torch.stack(unmasked_indices)
+    top_k_indices = torch.stack(top_k_indices)
+
+    # Create logits with the uniform distribution.
+    target_logits = torch.zeros((num_tokens, vocab_size), device=DEVICE)
+
+    # Increment the logits for top-k indices, a little bit more than the other
+    # ones. If the masking is effective, the non-topk indices will never be
+    # sampled despite the small difference in logits.
+    for i in range(num_tokens):
+        target_logits[i, top_k_indices[i]] += 0.1
 
     # Create sampling metadata
     temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE)
@@ -558,7 +559,8 @@ def test_top_k(rejection_sampler, top_k):
         batch_size=batch_size,
         num_draft_tokens=num_draft_tokens,
         vocab_size=vocab_size,
-        unmasked_indices=unmasked_indices,
+        target_logits=target_logits,
+        unmasked_indices=top_k_indices,
         sampling_metadata=sampling_metadata,
     )
 
@@ -571,16 +573,24 @@ def test_top_p(rejection_sampler, top_p):
     num_draft_tokens = 3
     num_tokens = batch_size * num_draft_tokens
 
-    # Randomly create unmasked indices.
-    num_top_p_tokens = int(vocab_size * top_p)
-    unmasked_indices = [
-        torch.randperm(vocab_size, device=DEVICE)[:num_top_p_tokens]
-        for _ in range(num_tokens)
-    ]
-    unmasked_indices = torch.stack(unmasked_indices)
+    # Create logits with the uniform distribution.
+    target_logits = torch.randn((num_tokens, vocab_size), device=DEVICE)
+    temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE)
+    rescaled_logits = target_logits / temperature
+
+    logits_sort, logits_idx = rescaled_logits.sort(dim=-1, descending=False)
+    probs_sort = logits_sort.softmax(dim=-1)
+    probs_sum = probs_sort.cumsum(dim=-1)
+    top_p_mask = probs_sum <= 1 - top_p
+    # at least one
+    top_p_mask[:, -1] = False
+
+    # Get the top-p indices.
+    top_p_indices = []
+    for i in range(num_tokens):
+        top_p_indices.append(logits_idx[i][~top_p_mask[i]].tolist())
 
     # Create sampling metadata
-    temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE)
     sampling_metadata = create_sampling_metadata(
         all_greedy=False,
         temperature=temperature,
@@ -594,6 +604,7 @@ def test_top_p(rejection_sampler, top_p):
         batch_size=batch_size,
         num_draft_tokens=num_draft_tokens,
         vocab_size=vocab_size,
-        unmasked_indices=unmasked_indices,
+        target_logits=target_logits,
+        unmasked_indices=top_p_indices,
         sampling_metadata=sampling_metadata,
     )
