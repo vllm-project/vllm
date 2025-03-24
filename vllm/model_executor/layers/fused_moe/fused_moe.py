@@ -3,7 +3,8 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Optional
+from math import prod
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -1314,13 +1315,9 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == dg.get_m_alignment_for_contiguous_layout()
 
-    chunked_dg = False
     if use_dg:
         if M % block_m != 0:
             CHUNK_SIZE = min((M // block_m) * block_m, CHUNK_SIZE)
-
-        num_chunks = (num_tokens // CHUNK_SIZE) + 1
-        chunked_dg = num_chunks > 1
 
         assert w1_scale is not None
         assert w2_scale is not None
@@ -1331,41 +1328,30 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
-        # TODO: computing new_M could be smarter
-        sorted_token_ids, _, _ = (moe_align_block_size(topk_ids, block_m,
-                                                       global_num_experts,
-                                                       expert_map))
+        M_sum = topk_ids.numel() + global_num_experts * (block_m - 1)
+        M_sum = ((M_sum + block_m - 1) // block_m) * block_m
 
-        new_M = ((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m
-
-        # We can reuse the memory between these because by the time we need
-        # cache3, we're done with cache1
-        cache13 = torch.empty(new_M * max(N, w2.shape[1]),
-                              device=hidden_states.device,
-                              dtype=hidden_states.dtype)
-
-        intermediate_cache1 = cache13[:(new_M * N)].view(new_M, N)
-        intermediate_cache2 = torch.empty((new_M, N // 2),
-                                          device=hidden_states.device,
-                                          dtype=hidden_states.dtype)
-        intermediate_cache3 = cache13[:(new_M * w2.shape[1])].view(
-            new_M, w2.shape[1])
+        cache1_view = (M_sum, N)
+        cache3_view = (M_sum, K)
     else:
-        # We can reuse the memory between these because by the time we need
-        # cache3, we're done with cache1
-        cache13 = torch.empty(M * top_k_num * max(N, w2.shape[1]),
-                              device=hidden_states.device,
-                              dtype=hidden_states.dtype)
+        M_sum = M * top_k_num
+        cache1_view = (M, top_k_num, N)
+        cache3_view = (M, top_k_num, K)
 
-        intermediate_cache1 = cache13[:M * top_k_num * N].view(
-            (M, topk_ids.shape[1], N))
-        intermediate_cache2 = torch.empty((M * top_k_num, N // 2),
-                                          device=hidden_states.device,
-                                          dtype=hidden_states.dtype)
-        intermediate_cache3 = cache13[:M * top_k_num * w2.shape[1]].view(
-            (M, topk_ids.shape[1], w2.shape[1]))
+    num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
-        num_chunks = (num_tokens // CHUNK_SIZE) + 1
+    # We can reuse the memory between these because by the time we need
+    # cache3, we're done with cache1
+    cache13 = torch.empty(M_sum * max(N, K),
+                          device=hidden_states.device,
+                          dtype=hidden_states.dtype)
+
+    intermediate_cache1 = cache13[:M_sum * N].view(*cache1_view)
+    intermediate_cache2 = torch.empty((M_sum, N // 2),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+    intermediate_cache3 = cache13[:M_sum * K].view(*cache3_view)
+
 
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
@@ -1459,7 +1445,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                            expert_ids,
                            top_k_num,
                            global_num_experts,
-                           w2.shape[1],
+                           K,
                            curr_topk_weights,
                            curr_topk_ids)
         else:
