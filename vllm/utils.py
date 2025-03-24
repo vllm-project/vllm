@@ -1797,6 +1797,11 @@ def aiter_mla_enabled() -> bool:
     return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_MLA
 
 
+@cache
+def aiter_block_gemm_enabled() -> bool:
+    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_BLOCK_GEMM
+
+
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
 ) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:

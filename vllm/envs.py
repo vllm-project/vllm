@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     VLLM_USE_AITER_LINEAR: bool = True
     VLLM_USE_AITER_NORM: bool = True
     VLLM_USE_AITER_MLA: bool = False
+    VLLM_USE_AITER_BLOCK_GEMM: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -336,7 +337,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # use aiter MLA op if ater ops are enabled
     "VLLM_USE_AITER_MLA":
-    lambda: (os.getenv("VLLM_USE_AITER_MLA", "True").lower() in ("true", "1")),
+    lambda: (os.getenv("VLLM_USE_AITER_MLA", "False").lower() in ("true", "1")),
+
+    # use aiter MLA op if ater ops are enabled
+    "VLLM_USE_AITER_BLOCK_GEMM":
+    lambda: (os.getenv("VLLM_USE_AITER_BLOCK_GEMM", "False").lower() in ("true", "1")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
