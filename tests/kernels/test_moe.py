@@ -3,7 +3,6 @@
 
 Run `pytest tests/kernels/test_moe.py`.
 """
-
 import pytest
 import torch
 from transformers import MixtralConfig
