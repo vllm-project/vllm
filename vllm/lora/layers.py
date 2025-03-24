@@ -237,20 +237,19 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        added_tokens_mask = x > self.base_layer.org_vocab_size - 1
-        embeddings_indices = self.punica_wrapper.embeddings_indices
+        added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
+                                        1, 0)
+        embeddings_indices = torch.narrow(
+            self.punica_wrapper._embeddings_indices, 1, 0, x.size(0))
 
-        if current_platform.is_tpu():
-            embeddings_indices = embeddings_indices[:, :x.size(0)]
-
-        indices = embeddings_indices[1].view_as(x)
+        indices = embeddings_indices[1]
         full_lora_a_embeddings = F.embedding(
             x + indices,
             self.lora_a_stacked_2d,
         )
-        indices = embeddings_indices[0].view_as(x)
-        full_output = self.base_layer.forward(
-            x.add_(indices * added_tokens_mask))
+        indices = embeddings_indices[0]
+        full_output = self.base_layer.forward(x +
+                                              (indices * added_tokens_mask))
 
         full_output_org = full_output
         if full_output.ndim == 3:
@@ -268,6 +267,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             full_lora_a_embeddings,
             self.lora_b_stacked,
             add_input=True)
+
+        # lora_output is None if the platform supports inplace updates.
+        # Otherwise it's a tensor, so we update the output manually
         if not current_platform.can_update_inplace():
             full_output = lora_output
 

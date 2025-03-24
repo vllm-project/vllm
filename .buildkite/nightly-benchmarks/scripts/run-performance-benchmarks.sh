@@ -361,7 +361,7 @@ main() {
   # get the current IP address, required by benchmark_serving.py
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
   # turn of the reporting of the status of each request, to clean up the terminal output
-  export VLLM_LOG_LEVEL="WARNING"
+  export VLLM_LOGGING_LEVEL="WARNING"
 
   # prepare for benchmarking
   cd benchmarks || exit 1

@@ -7,6 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import torch
 from torch.nn.parameter import UninitializedParameter
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -104,7 +105,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                     layer.w13_weight,
                     layer.w2_weight,
-                    use_prepack=True,
+                    use_prepack=envs.VLLM_CPU_MOE_PREPACK,
                 )
             else:
                 raise NotImplementedError("CPU MOE only supports x86 arch.")
@@ -193,10 +194,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
         **kwargs,
     ):
-        assert custom_routing_function is None
         assert activation == "silu", f"{activation} is not supported."
         return layer.ipex_fusion(
             x,
@@ -206,7 +208,38 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             renormalize,
             topk_group,
             num_expert_group,
+            custom_routing_function,
+            scoring_func,
+            e_score_correction_bias,
         )
+
+    def forward_hpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        assert not use_grouped_topk
+        assert num_expert_group is None
+        assert topk_group is None
+        assert custom_routing_function is None
+        assert layer is not None
+        if scoring_func != "softmax":
+            raise NotImplementedError(
+                "Only softmax scoring function is supported for HPU.")
+        if e_score_correction_bias is not None:
+            raise NotImplementedError(
+                "Expert score correction bias is not supported for HPU.")
+        return layer.hpu_fused_moe(x, layer.w13_weight, layer.w2_weight,
+                                   router_logits, top_k)
 
     def forward_tpu(
         self,
@@ -406,6 +439,9 @@ class FusedMoE(torch.nn.Module):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
+        if current_platform.is_hpu():
+            from vllm_hpu_extension.ops import DynamicFusedMOE
+            self.hpu_fused_moe = DynamicFusedMOE(self.num_experts)
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
