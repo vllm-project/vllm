@@ -71,7 +71,8 @@ from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
 
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -616,6 +617,16 @@ class Qwen2VisionTransformer(nn.Module):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
+    def compute_attn_mask_seqlen(
+            self, cu_seqlens: torch.Tensor
+    ) -> tuple[Optional[int], Optional[list[int]]]:
+        max_seqlen, seqlens = None, None
+        if self.attn_backend == _Backend.FLASH_ATTN:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        elif self.attn_backend == _Backend.XFORMERS:
+            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        return max_seqlen, seqlens
+
     def forward(
         self,
         x: torch.Tensor,
@@ -637,12 +648,8 @@ class Qwen2VisionTransformer(nn.Module):
         # transformers
         x = x.unsqueeze(1)
 
-        max_seqlen = None
-        seqlens = None
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        # pre-compute seqlens for attn mask to reduce cuMemcpy operations
+        max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
         for blk in self.blocks:
             x = blk(
                 x,
@@ -1262,7 +1269,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return modalities
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
@@ -1289,7 +1296,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[tuple[torch.Tensor, ...]] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
@@ -1301,10 +1308,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings_v0(
         self,
         input_ids: torch.Tensor,
-        image_input: Optional[tuple[torch.Tensor, ...]] = None,
-        video_input: Optional[tuple[torch.Tensor, ...]] = None,
+        image_input: Optional[Qwen2VLImagePixelInputs] = None,
+        video_input: Optional[Qwen2VLVideoPixelInputs] = None,
     ) -> torch.Tensor:
-
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)

@@ -289,14 +289,13 @@ def test_paged_attention(
                 k_scale,
                 v_scale,
                 None,
-                PARTITION_SIZE,
             )
 
             opcheck(torch.ops._rocm_C.paged_attention,
                     (output, exp_sums, max_logits, tmp_output, query,
                      key_cache, value_cache, num_kv_heads, scale, block_tables,
                      seq_lens, block_size, max_seq_len, alibi_slopes,
-                     kv_cache_dtype, k_scale, v_scale, None, PARTITION_SIZE),
+                     kv_cache_dtype, k_scale, v_scale, None),
                     cond=(head_size == HEAD_SIZES[0]
                           and block_size == BLOCK_SIZES[0]))
 
