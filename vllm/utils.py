@@ -217,12 +217,12 @@ class CacheInfo(NamedTuple):
         return self.hits / self.total
 
 
-class LRUCache(Cache[_K, _V], Generic[_K, _V]):
+class LRUCache(Cache, Generic[_K, _V]):
     """LRU Cache """
 
     def __init__(self, capacity: int, getsizeof=None):
         Cache.__init__(self, capacity, getsizeof)
-        self.__orders = OrderedDict[_K, _V]()
+        self.__orders = OrderedDict()
         self.pinned_items = set[_K]()
         self.capacity = capacity
 
