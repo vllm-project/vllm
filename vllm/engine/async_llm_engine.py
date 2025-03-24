@@ -545,7 +545,7 @@ async def build_guided_decoding_logits_processor_async(
     sampling_params = copy.copy(sampling_params)
     guided_decoding = sampling_params.guided_decoding
 
-    logger.info(
+    logger.debug(
         "Building guided decoding logits processor. "
         "guided_decoding: %s%s", guided_decoding,
         f", reasoning_backend: {reasoning_backend}"
