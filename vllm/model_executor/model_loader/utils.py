@@ -32,7 +32,7 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 def is_transformers_impl_compatible(
         arch: str,
-        module: Optional[transformers.PreTrainedModel] = None) -> bool:
+        module: Optional["transformers.PreTrainedModel"] = None) -> bool:
     mod = module or getattr(transformers, arch, None)
     if mod is None:
         return False
