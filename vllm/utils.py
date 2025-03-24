@@ -264,7 +264,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
     def touch(self, key: _K) -> None:
         self._LRUCache__update(key)  # type: ignore
 
-    def get(self, key: _K, default: _V | None = ...) -> _V | None:
+    def get(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
         value: Optional[_V]
         if key in self:
             value = self.__getitem__(key)
