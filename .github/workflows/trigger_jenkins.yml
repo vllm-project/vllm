@@ -65,6 +65,8 @@ jobs:
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
+          base-ref: ${{ needs.read_codeowners.outputs.pr_target_branch }}
+          head-ref: ${{ needs.read_codeowners.outputs.pr_branch }}
   CodeQLScan:
     name: CodeQL Scan
     runs-on: ubuntu-latest
