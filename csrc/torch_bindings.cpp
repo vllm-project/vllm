@@ -375,7 +375,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_moe_mm(Tensor! out_tensors, Tensor a_tensors, Tensor b_tensors, "
       "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
       "               Tensor problem_sizes, Tensor a_strides, "
-      "               Tensor b_strides, Tensor c_strides) -> ()");
+      "               Tensor b_strides, Tensor c_strides) -> ()",
+      {stride_tag});
   ops.impl("cutlass_moe_mm", torch::kCUDA, &cutlass_moe_mm);
 
   // A function that computes data required to run fused MoE with w8a8 grouped
@@ -388,8 +389,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "get_cutlass_moe_mm_data(Tensor topk_ids, Tensor! expert_offsets, "
       "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
       "                        Tensor! input_permutation, "
-      "                        Tensor! output_permutation, SymInt num_experts, "
-      "                        SymInt n, SymInt k) -> ()");
+      "                        Tensor! output_permutation, int num_experts, "
+      "                        int n, int k) -> ()",
+      {stride_tag});
   ops.impl("get_cutlass_moe_mm_data", torch::kCUDA, &get_cutlass_moe_mm_data);
 
   // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)

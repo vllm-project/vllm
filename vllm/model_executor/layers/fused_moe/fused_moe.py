@@ -1586,7 +1586,7 @@ def cutlass_moe_fp8(
     ab_strides2: torch.Tensor,
     c_strides2: torch.Tensor,
     intermediate_scale: Optional[torch.Tensor] = None,
-    out_dtype: torch.Type = torch.half,
+    out_dtype: torch.dtype = torch.half,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-quantized Mixture of Experts (MoE) layer
@@ -1656,12 +1656,12 @@ def cutlass_moe_fp8(
         0], "C Strides 2 expert number mismatch"
     assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
 
-    num_experts = w1_q.shape[0]
-    m = a_q.shape[0]
-    k = w1_q.shape[1]
-    n = w2_q.shape[1]
+    num_experts = w1_q.size(0)
+    m = a_q.size(0)
+    k = w1_q.size(1)
+    n = w2_q.size(1)
 
-    topk = topk_ids.shape[1]
+    topk = topk_ids.size(1)
     per_act_token = a_scale.numel() != 1
     device = a_q.device
 
