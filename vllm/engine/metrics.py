@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from copy import copy
 import time
+from copy import copy
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
 from typing import Dict, List, Optional, Type, Union, cast
@@ -672,9 +672,10 @@ class PrometheusStatLogger(StatLoggerBase):
             if self.spec_decode_metrics is not None:
                 # The counters in self.spec_decode_metrics are aggregates.
                 # The Prometheus Counters must be incremented with deltas.
-                # Keep track of the previously seen value so we can compute deltas.
+                # Keep track of the previous value so we can compute deltas.
                 if self.last_spec_decode_metrics is None:
-                    self.last_spec_decode_metrics = copy(self.spec_decode_metrics)
+                    self.last_spec_decode_metrics = copy(
+                        self.spec_decode_metrics)
                     self.last_spec_decode_metrics.accepted_tokens = 0
                     self.last_spec_decode_metrics.draft_tokens = 0
                     self.last_spec_decode_metrics.emitted_tokens = 0
@@ -688,13 +689,16 @@ class PrometheusStatLogger(StatLoggerBase):
                                 self.spec_decode_metrics.system_efficiency)
                 self._log_counter(
                     self.metrics.counter_spec_decode_num_accepted_tokens,
-                    snapshot.accepted_tokens - self.last_spec_decode_metrics.accepted_tokens)
+                    snapshot.accepted_tokens -
+                    self.last_spec_decode_metrics.accepted_tokens)
                 self._log_counter(
                     self.metrics.counter_spec_decode_num_draft_tokens,
-                    snapshot.draft_tokens - self.last_spec_decode_metrics.draft_tokens)
+                    snapshot.draft_tokens -
+                    self.last_spec_decode_metrics.draft_tokens)
                 self._log_counter(
                     self.metrics.counter_spec_decode_num_emitted_tokens,
-                    snapshot.emitted_tokens - self.last_spec_decode_metrics.emitted_tokens)
+                    snapshot.emitted_tokens -
+                    self.last_spec_decode_metrics.emitted_tokens)
 
                 self.last_spec_decode_metrics = snapshot
 
