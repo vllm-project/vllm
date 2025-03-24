@@ -592,6 +592,7 @@ class InputBatch:
             self.req_id_to_index[req_id]
             for req_id, _ in req_id_output_token_ids
         ]
+        prompt_token_ids = None
         if not skip_copy:
             self.temperature[req_indices].copy_(
                 self.temperature_cpu_tensor[req_indices], non_blocking=True)
@@ -615,8 +616,10 @@ class InputBatch:
                 # The prompt tokens are used only for applying penalties during
                 # the sampling process. Hence copy these tensors only when
                 # there are requests which need penalties to be applied.
-                self.prompt_token_ids = self._make_prompt_token_ids_tensor()
-
+                prompt_token_ids = self._make_prompt_token_ids_tensor(
+                )[req_indices]
+        else:
+            prompt_token_ids = None
         output_token_ids: list[list[int]] = []
 
         for req_id, output_tokens in req_id_output_token_ids:
@@ -638,7 +641,6 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[req_indices],
                 non_blocking=True)
             allowed_token_ids_mask = self.allowed_token_ids_mask[req_indices]
-
         return SamplingMetadata(
             temperature=self.temperature[req_indices],
             all_greedy=self.all_greedy,
@@ -648,7 +650,7 @@ class InputBatch:
             min_p=None if self.no_min_p else self.min_p[req_indices],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
-            prompt_token_ids=self.prompt_token_ids,
+            prompt_token_ids=prompt_token_ids,
             frequency_penalties=self.frequency_penalties[req_indices],
             presence_penalties=self.presence_penalties[req_indices],
             repetition_penalties=self.repetition_penalties[req_indices],
@@ -656,6 +658,7 @@ class InputBatch:
             min_tokens={
                 req_idx: self.min_tokens[req_idx]
                 for req_idx in req_indices
+                if self.min_tokens.get(req_idx, None) is not None
             },
             no_penalties=self.no_penalties,
             logit_bias=[self.logit_bias[req_idx] for req_idx in req_indices],

@@ -222,8 +222,12 @@ def swap_positions(b: InputBatch, id_1, id_2):
     b.presence_penalties_cpu[ids] = b.presence_penalties_cpu[rev_ids]
     b.repetition_penalties_cpu[ids] = b.repetition_penalties_cpu[rev_ids]
 
-    b.min_tokens[id_1], b.min_tokens[id_2] = b.min_tokens[id_2], b.min_tokens[
-        id_1]
+    min_tokens_1 = b.min_tokens.pop(id_1, None)
+    min_tokens_2 = b.min_tokens.pop(id_2, None)
+    if min_tokens_1 is not None:
+        b.min_tokens[id_2] = min_tokens_1
+    if min_tokens_2 is not None:
+        b.min_tokens[id_1] = min_tokens_2
 
     gen_1 = b.generators.pop(id_1, None)
     gen_2 = b.generators.pop(id_2, None)
@@ -528,7 +532,10 @@ class HpuModelAdapter:
             input_ids.device, self.dtype)
         if self.layer_names is not None:
             self._prepare_cos_sin(kwargs['positions'])
-        with set_forward_context(kwargs['attn_metadata'], self.vllm_config):
+        attn_meta = kwargs.pop('attn_metadata')
+        if 'kv_caches' in kwargs:
+            kwargs.pop('kv_caches')
+        with set_forward_context(attn_meta, self.vllm_config):
             hidden_states = self.model(*args, **kwargs)
         return hidden_states
 
@@ -784,14 +791,12 @@ class HPUModelRunner:
         The updated states are used by the `_prepare_inputs` function to create
         the input GPU tensors for the model.
 
-        Returns:
-            True if there is a new/resumed/paused/finished request in the batch.
-            If False, we can skip copying SamplingMetadata to the GPU.
+        The SamplingMetadata is updated and copied to the GPU if there is a
+        new/resumed/paused/finished request in the batch.
         """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
-
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -852,7 +857,20 @@ class HPUModelRunner:
             req_id = req_data.req_id
             req_state = self.requests[req_id]
             # Update the cached states.
-            req_state.num_computed_tokens = req_data.num_computed_tokens
+            num_computed_tokens = req_data.num_computed_tokens
+            req_state.num_computed_tokens = num_computed_tokens
+            # Add the sampled token(s) from the previous step (if any).
+            # This doesn't include "unverified" tokens like spec decode tokens.
+            num_new_tokens = (num_computed_tokens +
+                              len(req_data.new_token_ids) -
+                              req_state.num_tokens)
+            if num_new_tokens == 1:
+                # Avoid slicing list in most common case.
+                req_state.output_token_ids.append(req_data.new_token_ids[-1])
+            elif num_new_tokens > 0:
+                req_state.output_token_ids.extend(
+                    req_data.new_token_ids[-num_new_tokens:])
+            # Update the block IDs.
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
                 req_state.block_ids.extend(req_data.new_block_ids)
@@ -871,12 +889,30 @@ class HPUModelRunner:
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
-                req_data.num_computed_tokens)
-            start_index = len(req_state.block_ids) - len(
-                req_data.new_block_ids)
-            # TODO(kzawora): investigate if it's working properly
+                num_computed_tokens)
             self.input_batch.block_table.append_row(req_data.new_block_ids,
-                                                    start_index)
+                                                    req_index)
+            # Add new_token_ids to token_ids_cpu.
+            start_token_index = num_computed_tokens
+            end_token_index = num_computed_tokens + len(req_data.new_token_ids)
+            self.input_batch.token_ids_cpu[
+                req_index,
+                start_token_index:end_token_index] = req_data.new_token_ids
+            self.input_batch.num_tokens_no_spec[req_index] = end_token_index
+            # Add spec_token_ids to token_ids_cpu.
+            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
+                req_id, ())
+            if spec_token_ids:
+                start_index = end_token_index
+                end_token_index += len(spec_token_ids)
+                self.input_batch.token_ids_cpu[
+                    req_index, start_index:end_token_index] = spec_token_ids
+            # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
+            self.input_batch.num_tokens[req_index] = end_token_index
+
+        # Check if the batch has changed. If not, we can skip copying the
+        # sampling metadata from CPU to GPU.
+        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -894,8 +930,11 @@ class HPUModelRunner:
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
-        return (len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
-                or len(scheduler_output.finished_req_ids) > 0)
+
+        if batch_changed:
+            self.input_batch.refresh_sampling_metadata()
+
+        return batch_changed
 
     def get_model(self) -> torch.nn.Module:
         assert self.model is not None
@@ -1649,13 +1688,13 @@ class HPUModelRunner:
         # Discard garbage tokens from prefills and/or decodes
         if prefill_output_cpu is not None and decode_output_cpu is not None:
             sampled_token_ids_cpu = torch.cat(
-                (decode_output_cpu[:num_decodes],
-                 prefill_output_cpu[:num_prefills]),
+                (decode_output_cpu[:num_decodes].flatten(),
+                 prefill_output_cpu[:num_prefills].flatten()),
                 dim=0)
         else:
-            sampled_token_ids_cpu = decode_output_cpu[:num_decodes] \
+            sampled_token_ids_cpu = decode_output_cpu[:num_decodes].flatten() \
                 if decode_output_cpu is not None \
-                    else prefill_output_cpu[:num_prefills]
+                    else prefill_output_cpu[:num_prefills].flatten()
 
         sampled_token_ids_list = sampled_token_ids_cpu.tolist()
 
@@ -1677,7 +1716,6 @@ class HPUModelRunner:
                 req_state.output_token_ids.append(token_id)
             else:
                 sampled_token_ids_list[i] = 0
-
         ################## RETURN ##################
         # Create output.
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
@@ -1686,10 +1724,12 @@ class HPUModelRunner:
             prompt_logprobs_dict[req_id] = None
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
 
+        # in spec decode, multiple tokens can be returned, and I suspect
+        # scheduler expects a list of tokens per seq here
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=sampled_token_ids_list,
+            sampled_token_ids=[[i] for i in sampled_token_ids_list],
             logprobs=None,
             spec_token_ids=None,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
@@ -2113,9 +2153,11 @@ class HPUModelRunner:
                         num_blocks + 1, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
-                    kv_caches[layer_name] = torch.zeros(kv_cache_shape,
-                                                        dtype=dtype,
-                                                        device=self.device)
+                    key_cache = torch.zeros(kv_cache_shape,
+                                            dtype=dtype,
+                                            device=self.device)
+                    value_cache = torch.zeros_like(key_cache)
+                    kv_caches[layer_name] = (key_cache, value_cache)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.

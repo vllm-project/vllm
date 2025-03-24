@@ -100,6 +100,10 @@ class HPUWorker:
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+        """Allocate GPU KV cache with the specified kv_cache_config."""
+        self.model_runner.initialize_kv_cache(kv_cache_config)
+
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
