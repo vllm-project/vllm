@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
-import hashlib
 import os
-import pickle
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -10,6 +8,7 @@ from typing import Any, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.utils import sha256
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroupSpec,
                                         KVCacheSpec, KVCacheTensor)
 from vllm.v1.metrics.stats import PrefixCacheStats
@@ -21,8 +20,8 @@ logger = init_logger(__name__)
 class BlockHashType(NamedTuple):
     """Hash value of a block (int), the token IDs in the block, and extra keys.
     We keep a tuple of token IDs and extra keys to reduce the likelihood of
-    hash collisions when the hash value is the same. By using SHA256, hash
-    collisions are practically impossible.
+    hash collisions when the hash value is the same. By using SHA256 however,
+    hash collisions are practically impossible.
     """
     # Hash value of the block in an integer.
     hash_value: int
@@ -32,18 +31,8 @@ class BlockHashType(NamedTuple):
     extra_keys: Optional[Any] = None
 
 
-_none_hash = int.from_bytes(os.urandom(32), byteorder="big")
-
-
-def _block_hash(input) -> int:
-    """Hash function for a block.
-
-    Args:
-        input: The input tuple to hash.
-    """
-    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
-                          byteorder="big")
+NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
+    'PYTHONHASHSEED') is not None else sha256(os.getenv('PYTHONHASHSEED'))
 
 
 class PrefixCachingMetrics:
@@ -164,7 +153,7 @@ class FreeKVCacheBlockQueue:
     builtin deque to support removing a block in the middle of the queue
     in O(1) time. To close the performance gap to the builtin deque which is
     implemented in C++, this class does not allocate any Python objects when
-    manipulating the linked list. Instead, this class manipulates the 
+    manipulating the linked list. Instead, this class manipulates the
     prev_free_block and next_free_block attributes of the given blocks.
 
     The queue is ordered by block ID in the beginning. When a block is allocated
@@ -194,7 +183,7 @@ class FreeKVCacheBlockQueue:
 
     def popleft(self) -> KVCacheBlock:
         """Pop the first free block and reduce num_free_blocks by 1.
-        
+
         Returns:
             The first free block.
         """
@@ -207,7 +196,7 @@ class FreeKVCacheBlockQueue:
 
     def remove(self, block: KVCacheBlock) -> None:
         """Remove a block in the free list and reduce num_free_blocks by 1.
-        
+
         Args:
             block: The block to remove.
         """
@@ -251,7 +240,7 @@ class FreeKVCacheBlockQueue:
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
-        
+
         Returns:
             A list of free blocks.
         """
@@ -267,10 +256,10 @@ def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
 
     Args:
-        request (Request): The request. 
+        request (Request): The request.
 
     Returns:
-        bool: Whether blocks allocated to this request need extra hash keys. 
+        bool: Whether blocks allocated to this request need extra hash keys.
     """
 
     # Multimodal requests need to include the MM hash.
@@ -285,13 +274,13 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     computation. For multi-modal inputs, the extra keys are
     (mm_hash, start_offset) that indicate a mm input contained in the
     block and its starting offset in the block tokens.
-    
+
     Args:
         request: The request object.
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
         start_mm_idx: The start multi-modal index of the block.
-    
+
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
@@ -349,10 +338,10 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
 
 def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
     """Generate extra keys related to LoRA for block hash computation.
-    
+
     Args:
         request: The request object.
-    
+
     Returns:
         Return LoRA id of the request if it is a LoRA request. Return empty
         list otherwise.
@@ -367,13 +356,13 @@ def generate_block_hash_extra_keys(
         start_mm_idx: int) -> tuple[Optional[tuple[Any, ...]], int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
-    
+
     Args:
         request: The request object.
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
         start_mm_idx: The start multi-modal index of the block.
-    
+
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
@@ -411,12 +400,11 @@ def hash_block_tokens(
         The entire tuple is used as the hash key of the block.
     """
     if not parent_block_hash:
-        parent_block_hash = _none_hash
+        parent_block_hash = NONE_HASH
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return BlockHashType(
-        _block_hash(
-            (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
+        sha256((parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
         curr_block_token_ids_tuple, extra_keys)
 
 
@@ -463,7 +451,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
                                  kv_cache_spec: dict[str, KVCacheSpec],
                                  available_memory: int):
     """
-    Checks whether `available_memory` is enough for the KV cache to hold at 
+    Checks whether `available_memory` is enough for the KV cache to hold at
     least one request with the model's max_model_len.
 
     Args:
@@ -500,15 +488,15 @@ def create_kv_cache_group_specs(
         grouped_layer_names: list[list[str]]) -> list[KVCacheGroupSpec]:
     """
      Create KVCacheGroupSpec object for each kv cache group layer.
-     The layers in the same group should share the same 
+     The layers in the same group should share the same
      KVCacheSpec.
 
      Args:
          kv_cache_spec:
              A mapping from each layer name to its corresponding KVCacheSpec.
          grouped_layer_names:
-             A list of kv cache groups, where each element is a list of layer 
-             names that belong to the same group and should share the same 
+             A list of kv cache groups, where each element is a list of layer
+             names that belong to the same group and should share the same
              KVCacheSpec.
      Returns:
          A list of KVCacheGroupSpec objects, one for each group.
@@ -625,11 +613,11 @@ def get_kv_cache_config(vllm_config: VllmConfig,
 
 def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
     """
-    Make the KV cache configurations for each worker consistent, so that all 
+    Make the KV cache configurations for each worker consistent, so that all
     workers can be controlled by the same KVCacheManager.
     This function verifies that the layer group of each worker are the same,
     and changes the num_blocks of each worker to the smallest among all workers.
-    
+
     Args:
         kv_cache_configs: The KV cache configurations for each worker. Will be
             in-place modified to make them consistent.

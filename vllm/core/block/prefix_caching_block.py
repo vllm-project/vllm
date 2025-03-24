@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Token blocks."""
-import hashlib
 import os
-import pickle
 import sys
 from bisect import bisect_left
 from os.path import commonprefix
@@ -18,20 +16,10 @@ from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
 from vllm.logger import init_logger
 from vllm.sequence import Sequence
+from vllm.utils import sha256
 
-_none_hash = int.from_bytes(os.urandom(32), byteorder="big")
-
-
-def _block_hash(input) -> int:
-    """Hash function for a block.
-
-    Args:
-        input: The input tuple to hash.
-    """
-    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
-                          byteorder="big")
-
+NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
+    'PYTHONHASHSEED') is not None else sha256(os.getenv('PYTHONHASHSEED'))
 
 PrefixHash = int
 
@@ -354,10 +342,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         return block_id
 
     def _free_block_id(self, block: Block) -> None:
-        """Decrements the refcount of the block. The block may be in two 
-        possible states: (1) immutable/cached or (2) mutable/hashless. 
+        """Decrements the refcount of the block. The block may be in two
+        possible states: (1) immutable/cached or (2) mutable/hashless.
         In the first case, the refcount is decremented directly and the block
-        may be possibly added to the evictor. In other case, hashless 
+        may be possibly added to the evictor. In other case, hashless
         allocator free(..) with keep_block_object=True is called to only free
         the block id (since the block object may be reused by the caller)
         """
@@ -435,7 +423,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         given the absolute block id.
 
         Args:
-            absolute_id (int): The absolute block id for the block 
+            absolute_id (int): The absolute block id for the block
                 in whole allocator.
 
         Returns:
@@ -543,7 +531,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block (Block): The block to check for copy-on-write.
 
         Returns:
-            BlockId: The block index of the new block if a copy-on-write 
+            BlockId: The block index of the new block if a copy-on-write
                 operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
@@ -653,7 +641,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         return num_touched_blocks
 
     def swap_out(self, blocks: List[Block]) -> None:
-        """Execute the swap out actions. Basically just free the 
+        """Execute the swap out actions. Basically just free the
         given blocks.
 
         Args:
@@ -663,9 +651,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._free_block_id(block)
 
     def swap_in(self, blocks: List[Block]) -> None:
-        """Execute the swap in actions. Change the block id from 
-        old allocator to current allocator for each block to finish 
-        the block table update. 
+        """Execute the swap in actions. Change the block id from
+        old allocator to current allocator for each block to finish
+        the block table update.
 
         Args:
             blocks: List of blocks to be swapped in.
@@ -908,13 +896,13 @@ class PrefixCachingBlock(Block):
 
         is_first_block = self._prev_block is None
         prev_block_hash = (
-            _none_hash if is_first_block else
+            NONE_HASH if is_first_block else
             self._prev_block.content_hash  # type: ignore
         )
 
         # Previous block exists but does not yet have a hash.
         # Return no hash in this case.
-        if prev_block_hash == _none_hash and not is_first_block:
+        if prev_block_hash == NONE_HASH and not is_first_block:
             return None
 
         self._cached_content_hash = PrefixCachingBlock.hash_block_tokens(
@@ -948,9 +936,9 @@ class PrefixCachingBlock(Block):
         - int: The computed hash value for the block.
         """
         if is_first_block and prev_block_hash is None:
-            prev_block_hash = _none_hash
-        return _block_hash((is_first_block, prev_block_hash,
-                            *cur_block_token_ids, extra_hash))
+            prev_block_hash = NONE_HASH
+        return sha256((is_first_block, prev_block_hash, *cur_block_token_ids,
+                       extra_hash))
 
 
 class ComputedBlocksTracker:
@@ -1013,7 +1001,7 @@ class ComputedBlocksTracker:
         # We need to know the hash of the previous block to compute the hash of
         # the current block so that blocks could be uniquely identified across
         # sequences of prefixes.
-        prev_block_hash = (_none_hash if cur_num_blocks_recorded == 0 else
+        prev_block_hash = (NONE_HASH if cur_num_blocks_recorded == 0 else
                            block_hashes_recorded[-1])
         # Only update the computed block hashes for the new blocks
         for i in range(cur_num_blocks_recorded, num_computed_blocks):
@@ -1028,7 +1016,7 @@ class ComputedBlocksTracker:
             # This has to be kept in sync with the allocator's hash
             # calculation.
             block_hash = PrefixCachingBlock.hash_block_tokens(
-                is_first_block=prev_block_hash == _none_hash,
+                is_first_block=prev_block_hash == NONE_HASH,
                 prev_block_hash=prev_block_hash,
                 cur_block_token_ids=block_token_ids,
                 extra_hash=extra_hash,

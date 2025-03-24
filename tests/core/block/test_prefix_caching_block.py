@@ -10,10 +10,10 @@ import pytest
 from tests.core.utils import create_dummy_lora_sequence, create_dummy_sequence
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import Block, BlockAllocator
-from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
+from vllm.core.block.prefix_caching_block import (NONE_HASH,
+                                                  ComputedBlocksTracker,
                                                   PrefixCachingBlock,
-                                                  PrefixCachingBlockAllocator,
-                                                  _block_hash, _none_hash)
+                                                  PrefixCachingBlockAllocator)
 from vllm.sequence import Logprob
 from vllm.utils import Device
 
@@ -21,26 +21,10 @@ from vllm.utils import Device
 class TestPrefixCachingBlock:
 
     @staticmethod
-    @pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
-                                       (None, bool, [1, 2, 3])])
-    @pytest.mark.parametrize("output", [0, 1, 2])
-    def test_block_hash(input: list, output: int):
-        hash = _block_hash(input)
-        assert hash is not None
-        assert isinstance(hash, int)
-        assert hash != 0
-
-        # hashing again, returns the same value
-        assert hash == _block_hash(input)
-
-        # hashing different input, returns different value
-        assert hash != _block_hash(input + (1, ))
-
-    @staticmethod
     def test_none_hash():
-        assert _none_hash is not None
-        assert isinstance(_none_hash, int)
-        assert _none_hash != 0
+        assert NONE_HASH is not None
+        assert isinstance(NONE_HASH, int)
+        assert NONE_HASH != 0
 
     @staticmethod
     @pytest.mark.parametrize("seed", list(range(10)))
@@ -89,7 +73,7 @@ class TestPrefixCachingBlock:
         previous_block = MagicMock(spec=PrefixCachingBlock)
         prev_block_hash = random.randint(0, 1000)
         previous_block.content_hash = (prev_block_hash
-                                       if prev_block_has_hash else _none_hash)
+                                       if prev_block_has_hash else NONE_HASH)
 
         num_to_fill = block_size if is_curr_block_full else random.randint(
             0, block_size - 1)
