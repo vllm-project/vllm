@@ -245,7 +245,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         ...
 
     @overload
-    def get(self, key: _K, /, default: _V | None) -> _V | None:
+    def get(self, key: _K, /, default: Optional[_V]) -> Optional[_V]:
         ...
 
     @property
