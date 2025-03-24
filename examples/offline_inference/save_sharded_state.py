@@ -68,9 +68,6 @@ def main(args):
             path=args.output,
             pattern=args.file_pattern,
             max_size=args.max_file_size)
-        print("Sleeping 20 seconds...")
-        import time
-        time.sleep(3)
     else:
         # For V0 engine
         print("Using V0 engine save path")

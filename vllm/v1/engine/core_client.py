@@ -452,8 +452,7 @@ class SyncMPClient(MPClient):
                            path: str,
                            pattern: Optional[str] = None,
                            max_size: Optional[int] = None) -> None:
-        params = {"path": path, "pattern": pattern, "max_size": max_size}
-        self._call_utility("save_sharded_state", params)
+        self._call_utility("save_sharded_state", path, pattern, max_size)
 
 
 class AsyncMPClient(MPClient):
