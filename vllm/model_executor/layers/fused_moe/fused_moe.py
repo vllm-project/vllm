@@ -1316,7 +1316,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     chunked_dg = False
     if use_dg:
-        #print("USE_DG!")
         if M % block_m != 0:
             CHUNK_SIZE = min((M // block_m) * block_m, CHUNK_SIZE)
 
@@ -1329,7 +1328,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         # We attempt to do this offline in Fp8MoEMethod, in which case these
         # calls will be nops.  Otherwise, they'll be performed every time the
         # layer is executed.
-        #print(f"SHAPES {w1_scale.shape}, {w2_scale.shape}")
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
@@ -1353,7 +1351,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         intermediate_cache3 = cache13[:(new_M * w2.shape[1])].view(
             new_M, w2.shape[1])
     else:
-        #print(f"TRITON {allow_deep_gemm}")
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
         cache13 = torch.empty(M * top_k_num * max(N, w2.shape[1]),
