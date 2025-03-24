@@ -7,7 +7,9 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import (GeluAndMul,
                                                    ReLUSquaredActivation,
                                                    SiluAndMul)
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import (
+    RMSNorm, dispatch_cuda_rmsnorm_func, fused_add_rms_norm, rms_norm,
+    rocm_aiter_fused_add_rms_norm, rocm_aiter_rms_norm)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     cutlass_scaled_mm, dispatch_w8a8_blockscale_func,
     rocm_aiter_gemm_w8a8_blockscale, w8a8_block_fp8_matmul)
@@ -112,3 +114,27 @@ def test_w8a8_blockscale_dispatch(use_cutlass: bool, use_rocm_aiter: str,
         assert block_scale_func == rocm_aiter_gemm_w8a8_blockscale
     else:
         assert block_scale_func == w8a8_block_fp8_matmul
+
+
+@pytest.mark.parametrize("add_residual", [True, False])
+@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
+@pytest.mark.parametrize("use_rocm_aiter_norm", ["0", "1"])
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="AITER is a feature exclusive for ROCm")
+def test_rms_norm_dispatch(add_residual: bool, use_rocm_aiter: str,
+                           use_rocm_aiter_norm: str, monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", use_rocm_aiter_norm)
+    rms_norm_func = dispatch_cuda_rmsnorm_func(add_residual)
+
+    if not add_residual:
+        if current_platform.is_rocm() and int(use_rocm_aiter) and int(
+                use_rocm_aiter_norm):
+            assert rms_norm_func == rocm_aiter_rms_norm
+        else:
+            assert rms_norm_func == rms_norm
+    elif current_platform.is_rocm() and int(use_rocm_aiter) and int(
+            use_rocm_aiter_norm):
+        assert rms_norm_func == rocm_aiter_fused_add_rms_norm
+    else:
+        assert rms_norm_func == fused_add_rms_norm
