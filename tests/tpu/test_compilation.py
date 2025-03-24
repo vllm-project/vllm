@@ -6,6 +6,7 @@ import tempfile
 
 import depyf
 
+import vllm.envs as envs
 from vllm.config import CompilationLevel
 
 temp_dir = tempfile.mkdtemp()
@@ -52,15 +53,22 @@ compiled_codes = sorted(
 for i, compiled_code in enumerate(compiled_codes):
     print("{} file: {}".format(i + 1, compiled_code))
 
-# We should only trigger Dynamo compilation 3 times:
+# In V0, we should only trigger Dynamo compilation 4 times:
 # 1. forward pass (symbolic)
-# 2. forward pass (shape 16)
-# 3. forward pass (shape 32)
+# 2. compute_logits (symbolic)
+# 3. forward pass (shape 16)
+# 4. forward pass (shape 32)
 # and later calls should not trigger Dynamo compilation again.
+# In V1, we pre-compiled sampling with different input shapes, and we pad to
+# the nearest pre-compiled shape in compute_logits,
+# so we don't have 2(compute_logits) in V1.
 # NOTE: It might still trigger XLA compilation.
 
-# Check we have 3 compiled codes
-assert len(compiled_codes) == 3
+# Check we have 4 compiled codes in V0 and 3 compiled codes in V1.
+if envs.VLLM_USE_V1:
+    assert len(compiled_codes) == 3
+else:
+    assert len(compiled_codes) == 4
 
 kv_cache_prefix = "kv_cache"
 attn_prefix = "ragged_paged_attention"
