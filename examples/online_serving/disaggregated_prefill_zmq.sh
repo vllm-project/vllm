@@ -37,7 +37,7 @@ wait_for_server() {
 wait_for_disagg_server() {
   local log_file=$1
   timeout 1200 bash -c "
-    until grep -q 'PD Worker is ready' $log_file; do
+    until grep -q 'PDWorker is ready' $log_file; do
       sleep 1
     done" && return 0 || return 1
 }
@@ -45,9 +45,10 @@ wait_for_disagg_server() {
 
 # You can also adjust --kv-ip and --kv-port for distributed inference.
 MODEL=meta-llama/Llama-3.1-8B-Instruct
-CONTROLLER_ADDR=controlleripc
-PREFILL_WORKER_ADDR=prefillipc
-DECODE_WORKER_ADDR=decodeipc
+CONTROLLER_ADDR=controller.ipc
+PREFILL_WORKER_ADDR=prefill.ipc
+DECODE_WORKER_ADDR=decode.ipc
+PORT=8001
 
 # prefilling instance, which is the KV producer
 CUDA_VISIBLE_DEVICES=0 python3 ../../vllm/entrypoints/disaggregated/worker.py \
@@ -78,10 +79,10 @@ python3 ../../vllm/entrypoints/disaggregated/api_server.py \
     --model $MODEL \
     --controller-addr $CONTROLLER_ADDR \
     --prefill-addr $PREFILL_WORKER_ADDR \
-    --decode-addr $DECODE_WORKER_ADDR
+    --decode-addr $DECODE_WORKER_ADDR &
 
 # wait until prefill, decode instances and proxy are ready
-wait_for_server 8001
+wait_for_server $PORT
 wait_for_disagg_server vllm_disagg_prefill.log
 wait_for_disagg_server vllm_disagg_decode.log 
 
@@ -98,7 +99,7 @@ output1=$(curl -X POST -s http://localhost:8001/v1/completions \
 output2=$(curl -X POST -s http://localhost:8001/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
-"model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+"model": "meta-llama/Llama-3.1-8B-Instruct",
 "prompt": "Santa Clara is a",
 "max_tokens": 10,
 "temperature": 0
