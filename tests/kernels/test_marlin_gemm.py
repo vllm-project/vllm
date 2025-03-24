@@ -606,6 +606,51 @@ def test_marlin_qqq_gemm(
     assert max_diff < 0.04
 
 
+def test_marlin_gemm_subset_input():
+    quant_type = scalar_types.uint4b8
+    group_size = 128
+
+    size_m, size_k, size_n = 32, 1024, 2048
+    big_m = size_m * 2
+    big_k = size_k * 2
+
+    a_input = rand_data((big_m, big_k))[8:size_m + 8, 8:size_k + 8]
+    b_weight = rand_data((size_k, size_n))
+
+    w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
+        b_weight, quant_type, group_size, False)
+
+    marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
+    workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
+                                GPTQ_MARLIN_MAX_PARALLEL)
+
+    output = ops.gptq_marlin_gemm(
+        a_input,
+        marlin_q_w,
+        marlin_s,
+        marlin_zp,
+        g_idx,
+        sort_indices,
+        workspace.scratch,
+        quant_type,
+        a_input.shape[0],
+        b_weight.shape[1],
+        a_input.shape[1],
+        is_k_full=True,
+        has_zp=False,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
+        is_zp_float=False,
+    )
+    output_ref = torch.matmul(a_input, w_ref)
+
+    torch.cuda.synchronize()
+
+    max_diff = compute_max_diff(output, output_ref)
+
+    assert max_diff < 0.04
+
+
 def test_marlin_gemm_opcheck():
     size_m = 2048
     size_n = 4096
