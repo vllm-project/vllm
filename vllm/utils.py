@@ -1587,6 +1587,7 @@ def weak_ref_tensors(
         return tuple(weak_ref_tensor(t) for t in tensors)
     raise ValueError("Invalid type for tensors")
 
+
 def is_in_doc_build() -> bool:
     try:
         from sphinx.ext.autodoc.mock import _MockModule
