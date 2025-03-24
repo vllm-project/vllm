@@ -62,8 +62,8 @@ def get_processor(
     # don't put this import at the top level
     # it will call torch.cuda.device_count()
     from transformers import AutoProcessor
+    from transformers.processing_utils import ProcessorMixin
     if processor_cls is None:
-        from transformers.processing_utils import ProcessorMixin
         processor_cls = processor_cls
 
     processor_factory = (AutoProcessor if processor_cls == ProcessorMixin or
