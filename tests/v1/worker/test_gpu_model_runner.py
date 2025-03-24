@@ -2,10 +2,10 @@
 import pytest
 
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 @pytest.fixture
@@ -21,11 +21,11 @@ def model_runner():
         tokenizer="facebook/opt-125m",
         tokenizer_mode="auto",
         trust_remote_code=True,
-        dtype="float16",
+        dtype="float16" if not current_platform.is_hpu() else "bfloat16",
         seed=42,
     )
     cache_config = CacheConfig(
-        block_size=16,
+        block_size=16 if not current_platform.is_hpu() else 128,
         gpu_memory_utilization=0.9,
         swap_space=0,
         cache_dtype="auto",
@@ -36,8 +36,12 @@ def model_runner():
         scheduler_config=scheduler_config,
     )
 
-    device = "cuda"
-    return GPUModelRunner(vllm_config, device)
+    if current_platform.is_hpu():
+        from vllm.v1.worker.hpu_model_runner import HPUModelRunner
+        return HPUModelRunner(vllm_config)
+    else:
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+        return GPUModelRunner(vllm_config, 'cuda')
 
 
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:

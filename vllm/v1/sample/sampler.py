@@ -4,6 +4,7 @@
 import torch
 import torch.nn as nn
 
+from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.penalties import (apply_all_penalties,
@@ -18,6 +19,9 @@ class Sampler(nn.Module):
     def __init__(self):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
+        # NOTE(kzawora): hpu doesn't properly handle int64->int32 conversion
+        # remove this WA once it does
+        self.cast_sampled_to_int32 = not current_platform.is_hpu()
 
     def forward(
         self,
@@ -50,7 +54,8 @@ class Sampler(nn.Module):
             self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
 
         # Use int32 to reduce the tensor size.
-        sampled = sampled.to(torch.int32)
+        if self.cast_sampled_to_int32:
+            sampled = sampled.to(torch.int32)
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(

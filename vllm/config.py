@@ -1512,6 +1512,8 @@ class SchedulerConfig:
         return hash_str
 
     def __post_init__(self) -> None:
+        if envs.VLLM_USE_V1:
+            self.use_padding_aware_scheduling = False
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 if self.num_scheduler_steps > 1:
@@ -3231,7 +3233,8 @@ class VllmConfig:
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
         if envs.VLLM_USE_V1 and self.model_config is not None and \
-            not self.model_config.enforce_eager:
+            not self.model_config.enforce_eager and \
+                not current_platform.is_hpu():
             # NOTE(woosuk): Currently, we use inductor because the piecewise
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time

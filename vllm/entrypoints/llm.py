@@ -1416,8 +1416,11 @@ class LLM:
         if use_tqdm:
             pbar.close()
 
-        # Make sure that all workers are finished.
-        self.llm_engine.stop_remote_worker_execution_loop()
+        # Make sure that all workers are finished
+        # NOTE(kzawora): this crashes on v1, why?
+        # this doesn't seem like hpu-specific issue
+        if not envs.VLLM_USE_V1:
+            self.llm_engine.stop_remote_worker_execution_loop()
 
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than

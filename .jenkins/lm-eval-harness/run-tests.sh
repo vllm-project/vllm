@@ -13,7 +13,7 @@ usage() {
 }
 
 SUCCESS=0
-
+TIMEOUT_S=900 # 15 minutes timeout per test
 while getopts "c:t:" OPT; do
   case ${OPT} in
     c ) 
@@ -53,8 +53,11 @@ do
         JUNIT_FAMILY="-o junit_family=xunit1"
         JUNIT_XML="--junitxml=${LOG_PATH}"
     fi
-    pytest -s test_lm_eval_correctness.py "$JUNIT_FAMILY" "$JUNIT_XML" || LOCAL_SUCCESS=$?
-
+    timeout $TIMEOUT_S pytest -s test_lm_eval_correctness.py "$JUNIT_FAMILY" "$JUNIT_XML" &
+    TEST_PROCESS=$!
+    wait $TEST_PROCESS
+    LOCAL_SUCCESS=$?
+    kill -9 $TEST_PROCESS 2> /dev/null || true
     if [[ $LOCAL_SUCCESS == 0 ]]; then
         echo "=== PASSED MODEL: ${MODEL_CONFIG} ==="
     else

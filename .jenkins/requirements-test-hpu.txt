@@ -1,2 +1,3 @@
 lm_eval
 pytest
+pytest_asyncio

@@ -20,7 +20,7 @@ NUM_SAMPLE_LOGPROBS_UNDER_TEST = 5
 # Number of prompt logprobs to request when testing prompt logprobs
 NUM_PROMPT_LOGPROBS_UNDER_TEST = 7
 
-TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
+TOKENIZER_NAME = "/mnt/weka/data/pytorch/mistral/Mistral-7B-Instruct-v0.3"
 
 FULL_STRINGS = [
     "My name is Robert from Neural Magic and I love working on vLLM so much!",
