@@ -530,8 +530,8 @@ __global__ void paged_attention_v3_kernel(
     return;
   }
 
-  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);  // 256
-  const int num_blocks_per_partition =                              // 16
+  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
+  const int num_blocks_per_partition =
       USE_PARTITIONING ? PARTITION_SIZE / BLOCK_SIZE : num_seq_blocks;
 
   // [start_block_idx, end_block_idx) is the range of blocks to process.
@@ -539,38 +539,37 @@ __global__ void paged_attention_v3_kernel(
       USE_PARTITIONING ? partition_idx * num_blocks_per_partition : 0;
   const int end_block_idx =
       MIN(start_block_idx + num_blocks_per_partition, num_seq_blocks);
-  const int num_blocks = end_block_idx - start_block_idx;  // 16
+  const int num_blocks = end_block_idx - start_block_idx;
 
   // [start_token_idx, end_token_idx) is the range of tokens to process.
   const int start_token_idx = start_block_idx * BLOCK_SIZE;
   const int end_token_idx =
       MIN(start_token_idx + num_blocks * BLOCK_SIZE, seq_len);
-  const int num_tokens = end_token_idx - start_token_idx;  // 256
+  const int num_tokens = end_token_idx - start_token_idx;
 
-  assert(NUM_Q_HEADS_PER_KV == blockDim.y);                          // 8
-  constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);  // 2
-  constexpr int NUM_THREAD_GROUPS_PER_QUERY =                        // 16
+  assert(NUM_Q_HEADS_PER_KV == blockDim.y);
+  constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);
+  constexpr int NUM_THREAD_GROUPS_PER_QUERY =
       NUM_QUERY_THREADS / THREAD_GROUP_SIZE;
 
   assert(NUM_QUERY_THREADS % THREAD_GROUP_SIZE == 0);
-  constexpr int NUM_TOKENS_PER_THREAD_GROUP =  // 1
+  constexpr int NUM_TOKENS_PER_THREAD_GROUP =
       DIVIDE_ROUND_UP(BLOCK_SIZE, WARP_SIZE);
-  constexpr int NUM_WARPS_PER_QUERY = NUM_QUERY_THREADS / WARP_SIZE;  // 1
-  // constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE; // 32
-  // The thread id inside one query, because we will use different group warps
-  // to process different query, so this idx is the index inside the group
-  // warps.
-  const int query_thread_idx = threadIdx.x;  // range(0, 32)
-  const int query_warp_idx =
-      query_thread_idx / WARP_SIZE;  // 0, in the current implement just 1 warps
-                                     // for a query, so only 0 here.
-  const int query_lane = query_thread_idx % WARP_SIZE;  // range(0, 32)
+  constexpr int NUM_WARPS_PER_QUERY = NUM_QUERY_THREADS / WARP_SIZE;
+  constexpr int NUM_WARPS = NUM_QUERY_THREADS * NUM_Q_HEADS_PER_KV / WARP_SIZE;
 
-  const int kv_head_idx = blockIdx.x;  // range(0, 8)
+  // The thread id inside one query, because we will use different group warps
+  // to process different query, so this idx is the index inside the group of
+  // warps.
+  const int query_thread_idx = threadIdx.x;
+  const int query_warp_idx = query_thread_idx / WARP_SIZE;
+  const int query_lane = query_thread_idx % WARP_SIZE;
+
+  const int kv_head_idx = blockIdx.x;
   const int start_head_idx = kv_head_idx * NUM_Q_HEADS_PER_KV;
   const int head_idx = start_head_idx + threadIdx.y;
-  const int head_offset = head_idx - start_head_idx;     // range(0, 8)
-  const int num_heads = gridDim.x * NUM_Q_HEADS_PER_KV;  // 64
+  const int head_offset = head_idx - start_head_idx;
+  const int num_heads = gridDim.x * NUM_Q_HEADS_PER_KV;
   const float alibi_slope =
       alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
 
@@ -579,23 +578,19 @@ __global__ void paged_attention_v3_kernel(
   // group fetch or compute 16 bytes at a time. For example, if the size of a
   // thread group is 4 and the data type is half, then the vector size is 16 /
   // (4 * sizeof(half)) == 2.
-  constexpr int VEC_SIZE =
-      MAX(16 / (THREAD_GROUP_SIZE * sizeof(scalar_t)), 1);  // 4
+  constexpr int VEC_SIZE = MAX(16 / (THREAD_GROUP_SIZE * sizeof(scalar_t)), 1);
   using K_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
   using Q_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
   using Quant_vec = typename Vec<cache_t, VEC_SIZE>::Type;
 
-  const int query_thread_group_idx =
-      query_thread_idx / THREAD_GROUP_SIZE;  // range(0, 16)
-  const int query_thread_group_offset =
-      query_thread_idx % THREAD_GROUP_SIZE;  // range(0, 2)
+  const int query_thread_group_idx = query_thread_idx / THREAD_GROUP_SIZE;
+  const int query_thread_group_offset = query_thread_idx % THREAD_GROUP_SIZE;
 
-  constexpr int NUM_Q_ELEMS_PER_THREAD = HEAD_SIZE / THREAD_GROUP_SIZE;  // 64
-  constexpr int NUM_Q_VECS_PER_THREAD =
-      NUM_Q_ELEMS_PER_THREAD / VEC_SIZE;  // 16
+  constexpr int NUM_Q_ELEMS_PER_THREAD = HEAD_SIZE / THREAD_GROUP_SIZE;
+  constexpr int NUM_Q_VECS_PER_THREAD = NUM_Q_ELEMS_PER_THREAD / VEC_SIZE;
   const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
-  __shared__ Q_vec q_vecs[NUM_Q_HEADS_PER_KV][THREAD_GROUP_SIZE]
-                         [NUM_Q_VECS_PER_THREAD];  // 8 * 2 * 16 * 8 = 2 kb
+  __shared__ Q_vec
+      q_vecs[NUM_Q_HEADS_PER_KV][THREAD_GROUP_SIZE][NUM_Q_VECS_PER_THREAD];
 #pragma unroll
   for (int i = query_thread_group_idx; i < NUM_Q_VECS_PER_THREAD;
        i += NUM_THREAD_GROUPS_PER_QUERY) {
@@ -606,42 +601,24 @@ __global__ void paged_attention_v3_kernel(
   __syncthreads();  // TODO(naed90): possible speedup if this is replaced with a
                     // memory wall right before we use q_vecs
 
-  // TODO(Wenqin): try use register for query, but each thread should load half
-  // of a query's head size. Load the query to registers. Each warp will load
-  // NUM_Q_HEADS_PER_KV heads of query into regs. constexpr int
-  // NUM_Q_ELEMS_PER_GROUP = HEAD_SIZE / NUM_THREAD_GROUPS_PER_QUERY; // 8
-  // constexpr int NUM_Q_ELEMS_PER_THREAD = NUM_Q_ELEMS_PER_GROUP /
-  // THREAD_GROUP_SIZE; // 4 constexpr int NUM_Q_VECS_PER_THREAD =
-  // NUM_Q_ELEMS_PER_THREAD / VEC_SIZE; // 1
-  //   const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
-  //   Q_vec q_vecs[NUM_Q_VECS_PER_THREAD];
-  // #pragma unroll
-  //   for (int i = 0; i < NUM_Q_VECS_PER_THREAD; i ++) {
-  //     const int vec_base_idx = query_thread_group_idx * THREAD_GROUP_SIZE +
-  //     query_thread_group_offset;
-  //     // in each iteration, one therad will load one vec into its registers,
-  //     so we should advanced by WARP_SIZE. const int vec_idx = vec_base_idx +
-  //     i * WARP_SIZE; q_vecs[i] = *reinterpret_cast<const Q_vec*>(q_ptr +
-  //     vec_idx * VEC_SIZE);
-  //   }
+  // TODO(Wenqin): try use register for query.
 
   // Memory planning.
-  extern __shared__ char shared_mem[];  // 8kb
+  extern __shared__ char shared_mem[];
   // NOTE(woosuk): We use FP32 for the softmax logits for better accuracy.
   float* logits = reinterpret_cast<float*>(shared_mem);
   // Workspace for reduction.
-  __shared__ float red_smem[NUM_Q_HEADS_PER_KV]
-                           [NUM_WARPS_PER_QUERY];  // 32 bytes.
+  __shared__ float red_smem[NUM_Q_HEADS_PER_KV][NUM_WARPS_PER_QUERY];
 
   // x == THREAD_GROUP_SIZE * VEC_SIZE
   // Each thread group fetches x elements from the key at a time.
-  constexpr int x = 16 / sizeof(cache_t);  // 8
+  constexpr int x = 16 / sizeof(cache_t);
   float qk_max = -FLT_MAX;
 
   // Iterate over the key blocks.
-  // Each warp fetches a block of keys for each iteration.
-  // Each thread group in a warp fetches a key from the block, and computes
-  // dot product with the query.
+  // Each warp fetches x elements of all keys in a block for each iteration.
+  // Each thread group in a warp fetches x elements of of a key from the block,
+  // and computes dot product with the query.
   const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
 
   // blocksparse specific vars
@@ -698,18 +675,17 @@ __global__ void paged_attention_v3_kernel(
     constexpr int NUM_K_VECS_PER_THREAD =
         NUM_K_ELEMS_PER_THREAD / VEC_SIZE;  // 16
 
-    // Load a key to registers.
+    // Load a block of key to shared memory.
     // Each thread in a thread group has a different part of the key.
     // For example, if the the thread group size is 4, then the first thread in
     // the group has 0, 4, 8, ... th vectors of the key, and the second thread
     // has 1, 5, 9, ... th vectors of the key, and so on.
 
-    // Note(Wenqin): loading k is different with loading q!!
     for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {
       const int physical_block_offset =
           (query_thread_group_idx + i * WARP_SIZE) % BLOCK_SIZE;
       const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
-      // Note(Wenqin): we should try to avoid bank conflict if each thread read
+      // NOTE(Wenqin): we should try to avoid bank conflict if each thread read
       // data is multiple of 128 bytes. Why we add THREAD_GROUP_SIZE is to make
       // pointer be aligned with 16 bytes, to do vectorized load.
       const int k_vecs_last_dim =
@@ -720,34 +696,33 @@ __global__ void paged_attention_v3_kernel(
           k_vecs[NUM_WARPS_PER_QUERY][BLOCK_SIZE][THREAD_GROUP_SIZE]
                 [k_vecs_last_dim];  // 1 * 16 * 2 * 16 * 8 = 4 kb
 
-      // TODO(Wenqin): here we just use threads which process the first head for
-      // query to load data for key into shared memory, try to optimize later.
-      if (head_offset == 0) {
+      // each thread reads (NUM_K_VECS_PER_THREAD / NUM_WARPS) elements into
+      // shared memory.
 #pragma unroll
-        for (int j = 0; j < NUM_K_VECS_PER_THREAD; j++) {
-          const cache_t* k_ptr =
-              k_cache + physical_block_number * kv_block_stride +
-              kv_head_idx * kv_head_stride + physical_block_offset * x;
-          const int vec_idx = query_thread_group_offset + j * THREAD_GROUP_SIZE;
-          const int offset1 = (vec_idx * VEC_SIZE) / x;
-          const int offset2 = (vec_idx * VEC_SIZE) % x;
+      for (int j = head_offset; j < NUM_K_VECS_PER_THREAD; j += NUM_WARPS) {
+        const cache_t* k_ptr =
+            k_cache + physical_block_number * kv_block_stride +
+            kv_head_idx * kv_head_stride + physical_block_offset * x;
+        const int vec_idx = query_thread_group_offset + j * THREAD_GROUP_SIZE;
+        const int offset1 = (vec_idx * VEC_SIZE) / x;
+        const int offset2 = (vec_idx * VEC_SIZE) % x;
 
-          if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
-            k_vecs[query_warp_idx][physical_block_offset]
-                  [query_thread_group_offset][j] =
-                      *reinterpret_cast<const K_vec*>(
-                          k_ptr + offset1 * BLOCK_SIZE * x + offset2);
-          } else {
-            // Vector conversion from Quant_vec to K_vec.
-            Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
-                k_ptr + offset1 * BLOCK_SIZE * x + offset2);
-            k_vecs[query_warp_idx][physical_block_offset]
-                  [query_thread_group_offset][j] =
-                      fp8::scaled_convert<K_vec, Quant_vec, KV_DTYPE>(
-                          k_vec_quant, *k_scale);
-          }
+        if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
+          k_vecs[query_warp_idx][physical_block_offset]
+                [query_thread_group_offset][j] =
+                    *reinterpret_cast<const K_vec*>(
+                        k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+        } else {
+          // Vector conversion from Quant_vec to K_vec.
+          Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
+              k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+          k_vecs[query_warp_idx][physical_block_offset]
+                [query_thread_group_offset][j] =
+                    fp8::scaled_convert<K_vec, Quant_vec, KV_DTYPE>(k_vec_quant,
+                                                                    *k_scale);
         }
       }
+
       __syncthreads();
 
       // Compute dot product.
@@ -815,7 +790,6 @@ __global__ void paged_attention_v3_kernel(
   }
   // Warp leaders store the data to shared memory.
   if (query_lane == 0) {
-    // TODO(Wenqin): maybe we should use a max method for red_smem size???
     red_smem[head_offset][query_warp_idx] = exp_sum;
   }
   __syncthreads();
@@ -902,7 +876,7 @@ __global__ void paged_attention_v3_kernel(
     from_float(logits_vec,
                *reinterpret_cast<Float_L_vec*>(logits + logits_offset));
 
-    // TODO(Wenqin): use shared memory for v also.
+    // TODO(Wenqin): Try to use shared memory for value also.
     const cache_t* v_ptr = v_cache + physical_block_number * kv_block_stride +
                            kv_head_idx * kv_head_stride;
 #pragma unroll
@@ -933,8 +907,6 @@ __global__ void paged_attention_v3_kernel(
             v_vec_ptr[j] = token_idx + j < seq_len ? v_vec_ptr[j] : zero_value;
           }
         }
-        // TODO(Wenqin): why not use `=` but `+=` here? I guess we just add it
-        // once.
         accs[i] += dot(logits_vec, v_vec);
       }
     }
