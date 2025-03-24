@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Utility methods for model layers."""
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -56,3 +56,9 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     logits -= frequency_penalties.unsqueeze(dim=1) * output_bin_counts
     logits -= presence_penalties.unsqueeze(dim=1) * output_mask
     return logits
+
+
+def apply_gemm_rocm(x: torch.Tensor,
+                    weight: torch.Tensor,
+                    bias: Optional[torch.Tensor] = None):
+    pass
