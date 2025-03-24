@@ -42,9 +42,9 @@ class TeleChat2Model(LlamaModel):
         for layer in self.layers:
             if not isinstance(layer, PPMissingLayer):
                 layer.self_attn.qkv_proj.bias = None
-                layer.self_attn.qkv_proj.skip_bias_add = True
+                #layer.self_attn.qkv_proj.skip_bias_add = True
                 layer.mlp.gate_up_proj.bias = None
-                layer.mlp.gate_up_proj.skip_bias_add = True
+                #layer.mlp.gate_up_proj.skip_bias_add = True
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
