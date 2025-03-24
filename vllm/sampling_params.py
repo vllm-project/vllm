@@ -369,8 +369,9 @@ class SamplingParams(
             self.top_k = -1
             self.min_p = 0.0
             self._verify_greedy_sampling()
+
         # eos_token_id is added to this by the engine
-        self._all_stop_token_ids = set(self.stop_token_ids)
+        self._all_stop_token_ids.update(self.stop_token_ids)
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
