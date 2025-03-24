@@ -9,7 +9,7 @@ Compared to other quantization methods, BitsAndBytes eliminates the need for cal
 Below are the steps to utilize BitsAndBytes with vLLM.
 
 ```console
-pip install bitsandbytes>=0.45.0
+pip install bitsandbytes>=0.45.3
 ```
 
 vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.
@@ -25,7 +25,7 @@ import torch
 # unsloth/tinyllama-bnb-4bit is a pre-quantized checkpoint.
 model_id = "unsloth/tinyllama-bnb-4bit"
 llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True, \
-quantization="bitsandbytes", load_format="bitsandbytes")
+quantization="bitsandbytes")
 ```
 
 ## Inflight quantization: load as 4bit quantization
@@ -35,7 +35,7 @@ from vllm import LLM
 import torch
 model_id = "huggyllama/llama-7b"
 llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True, \
-quantization="bitsandbytes", load_format="bitsandbytes")
+quantization="bitsandbytes")
 ```
 
 ## OpenAI Compatible Server
@@ -43,5 +43,5 @@ quantization="bitsandbytes", load_format="bitsandbytes")
 Append the following to your 4bit model arguments:
 
 ```console
---quantization bitsandbytes --load-format bitsandbytes
+--quantization bitsandbytes
 ```
