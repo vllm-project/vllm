@@ -34,8 +34,8 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID, device_map="auto", torch_dtype="auto",
 )
 model.eval()
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID,
-    model_max_length=seq_len, padding_side="left")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, padding_side="left")
+tokenizer.pad_token = tokenizer.eos_token
 ```
 
 ### 2. Preparing Calibration Dataloader
@@ -51,12 +51,11 @@ from torch.utils.data import DataLoader
 
 BATCH_SIZE = 1
 NUM_CALIBRATION_DATA = 512
-MAX_SEQUENCE_LENGTH = 512
 
 dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
 text_data = dataset["text"][:NUM_CALIBRATION_DATA]
-tokenized_outputs = tokenizer(text_data, return_tensors="pt",
-    padding=True, truncation=True, max_length=MAX_SEQUENCE_LENGTH)
+tokenized_outputs = tokenizer(text_data, return_tensors="pt", truncation=True,
+    padding=True)
 calib_dataloader = DataLoader(tokenized_outputs['input_ids'],
     batch_size=BATCH_SIZE, drop_last=True)
 ```
@@ -67,9 +66,9 @@ We need to set the quantization config, you can check [config user guide](https:
 Here we use FP8 per-tensor quantization on weight, activate, kv-cache and the quantization algorithm is autosmoothquant.
 
 ```python
-from quark.torch.quantization import Config, QuantizationConfig, 
+from quark.torch.quantization import (Config, QuantizationConfig,
                                      FP8E4M3PerTensorSpec,
-                                     load_quant_algo_config_from_file
+                                     load_quant_algo_config_from_file)
 
 FP8_PER_TENSOR_SPEC = FP8E4M3PerTensorSpec(observer_method="min_max",
     is_dynamic=False).to_quantization_spec()                                          
@@ -117,7 +116,7 @@ EXPORT_DIR = MODEL_ID.split("/")[1] + "-w-fp8-a-fp8-kvcache-fp8-pertensor-autosm
 exporter = ModelExporter(config=export_config, export_dir=EXPORT_DIR)
 with torch.no_grad():
     exporter.export_safetensors_model(freezed_model,
-        quant_config=quant_config, tokenizer=tokenizer, custom_mode='fp8')
+        quant_config=quant_config, tokenizer=tokenizer)
 ```
 
 ### 5. Evaluating Accuracy
@@ -137,8 +136,6 @@ $ lm_eval --model vllm \
   --model_args pretrained="model=Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant, \
                            quantization=quark" \
   --tasks gsm8k,wikitext \
-  --num_fewshot 5 \
-  --limit 250 \
   --batch_size 'auto'
 ```
 
