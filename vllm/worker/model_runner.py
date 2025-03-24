@@ -59,6 +59,8 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
+import inspect
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -1646,6 +1648,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
 
+    def memory_update(self) -> None:
+        """Update the memory usage of the model."""
+        get_kv_transfer_group().update()
+    
     @torch.inference_mode()
     def execute_model(
         self,

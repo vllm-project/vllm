@@ -61,6 +61,9 @@ class KVTransferAgent:
         self.connector.send_kv_caches_and_hidden_states(
             model_executable, model_input, kv_caches,
             hidden_or_intermediate_states)
+        
+    def update(self) -> None:
+        self.connector.update()
 
     def close(self) -> None:
         self.connector.close()

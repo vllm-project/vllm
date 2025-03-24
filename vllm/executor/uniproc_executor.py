@@ -48,6 +48,11 @@ class UniProcExecutor(ExecutorBase):
                        kwargs: Optional[Dict] = None) -> List[Any]:
         if kwargs is None:
             kwargs = {}
+
+        if method == "memory_update":
+            self.driver_worker.worker.model_runner.memory_update()
+            return None
+
         answer = run_method(self.driver_worker, method, args, kwargs)
         return [answer]
 

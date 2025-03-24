@@ -38,7 +38,7 @@ class LMCacheConnector(KVConnectorBase):
         from lmcache.integration.vllm.utils import ENGINE_NAME
         from lmcache.integration.vllm.vllm_adapter import (
             RetrieveStatus, StoreStatus, init_lmcache_engine,
-            lmcache_retrieve_kv, lmcache_should_store, lmcache_store_kv)
+            lmcache_retrieve_kv, lmcache_should_store, lmcache_store_kv, lmcache_update_kv)
         logger.info("Initializing LMCacheConfig under kv_transfer_config %s",
                     self.transfer_config)
 
@@ -54,6 +54,7 @@ class LMCacheConnector(KVConnectorBase):
         self.cache_config = config.cache_config
         self.lmcache_retrieve_kv = lmcache_retrieve_kv
         self.lmcache_store_kv = lmcache_store_kv
+        self.update = lmcache_update_kv
         self.lmcache_should_store = lmcache_should_store
         self.store_status = StoreStatus
         self.retrieve_status = RetrieveStatus

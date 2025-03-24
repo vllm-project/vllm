@@ -138,6 +138,12 @@ class ExecutorBase(ABC):
         output = self.collective_rpc("execute_model",
                                      args=(execute_model_req, ))
         return output[0]
+    
+    def inform_memory_update(
+        self
+    ) -> None:
+        output = self.collective_rpc("memory_update")
+        return None
 
     def stop_remote_worker_execution_loop(self) -> None:
         """Releases parallel workers from model loop."""

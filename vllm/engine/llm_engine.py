@@ -1139,6 +1139,10 @@ class LLMEngine:
 
         # Free currently finished requests
         if finished_now:
+            # Update saved KV Cache 
+            logger.info(f"Start updating memory")
+            self.model_executor.inform_memory_update() 
+
             for scheduler in self.scheduler:
                 scheduler.free_finished_seq_groups()
 
