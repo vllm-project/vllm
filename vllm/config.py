@@ -35,22 +35,29 @@ from vllm.transformers_utils.config import (
     try_get_generation_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3
-from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, random_uuid, resolve_obj_by_qualname)
+from vllm.utils import (GiB_bytes, LayerBlockType, LazyLoader,
+                        cuda_device_count_stateless, get_cpu_memory,
+                        random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
     from transformers import PretrainedConfig
 
     from vllm.executor.executor_base import ExecutorBase
-    from vllm.model_executor.layers.quantization.base_config import (
-        QuantizationConfig)
+    from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+    HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
+                                                 PretrainedConfig]]
 else:
-    QuantizationConfig = None
+    me_quant = LazyLoader("model_executor", globals(),
+                          ".model_executor.layers.quantization")
+    me_models = LazyLoader("model_executor", globals(),
+                           ".model_executor.models")
 
+    HfOverrides = None
+    QuantizationConfig = None
 from packaging.version import Version
 
 logger = init_logger(__name__)
@@ -81,9 +88,6 @@ _TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
     for runner, tasks in _RUNNER_TASKS.items()
     for task in tasks
 }
-
-HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
-                                             PretrainedConfig]]
 
 
 class SupportsHash(Protocol):
@@ -427,8 +431,7 @@ class ModelConfig:
 
     @property
     def registry(self):
-        from vllm.model_executor.models import ModelRegistry
-        return ModelRegistry
+        return me_models.ModelRegistry
 
     @property
     def architectures(self) -> list[str]:
@@ -616,9 +619,8 @@ class ModelConfig:
         return quant_cfg
 
     def _verify_quantization(self) -> None:
-        from vllm.model_executor.layers.quantization import (
-            QUANTIZATION_METHODS, get_quantization_config)
-        supported_quantization = QUANTIZATION_METHODS
+        supported_quantization = me_quant.QUANTIZATION_METHODS
+
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
@@ -635,7 +637,7 @@ class ModelConfig:
 
             # Detect which checkpoint is it
             for name in QUANTIZATION_METHODS:
-                method = get_quantization_config(name)
+                method = me_quant.get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
                 if quantization_override:
@@ -1063,9 +1065,8 @@ class ModelConfig:
 
     @property
     def is_v1_compatible(self) -> bool:
-        from vllm.model_executor.models import ModelRegistry
         architectures = getattr(self.hf_config, "architectures", [])
-        return ModelRegistry.is_v1_compatible(architectures)
+        return me_models.ModelRegistry.is_v1_compatible(architectures)
 
 
 class CacheConfig:
@@ -3402,9 +3403,7 @@ class VllmConfig:
         """Get the quantization config."""
         from vllm.platforms import current_platform
         if model_config.quantization is not None:
-            from vllm.model_executor.model_loader.weight_utils import (
-                get_quant_config)
-            quant_config = get_quant_config(model_config, load_config)
+            quant_config = me_quant.get_quant_config(model_config, load_config)
             capability_tuple = current_platform.get_device_capability()
 
             if capability_tuple is not None:

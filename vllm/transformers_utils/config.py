@@ -10,14 +10,13 @@ from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Literal, Optional,
                     Type, Union)
 
-import huggingface_hub
 from torch import nn
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils import LazyLoader, resolve_obj_by_qualname
 
 MISTRAL_CONFIG_NAME = "params.json"
 HF_TOKEN = os.getenv('HF_TOKEN', None)
@@ -26,7 +25,12 @@ logger = init_logger(__name__)
 # yapf conflicts with isort for this block
 # yapf: disable
 if TYPE_CHECKING:
+    import huggingface_hub as hfhub
+    import huggingface_hub.utils as hfhub_utils
     from transformers import GenerationConfig, PretrainedConfig
+else:
+    hfhub = LazyLoader("hfhub", globals(), "huggingface_hub")
+    hfhub_utils = LazyLoader("hfhub_utils", globals(), "huggingface_hub.utils")
 
 _CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, str] = {
     "mllama": "MllamaConfig"
@@ -119,12 +123,11 @@ def list_repo_files(
                 return modelscope_list_repo_files(repo_id,
                                                   revision=revision,
                                                   token=token)
-            from huggingface_hub import list_repo_files as hf_list_repo_files
-            return hf_list_repo_files(repo_id,
+            return hfhub.list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
                                       token=token)
-        except huggingface_hub.errors.OfflineModeIsEnabled:
+        except hfhub.errors.OfflineModeIsEnabled:
             # Don't raise in offline mode,
             # all we know is that we don't have this
             # file cached.
@@ -155,8 +158,7 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
         return (local_path / config_name).is_file()
 
     # Offline mode support: Check if config file is cached already
-    from huggingface_hub import try_to_load_from_cache
-    cached_filepath = try_to_load_from_cache(repo_id=model,
+    cached_filepath = hfhub.try_to_load_from_cache(repo_id=model,
                                              filename=config_name,
                                              revision=revision)
     if isinstance(cached_filepath, str):
@@ -347,15 +349,13 @@ def try_get_local_file(model: Union[str, Path],
     if file_path.is_file():
         return file_path
     else:
-        from huggingface_hub.utils import HFValidationError
         try:
-            from huggingface_hub import try_to_load_from_cache
-            cached_filepath = try_to_load_from_cache(repo_id=model,
+            cached_filepath = hfhub.try_to_load_from_cache(repo_id=model,
                                                      filename=file_name,
                                                      revision=revision)
             if isinstance(cached_filepath, str):
                 return Path(cached_filepath)
-        except HFValidationError:
+        except hfhub_utils.HFValidationError:
             ...
     return None
 
@@ -376,10 +376,6 @@ def get_hf_file_to_dict(file_name: str,
     - config_dict (dict): A dictionary containing
     the contents of the downloaded file.
     """
-    from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
-                                       LocalEntryNotFoundError,
-                                       RepositoryNotFoundError,
-                                       RevisionNotFoundError)
 
     file_path = try_get_local_file(model=model,
                                    file_name=file_name,
@@ -387,15 +383,17 @@ def get_hf_file_to_dict(file_name: str,
 
     if file_path is None:
         try:
-            from huggingface_hub import hf_hub_download
-            hf_hub_file = hf_hub_download(model, file_name, revision=revision)
-        except huggingface_hub.errors.OfflineModeIsEnabled:
+            hf_hub_file = hfhub.hf_hub_download(model, file_name,
+                                                revision=revision)
+        except hfhub.errors.OfflineModeIsEnabled:
             return None
-        except (RepositoryNotFoundError, RevisionNotFoundError,
-                EntryNotFoundError, LocalEntryNotFoundError) as e:
+        except (hfhub_utils.RepositoryNotFoundError,
+                hfhub_utils.RevisionNotFoundError,
+                hfhub_utils.EntryNotFoundError,
+                hfhub_utils.LocalEntryNotFoundError) as e:
             logger.debug("File or repository not found in hf_hub_download", e)
             return None
-        except HfHubHTTPError as e:
+        except hfhub_utils.HfHubHTTPError as e:
             logger.warning(
                 "Cannot connect to Hugging Face Hub. Skipping file "
                 "download for '%s':",
