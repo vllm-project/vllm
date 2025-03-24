@@ -217,7 +217,7 @@ class CacheInfo(NamedTuple):
         return self.hits / self.total
 
 
-class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
+class LRUCache(cachetools.LRUCache[_K, Optional[_V]], Generic[_K, _V]):
     """LRU Cache"""
 
     def __init__(self,
@@ -241,7 +241,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
             self._on_remove(key, value)
 
     @overload
-    def get(self, key: _K, /) -> Any | None:
+    def get(self, key: _K, /) -> Optional[_V]:
         ...
 
     @overload
@@ -312,7 +312,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
                                    "cannot remove oldest from the cache.")
         else:
             lru_key = next(iter(self.order))
-        self.pop(lru_key, None)
+        self.pop(cast(Optional[_K], lru_key), None)
 
     def _remove_old_if_needed(self) -> None:
         if len(self) > self.capacity:
@@ -334,7 +334,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
                                    "cannot remove oldest from the cache.")
         else:
             lru_key = next(iter(self.order))
-        value = self.pop(lru_key, None)
+        value = self.pop(cast(Optional[_K], lru_key), None)
         return (lru_key, value)
 
 
