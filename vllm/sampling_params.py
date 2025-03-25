@@ -235,7 +235,7 @@ class SamplingParams(
 
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
-    _bad_words_token_ids: list[list[int]] = msgspec.field(default_factory=list)
+    _bad_words_token_ids: Optional[list[list[int]]] = None
 
     @staticmethod
     def from_optional(
@@ -369,8 +369,9 @@ class SamplingParams(
             self.top_k = -1
             self.min_p = 0.0
             self._verify_greedy_sampling()
+
         # eos_token_id is added to this by the engine
-        self._all_stop_token_ids = set(self.stop_token_ids)
+        self._all_stop_token_ids.update(self.stop_token_ids)
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
@@ -464,8 +465,9 @@ class SamplingParams(
                     self.stop_token_ids = list(eos_ids)
 
     def update_from_tokenizer(self, tokenizer: AnyTokenizer) -> None:
-        if self.bad_words is None:
+        if not self.bad_words:
             return
+        self._bad_words_token_ids = []
         for bad_word in self.bad_words:
             # To prohibit words both at the beginning
             # and in the middle of text
@@ -516,7 +518,7 @@ class SamplingParams(
         return self._all_stop_token_ids
 
     @property
-    def bad_words_token_ids(self) -> list[list[int]]:
+    def bad_words_token_ids(self) -> Optional[list[list[int]]]:
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
 

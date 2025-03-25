@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pickle
+from collections.abc import Sequence
 from inspect import isclass
-from typing import Any, List, Optional, Sequence, Type, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -19,7 +20,7 @@ class MsgpackEncoder:
 
     def __init__(self):
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
-        self.aux_buffers: Optional[List[bytestr]] = None
+        self.aux_buffers: Optional[list[bytestr]] = None
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
@@ -77,7 +78,7 @@ class MsgpackDecoder:
         finally:
             self.aux_buffers = ()
 
-    def dec_hook(self, t: Type, obj: Any) -> Any:
+    def dec_hook(self, t: type, obj: Any) -> Any:
         if isclass(t):
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
