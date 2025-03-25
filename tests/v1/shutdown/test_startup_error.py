@@ -29,13 +29,16 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-def test_async_llm_startup_error(monkeypatch, model, tensor_parallel_size):
+@pytest.mark.parametrize("enable_multiprocessing", [True, False])
+def test_async_llm_startup_error(monkeypatch, model, tensor_parallel_size,
+                                 enable_multiprocessing):
 
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
+        MP_VALUE = "1" if enable_multiprocessing else "0"
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", MP_VALUE)
 
         # Monkeypatch an error in the model.
         monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
@@ -67,7 +70,6 @@ def test_llm_startup_error(monkeypatch, model, tensor_parallel_size,
         pytest.skip(reason="Not enough CUDA devices")
 
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
 
         MP_VALUE = "1" if enable_multiprocessing else "0"
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", MP_VALUE)

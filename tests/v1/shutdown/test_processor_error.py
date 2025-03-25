@@ -14,10 +14,12 @@ from vllm.v1.engine.exceptions import EngineGenerateError
 
 
 @pytest.mark.asyncio
-async def test_async_llm_processor_error(monkeypatch):
+@pytest.mark.parametrize("enable_multiprocessing", [True, False])
+async def test_async_llm_processor_error(monkeypatch, enable_multiprocessing):
 
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
+        MP_VALUE = "1" if enable_multiprocessing else "0"
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", MP_VALUE)
 
         engine_args = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B",
                                       enforce_eager=True)
