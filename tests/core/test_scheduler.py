@@ -11,6 +11,7 @@ from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SequenceGroup
+from vllm.sequence import Sequence, SequenceStatus
 
 from .utils import (append_new_token, append_new_token_seq,
                     append_new_token_seq_group, create_dummy_prompt,
@@ -971,3 +972,77 @@ def test_no_multiple_partial_prefills_with_chunked_prefill_and_prefix_caching(
     ), "A partial prefix of C (4 tokens) should be prefilled, with the "
     "remaining tokens fit into 3 token budget (4-1 from the seqA). It will "
     "then be rounded down to 2 tokens on block size, thus 6 tokens in total."
+
+def test_continuous_batching():
+    block_size = 4
+    max_num_seqs = 3
+    num_seq_groups = 4
+    max_model_len = 16
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=64,
+        max_num_seqs=max_num_seqs,
+        max_model_len=max_model_len,
+    )
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 64
+    # Can contain up to 64 * 4 = 256 tokens
+    cache_config.num_gpu_blocks = 64
+
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    all_seq_groups: List[SequenceGroup] = []
+    # Add two sequences that requires 16 token outputs
+    for i in range(num_seq_groups - 2):
+        # TODO: may need ignore_eos
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=block_size,
+                                           block_size=block_size,
+                                           min_tokens=16,
+                                           max_tokens=16)
+        all_seq_groups.append(seq_group)
+        scheduler.add_seq_group(seq_group)
+
+    # Add one sequences that require 2 token outputs
+    _, seq_group = create_dummy_prompt(str(2),
+                                       prompt_length=block_size,
+                                       min_tokens=2,
+                                       max_tokens=2)
+    all_seq_groups.append(seq_group)
+    scheduler.add_seq_group(seq_group)
+
+    # Add the last sequence, which also requires 16 tokens
+    _, seq_group = create_dummy_prompt(str(3),
+                                        prompt_length=block_size,
+                                        block_size=block_size,
+                                        min_tokens=16,
+                                        max_tokens=16)
+    all_seq_groups.append(seq_group)
+    scheduler.add_seq_group(seq_group)
+
+    # This should generate the first token for the first three requests
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert len(get_sequence_groups(out)) == 3
+    # Generate one token
+    append_new_token(out, 1)
+    # Generate one token
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    append_new_token(out, 1)
+
+    # Now the request "2" is finished
+    all_seq_groups[2].seqs[0].status = SequenceStatus.FINISHED_LENGTH_CAPPED
+    del scheduler.running[2]
+
+    # Now the next scheduling will schedule the last seq, which prepare for its prefill
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    target = set(get_sequence_groups(out))
+    expected = set([all_seq_groups[3]])
+    assert target == expected
+    append_new_token(out, 1)
+
+    # The next schedule will schedule 0, 1, 3 requests
+    # Which proves that we do not need to wait for all other sequences finished to schedule the next
+    # sequence...
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    target = set(get_sequence_groups(out))
+    expected = set([all_seq_groups[1], all_seq_groups[0], all_seq_groups[3]])
+    assert target == expected
