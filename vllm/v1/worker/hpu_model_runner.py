@@ -1725,7 +1725,6 @@ class HPUModelRunner:
                 selected_token_ranks,
             )
 
-        print(logprobs)
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             req_state = self.requests[req_id]
