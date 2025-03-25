@@ -183,6 +183,8 @@ class SamplingParams(
             decoding logits processor from these parameters. Defaults to None.
         logit_bias: If provided, the engine will construct a logits processor
             that applies these logit biases. Defaults to None.
+        return_hidden_states: If provided, hidden states of the last attention
+            block are returned in the output
         allowed_token_ids: If provided, the engine will construct a logits
             processor which only retains scores for the given token ids.
             Defaults to None.
@@ -230,6 +232,7 @@ class SamplingParams(
     # Fields used to construct logits processors
     guided_decoding: Optional[GuidedDecodingParams] = None
     logit_bias: Optional[dict[int, float]] = None
+    return_hidden_states: Optional[bool] = None
     allowed_token_ids: Optional[list[int]] = None
     extra_args: Optional[dict[str, Any]] = None
 
@@ -369,9 +372,8 @@ class SamplingParams(
             self.top_k = -1
             self.min_p = 0.0
             self._verify_greedy_sampling()
-
         # eos_token_id is added to this by the engine
-        self._all_stop_token_ids.update(self.stop_token_ids)
+        self._all_stop_token_ids = set(self.stop_token_ids)
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
