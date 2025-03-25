@@ -23,6 +23,7 @@ from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
                         zmq_socket_ctx)
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
+from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -84,7 +85,7 @@ class EngineCore:
                 "compatibility may not be maintained.",
                 vllm_config.scheduler_config.scheduler_cls)
 
-        self.scheduler = Scheduler(
+        self.scheduler: SchedulerInterface = Scheduler(
             scheduler_config=vllm_config.scheduler_config,
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
