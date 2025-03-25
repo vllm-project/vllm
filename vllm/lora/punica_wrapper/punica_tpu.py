@@ -39,7 +39,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     @property
     def embeddings_indices(self) -> torch.Tensor:
         """
-        This property provides access to the indices used for lora embeddings, 
+        This property provides access to the indices used for lora embeddings,
         specifically for VocabParallelEmbeddingWithLoRA.
         """
         return self._embeddings_indices[:]
@@ -108,7 +108,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
 
         new_y = []
-        # TODO fuse these kernels
         for slice_idx in range(len(lora_a_stacked)):
             y_s = y[slice_idx]
             lora_s = lora_a_stacked[slice_idx]
@@ -273,7 +272,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
-        if self.no_lora:
+        # Temporary fix to pipeline bubble bug
+        if self.no_lora or lora_a_stacked.sum() == 0:
             return y
 
         y_org = y
@@ -282,10 +282,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         rank = lora_b_stacked.size(-1)
         if buffer is None:
-            # We set the buffer to be float32 by default, consistent with the
-            # triton op
             buffer = torch.zeros((x.size(0), rank),
-                                 dtype=torch.float32,
+                                 dtype=y.dtype,
                                  device=x.device)
 
         buffer = bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices,
@@ -301,5 +299,4 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self.batch_size = 1
         self._lora_indices_per_batch[:self.batch_size].copy_(
             token_lora_tensor[:self.batch_size])
-        # TODO: .item() is extremely inefficient on TPU, so find a way around it
         self.no_lora = torch.all(token_lora_tensor == -1).item()
