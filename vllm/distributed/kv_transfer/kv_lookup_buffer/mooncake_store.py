@@ -8,7 +8,7 @@ from this remote lookup buffer.
 import json
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 import torch
 from safetensors.torch import load as safetensors_load
@@ -16,7 +16,7 @@ from safetensors.torch import save as safetensors_save
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
-    KVLookupBufferBase)
+    KVStoreBufferBase)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -57,7 +57,7 @@ class MooncakeStoreConfig:
         return MooncakeStoreConfig.from_file(config_file_path)
 
 
-class MooncakeStore(KVLookupBufferBase):
+class MooncakeStore(KVStoreBufferBase):
 
     def __init__(
         self,
@@ -91,28 +91,6 @@ class MooncakeStore(KVLookupBufferBase):
             logger.error(
                 "An error occurred while loading the configuration: %s", exc)
             raise
-
-    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-               key: torch.Tensor, value: torch.Tensor,
-               hidden: torch.Tensor) -> None:
-        # This interface has not been implemented since it is incompatible with
-        # the future layer-by-layer communication implementation of
-        # MooncakeStoreConnector. MooncakeStoreConnector will send the key
-        # cache, value cache, and hidden states separately and asynchronously
-        # and use a message queue to notify their transfer states for the
-        # decode instances and the proxy.
-        raise NotImplementedError
-
-    def drop_select(
-            self, input_tokens: Optional[torch.Tensor],
-            roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
-        # This interface has not been implemented since it is incompatible with
-        # the future layer-by-layer communication implementation of
-        # MooncakeStoreConnector. MooncakeStoreConnector will send the key
-        # cache, value cache, and hidden states separately and asynchronously
-        # and use a message queue to notify their transfer states for the
-        # decode instances and the proxy.
-        raise NotImplementedError
 
     def close(self):
         # MooncakeDistributedStore will automatically call the destructor, so

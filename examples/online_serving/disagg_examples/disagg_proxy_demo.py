@@ -1,4 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
+"""
+This file provides a disaggregated prefilling proxy demo to demonstrate an
+example usage of XpYd disaggregated prefilling.
+We can launch multiple vllm instances (2 for prefill and 2 for decode), and
+launch this proxy demo through:
+  python3 examples/online_serving/disagg_examples/disagg_proxy_demo.py  \
+       --model $model_name  \
+       --prefill localhost:8100 localhost:8101   \
+       --decode localhost:8200 localhost:8201   \
+       --port 8000
+
+Note: This demo will be removed once the PDController implemented in PR 15343
+(https://github.com/vllm-project/vllm/pull/15343) supports XpYd.
+"""
 import argparse
 import ipaddress
 import itertools
@@ -6,7 +20,6 @@ import json
 import logging
 import os
 import sys
-import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
@@ -23,9 +36,6 @@ logging.basicConfig(level=logging.INFO)
 
 
 class SchedulingPolicy(ABC):
-
-    def __init__(self):
-        self.lock = threading.Lock()
 
     @abstractmethod
     def schedule(self, cycler: itertools.cycle):
@@ -160,23 +170,20 @@ class Proxy:
                                     detail="Instance validation failed.")
 
             if instance_type == "prefill":
-                with self.scheduling_policy.lock:
-                    if instance not in self.prefill_instances:
-                        self.prefill_instances.append(instance)
-                        self.prefill_cycler = itertools.cycle(
-                            self.prefill_instances)
-                    else:
-                        raise HTTPException(status_code=400,
-                                            detail="Instance already exists.")
+                if instance not in self.prefill_instances:
+                    self.prefill_instances.append(instance)
+                    self.prefill_cycler = itertools.cycle(
+                        self.prefill_instances)
+                else:
+                    raise HTTPException(status_code=400,
+                                        detail="Instance already exists.")
             else:
-                with self.scheduling_policy.lock:
-                    if instance not in self.decode_instances:
-                        self.decode_instances.append(instance)
-                        self.decode_cycler = itertools.cycle(
-                            self.decode_instances)
-                    else:
-                        raise HTTPException(status_code=400,
-                                            detail="Instance already exists.")
+                if instance not in self.decode_instances:
+                    self.decode_instances.append(instance)
+                    self.decode_cycler = itertools.cycle(self.decode_instances)
+                else:
+                    raise HTTPException(status_code=400,
+                                        detail="Instance already exists.")
 
             return JSONResponse(content={
                 "message":
@@ -315,15 +322,12 @@ class Proxy:
                                      media_type="text/event-stream")
 
     def remove_instance_endpoint(self, instance_type, instance):
-        with self.scheduling_policy.lock:
-            if (instance_type == "decode"
-                    and instance in self.decode_instances):
-                self.decode_instances.remove(instance)
-                self.decode_cycler = itertools.cycle(self.decode_instances)
-            if (instance_type == "prefill"
-                    and instance in self.decode_instances):
-                self.prefill_instances.remove(instance)
-                self.prefill_cycler = itertools.cycle(self.decode_instances)
+        if (instance_type == "decode" and instance in self.decode_instances):
+            self.decode_instances.remove(instance)
+            self.decode_cycler = itertools.cycle(self.decode_instances)
+        if (instance_type == "prefill" and instance in self.decode_instances):
+            self.prefill_instances.remove(instance)
+            self.prefill_cycler = itertools.cycle(self.decode_instances)
 
 
 class RoundRobinSchedulingPolicy(SchedulingPolicy):
@@ -331,12 +335,8 @@ class RoundRobinSchedulingPolicy(SchedulingPolicy):
     def __init__(self):
         super().__init__()
 
-    def safe_next(self, cycler: itertools.cycle):
-        with self.lock:
-            return next(cycler)
-
     def schedule(self, cycler: itertools.cycle) -> str:
-        return self.safe_next(cycler)
+        return next(cycler)
 
 
 class ProxyServer:
@@ -389,12 +389,14 @@ class ProxyServer:
                     f"Invalid instance {instance}: {str(e)}") from e
 
     def verify_model_config(self, instances: list, model: str) -> None:
+        model_suffix = model.split("/")[-1]
         for instance in instances:
             try:
                 response = requests.get(f"http://{instance}/v1/models")
                 if response.status_code == 200:
                     model_cur = response.json()["data"][0]["id"]
-                    if model_cur != model:
+                    model_cur_suffix = model_cur.split("/")[-1]
+                    if model_cur_suffix != model_suffix:
                         raise ValueError(
                             f"{instance} serves a different model: "
                             f"{model_cur} != {model}")
