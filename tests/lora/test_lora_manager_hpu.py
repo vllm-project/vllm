@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
-from typing import Dict, List
 
 import habana_frameworks.torch  # noqa: F401
 import pytest
@@ -74,9 +73,9 @@ def test_from_lora_tensors(sql_lora_files, device):
             assert lora.embeddings_tensor is None
 
 
-def create_lora(lora_id: int, model: nn.Module, sub_modules: List[str],
+def create_lora(lora_id: int, model: nn.Module, sub_modules: list[str],
                 device: torch.device) -> LoRAModel:
-    loras: Dict[str, LoRALayerWeights] = {}
+    loras: dict[str, LoRALayerWeights] = {}
     for name in sub_modules:
         w = model.get_submodule(name).weight
         loras[name] = LoRALayerWeights(
@@ -98,7 +97,7 @@ def create_packed_lora(
     empty_replaced_module_name=None,
 ) -> LoRAModel:
     w = model.get_submodule(module_name).weight
-    loras: Dict[str, LoRALayerWeights] = {}
+    loras: dict[str, LoRALayerWeights] = {}
     for replaced_module_name in replaced_module_names:
         if replaced_module_name == empty_replaced_module_name:
             continue
