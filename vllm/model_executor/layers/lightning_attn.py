@@ -6,13 +6,22 @@ from einops import rearrange
 
 
 @triton.jit
-def _fwd_diag_kernel(Q, K, V, Out, S, h: tl.constexpr, n, d: tl.constexpr,
-                     e: tl.constexpr, BLOCK: tl.constexpr, NUM_BLOCK,
-                     CBLOCK: tl.constexpr):
-    # Computes attention for diagonal blocks
-    # Handles query-key pairs where query position
-    # is greater than or equal to key position
-    # (upper triangular part of causal attention)
+def _fwd_diag_kernel(
+    Q,
+    K,
+    V,
+    Out,
+    S,
+    b: tl.constexpr,
+    h: tl.constexpr,
+    n,
+    d: tl.constexpr,
+    e: tl.constexpr,
+    BLOCK: tl.constexpr,
+    NUM_BLOCK,
+    CBLOCK: tl.constexpr,
+    NUM_CBLOCK: tl.constexpr,
+):
     off = tl.program_id(0)
     off_bh = off // NUM_BLOCK
     off_block = off % NUM_BLOCK
@@ -96,6 +105,7 @@ def _fwd_kv_parallel(
     V,
     K_decay,
     KV,
+    b: tl.constexpr,
     h: tl.constexpr,
     n,
     d: tl.constexpr,
@@ -104,12 +114,10 @@ def _fwd_kv_parallel(
     NUM_BLOCK,
     D_FBLOCK: tl.constexpr,
     E_FBLOCK: tl.constexpr,
+    NUM_FBLOCK: tl.constexpr,
     CBLOCK: tl.constexpr,
     NUM_CBLOCK: tl.constexpr,
 ):
-    # Computes key-value products in parallel
-    # Prepares intermediate results for
-    # subsequent non-diagonal attention computation
     off_bh = tl.program_id(0)
     off_block = tl.program_id(1)
 
@@ -153,7 +161,7 @@ def _fwd_kv_parallel(
         k_trans = tl.load(K_trans_block_ptr - left_shift * d,
                           mask=kv_index[None, :] >= left_bound,
                           other=0.0)
-        v = tl.load(V_block_ptr - left_shift * e,
+        v = tl.load(V_block_ptr - left_shift * d,
                     mask=kv_index[:, None] >= left_bound,
                     other=0.0)
 
@@ -164,17 +172,17 @@ def _fwd_kv_parallel(
         V_block_ptr += CBLOCK * e
         k_decay_ptr += CBLOCK
 
-    tl.store(KV_block_ptr,
-             kv.to(KV_block_ptr.dtype.element_ty),
-             mask=tl.arange(0, D_FBLOCK)[:, None] < d
-             and tl.arange(0, E_FBLOCK)[None, :] < e)
+    tl.store(KV_block_ptr, kv.to(KV_block_ptr.dtype.element_ty))
 
 
 @triton.jit
 def _fwd_kv_reduce(
+    K,
+    V,
     S,
     KV,
     KV_HISTORY,
+    b: tl.constexpr,
     h: tl.constexpr,
     n,
     d: tl.constexpr,
@@ -183,9 +191,10 @@ def _fwd_kv_reduce(
     NUM_BLOCK,
     D_FBLOCK: tl.constexpr,
     E_FBLOCK: tl.constexpr,
+    NUM_FBLOCK: tl.constexpr,
+    CBLOCK: tl.constexpr,
+    NUM_CBLOCK: tl.constexpr,
 ):
-    # Reduces the parallel computed key-value products
-    # Also handles updating the history of key-value cache
     off_bh = tl.program_id(0)
     off_h = off_bh % h
 
@@ -201,17 +210,13 @@ def _fwd_kv_reduce(
     KV_HISTORY_block_ptr = (KV_HISTORY + kv_history_offset +
                             tl.arange(0, D_FBLOCK)[:, None] * e +
                             tl.arange(0, E_FBLOCK)[None, :])
-
     kv_pre = tl.load(KV_HISTORY_block_ptr).to(tl.float32)
     for i in range(NUM_BLOCK):
         block_size = min(n - i * BLOCK, BLOCK)
         block_decay = tl.exp(-s.to(tl.float32) * block_size)
 
         kv_cur = tl.load(KV_block_ptr).to(tl.float32)
-        tl.store(KV_block_ptr,
-                 kv_pre.to(KV_block_ptr.dtype.element_ty),
-                 mask=tl.arange(0, D_FBLOCK)[:, None] < d
-                 and tl.arange(0, E_FBLOCK)[None, :] < e)
+        tl.store(KV_block_ptr, kv_pre.to(KV_block_ptr.dtype.element_ty))
 
         kv_pre = block_decay * kv_pre + kv_cur
         KV_block_ptr += d * e
@@ -221,22 +226,24 @@ def _fwd_kv_reduce(
 @triton.jit
 def _fwd_none_diag_kernel(
     Q,
+    K,
+    V,
     Out,
     S,
     KV,
+    b: tl.constexpr,
     h: tl.constexpr,
     n,
     d: tl.constexpr,
     e: tl.constexpr,
     BLOCK: tl.constexpr,
     NUM_BLOCK,
+    D_FBLOCK: tl.constexpr,
     E_FBLOCK: tl.constexpr,
+    NUM_FBLOCK: tl.constexpr,
     CBLOCK: tl.constexpr,
     NUM_CBLOCK: tl.constexpr,
 ):
-    # Computes attention for non-diagonal blocks
-    # Handles query-key pairs where query position is less than key position
-    # (lower triangular part of causal attention)
     off_bh = tl.program_id(0)
     off_h = off_bh % h
 
@@ -285,19 +292,9 @@ def _fwd_none_diag_kernel(
 
 
 class _attention(torch.autograd.Function):
-    # Custom PyTorch autograd function implementing
-    # Lightning Attention forward pass
-    # Coordinates the execution of various Triton kernels
-    # to complete the full attention computation
 
     @staticmethod
     def forward(ctx, q, k, v, s, kv_history):
-        # Forward pass implementation, integrating
-        # all computation kernels
-        # 1. Compute diagonal block attention
-        # 2. Compute key-value pairs in parallel
-        # 3. Reduce key-value results and update history
-        # 4. Compute non-diagonal block attention
         q = q.contiguous()
         k = k.contiguous()
         v = v.contiguous()
@@ -322,18 +319,22 @@ class _attention(torch.autograd.Function):
         k_decay = torch.exp(-s * (BLOCK - array.reshape(1, -1)))
 
         grid = (b * h * NUM_BLOCK, NUM_CBLOCK)
-        _fwd_diag_kernel[grid](q,
-                               k,
-                               v,
-                               o,
-                               s,
-                               h,
-                               n,
-                               d,
-                               e,
-                               BLOCK=BLOCK,
-                               NUM_BLOCK=NUM_BLOCK,
-                               CBLOCK=CBLOCK)
+        _fwd_diag_kernel[grid](
+            q,
+            k,
+            v,
+            o,
+            s,
+            b,
+            h,
+            n,
+            d,
+            e,
+            BLOCK=BLOCK,
+            NUM_BLOCK=NUM_BLOCK,
+            CBLOCK=CBLOCK,
+            NUM_CBLOCK=NUM_CBLOCK,
+        )
 
         NUM_FBLOCK = 1
         D_FBLOCK = d // NUM_FBLOCK
@@ -354,6 +355,7 @@ class _attention(torch.autograd.Function):
             v,
             k_decay,
             kv,
+            b,
             h,
             n,
             d,
@@ -362,36 +364,50 @@ class _attention(torch.autograd.Function):
             NUM_BLOCK=NUM_BLOCK,
             D_FBLOCK=D_FBLOCK,
             E_FBLOCK=E_FBLOCK,
+            NUM_FBLOCK=NUM_FBLOCK,
             CBLOCK=CBLOCK,
             NUM_CBLOCK=NUM_CBLOCK,
         )
 
         grid = (b * h, NUM_FBLOCK)
-        _fwd_kv_reduce[grid](s,
-                             kv,
-                             kv_history,
-                             h,
-                             n,
-                             d,
-                             e,
-                             BLOCK=BLOCK,
-                             NUM_BLOCK=NUM_BLOCK,
-                             D_FBLOCK=D_FBLOCK,
-                             E_FBLOCK=E_FBLOCK)
-
-        grid = (b * h, NUM_BLOCK * NUM_CBLOCK)
-        _fwd_none_diag_kernel[grid](
-            q,
-            o,
+        _fwd_kv_reduce[grid](
+            k,
+            v,
             s,
             kv,
+            kv_history,
+            b,
             h,
             n,
             d,
             e,
             BLOCK=BLOCK,
             NUM_BLOCK=NUM_BLOCK,
+            D_FBLOCK=D_FBLOCK,
             E_FBLOCK=E_FBLOCK,
+            NUM_FBLOCK=NUM_FBLOCK,
+            CBLOCK=CBLOCK,
+            NUM_CBLOCK=NUM_CBLOCK,
+        )
+
+        grid = (b * h, NUM_BLOCK * NUM_CBLOCK)
+        _fwd_none_diag_kernel[grid](
+            q,
+            k,
+            v,
+            o,
+            s,
+            kv,
+            b,
+            h,
+            n,
+            d,
+            e,
+            BLOCK=BLOCK,
+            NUM_BLOCK=NUM_BLOCK,
+            D_FBLOCK=D_FBLOCK,
+            E_FBLOCK=E_FBLOCK,
+            NUM_FBLOCK=NUM_FBLOCK,
             CBLOCK=CBLOCK,
             NUM_CBLOCK=NUM_CBLOCK,
         )
@@ -406,20 +422,9 @@ lightning_attention_ = _attention.apply
 
 
 def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
-    # Main interface function for Lightning Attention
-    # Processes input in blocks, supporting large dimension inputs
-    # Parameters:
-    #   q, k, v: query, key, value tensors
-    #   ed: decay rate
-    #   block_size: size of blocks
-    #   kv_history: key-value history cache
     d = q.shape[-1]
     e = v.shape[-1]
     m = 128 if d >= 128 else 64
-
-    # Ensure d is divisible by m, otherwise raise an error
-    assert d % m == 0, f"Input dimension d={d} must be divisible by m={m}"
-
     arr = [m * i for i in range(d // m + 1)]
     if arr[-1] != d:
         arr.append(d)
@@ -448,8 +453,6 @@ def lightning_attention2_parallel(q,
                                   ed,
                                   block_size=256,
                                   kv_history=None):
-    # Parallel version of Lightning Attention interface
-    # Current implementation simply calls lightning_attention
     return lightning_attention(q, k, v, ed, block_size, kv_history)
 
 
@@ -462,6 +465,8 @@ def _linear_attn_decode_kernel(
     slope_rate,
     slot_idx,
     output_ptr,
+    B,
+    H,
     D: tl.constexpr,
     qkv_b_stride,
     qkv_h_stride,
@@ -471,32 +476,34 @@ def _linear_attn_decode_kernel(
     cache_d1_stride,
     BLOCK_SIZE: tl.constexpr,
 ):
-    # Linear attention kernel for decoding phase
-    # Handles attention computation for
-    # a single token and updates key-value cache
-    pid_d = tl.program_id(0)
 
-    slot_id = tl.load(slot_idx + pid_d)
+    pid_b = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    pid_d = tl.program_id(2)
+
+    slot_id = tl.load(slot_idx + pid_b)
 
     if slot_id == -1:
         return
 
-    ratio = tl.load(slope_rate + pid_d)
+    batch_id = pid_b
+    head_id = pid_h
+
+    ratio = tl.load(slope_rate + pid_h)
 
     qk_d_offsets = tl.arange(0, D)
     v_d_offsets = tl.arange(0, BLOCK_SIZE) + pid_d * BLOCK_SIZE
     cache_d_offsets = qk_d_offsets[:, None] * cache_d0_stride + v_d_offsets[
         None, :] * cache_d1_stride
 
-    q_offset = pid_d * qkv_b_stride + pid_d * qkv_h_stride
-    k_offset = pid_d * qkv_b_stride + pid_d * qkv_h_stride
-    v_offset = pid_d * qkv_b_stride + pid_d * qkv_h_stride
+    q_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
+    k_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
+    v_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
 
-    cache_offset = slot_id * cache_b_stride + pid_d * cache_h_stride
+    cache_offset = slot_id * cache_b_stride + head_id * cache_h_stride
 
     qk_mask = qk_d_offsets < D
     v_mask = v_d_offsets < D
-
     q = tl.load(q_ptr + q_offset + qk_d_offsets, mask=qk_mask, other=0.0)
     k = tl.load(k_ptr + k_offset + qk_d_offsets, mask=qk_mask, other=0.0)
     v = tl.load(v_ptr + v_offset + v_d_offsets, mask=v_mask, other=0.0)
@@ -525,8 +532,7 @@ def linear_decode_forward_triton(
     slot_idx: torch.Tensor,
     BLOCK_SIZE: int = 32,
 ) -> torch.Tensor:
-    # Linear attention decoding forward pass implemented with Triton
-    # Used for autoregressive generation during model inference
+
     B, H, _, D = q.shape
     assert k.shape == (B, H, 1, D)
     assert v.shape == (B, H, 1, D)
@@ -551,6 +557,8 @@ def linear_decode_forward_triton(
         slope_rate,
         slot_idx,
         output,
+        B,
+        H,
         D,
         qkv_b_stride,
         qkv_h_stride,
