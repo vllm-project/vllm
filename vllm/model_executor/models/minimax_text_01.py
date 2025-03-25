@@ -41,7 +41,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid
+from .interfaces import HasInnerState, IsHybrid, SupportsV0Only
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
@@ -409,7 +409,7 @@ class MiniMaxText01LinearAttention(nn.Module):
         slopes = torch.tensor(get_slopes(n_attention_heads),
                               dtype=torch.float32).reshape(
                                   n_attention_heads, 1, 1)
-        return slopes  # [h, 1, 1]
+        return slopes
 
     def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor,
                                attn_metadata):
@@ -451,12 +451,8 @@ class MiniMaxText01LinearAttention(nn.Module):
                                               slot_id, 32)
         return hidden
 
-    def forward(
-            self,
-            hidden_states: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: MinimaxCacheParams,  # layer of tensor
-            **kwargs) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
+                kv_caches: MinimaxCacheParams, **kwargs) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         qkv32 = qkv.to(torch.float32)
         qkvact = torch.nn.functional.silu(qkv32)
@@ -469,12 +465,10 @@ class MiniMaxText01LinearAttention(nn.Module):
 
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
         if not decode_only:
-            # prefill and mix
             hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
                                                  state_indices_tensor,
                                                  attn_metadata)
         else:
-            # decode only
             hidden = self._decode_infer(q, k, v, kv_cache,
                                         state_indices_tensor, attn_metadata)
 
@@ -513,12 +507,8 @@ class MiniMaxText01Attention(nn.Module):
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
             assert self.total_num_kv_heads % tp_size == 0
         else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim
@@ -575,8 +565,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        expert_num: int = 1,  # moe or mlp
-        layer_id: int = None,  # current layer index
+        expert_num: int = 1,
+        layer_id: int = None,
         linear_layer_id: Optional[int] = None,
         prefix: str = "decoder",
     ) -> None:
@@ -688,17 +678,14 @@ class MiniMaxText01DecoderLayer(nn.Module):
                                            'softmax')
         return
 
-    def forward(
-            self,
-            hidden_states: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: Union[List[Dict], Optional[
-                torch.
-                Tensor]],  # linear-attn / flash-attn(possible with warmup)
-            attn_metadata: AttentionMetadata,
-            residual: Optional[torch.Tensor],
-            is_warmup: bool = False,
-            **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self,
+                hidden_states: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: Union[List[Dict], Optional[torch.Tensor]],
+                attn_metadata: AttentionMetadata,
+                residual: Optional[torch.Tensor],
+                is_warmup: bool = False,
+                **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
 
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
@@ -726,18 +713,14 @@ class MiniMaxText01DecoderLayer(nn.Module):
             moe_hidden_states = self.block_sparse_moe(
                 copy.deepcopy(layernorm_output))
             if self.shared_moe:
-
-                # shared-moe part use all fp32 compute
                 before_moe_dtype = layernorm_output.dtype
                 moe_hidden_fp32 = moe_hidden_states.to(torch.float32)
                 output_mlp = self.shared_mlp(layernorm_output).to(
                     torch.float32)
 
-                # actually gate for shared moe
                 coef, _ = self.coefficient(layernorm_output.to(torch.float32))
 
                 if self.shared_moe_mode == 'softmax':
-                    # TODO: require test.
                     coef = torch.nn.functional.softmax(coef, dim=-1)
                     hidden_states = moe_hidden_fp32 * (
                         1 - coef) + output_mlp * coef
@@ -746,7 +729,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
                     hidden_states = moe_hidden_fp32 * (
                         1 - coef) + output_mlp * coef
 
-                # dtype cast back
                 hidden_states = hidden_states.to(before_moe_dtype)
             else:
                 hidden_states = moe_hidden_states
@@ -786,7 +768,6 @@ class MiniMaxText01Model(nn.Module):
             config, "attn_type_list", False) or getattr(
                 config, "decoder_attention_types", False)
         if not self.decoder_attention_types:
-            # by default, use self-attn
             self.decoder_attention_types = [1] * config.num_hidden_layers
         self.num_layers = config.num_hidden_layers
 
@@ -970,7 +951,8 @@ class MiniMaxText01Model(nn.Module):
         return hidden_states
 
 
-class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
+class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
+                               SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
 
@@ -1200,7 +1182,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                                    self) -> None:
 
             flash_mha_params_mapping = [
-                # (param_name, weight_name, shard_id)
                 ("qkv_proj", "q_proj", "q"),
                 ("qkv_proj", "k_proj", "k"),
                 ("qkv_proj", "v_proj", "v"),

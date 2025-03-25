@@ -7,6 +7,7 @@ import torch
 
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
+from vllm.model_executor.models.constant_size_cache import ConstantSizeCache
 
 
 @dataclass
@@ -21,7 +22,7 @@ class MambaCacheParams:
                                 self.state_indices_tensor)
 
 
-class MambaCacheManager:
+class MambaCacheManager(ConstantSizeCache):
 
     def __init__(self, vllm_config: VllmConfig, dtype: torch.dtype,
                  num_mamba_layers: int, conv_state_shape: Tuple[int, int],
@@ -32,6 +33,9 @@ class MambaCacheManager:
         if not vllm_config.model_config.enforce_eager:
             max_batch_size = vllm_config.pad_for_cudagraph(max_batch_size)
 
+        # Initialize parent class
+        super().__init__(max_batch_size)
+
         conv_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
                                  conv_state_shape,
                                  dtype=dtype,
@@ -41,61 +45,32 @@ class MambaCacheManager:
                                      dtype=dtype,
                                      device="cuda")
 
-        self.mamba_cache = (conv_state, temporal_state)
+        self._mamba_cache = (conv_state, temporal_state)
 
-        # Maps between the request id and a dict that maps between the seq_id
-        # and its index inside the self.mamba_cache
-        self.mamba_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
-        self.free_cache_indices = list(range(max_batch_size))
+    @property
+    def cache(self):
+        return self._mamba_cache
+
+    def _copy_cache(self, from_index: int, to_index: int):
+        for cache_t in self._mamba_cache:
+            cache_t[:, to_index].copy_(cache_t[:, from_index],
+                                       non_blocking=True)
 
     def current_run_tensors(self, **kwargs) -> MambaCacheParams:
         """
         Return the tensors for the current run's conv and ssm state.
         """
-        if "seqlen_agnostic_capture_inputs" not in kwargs:
-            # We get here only on Prefill/Eager mode runs
-            request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
-            finished_requests_ids = kwargs["finished_requests_ids"]
+        cache_tensors, state_indices_tensor = super().current_run_tensors(
+            input_ids=None, attn_metadata=None, **kwargs)
 
-            self._release_finished_requests(finished_requests_ids)
-            state_indices = self._prepare_current_run_mamba_cache(
-                request_ids_to_seq_ids, finished_requests_ids)
-
-            state_indices_tensor = torch.as_tensor(state_indices,
-                                                   dtype=torch.int32,
-                                                   device="cuda")
-            mamba_cache_tensors = self.mamba_cache
-
-        else:
-            # CUDA graph capturing runs
-            (mamba_cache_tensors,
-             state_indices_tensor) = kwargs["seqlen_agnostic_capture_inputs"]
-
-        return MambaCacheParams(mamba_cache_tensors[0], mamba_cache_tensors[1],
+        return MambaCacheParams(cache_tensors[0], cache_tensors[1],
                                 state_indices_tensor)
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         """
         Copy the relevant state_indices into the CUDA graph input buffer 
         """
-        assert all(
-            key in kwargs
-            for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
-        finished_requests_ids = kwargs["finished_requests_ids"]
-        request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
-        assert "seqlen_agnostic_capture_inputs" in input_buffers
-        _, input_state_indices_buffer = input_buffers[
-            "seqlen_agnostic_capture_inputs"]
-
-        self._release_finished_requests(finished_requests_ids)
-        state_indices = self._prepare_current_run_mamba_cache(
-            request_ids_to_seq_ids, finished_requests_ids)
-        cuda_graph_pad_len = input_state_indices_buffer.shape[0] - len(
-            state_indices)
-        state_indices.extend([PAD_SLOT_ID] * cuda_graph_pad_len)
-
-        input_state_indices_buffer.copy_(
-            torch.as_tensor(state_indices, dtype=torch.int32, device="cuda"))
+        super().copy_inputs_before_cuda_graphs(input_buffers, **kwargs)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         """
@@ -106,13 +81,7 @@ class MambaCacheManager:
         state_indices_tensor = torch.as_tensor([PAD_SLOT_ID] * batch_size,
                                                dtype=torch.int32,
                                                device="cuda")
-        return (self.mamba_cache, state_indices_tensor)
-
-    def _copy_mamba_cache(self, from_index: int, to_index: int):
-        assert len(self.mamba_cache) > 0
-        for cache_t in self.mamba_cache:
-            cache_t[:, to_index].copy_(cache_t[:, from_index],
-                                       non_blocking=True)
+        return (self._mamba_cache, state_indices_tensor)
 
     def _assign_seq_id_to_cache_index(self, cur_rid: str, seq_id: int,
                                       finished_requests_ids) -> int:
@@ -137,8 +106,8 @@ class MambaCacheManager:
             index_exists = next(iter(seq_ids2indices.values()))
             # case of decoding n>1, copy prefill cache to decoding indices
             destination_index = self.free_cache_indices.pop()
-            self._copy_mamba_cache(from_index=index_exists,
-                                   to_index=destination_index)
+            self._copy_cache(from_index=index_exists,
+                             to_index=destination_index)
             self.mamba_cache_indices_mapping[cur_rid][
                 seq_id] = destination_index
             return destination_index
