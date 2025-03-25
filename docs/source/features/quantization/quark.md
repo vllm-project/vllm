@@ -2,14 +2,17 @@
 
 # QUARK
 
-Quantization can effectively reduce memory and bandwidth usage, accelerate computation and improve throughput while with minimal accuracy loss.  
-vLLM can leverage [Quark](https://quark.docs.amd.com/latest/), the flexible and powerful quantization toolkit, to produce performant quantized models to run on GPUs of AMD or Nvidia.   
-Quark has specialized support for quantizing large language models with weight, activation and kv-cache quantization  
-and along with the cutting-edge quantization algorithms like SmoothQuant, AWQ, and GPTQ.
+Quantization can effectively reduce memory and bandwidth usage, accelerate computation and improve
+throughput while with minimal accuracy loss. vLLM support quantization and can leverage [Quark](https://quark.docs.amd.com/latest/),
+the flexible and powerful quantization toolkit, to produce performant quantized models to run on GPUs
+of AMD or Nvidia. Quark has specialized support for quantizing large language models with weight,
+activation and kv-cache quantization and along with the cutting-edge quantization algorithms like
+SmoothQuant, AWQ, and GPTQ.
 
 ## Quark Installation
 
-Before quantizing model, you need to install Quark. Please refer to [Quark installation guide](https://quark.docs.amd.com/latest/install.html).
+Before quantizing model, you need to install Quark. Please refer to
+[Quark installation guide](https://quark.docs.amd.com/latest/install.html).
 
 ## Quantization Process
 
@@ -24,7 +27,8 @@ The Quark quantization process can be listed for 5 steps as below:
 
 ### 1. Loading the Model
 
-Quark use [Transformers](https://huggingface.co/docs/transformers/en/index) to fetch model and tokenizer.
+Quark use [Transformers](https://huggingface.co/docs/transformers/en/index)
+to fetch model and tokenizer.
 
 ```python
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -39,10 +43,11 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
 ### 2. Preparing Calibration Dataloader
 
-Calibration is a crucial step in post-training quantization.  
-Usually, you need calibration to ensures that the reduced-precision representation (e.g., INT8 or FP8) maintains model accuracy.  
-Quark use the [PyTorch Dataloader](https://pytorch.org/tutorials/beginner/basics/data_tutorial.html) to load calibration data.
-For more details, please refer to [Adding Calibration Datasets](https://quark.docs.amd.com/latest/pytorch/calibration_datasets.html).
+Calibration is a crucial step in post-training quantization.
+Usually, you need calibration to ensures that the reduced-precisionrepresentation (e.g., INT8 or FP8)
+maintains model accuracy. Quark use the [PyTorch Dataloader](https://pytorch.org/tutorials/beginner/basics/data_tutorial.html)
+to load calibration data. For more details, please refer to
+[Adding Calibration Datasets](https://quark.docs.amd.com/latest/pytorch/calibration_datasets.html).
 
 ```python
 from datasets import load_dataset
@@ -60,8 +65,10 @@ calib_dataloader = DataLoader(tokenized_outputs['input_ids'],
 
 ### 3. Set the Quantization Configuration
 
-We need to set the quantization config, you can check [config user guide](https://quark.docs.amd.com/latest/pytorch/user_guide_config_description.html) for further details.  
-Here we use FP8 per-tensor quantization on weight, activate, kv-cache and the quantization algorithm is autosmoothquant.
+We need to set the quantization config, you can check
+[quark config user guide](https://quark.docs.amd.com/latest/pytorch/user_guide_config_description.html)
+for further details. Here we use FP8 per-tensor quantization on weight, activate,
+kv-cache and the quantization algorithm is autosmoothquant.
 
 ```python
 from quark.torch.quantization import (Config, QuantizationConfig,
@@ -94,9 +101,10 @@ quant_config = Config(
 
 ### 4. Quantize the Model and Export
 
-Then we can apply the quantization. After quantizing, we need freeze the quantized model first before exporting.  
-Here we export model with format of HuggingFace `safetensors`.
-You can refer to [HuggingFace format exporting](https://quark.docs.amd.com/latest/pytorch/export/quark_export_hf.html) for more details. 
+Then we can apply the quantization. After quantizing, we need freeze the
+quantized model first before exporting. Here we export model with format of
+HuggingFace `safetensors`. You can refer to [HuggingFace format exporting](https://quark.docs.amd.com/latest/pytorch/export/quark_export_hf.html)
+for more details.
 
 ```python
 from quark.torch import ModelQuantizer, ModelExporter
@@ -137,9 +145,10 @@ $ lm_eval --model vllm \
   --batch_size 'auto'
 ```
 
-## Use Quark Example Quantization Script
-In addition to the example of Python API above, Quark also has [example quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html) to quantize language models in a more convenient way.  
-So, the example above can be:
+## Using Quark Example Quantization Script
+In addition to the example of Python API above, Quark also has
+[example quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html)
+to quantize language models in a more convenient way. So, the example above can be:
 ```console
 python3 quantize_quark.py --model_dir /path/to/Llama-2-7b-chat-hf  \
                           --output_dir /path/to/output \
@@ -151,10 +160,10 @@ python3 quantize_quark.py --model_dir /path/to/Llama-2-7b-chat-hf  \
                           --model_export hf_format \
                           --skip_evaluation
 ```
-Also, you can use this script to quantize different models with different quantization schemes and different optimization algorithms.  
-Here is an example of Llama-3.1-8B-Instruct quantization, weight is int8 per-channel, activation is int8 per-tensor,  
-kv-cache is int8 per-tensor and use advanced algorithms
-combination of rotation and smoothquant.  
+Also, you can use this script to quantize different models with different quantization
+schemes and different optimization algorithms. Here is an example of Llama-3.1-8B-Instruct quantization,
+weight is int8 per-channel, activation is int8 per-tensor, kv-cache is int8
+per-tensor and use advanced algorithms combination of rotation and smoothquant.
 It will run gsm8k and wikitext evaluation tasks directly to evaluate the quantized model.
 
 ```console
