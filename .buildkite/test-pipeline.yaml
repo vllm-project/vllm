@@ -627,19 +627,19 @@ steps:
 ##### A100 test #####
 
 - label: Distributed Tests (A100) # optional
+  working_dir: "/vllm-workspace/tests"
   gpu: a100
   optional: true
   num_gpus: 4
   source_file_dependencies:
   - vllm/
   commands:
-  # Issues parsing the buildkite with this enabled
-  # - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - pytest -v -s -x lora/test_mixtral.py
+  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
 
 - label: LM Eval Large Models # optional
   gpu: a100
