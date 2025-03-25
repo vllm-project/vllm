@@ -4,6 +4,7 @@ import ast
 import copy
 import enum
 import hashlib
+import importlib.metadata
 import json
 import sys
 import warnings
@@ -17,6 +18,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
                     Optional, Protocol, Union)
 
 import torch
+from packaging.version import Version
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
@@ -51,8 +53,6 @@ if TYPE_CHECKING:
         BaseTokenizerGroup)
 else:
     QuantizationConfig = None
-
-from packaging.version import Version
 
 logger = init_logger(__name__)
 
@@ -1023,6 +1023,13 @@ class ModelConfig:
                     "max_new_tokens")
         else:
             diff_sampling_param = {}
+
+        if diff_sampling_param:
+            logger.warning_once(
+                "Default sampling parameters have been overridden by the "
+                "model's Hugging Face generation config recommended from the "
+                "model creator. If this is not intended, please relaunch "
+                "vLLM instance with `--generation-config vllm`.")
         return diff_sampling_param
 
     @property
@@ -1150,10 +1157,6 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "V1 does not yet support fp8 KV cache. "
-                    "Set VLLM_USE_V1=0 to enable fp8 kv cache.")
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
@@ -2012,18 +2015,30 @@ class SpeculativeConfig:
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
             self.method = "ngram"
-            if self.prompt_lookup_min is None:
-                self.prompt_lookup_min = 1
-            if self.prompt_lookup_max is None or self.prompt_lookup_max < 1:
-                raise ValueError("prompt_lookup_max="
-                                 f"{self.prompt_lookup_max} must be > 0")
+            # Set default values if not provided
+            if (self.prompt_lookup_min is None
+                    and self.prompt_lookup_max is None):
+                # TODO(woosuk): Tune these values. They are arbitrarily chosen.
+                self.prompt_lookup_min = 5
+                self.prompt_lookup_max = 5
+            elif self.prompt_lookup_min is None:
+                assert self.prompt_lookup_max is not None
+                self.prompt_lookup_min = self.prompt_lookup_max
+            elif self.prompt_lookup_max is None:
+                assert self.prompt_lookup_min is not None
+                self.prompt_lookup_max = self.prompt_lookup_min
+
+            # Validate values
             if self.prompt_lookup_min < 1:
-                raise ValueError("prompt_lookup_min="
-                                 f"{self.prompt_lookup_min} must be > 0")
+                raise ValueError(
+                    f"prompt_lookup_min={self.prompt_lookup_min} must be > 0")
+            if self.prompt_lookup_max < 1:
+                raise ValueError(
+                    f"prompt_lookup_max={self.prompt_lookup_max} must be > 0")
             if self.prompt_lookup_min > self.prompt_lookup_max:
-                raise ValueError(f"prompt_lookup_min={self.prompt_lookup_min} "
-                                 "cannot be larger than prompt_lookup_max="
-                                 f"{self.prompt_lookup_max}")
+                raise ValueError(
+                    f"prompt_lookup_min={self.prompt_lookup_min} must "
+                    f"be <= prompt_lookup_max={self.prompt_lookup_max}")
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
@@ -3073,8 +3088,7 @@ class CompilationConfig(BaseModel):
             compilation.
             """
             dict_ = self.model_dump(include={"enable_fusion", "enable_noop"})
-            encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
-            return hashlib.sha256(encoded).digest()
+            return InductorPass.hash_dict(dict_)
 
         def model_post_init(self, __context: Any) -> None:
             if not self.enable_noop and self.enable_fusion:
@@ -3163,7 +3177,7 @@ class CompilationConfig(BaseModel):
         #    and it is not yet a priority. RFC here:
         #    https://github.com/vllm-project/vllm/issues/14703
 
-        if Version(torch.__version__) >= Version("2.6"):
+        if Version(importlib.metadata.version('torch')) >= Version("2.6"):
             KEY = 'enable_auto_functionalized_v2'
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False
