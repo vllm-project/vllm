@@ -375,25 +375,25 @@ torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
 int64_t ggml_moe_get_block_size(int64_t type) {
   switch (type) {
     case 2:
-      return MMQ_X_Q4_0;
+      return MOE_X_Q4_0;
     case 3:
-      return MMQ_X_Q4_1;
+      return MOE_X_Q4_1;
     case 6:
-      return MMQ_X_Q5_0;
+      return MOE_X_Q5_0;
     case 7:
-      return MMQ_X_Q5_1;
+      return MOE_X_Q5_1;
     case 8:
-      return MMQ_X_Q8_0;
+      return MOE_X_Q8_0;
     case 10:
-      return MMQ_X_Q2_K;
+      return MOE_X_Q2_K;
     case 11:
-      return MMQ_X_Q3_K;
+      return MOE_X_Q3_K;
     case 12:
-      return MMQ_X_Q4_K;
+      return MOE_X_Q4_K;
     case 13:
-      return MMQ_X_Q5_K;
+      return MOE_X_Q5_K;
     case 14:
-      return MMQ_X_Q6_K;
+      return MOE_X_Q6_K;
   }
   return 0;
 }
