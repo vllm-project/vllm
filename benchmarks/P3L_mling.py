@@ -63,6 +63,7 @@ import datetime
 import json
 import math
 import os
+import tempfile
 
 import pandas
 from huggingface_hub import hf_hub_download
@@ -75,15 +76,14 @@ logger = init_logger(__name__)
 
 
 def get_wikitext2_text(tokenizer):
-    hf_hub_download(repo_id='alexei-v-ivanov-amd/wiki',
-                    repo_type="dataset",
-                    filename='wiki.test.raw',
-                    local_dir='./')
-    with open('./wiki.test.raw') as f:
-        test_text = "\n".join(line.strip() for line in f)
-        test_enc = tokenizer(test_text)
-
-    os.remove('./wiki.test.raw')
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        hf_hub_download(repo_id='alexei-v-ivanov-amd/wiki',
+                        repo_type="dataset",
+                        filename='wiki.test.raw',
+                        local_dir=tmpdirname)
+        with open(os.path.join(tmpdirname, 'wiki.test.raw')) as f:
+            test_text = "\n".join(line.strip() for line in f)
+            test_enc = tokenizer(test_text)
 
     return test_enc, test_text
 
