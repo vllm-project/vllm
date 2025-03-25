@@ -389,6 +389,8 @@ class MambaMixer2(CustomOp):
         hidden_states: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
+        chunk_indices: Optional[torch.Tensor] = None,
+        chunk_offsets: Optional[torch.Tensor] = None,
     ):
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
@@ -488,6 +490,8 @@ class MambaMixer2(CustomOp):
                 z=None,
                 dt_bias=self.dt_bias,
                 seq_idx=sequence_idx,
+                chunk_indices=chunk_indices,
+                chunk_offsets=chunk_offsets,
                 cu_seqlens=attn_metadata.query_start_loc,
                 initial_states=initial_states,
                 return_varlen_states=True,

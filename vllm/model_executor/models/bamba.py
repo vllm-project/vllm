@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inference-only Bamba model."""
 # Added by the IBM Team, 2024
+import math
 from typing import Iterable, Optional, Set, Tuple
 
 import torch
@@ -109,6 +110,8 @@ class BambaMixerDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
+        chunk_indices: Optional[torch.Tensor] = None,
+        chunk_offsets: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         if residual is None:
@@ -119,7 +122,7 @@ class BambaMixerDecoderLayer(nn.Module):
                 hidden_states, residual)
 
         hidden_states = self.mamba(hidden_states, mamba_cache_params,
-                                   sequence_idx)
+                                   sequence_idx, chunk_indices, chunk_offsets)
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(
             hidden_states, residual)
@@ -254,12 +257,46 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
+def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
+
+    # convert seq_idx to chunk indices and offsets
+    # - derive the cu_seqlens
+    _, cu_seqlens = torch.where(seq_idx.diff())
+    cu_seqlens += 1
+
+    # outputs will have length expansion of chunks that do not divide
+    # chunk_size
+    N = math.ceil(seq_idx.shape[-1] / chunk_size) + (cu_seqlens % chunk_size
+                                                     > 0).sum()
+    chunk_indices = torch.arange(N, dtype=torch.int, device=seq_idx.device)
+    chunk_offsets = torch.zeros((N, ), dtype=torch.int, device=seq_idx.device)
+
+    cu_seqlens = cu_seqlens.tolist() + [seq_idx.shape[-1]]
+    p = 0  # num of insertions
+    for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
+
+        # if does not divide chunk_size, then there is one chunk insertion
+        p += (s % chunk_size > 0)
+
+        # get the dimensions
+        # - the + 1 for _e is to shift the boundary by one chunk
+        # - this shifting is not needed if chunk_size divides e
+        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
+                                                             > 0)
+
+        # adjust inidces and offsets
+        chunk_indices[_s:_e] -= p
+        chunk_offsets[_s] = s % chunk_size
+
+    return chunk_indices, chunk_offsets
+
+
 class BambaModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config: BambaConfig = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -313,6 +350,7 @@ class BambaModel(nn.Module):
         # proper continuous batching computation including
         # chunked prefill
         seq_idx = None
+        chunk_indices, chunk_offsets = None, None
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata.num_prefills > 0:
             seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
@@ -323,6 +361,9 @@ class BambaModel(nn.Module):
                     )):
                 seq_idx[srt:end] = i
             seq_idx.unsqueeze_(0)
+            # Compute mamba2 metadata tensors that are reused across layers
+            chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
+                seq_idx, self.config.mamba_chunk_size)
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -337,6 +378,7 @@ class BambaModel(nn.Module):
 
         residual = None
         num_attn = 0
+        extra_args = {}
         for i in range(len(self.layers)):
             layer = self.layers[i]
             if isinstance(layer, BambaAttentionDecoderLayer):
@@ -346,13 +388,19 @@ class BambaModel(nn.Module):
             if isinstance(layer, BambaMixerDecoderLayer):
                 layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
                     i - num_attn)
+                extra_args = {
+                    'chunk_indices': chunk_indices,
+                    'chunk_offsets': chunk_offsets,
+                }
 
+            # print(f"{len(extra_args)=}")
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
                 mamba_cache_params=layer_mamba_cache_params,
                 sequence_idx=seq_idx,
+                **extra_args,
             )
 
         if not get_pp_group().is_last_rank:
