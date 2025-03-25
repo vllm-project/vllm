@@ -208,8 +208,7 @@ from vllm.utils import cdiv, round_down
 from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 try:
-    from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                      get_scheduler_metadata)
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
@@ -478,7 +477,6 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
         seq_lens = seq_lens_cpu.to(device, non_blocking=True)
-        max_seq_len = seq_lens_cpu.max().item()
 
         prefill_metadata = None
         if self._num_prefills > 0:
@@ -491,23 +489,6 @@ class MLACommonMetadataBuilder(Generic[M]):
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = query_start_loc[
                 reqs_start:] - query_start_loc[reqs_start]
-
-            scheduler_metadata = None
-            if self.aot_schedule:
-                scheduler_metadata = get_scheduler_metadata(
-                    batch_size=self._num_prefills,
-                    max_seqlen_q=max_query_len,
-                    max_seqlen_k=max_seq_len,
-                    cache_seqlens=seq_lens,
-                    num_heads_q=self.num_heads,
-                    num_heads_kv=self.num_heads,
-                    headdim=self.mla_dims.qk_nope_head_dim +
-                    self.mla_dims.qk_rope_head_dim,
-                    headdim_v=self.mla_dims.v_head_dim,
-                    page_size=self.page_size,
-                    cu_seqlens_q=prefill_query_start_loc,
-                    causal=True,
-                )
 
             chunked_context_metadata = None
             if self.chunked_prefill_enabled and self._num_prefills > 0 \
@@ -545,7 +526,6 @@ class MLACommonMetadataBuilder(Generic[M]):
                 chunk_ends = torch.min(context_lens_cpu.unsqueeze(0),
                                        chunk_starts + max_context_chunk)
                 chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
-                max_chunk_seq_lens = chunk_seq_lens.max(dim=1)
 
                 cu_seq_lens_cpu = torch.zeros(num_chunks,
                                               self._num_prefills + 1,
@@ -556,26 +536,6 @@ class MLACommonMetadataBuilder(Generic[M]):
                              out=cu_seq_lens_cpu[:, 1:],
                              dtype=torch.int32)
 
-                scheduler_metadatas = None
-                if self.aot_schedule:
-                    scheduler_metadatas = []
-                    for i in range(num_chunks):
-                        scheduler_metadatas.append(
-                            get_scheduler_metadata(
-                                batch_size=self._num_prefills,
-                                max_seqlen_q=max_query_len,
-                                max_seqlen_k=max_chunk_seq_lens[i],
-                                cache_seqlens=chunk_seq_lens[i],
-                                num_heads_q=self.num_heads,
-                                num_heads_kv=self.num_heads,
-                                headdim=self.mla_dims.qk_nope_head_dim +
-                                self.mla_dims.qk_rope_head_dim,
-                                headdim_v=self.mla_dims.v_head_dim,
-                                page_size=self.page_size,
-                                cu_seqlens_q=prefill_query_start_loc,
-                                causal=False,
-                            ))
-
                 chunked_context_metadata = \
                     MLACommonPrefillMetadata.ChunkedContextMetadata(
                     cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
@@ -583,7 +543,6 @@ class MLACommonMetadataBuilder(Generic[M]):
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     workspace=self.chunked_prefill_workspace,
-                    scheduler_metadatas=scheduler_metadatas,
                 )
 
                 assert max(chunked_context_metadata.max_seq_lens) <= \
@@ -595,7 +554,6 @@ class MLACommonMetadataBuilder(Generic[M]):
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
-                scheduler_metadata=scheduler_metadata,
             )
 
         decode_metadata = None
@@ -710,43 +668,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             maybe_padded_v = torch.nn.functional.pad(
                 v, [0, q.shape[-1] - v.shape[-1]], value=0)
 
-        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN:
-            attn_out = self.triton_fa_func(
-                q,
-                k,
-                maybe_padded_v,
-                sm_scale=softmax_scale,
-                **kwargs,
-            )
-        elif is_vllm_fa:
-            attn_out = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=maybe_padded_v,
-                return_softmax_lse=return_softmax_lse,
-                softmax_scale=softmax_scale,
-                **kwargs,
-            )
-        else:
-            # Use return_attn_probs instead of return_softmax_lse for RoCM
-            attn_out = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=maybe_padded_v,
-                return_attn_probs=return_softmax_lse,
-                softmax_scale=softmax_scale,
-                **kwargs,
-            )
+        attn_out = self.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=maybe_padded_v,
+            return_softmax_lse=return_softmax_lse,
+            softmax_scale=softmax_scale,
+            **kwargs,
+        )
 
-        # Unpack the output if there is multiple results,
-        # triton always returns (output, softmax_lse),
-        # vllm_flash_attn returns (output, softmax_lse) when
-        #  `return_softmax_lse = True`
-        # flash_attn (RoCM) returns (output, softmax_lse, ...) when
-        #  `return_attn_probs = True`
-        rest = None
+        # Unpack the output if there is multiple results
+        lse = None
         if isinstance(attn_out, tuple):
-            attn_out, *rest = attn_out
+            attn_out, lse = attn_out[0], attn_out[1]
 
         # unpad if necessary
         if self._pad_v:
@@ -755,8 +689,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.
         if return_softmax_lse:
-            assert rest is not None
-            return attn_out, rest[0]
+            return attn_out, lse
         return attn_out
 
     def _v_up_proj_and_o_proj(self, x):
