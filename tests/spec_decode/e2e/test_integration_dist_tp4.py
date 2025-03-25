@@ -3,6 +3,8 @@
 tensor parallelism.
 """
 
+import json
+
 import openai
 import pytest
 import torch
@@ -33,7 +35,7 @@ SPEC_MODEL = "JackFram/llama-68m"
         #TODO(wooyeon): add spec_draft_dp=2 case
         [
             "--speculative_config",
-            str({
+            json.dumps({
                 "model": f"{SPEC_MODEL}",
                 "num_speculative_tokens": 5,
                 "draft_tensor_parallel_size": 1,
@@ -80,7 +82,7 @@ def test_draft_model_tp_lt_target_model_tp4(common_llm_kwargs,
             # Artificially limit the draft model max model len; this forces vLLM
             # to skip speculation once the sequences grow beyond 32-k tokens.
             "--speculative_config",
-            str({
+            json.dumps({
                 "model": f"{SPEC_MODEL}",
                 "num_speculative_tokens": 5,
                 "max_model_len": 32,
