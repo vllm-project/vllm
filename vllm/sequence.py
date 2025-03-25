@@ -210,6 +210,8 @@ class SequenceData(msgspec.Struct,
     def from_seqs(
         prompt_token_ids: GenericSequence[int],
         output_token_ids: Optional[GenericSequence[int]] = None,
+        *,
+        prompt_embeds: Optional[torch.Tensor] = None,
     ) -> "SequenceData":
         """
         Construct a :class:`SequenceData` instance from prompt and output
@@ -219,13 +221,15 @@ class SequenceData(msgspec.Struct,
                                      prompt_token_ids)
 
         if output_token_ids is None:
-            return SequenceData(prompt_token_ids_arr)
+            return SequenceData(prompt_token_ids_arr,
+                                _prompt_embeds=prompt_embeds)
 
         output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                      output_token_ids)
 
         return SequenceData(prompt_token_ids_arr,
-                            _output_token_ids=output_token_ids_arr)
+                            _output_token_ids=output_token_ids_arr,
+                            _prompt_embeds=prompt_embeds)
 
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"
@@ -305,7 +309,8 @@ class SequenceData(msgspec.Struct,
         self._cumulative_logprob += logprob
 
     def get_len(self) -> int:
-        return len(self._output_token_ids) + len(self._prompt_token_ids)
+        return len(self._output_token_ids) + len(self._prompt_token_ids) + (
+            len(self._prompt_embeds) if self._prompt_embeds is not None else 0)
 
     def get_prompt_len(self) -> int:
         return len(self._prompt_token_ids)
