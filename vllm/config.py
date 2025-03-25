@@ -2800,12 +2800,17 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        valid_guided_backends = [
-            'outlines', 'lm-format-enforcer', 'xgrammar', 'guidance'
+        v0_valid_guided_backends = [
+            'outlines', 'lm-format-enforcer', 'xgrammar'
         ]
+        v1_valid_guided_backends = ['xgrammar', 'guidance', 'auto']
 
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
+        if envs.VLLM_USE_V1:
+            valid_guided_backends = v1_valid_guided_backends
+        else:
+            valid_guided_backends = v0_valid_guided_backends
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
                              f" must be one of {valid_guided_backends}")
