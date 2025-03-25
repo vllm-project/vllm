@@ -1223,6 +1223,8 @@ class LLM:
         :param tags: An optional list of tags to reallocate the engine memory 
             for specific memory allocations. Values must be in 
             ("weights", "kv_cache",). If None, all memory is reallocated.
+            wake_up should be called with all tags (or None) before the engine 
+            is used again.
         """
         self.llm_engine.wake_up(tags)
 

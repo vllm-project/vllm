@@ -161,13 +161,8 @@ def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
 
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize(
-    "model, use_v1",
-    [
-        # sleep mode with safetensors
-        ("meta-llama/Llama-3.2-1B", True),
-        ("meta-llama/Llama-3.2-1B", False)
-    ])
+@pytest.mark.parametrize("model, use_v1", [("meta-llama/Llama-3.2-1B", True),
+                                           ("meta-llama/Llama-3.2-1B", False)])
 def test_end_to_end_with_tags(monkeypatch: pytest.MonkeyPatch, model: str,
                               use_v1: bool):
     with monkeypatch.context() as m:
