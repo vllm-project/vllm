@@ -863,7 +863,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         """
         # Combine and flatten intermediate data.
         input_tokens = []
-        inputs_embeds = []
+        inputs_embeds: Union[list[torch.Tensor], None] = []
         token_types = []
         for inter_data in self.inter_data_list:
             for cur_input_tokens in inter_data.input_tokens:
