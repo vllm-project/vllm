@@ -291,7 +291,7 @@ jobs:
       name: Summarize Test Results
       runs-on: generic-runner
       needs: [TestRun,read_codeowners]
-      if: needs.TestRun.result != 'skipped' && needs.read_codeowners.result != 'skipped'
+      if: always() && needs.TestRun.result != 'skipped' && needs.read_codeowners.result != 'skipped'
       steps:
         - name: Checkout Repository
           uses: actions/checkout@v4
