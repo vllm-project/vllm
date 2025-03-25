@@ -18,6 +18,7 @@ import requests
 import torch
 
 import vllm.envs as envs
+from vllm.connections import global_http_connection
 from vllm.version import __version__ as VLLM_VERSION
 
 _config_home = envs.VLLM_CONFIG_ROOT
@@ -227,8 +228,6 @@ class UsageMessage:
             self._send_to_server(data)
 
     def _send_to_server(self, data: dict[str, Any]) -> None:
-
-        from vllm.connections import global_http_connection
 
         try:
             global_http_client = global_http_connection.get_sync_client()
