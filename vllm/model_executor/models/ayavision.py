@@ -485,8 +485,12 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
             raise ValueError("Incorrect type of pixel values. "
                              f"Got type: {type(pixel_values)}")
         if num_patches is None:
-            # num_patches got poped here
+            # num_patches got poped here:
+            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/aya_vision/processing_aya_vision.py#L210
             num_patches =  torch.tensor([x.shape[0] for x in pixel_values if x.ndim==4])
+            # TODO remove debug
+            print("check num_pathes | "*10)
+            print(torch.tensor([x.shape for x in pixel_values if x.ndim!=4]))
         if num_patches is not None and not isinstance(num_patches, (torch.Tensor, list)):
             raise ValueError("Incorrect type of num_patches. "
                              f"Got type: {type(num_patches)}")
