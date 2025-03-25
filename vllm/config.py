@@ -221,6 +221,9 @@ class ModelConfig:
         factors.append(self.trust_remote_code)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
+        # rope cos/sin cache depends on the max_position_embeddings
+        factors.append(
+            getattr(self.hf_config, "max_position_embeddings", "None"))
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __init__(
