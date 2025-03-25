@@ -252,4 +252,5 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_v1(cls, model_config):
+        # V1 support on AMD gpus is experimental
         return True
