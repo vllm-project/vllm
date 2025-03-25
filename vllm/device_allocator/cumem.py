@@ -204,7 +204,7 @@ class CuMemAllocator:
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
 
-    def wake_up(self, tags: Optional[Tuple[str]] = None) -> None:
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU 
