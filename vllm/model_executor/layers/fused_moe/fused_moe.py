@@ -648,7 +648,8 @@ def moe_align_block_size(
                                       dtype=torch.int32,
                                       device=topk_ids.device)
     if num_experts >= 224:
-        if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts != 256:
+        if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts not in (
+                256, 264):
             moe_align_block_size_triton(
                 topk_ids,
                 num_experts,
@@ -658,7 +659,7 @@ def moe_align_block_size(
                 num_tokens_post_pad,
             )
         else:
-            # Currently requires num_experts=256
+            # Currently requires num_experts=256 or 264
             ops.sgl_moe_align_block_size(
                 topk_ids,
                 num_experts,
@@ -1164,9 +1165,9 @@ def grouped_topk(
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None
+    e_score_correction_bias: Optional[torch.Tensor] = None,
+    share_fusion=False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
@@ -1208,8 +1209,20 @@ def grouped_topk(
                                             dim=-1,
                                             sorted=False)
 
+    if share_fusion:
+        topk_ids[:, -1] = torch.randint(low=256,
+                                        high=264,
+                                        size=(topk_ids.size(0), ),
+                                        dtype=topk_ids.dtype,
+                                        device=topk_ids.device)
+        topk_weights[:, -1] = topk_weights[:, :-1].sum(dim=-1) * 1.0 / 2.5
+
     if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        topk_weights_sum = topk_weights.sum(
+            dim=-1,
+            keepdim=True) if not share_fusion else topk_weights[:, :-1].sum(
+                dim=-1, keepdim=True)
+        topk_weights = topk_weights / topk_weights_sum
 
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
@@ -1761,9 +1774,14 @@ def fused_moe(
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None
-        topk_weights, topk_ids = grouped_topk(hidden_states, gating_output,
-                                              topk, renormalize,
-                                              num_expert_group, topk_group)
+        topk_weights, topk_ids = grouped_topk(
+            hidden_states,
+            gating_output,
+            topk,
+            renormalize,
+            num_expert_group,
+            topk_group,
+            share_fusion=envs.VLLM_ENABLE_SHARE_EXPERT_FUSION)
     elif custom_routing_function is None:
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)

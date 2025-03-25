@@ -788,7 +788,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-        )
+            share_fusion=envs.VLLM_ENABLE_SHARE_EXPERT_FUSION)
 
         return fused_experts(
             x,
