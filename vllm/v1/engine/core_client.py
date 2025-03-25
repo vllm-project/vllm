@@ -565,3 +565,12 @@ class AsyncMPClient(MPClient):
 
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self._call_utility_async("pin_lora", lora_id)
+
+    async def collective_rpc(
+            self,
+            method: Union[str, Callable[..., _R]],
+            timeout: Optional[float] = None,
+            args: tuple = (),
+            kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return await self._call_utility_async("collective_rpc", method,
+                                              timeout, args, kwargs)
