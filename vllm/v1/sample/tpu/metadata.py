@@ -11,7 +11,7 @@ DEFAULT_SAMPLING_PARAMS = dict(
     temperature=-1.0,
     min_p=0.0,
     # strictly disabled for now
-    # top_k=-1,
+    top_k=0,
     # top_p=0.0,
     # frequency_penalties=0.0,
     # presence_penalties=0.0,
@@ -98,7 +98,8 @@ class TPUSupportedSamplingMetadata:
                    DEFAULT_SAMPLING_PARAMS["temperature"])
         # TODO Temporarily disabled until sampling options are enabled
         # copy_slice(input_batch.top_p_cpu_tensor, input_batch.top_p)
-        # copy_slice(input_batch.top_k_cpu_tensor, input_batch.top_k)
+        copy_slice(input_batch.top_k_cpu_tensor, input_batch.top_k,
+                   DEFAULT_SAMPLING_PARAMS["top_k"])
         copy_slice(input_batch.min_p_cpu_tensor, input_batch.min_p,
                    DEFAULT_SAMPLING_PARAMS["min_p"])
 
@@ -114,7 +115,7 @@ class TPUSupportedSamplingMetadata:
                                     device=input_batch.device),
             # TODO enable more and avoid returning None values
             top_p=None,  # input_batch.top_p[:padded_num_reqs],
-            top_k=None,  # input_batch.top_k[:padded_num_reqs],
+            top_k=input_batch.top_k[:],
             min_p=input_batch.min_p[:padded_num_reqs],
             generators=input_batch.generators,
             indices_do_sample=indices_do_sample)
