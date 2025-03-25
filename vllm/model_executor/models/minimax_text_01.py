@@ -24,7 +24,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.lightning_attn import (
-    lightning_attention2_parallel, linear_decode_forward_triton)
+    lightning_attention, linear_decode_forward_triton)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -308,8 +308,12 @@ class MiniMaxText01LinearKernel:
         b, h, n, d = q.shape
         e = d
         kv_history = kv_caches.reshape(1, h, d, e).contiguous()
-        output, kv_history = lightning_attention2_parallel(
-            q, k, v, slope_rate, block_size=block_size, kv_history=kv_history)
+        output, kv_history = lightning_attention(q,
+                                                 k,
+                                                 v,
+                                                 slope_rate,
+                                                 block_size=block_size,
+                                                 kv_history=kv_history)
         kv_caches.copy_(kv_history[:, :, -1, :, :].reshape(h, d, e))
         assert output.shape[0] == 1, "batch size must be 1"
         return rearrange(output.squeeze(0), "h n d -> n (h d)")

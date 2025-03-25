@@ -502,30 +502,6 @@ def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
     return output, kv
 
 
-def lightning_attention2_parallel(q,
-                                  k,
-                                  v,
-                                  ed,
-                                  block_size=256,
-                                  kv_history=None):
-    """
-    Wrapper function for lightning_attention with parallel processing.
-    
-    Args:
-        q: Query tensor
-        k: Key tensor
-        v: Value tensor
-        ed: Decay rate tensor
-        block_size: Size of blocks for block-sparse attention
-        kv_history: Optional key-value history
-        
-    Returns:
-        output: Attention output
-        kv: Updated key-value history
-    """
-    return lightning_attention(q, k, v, ed, block_size, kv_history)
-
-
 @triton.jit
 def _linear_attn_decode_kernel(
     q_ptr,
