@@ -29,7 +29,7 @@ class SchedulerStats:
 
     num_running_reqs: int = 0
     num_waiting_reqs: int = 0
-    total_tokens_in_queue: int = 0
+    num_tokens_waiting: int = 0
     gpu_cache_usage: float = 0.0
     num_evicted_tokens: int = 0
 

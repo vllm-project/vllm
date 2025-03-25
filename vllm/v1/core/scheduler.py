@@ -759,7 +759,7 @@ class Scheduler:
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
-            total_tokens_in_queue=self._waiting_tokens,
+            num_tokens_waiting=self._waiting_tokens,
             gpu_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=self.kv_cache_manager.make_prefix_cache_stats(),
             num_evicted_tokens=self.kv_cache_manager.
