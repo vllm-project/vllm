@@ -138,8 +138,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        logger.warning("Pin memory is not supported on XPU.")
-        return False
+        return True
 
     @classmethod
     def get_current_memory_usage(cls,

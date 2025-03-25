@@ -619,7 +619,7 @@ class ModelConfig:
         supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
-            "awq_marlin", "fbgemm_fp8", "compressed_tensors",
+            "awq_marlin", "fbgemm_fp8", "compressed_tensors", "ipex",
             "compressed-tensors", "experts_int8", "quark", "nvfp4"
         ]
         if self.quantization is not None:
