@@ -365,8 +365,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             else:
                 self.input_tokens = input_tokens or []
-                self.inputs_embeds = (inputs_embeds
-                                      if inputs_embeds is not None else None)
+                self.inputs_embeds = inputs_embeds
                 self.input_positions = input_positions or []
                 self.token_types = token_types or []
                 self.mrope_input_positions = mrope_input_positions or None
@@ -543,13 +542,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             context_len = seq_data.get_num_computed_tokens()
 
         # Compute tokens.
-        tokens = seq_data.get_token_ids()[context_len:seq_len]
-        if seq_data.prompt_embeds is not None and seq_data.get_output_len(
-        ) == 0:
-            prompt_embeds = seq_data.prompt_embeds[context_len:seq_len]
-        else:
-            seq_data.prompt_embeds = None  # release memory
+        if seq_data.prompt_embeds is None:
+            tokens = seq_data.get_token_ids()[context_len:seq_len]
             prompt_embeds = None
+        else:
+            tokens = [0] * (seq_len - context_len)
+            prompt_embeds = seq_data.prompt_embeds[context_len:seq_len]
 
         token_types = seq_group_metadata.token_type_ids
 
@@ -881,7 +879,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         else:
             inputs_embeds = torch.cat(inputs_embeds_, dim=0)
 
-        if not input_tokens:
+        if not input_tokens and inputs_embeds is None:
             # This may happen when all prefill requests hit
             # prefix caching and there is no decode request.
             return self.model_input_cls()

@@ -742,7 +742,7 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -756,7 +756,11 @@ class VllmRunner:
         if audios is not None:
             assert len(prompts) == len(audios)
 
-        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
+        inputs = [
+            TextPrompt(prompt=prompt)
+            if isinstance(prompt, str) else TextPrompt(prompt_embeds=prompt)
+            for prompt in prompts
+        ]
         if images is not None:
             for i, image in enumerate(images):
                 if image is not None:
@@ -776,7 +780,7 @@ class VllmRunner:
 
     def generate(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -802,7 +806,7 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
-                req_sample_output_strs.append(prompt_str + output_str)
+                req_sample_output_strs.append(prompt_str or "" + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
@@ -869,7 +873,7 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
