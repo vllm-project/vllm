@@ -9,7 +9,6 @@ import triton.language as tl
 from vllm.logger import init_logger
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.sample.ops.utils import compiled_softmax
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 logger = init_logger(__name__)
@@ -68,6 +67,7 @@ class RejectionSampler(nn.Module):
                 Shape is [num_tokens, vocab_size]. Here, probabilities from
                 different requests are flattened into a single tensor because
                 this is the shape of the output logits.
+                NOTE: `target_logits` can be updated in place to save memory.
             bonus_token_ids_tensor (torch.Tensor):
                 A tensor containing bonus tokens. Shape is [batch_size, 1].
                 Bonus tokens are added to the end of the sequence if all
@@ -84,6 +84,8 @@ class RejectionSampler(nn.Module):
         '''
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         # [num_tokens, vocab_size]
+        # NOTE(woosuk): `target_logits` can be updated in place inside the
+        # `compute_probs` function.
         target_probs = compute_probs(
             target_logits,
             metadata.cu_num_draft_tokens,
@@ -253,8 +255,8 @@ def compute_probs(
         replace_from=GREEDY_TEMPERATURE,
         replace_to=1,
     )
-    # TODO(woosuk): Consider using in-place op to reduce memory usage.
-    logits = logits / temperature.unsqueeze(-1)
+    # NOTE(woosuk): Update `logits` in place to avoid allocating a new tensor.
+    logits.div_(temperature.unsqueeze(-1))
 
     # Get expanded top_k and top_p tensors.
     top_k = None
@@ -275,8 +277,7 @@ def compute_probs(
     # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
     # which is slow for large vocab sizes. This may cause performance issues.
     logits = apply_top_k_top_p(logits, top_k, top_p)
-
-    output_prob = compiled_softmax(logits)
+    output_prob = logits.softmax(dim=-1, dtype=torch.float32)
     return output_prob
 
 

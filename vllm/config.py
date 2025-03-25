@@ -2373,12 +2373,6 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
-        if model_config.quantization and model_config.quantization not in [
-                "awq", "gptq"
-        ]:
-            # TODO support marlin
-            logger.warning("%s quantization is not tested with LoRA yet.",
-                           model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
         # Reminder: Please update docs/source/features/compatibility_matrix.md
@@ -2806,12 +2800,17 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        valid_guided_backends = [
-            'outlines', 'lm-format-enforcer', 'xgrammar', 'guidance'
+        v0_valid_guided_backends = [
+            'outlines', 'lm-format-enforcer', 'xgrammar'
         ]
+        v1_valid_guided_backends = ['xgrammar', 'guidance', 'auto']
 
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
+        if envs.VLLM_USE_V1:
+            valid_guided_backends = v1_valid_guided_backends
+        else:
+            valid_guided_backends = v0_valid_guided_backends
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
                              f" must be one of {valid_guided_backends}")
