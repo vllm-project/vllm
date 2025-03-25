@@ -36,7 +36,8 @@ from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (load_chat_template,
-                                         resolve_hf_chat_template)
+                                         resolve_hf_chat_template,
+                                         resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -888,10 +889,11 @@ async def init_app_state(
         # Get the tokenizer to check official template
         tokenizer = await engine_client.get_tokenizer()
 
-        # For HF tokenizer, check if the chat template matches.
-        # We don't need to check Mistral tokenizer
-        # because it doesn't support chat template
-        if not isinstance(tokenizer, MistralTokenizer):
+        if isinstance(tokenizer, MistralTokenizer):
+            # The warning is logged in resolve_mistral_chat_template.
+            resolved_chat_template = resolve_mistral_chat_template(
+                chat_template=resolved_chat_template)
+        else:
             hf_chat_template = resolve_hf_chat_template(
                 tokenizer,
                 chat_template=None,
