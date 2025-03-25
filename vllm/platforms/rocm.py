@@ -251,6 +251,6 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fn
 
     @classmethod
-    def supports_v1(cls, model_config):
+    def supports_v1(cls, model_config) -> bool:
         # V1 support on AMD gpus is experimental
         return True

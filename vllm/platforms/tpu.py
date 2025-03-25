@@ -129,6 +129,6 @@ class TpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_v1(cls, model_config):
+    def supports_v1(cls, model_config) -> bool:
         # V1 support on TPU is experimental
         return True

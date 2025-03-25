@@ -304,7 +304,7 @@ class CudaPlatformBase(Platform):
         return cls.has_device_capability(89)
 
     @classmethod
-    def supports_v1(cls, model_config):
+    def supports_v1(cls, model_config) -> bool:
         return True
 
 
