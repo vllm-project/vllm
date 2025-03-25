@@ -1331,6 +1331,10 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == dg.get_m_alignment_for_contiguous_layout()
 
+    cache1_view: Tuple[int, ...] = ()
+    cache2_view: Tuple[int, ...] = ()
+    cache3_view: Tuple[int, ...] = ()
+
     if use_dg:
         # If M is not divisible by the block size we run the largest
         # chunk we can using DeepGemm, the remainder is handed off to
