@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
+    VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -96,6 +97,7 @@ if TYPE_CHECKING:
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
+    VLLM_TPU_BUCKET_PADDING_GAP: int = 64
 
 
 def get_default_cache_root():
@@ -294,7 +296,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # this is used for configuring the default logging level
     "VLLM_LOGGING_LEVEL":
-    lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO"),
+    lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
 
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX":
@@ -340,7 +342,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
 
     # (CPU backend only) CPU key-value cache space.
-    # default is 4GB
+    # default is 4 GiB
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
 
@@ -412,9 +414,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
     # Cache size (in GiB) for multimodal input cache
-    # Default is 8GiB
+    # Default is 4 GiB
     "VLLM_MM_INPUT_CACHE_GIB":
-    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "8")),
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -520,6 +522,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_FP8_PADDING":
     lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
 
+    # Pad the weights for the moe kernel
+    "VLLM_ROCM_MOE_PADDING":
+    lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
+
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
     lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
@@ -622,6 +628,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
     if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
+
+    # Gap between padding buckets for the forward pass. So we have
+    # 8, we will run forward pass with [16, 24, 32, ...].
+    "VLLM_TPU_BUCKET_PADDING_GAP":
+    lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
+    if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 64,
 }
 
 # end-env-vars-definition

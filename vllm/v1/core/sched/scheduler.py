@@ -152,6 +152,10 @@ class Scheduler(SchedulerInterface):
 
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                num_new_tokens = min(
+                    num_new_tokens,
+                    self.scheduler_config.long_prefill_token_threshold)
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
@@ -299,6 +303,10 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens -= self.block_size
                     num_new_tokens = self.block_size
                     computed_blocks.pop()
+                if self.scheduler_config.long_prefill_token_threshold > 0:
+                    num_new_tokens = min(
+                        num_new_tokens,
+                        self.scheduler_config.long_prefill_token_threshold)
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
@@ -627,8 +635,7 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            # Transmit partial if chunked prefill & prompt logprobs is enabled
-            if new_token_ids or prompt_logprobs_tensors is not None:
+            if new_token_ids:
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
                     EngineCoreOutput(
@@ -639,6 +646,9 @@ class Scheduler(SchedulerInterface):
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
                         events=request.take_events()))
+            else:
+                # Invariant: EngineCore returns no partial prefill outputs.
+                assert not prompt_logprobs_tensors
 
             self.scheduled_req_ids.remove(request.request_id)
             if not stopped:
