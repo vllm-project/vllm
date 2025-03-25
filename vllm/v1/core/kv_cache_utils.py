@@ -4,7 +4,7 @@ import os
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -31,6 +31,16 @@ class BlockHashType(NamedTuple):
     extra_keys: Optional[Any] = None
 
 
+# The hash seed for the first block of the prefix block sequence.
+#
+# Even if the hash function is the builtin hash(), we use sha256 to generate
+# the initial hash to simplify the code. This is not performance critical
+# as it is done one per process.
+#
+# We use a random value to avoid hash collisions or PYTHONHASHSEED environment
+# variable if set such that processes can share the seed if needed.
+# This aligns with the behavior of Python's hash() function, which also uses
+# a random seed if PYTHONHASHSEED is not set.
 NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
     'PYTHONHASHSEED') is not None else sha256(os.getenv('PYTHONHASHSEED'))
 
@@ -380,6 +390,7 @@ def generate_block_hash_extra_keys(
 
 
 def hash_block_tokens(
+        hash_function: Callable,
         parent_block_hash: Optional[int],
         curr_block_token_ids: Sequence[int],
         extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHashType:
@@ -404,11 +415,12 @@ def hash_block_tokens(
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return BlockHashType(
-        sha256((parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
+        hash_function(
+            (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
         curr_block_token_ids_tuple, extra_keys)
 
 
-def hash_request_tokens(block_size: int,
+def hash_request_tokens(hash_function: Any, block_size: int,
                         request: Request) -> list[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
@@ -440,7 +452,7 @@ def hash_request_tokens(block_size: int,
             req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start, end, curr_mm_idx)
 
-        block_hash = hash_block_tokens(parent_block_hash_value,
+        block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
                                        block_token_ids, req_extra_keys)
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value

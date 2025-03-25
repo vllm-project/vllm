@@ -10,8 +10,7 @@ import pytest
 from tests.core.utils import create_dummy_lora_sequence, create_dummy_sequence
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import Block, BlockAllocator
-from vllm.core.block.prefix_caching_block import (NONE_HASH,
-                                                  ComputedBlocksTracker,
+from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   PrefixCachingBlock,
                                                   PrefixCachingBlockAllocator)
 from vllm.sequence import Logprob
@@ -19,12 +18,6 @@ from vllm.utils import Device
 
 
 class TestPrefixCachingBlock:
-
-    @staticmethod
-    def test_none_hash():
-        assert NONE_HASH is not None
-        assert isinstance(NONE_HASH, int)
-        assert NONE_HASH != 0
 
     @staticmethod
     @pytest.mark.parametrize("seed", list(range(10)))
@@ -72,8 +65,8 @@ class TestPrefixCachingBlock:
 
         previous_block = MagicMock(spec=PrefixCachingBlock)
         prev_block_hash = random.randint(0, 1000)
-        previous_block.content_hash = (prev_block_hash
-                                       if prev_block_has_hash else NONE_HASH)
+        previous_block.content_hash = (prev_block_hash if prev_block_has_hash
+                                       else hash('None'))
 
         num_to_fill = block_size if is_curr_block_full else random.randint(
             0, block_size - 1)

@@ -202,21 +202,23 @@ def test_generate_block_hash_extra_keys_no_mm_inputs():
     assert next_mm_idx == 0
 
 
-def test_hash_block_tokens():
+@pytest.mark.parametrize("hash_fn", [sha256, hash])
+def test_hash_block_tokens(hash_fn):
     parent_block_hash = 123
     curr_block_token_ids = (1, 2, 3)
     extra_keys = ("key1", "key2")
 
-    block_hash = hash_block_tokens(parent_block_hash, curr_block_token_ids,
-                                   extra_keys)
+    block_hash = hash_block_tokens(hash_fn, parent_block_hash,
+                                   curr_block_token_ids, extra_keys)
     assert isinstance(block_hash, BlockHashType)
-    assert block_hash.hash_value == sha256(
+    assert block_hash.hash_value == hash_fn(
         (parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
     assert block_hash.extra_keys == extra_keys
 
 
-def test_hash_request_tokens():
+@pytest.mark.parametrize("hash_fn", [sha256, hash])
+def test_hash_request_tokens(hash_fn):
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
@@ -231,7 +233,7 @@ def test_hash_request_tokens():
     )
 
     block_size = 3
-    block_hashes = hash_request_tokens(block_size, request)
+    block_hashes = hash_request_tokens(hash_fn, block_size, request)
 
     assert len(block_hashes) == 2
     assert isinstance(block_hashes[0], BlockHashType)
@@ -246,7 +248,8 @@ def test_hash_request_tokens():
     assert block_hashes[1].extra_keys == ("hash2", )
 
 
-def test_hash_tokens_different_mm_input():
+@pytest.mark.parametrize("hash_fn", [sha256, hash])
+def test_hash_tokens_different_mm_input(hash_fn):
     request1 = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
@@ -272,13 +275,14 @@ def test_hash_tokens_different_mm_input():
         mm_hashes=["hash3", "hash2"],
     )
     block_size = 3
-    block_hashes1 = hash_request_tokens(block_size, request1)
-    block_hashes2 = hash_request_tokens(block_size, request2)
+    block_hashes1 = hash_request_tokens(hash_fn, block_size, request1)
+    block_hashes2 = hash_request_tokens(hash_fn, block_size, request2)
     assert block_hashes1[0] != block_hashes2[0]
     assert block_hashes1[1] != block_hashes2[1]
 
 
-def test_hash_request_tokens_no_mm_inputs():
+@pytest.mark.parametrize("hash_fn", [sha256, hash])
+def test_hash_request_tokens_no_mm_inputs(hash_fn):
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
@@ -287,7 +291,7 @@ def test_hash_request_tokens_no_mm_inputs():
     )
 
     block_size = 3
-    block_hashes = hash_request_tokens(block_size, request)
+    block_hashes = hash_request_tokens(hash_fn, block_size, request)
 
     assert len(block_hashes) == 2
     assert block_hashes[0].token_ids == (0, 1, 2)
