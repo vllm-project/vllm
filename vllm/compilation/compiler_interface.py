@@ -228,7 +228,11 @@ class InductorAdaptor(CompilerInterface):
                 inductor_compiled_graph = output
                 if inductor_compiled_graph is not None:
                     nonlocal file_path
-                    file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
+                    # the current_callable captures two things, the inputs_idx
+                    # (0) and the function (1) from which we are going to pull
+                    # the filename from.
+                    file_path = inductor_compiled_graph.current_callable.__closure__[  # noqa
+                        1].cell_contents.__code__.co_filename  # noqa
                     hash_str = inductor_compiled_graph._fx_graph_cache_key
                 return output
 
