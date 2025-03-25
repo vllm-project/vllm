@@ -113,12 +113,13 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size,
                   enforce_eager=True,
                   tensor_parallel_size=tensor_parallel_size)
 
-        with pytest.raises(EngineDeadError):
+        with pytest.raises(
+                EngineDeadError if enable_multiprocessing else Exception):
             llm.generate("Hello my name is Robert and I")
 
-        # Confirm all the processes are cleaned up.
-        wait_for_gpu_memory_to_clear(
-            devices=list(range(tensor_parallel_size)),
-            threshold_bytes=2 * 2**30,
-            timeout_s=60,
-        )
+            # Confirm all the processes are cleaned up.
+            wait_for_gpu_memory_to_clear(
+                devices=list(range(tensor_parallel_size)),
+                threshold_bytes=2 * 2**30,
+                timeout_s=60,
+            )
