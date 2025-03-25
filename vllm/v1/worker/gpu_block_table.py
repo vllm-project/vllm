@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from typing import List, Set
 
 import numpy as np
@@ -14,13 +15,11 @@ class GPUBlockTable:
     def __init__(
         self,
         max_num_reqs: int,
-        max_model_len: int,
         max_num_blocks_per_req: int,
         pin_memory: bool,
         device: torch.device,
     ):
         self.max_num_reqs = max_num_reqs
-        self.max_model_len = max_model_len
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.pin_memory = pin_memory
         self.device = device
@@ -57,7 +56,7 @@ class GPUBlockTable:
         )
         self.append_row_indices_np = self.append_row_indices_cpu.numpy()
         self.append_cumsums = torch.zeros(
-            (max_num_reqs + 1,),
+            (max_num_reqs + 1, ),
             dtype=torch.int32,
             device=self.device,
         )
@@ -68,7 +67,7 @@ class GPUBlockTable:
         )
         self.append_cumsums_np = self.append_cumsums_cpu.numpy()
         self.append_data = torch.zeros(
-            (max_num_reqs * max_num_blocks_per_req,),
+            (max_num_reqs * max_num_blocks_per_req, ),
             dtype=torch.int32,
             device=self.device,
         )

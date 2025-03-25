@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import fnmatch
 import re
 from typing import Any, Dict, List, Optional, cast
@@ -16,8 +18,6 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkScheme, QuarkW8A8Fp8, QuarkW8A8Int8)
 from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare, should_ignore_layer)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    FUSED_LAYER_NAME_MAPPING)
 from vllm.platforms import current_platform
 
 __all__ = ["QuarkLinearMethod"]
@@ -30,6 +30,7 @@ class QuarkConfig(QuantizationConfig):
                  kv_cache_group: Optional[List[str]] = None,
                  kv_cache_config: Optional[Dict[str, Any]] = None,
                  pack_method: str = "reorder"):
+        super().__init__()
         if kv_cache_group is None:
             kv_cache_group = []
         self.quant_config = quant_config
@@ -56,7 +57,9 @@ class QuarkConfig(QuantizationConfig):
 
         # Check if the layer is skipped for quantization.
         exclude_layers = cast(List[str], self.quant_config.get("exclude"))
-        if should_ignore_layer(prefix, ignore=exclude_layers):
+        if should_ignore_layer(prefix,
+                               ignore=exclude_layers,
+                               fused_mapping=self.packed_modules_mapping):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -199,8 +202,8 @@ class QuarkConfig(QuantizationConfig):
                              module: torch.nn.Module) -> Dict[str, Any]:
 
         proj_name = layer_name.split(".")[-1]
-        if proj_name in FUSED_LAYER_NAME_MAPPING:
-            shard_proj_names = FUSED_LAYER_NAME_MAPPING[proj_name]
+        if proj_name in self.packed_modules_mapping:
+            shard_proj_names = self.packed_modules_mapping[proj_name]
 
             # Convert fused_name --> [shard_names]
             shard_names = [

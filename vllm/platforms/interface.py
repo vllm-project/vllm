@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 import platform
 import random
@@ -11,8 +13,10 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.utils import FlexibleArgumentParser
 else:
     VllmConfig = None
+    FlexibleArgumentParser = None
 
 logger = init_logger(__name__)
 
@@ -25,13 +29,16 @@ def in_wsl() -> bool:
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
     FLASH_ATTN_VLLM_V1 = enum.auto()
+    TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
-    OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
+    TRITON_MLA = enum.auto()  # Supported by V1
+    FLASHMLA = enum.auto()  # Supported by V1
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
+    PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
@@ -45,7 +52,6 @@ class PlatformEnum(enum.Enum):
     XPU = enum.auto()
     CPU = enum.auto()
     NEURON = enum.auto()
-    OPENVINO = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -105,6 +111,8 @@ class Platform:
 
     supported_quantization: list[str] = []
 
+    additional_env_vars: list[str] = []
+
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
@@ -126,9 +134,6 @@ class Platform:
     def is_neuron(self) -> bool:
         return self._enum == PlatformEnum.NEURON
 
-    def is_openvino(self) -> bool:
-        return self._enum == PlatformEnum.OPENVINO
-
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
@@ -139,7 +144,8 @@ class Platform:
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool) -> str:
+                             block_size: int, use_v1: bool,
+                             use_mla: bool) -> str:
         """Get the attention backend class of a device."""
         return ""
 
@@ -180,6 +186,11 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        """Get the uuid of a device, e.g. the PCI bus ID."""
+        raise NotImplementedError
+
+    @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         """Get the total memory of a device in bytes."""
         raise NotImplementedError
@@ -202,16 +213,33 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
-    def seed_everything(cls, seed: int) -> None:
+    def seed_everything(cls, seed: Optional[int] = None) -> None:
         """
         Set the seed of each random module.
         `torch.manual_seed` will set seed on all devices.
 
         Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
         """
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+
+    @classmethod
+    def pre_register_and_update(cls,
+                                parser: Optional[FlexibleArgumentParser] = None
+                                ) -> None:
+        """
+        Do some pre-registeration or update action for the current platform.
+
+        This function is called before global VllmConfig is initialized or cli
+        arguments are parsed. It's used for out-of-tree platforms to register or
+        update the configuration.
+
+        For example, the out-of-tree quantization config can be imported and
+        registered here dynamically.
+        """
+        pass
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -292,6 +320,56 @@ class Platform:
         Return the punica wrapper for current platform.
         """
         raise NotImplementedError
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        """
+        Get device specific communicator class for distributed communication.
+        """
+        return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        """
+        Returns whether the current platform supports FP8 types.
+        """
+        return False
+
+    @classmethod
+    def is_fp8_fnuz(cls) -> bool:
+        """
+        Returns whether the preferred FP8 type is FNUZ on the current platform.
+
+        There are two representations of FP8, OCP FP8 and FNUZ FP8.
+        The OCP specification can be found at https://tinyurl.com/b7jvwpft.
+        The FNUZ specification can be found at https://tinyurl.com/5n6hwwu5.
+
+        AMD's MI300 and MI325 have native hardware support for FNUZ. All other
+        hardware has converged on the OCP FP8 standard.
+        """
+        return False
+
+    @classmethod
+    def fp8_dtype(cls) -> torch.dtype:
+        """
+        Returns the preferred FP8 type on the current platform.
+
+        See the documentation for is_fp8_fnuz for details.
+        """
+        return torch.float8_e4m3fn
+
+    @classmethod
+    def use_all_gather(cls) -> bool:
+        """
+        Whether to use allgather in LogitsProcessor to gather the logits.
+        """
+        import vllm.envs as envs
+        from vllm.config import get_current_vllm_config
+
+        parallel_config = get_current_vllm_config().parallel_config
+        return (envs.VLLM_USE_V1
+                or parallel_config.distributed_executor_backend
+                == "external_launcher")
 
 
 class UnspecifiedPlatform(Platform):

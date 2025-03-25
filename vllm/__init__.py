@@ -1,4 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
 """vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
+# The version.py should be independent library, and we always import the
+# version library first.  Such assumption is critical for some customization.
+from .version import __version__, __version_tuple__  # isort:skip
+
 import os
 
 import torch
@@ -17,8 +22,6 @@ from vllm.outputs import (ClassificationOutput, ClassificationRequestOutput,
                           ScoringRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-
-from .version import __version__, __version_tuple__
 
 # set some common config/environment variables that should be set
 # for all processes created by vllm and all processes

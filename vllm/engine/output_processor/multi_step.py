@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import functools
 from typing import Callable, List, cast
 
@@ -97,6 +99,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         if seqs is None:
             seqs = sequence_group.get_seqs(
                 status=SequenceStatus.FINISHED_ABORTED)
+
+        for output in outputs:
+            if output.samples[0].output_token != VLLM_INVALID_TOKEN_ID:
+                sequence_group.metrics.spec_token_acceptance_counts[
+                    output.step_index] += 1
 
         assert seqs, "Expected RUNNING or FINISHED_ABORTED sequences"
         assert len(seqs) == 1, (

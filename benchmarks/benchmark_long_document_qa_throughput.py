@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Offline benchmark to test the long document QA throughput.
 

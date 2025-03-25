@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention backend utils"""
 from collections import defaultdict
 from contextlib import contextmanager
@@ -10,8 +11,11 @@ import torch
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
 from vllm.attention.backends.abstract import AttentionType
+from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import ModelRunnerBase
@@ -289,7 +293,9 @@ class CommonAttentionState(AttentionState):
 
     @contextmanager
     def graph_capture(self, max_batch_size: int):
+
         self._is_graph_capturing = True
+
         self._graph_slot_mapping = torch.full((max_batch_size, ),
                                               PAD_SLOT_ID,
                                               dtype=torch.long,
@@ -299,7 +305,9 @@ class CommonAttentionState(AttentionState):
                                           device=self.runner.device)
         self._graph_block_tables = torch.from_numpy(
             self.runner.graph_block_tables).to(device=self.runner.device)
+
         yield
+
         self._is_graph_capturing = False
         del self._graph_slot_mapping
         del self._graph_seq_lens

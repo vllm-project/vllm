@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the with and without prefix caching.
 
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.
@@ -33,7 +34,10 @@ def test_disable_sliding_window(model_len_len, ):
     del vllm_disabled_model
     cleanup_dist_env_and_memory()
 
-    vllm_enabled_model = LLM(model, disable_sliding_window=False)
+    vllm_enabled_model = LLM(model,
+                             enforce_eager=True,
+                             disable_sliding_window=False,
+                             enable_prefix_caching=False)
     vllm_enabled_model.generate("Hi my name is")
     model_config = vllm_enabled_model.llm_engine.model_config
     assert model_config.max_model_len == full_len, (

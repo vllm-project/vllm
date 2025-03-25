@@ -7,9 +7,9 @@ page for information on known issues and how to solve them.
 
 ## Introduction
 
-```{important}
+:::{important}
 The source code references are to the state of the code at the time of writing in December, 2024.
-```
+:::
 
 The use of Python multiprocessing in vLLM is complicated by:
 

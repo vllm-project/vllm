@@ -22,9 +22,9 @@ The available APIs depend on the type of model that is being run:
 
 Please refer to the above pages for more details about each API.
 
-```{seealso}
+:::{seealso}
 [API Reference](/api/offline_inference/index)
-```
+:::
 
 ## Configuration Options
 
@@ -70,12 +70,12 @@ llm = LLM(model="ibm-granite/granite-3.1-8b-instruct",
           tensor_parallel_size=2)
 ```
 
-```{important}
+:::{important}
 To ensure that vLLM initializes CUDA correctly, you should avoid calling related functions (e.g. {func}`torch.cuda.set_device`)
 before initializing vLLM. Otherwise, you may run into an error like `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
 
 To control which devices are used, please instead set the `CUDA_VISIBLE_DEVICES` environment variable.
-```
+:::
 
 #### Quantization
 
@@ -96,6 +96,13 @@ llm = LLM(model="adept/fuyu-8b",
           max_model_len=2048,
           max_num_seqs=2)
 ```
+
+#### Adjust cache size
+
+If you run out of CPU RAM, try the following options:
+
+- (Multi-modal models only) you can set the size of multi-modal input cache using `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
+- (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable (default 4 GiB).
 
 ### Performance optimization and tuning
 

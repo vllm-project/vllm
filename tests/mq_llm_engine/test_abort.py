@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test that aborting is handled properly."""
 
 import asyncio

@@ -1,4 +1,6 @@
-from typing import List, Optional, Tuple
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Optional
 
 import pytest
 import torch
@@ -6,7 +8,9 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import (cascade_attention,
                                                    merge_attn_states)
-from vllm.vllm_flash_attn import flash_attn_varlen_func
+from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
+                                  flash_attn_varlen_func,
+                                  is_fa_version_supported)
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 192, 256]
@@ -21,7 +25,7 @@ DTYPES = [torch.float16, torch.bfloat16]
 @torch.inference_mode()
 def test_merge_kernel(
     num_tokens: int,
-    num_heads: Tuple[int, int],
+    num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
 ):
@@ -81,8 +85,8 @@ CASES = [
 @pytest.mark.parametrize("fa_version", [2, 3])
 @torch.inference_mode()
 def test_cascade(
-    seq_lens_and_common_prefix: Tuple[List[Tuple[int, int]], int],
-    num_heads: Tuple[int, int],
+    seq_lens_and_common_prefix: tuple[list[tuple[int, int]], int],
+    num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
     block_size: int,
@@ -91,10 +95,9 @@ def test_cascade(
     fa_version: int,
 ) -> None:
     torch.set_default_device("cuda")
-    if fa_version == 3 and (torch.cuda.get_device_capability() == (8, 6)
-                            or torch.cuda.get_device_capability() == (8, 9)):
-        pytest.skip("Flash attention version 3 fails on 8.6 and 8.9 due to "
-                    "insufficient shared memory for some shapes")
+    if not is_fa_version_supported(fa_version):
+        pytest.skip(f"Flash attention version {fa_version} not supported due "
+                    f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
 
     current_platform.seed_everything(0)
 

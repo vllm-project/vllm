@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
 from typing import Iterable, Optional, Set, Tuple, Union

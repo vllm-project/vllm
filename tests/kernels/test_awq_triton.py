@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the AWQ Triton kernel.
 
 Run `pytest tests/kernels/test_awq_triton.py`.

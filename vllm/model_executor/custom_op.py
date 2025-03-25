@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, Type
 
 import torch.nn as nn
@@ -57,6 +59,11 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
+    def forward_neuron(self, *args, **kwargs):
+        # By default, we assume that Neuron ops are compatible with the
+        # PyTorch-native implementation.
+        return self.forward_native(*args, **kwargs)
+
     def forward_oot(self, *args, **kwargs):
         # By default, we assume that OOT ops are compatible with the
         # PyTorch-native implementation.
@@ -86,6 +93,8 @@ class CustomOp(nn.Module):
             return self.forward_tpu
         elif current_platform.is_xpu():
             return self.forward_xpu
+        elif current_platform.is_neuron():
+            return self.forward_neuron
         elif current_platform.is_out_of_tree():
             return self.forward_oot
         else:

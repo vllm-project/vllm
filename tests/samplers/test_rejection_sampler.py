@@ -1,5 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for rejection sampling."""
-from typing import List, Tuple
 
 import pytest
 import torch
@@ -7,6 +7,15 @@ import torch.nn.functional as F
 
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.utils import set_random_seed
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This file tests V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
 
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
@@ -23,16 +32,17 @@ def mock_causal_accepted_tensor(
     """
     batch_size = last_accepted_indices.shape[0]
 
-    accepted = (torch.arange(k).expand(batch_size, k) <=
-                last_accepted_indices.unsqueeze(-1).broadcast_to(
+    accepted = (torch.arange(k).expand(batch_size, k)
+                <= last_accepted_indices.unsqueeze(-1).broadcast_to(
                     batch_size, k))
 
     # Sprinkle accepted values after the contiguous initial accepted values.
     # This replicates the behavior of rejection sampling, which may "accept"
     # a token that cannot be accepted because of causality.
-    sprinkle_candidates = (
-        torch.arange(k).expand(batch_size, k) >
-        last_accepted_indices.unsqueeze(-1).broadcast_to(batch_size, k) + 1)
+    sprinkle_candidates = (torch.arange(k).expand(
+        batch_size,
+        k) > last_accepted_indices.unsqueeze(-1).broadcast_to(batch_size, k) +
+                           1)
     sprinkle = torch.rand(batch_size, k) > 0.5
     accepted[sprinkle_candidates] = sprinkle[sprinkle_candidates]
     return accepted
@@ -414,8 +424,8 @@ def test_rejection_sampling_approximates_target_distribution(
         draft_and_target_probs_equal)
 
     sample_sizes = [10, 100, 1_000, 10_000, 100_000]
-    distance_wrt_reference: List[float] = []
-    distance_wrt_target: List[float] = []
+    distance_wrt_reference: list[float] = []
+    distance_wrt_target: list[float] = []
 
     for num_samples in sample_sizes:
         (reference_vs_rejsample_dist,
@@ -445,12 +455,12 @@ def test_rejection_sampling_approximates_target_distribution(
         distance_wrt_reference)
 
     expected_improvement_multiplier = 20
-    assert (relative_change_in_distance_wrt_target >
-            relative_change_in_distance_wrt_reference *
+    assert (relative_change_in_distance_wrt_target
+            > relative_change_in_distance_wrt_reference *
             expected_improvement_multiplier)
 
 
-def get_ratio_first_to_last(elements: List[float]) -> float:
+def get_ratio_first_to_last(elements: list[float]) -> float:
     return elements[0] / elements[-1]
 
 
@@ -475,7 +485,7 @@ class _CorrectnessTestHelper:
 
     def generate_probs_for_test(
         self, draft_and_target_probs_equal: bool
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         draft_probs, target_probs = (F.softmax(
             torch.rand(self.vocab_size, dtype=torch.float32),
             dim=-1,
@@ -497,7 +507,7 @@ class _CorrectnessTestHelper:
     def run_and_compare_distributions(self, draft_probs: torch.Tensor,
                                       target_probs: torch.Tensor,
                                       reference_probs: torch.Tensor,
-                                      num_samples: int) -> Tuple[float, float]:
+                                      num_samples: int) -> tuple[float, float]:
         # Sample using rejection sampling.
         rej_sample_probs = self._estimate_rejection_sampling_pdf(
             draft_probs, target_probs, num_samples)
