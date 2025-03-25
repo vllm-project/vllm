@@ -120,6 +120,18 @@ class KVLookupBufferBase(KVCacheBufferBase):
 
 
 class KVStoreBufferBase(KVCacheBufferBase):
+    """
+    Abstract base class for a KVCache storage buffer with key-value semantics.
+    This class provides a simple key-value storage buffer abstract with basic
+    put/get operations, which enables flexible KVCache transfer granular
+    control.
+
+    The functionality is similar to a distributed key-value store, where:
+    - Key: A unique string identifier for the cached entry
+    - Value:
+        - Tensor to be stored and retrieved
+        - None (indicating deletion or empty value)
+    """
 
     @abstractmethod
     def put(
