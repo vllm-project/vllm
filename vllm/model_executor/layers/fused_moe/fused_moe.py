@@ -912,9 +912,9 @@ def grouped_topk(
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None
-) -> tuple[torch.Tensor, torch.Tensor]:
-
+    e_score_correction_bias: Optional[torch.Tensor] = None,
+    share_fusion=False
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
@@ -956,8 +956,20 @@ def grouped_topk(
                                             dim=-1,
                                             sorted=False)
 
+    if share_fusion:
+        topk_ids[:, -1] = torch.randint(low=256,
+                                        high=264,
+                                        size=(topk_ids.size(0), ),
+                                        dtype=topk_ids.dtype,
+                                        device=topk_ids.device)
+        topk_weights[:, -1] = topk_weights[:, :-1].sum(dim=-1) * 1.0 / 2.5
+
     if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        topk_weights_sum = topk_weights.sum(
+            dim=-1,
+            keepdim=True) if not share_fusion else topk_weights[:, :-1].sum(
+                dim=-1, keepdim=True)
+        topk_weights = topk_weights / topk_weights_sum
 
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
@@ -1484,9 +1496,14 @@ def fused_moe(
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None
-        topk_weights, topk_ids = grouped_topk(hidden_states, gating_output,
-                                              topk, renormalize,
-                                              num_expert_group, topk_group)
+        topk_weights, topk_ids = grouped_topk(
+            hidden_states,
+            gating_output,
+            topk,
+            renormalize,
+            num_expert_group,
+            topk_group,
+            share_fusion=envs.VLLM_ENABLE_SHARE_EXPERT_FUSION)
     elif custom_routing_function is None:
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             hidden_states, gating_output, topk, renormalize)

@@ -838,6 +838,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
+            share_fusion=envs.VLLM_ENABLE_SHARE_EXPERT_FUSION
         )
 
         if self.rocm_aiter_moe_enabled:
