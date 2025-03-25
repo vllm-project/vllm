@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import zmq
 import zmq.asyncio
@@ -31,6 +31,8 @@ from vllm.v1.utils import BackgroundProcHandle
 logger = init_logger(__name__)
 
 AnyFuture = Union[asyncio.Future[Any], Future[Any]]
+
+_R = TypeVar('_R')  # Return type for collective_rpc
 
 
 class EngineCoreClient(ABC):
@@ -447,6 +449,14 @@ class SyncMPClient(MPClient):
 
     def execute_dummy_batch(self) -> None:
         self._call_utility("execute_dummy_batch")
+
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return self._call_utility("collective_rpc", method, timeout, args,
+                                  kwargs)
 
 
 class AsyncMPClient(MPClient):
