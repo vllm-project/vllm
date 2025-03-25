@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Callable, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
 from vllm import envs
@@ -96,8 +97,26 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
+    def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        # Pad the weight tensor. This is an optimization on ROCm platform, which
+        # can benefit from tensors located far enough from one another in memory
+        if (envs.VLLM_ROCM_MOE_PADDING and current_platform.is_rocm()
+                and weight.stride(-1) == 1
+                and (weight.stride(-2) * weight.element_size()) % 512 == 0):
+            num_pad = 256 // weight.element_size()
+            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
+            torch.cuda.empty_cache()
+        return weight
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+
+        layer.w13_weight = torch.nn.Parameter(self._maybe_pad_weight(
+            layer.w13_weight.data),
+                                              requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(self._maybe_pad_weight(
+            layer.w2_weight.data),
+                                             requires_grad=False)
 
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
@@ -212,6 +231,34 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func,
             e_score_correction_bias,
         )
+
+    def forward_hpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        assert not use_grouped_topk
+        assert num_expert_group is None
+        assert topk_group is None
+        assert custom_routing_function is None
+        assert layer is not None
+        if scoring_func != "softmax":
+            raise NotImplementedError(
+                "Only softmax scoring function is supported for HPU.")
+        if e_score_correction_bias is not None:
+            raise NotImplementedError(
+                "Expert score correction bias is not supported for HPU.")
+        return layer.hpu_fused_moe(x, layer.w13_weight, layer.w2_weight,
+                                   router_logits, top_k)
 
     def forward_tpu(
         self,
@@ -411,6 +458,9 @@ class FusedMoE(torch.nn.Module):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
+        if current_platform.is_hpu():
+            from vllm_hpu_extension.ops import DynamicFusedMOE
+            self.hpu_fused_moe = DynamicFusedMOE(self.num_experts)
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.

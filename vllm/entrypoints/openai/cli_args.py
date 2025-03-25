@@ -89,6 +89,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default="info",
         choices=['debug', 'info', 'warning', 'error', 'critical', 'trace'],
         help="Log level for uvicorn.")
+    parser.add_argument("--disable-uvicorn-access-log",
+                        action="store_true",
+                        help="Disable uvicorn access log.")
     parser.add_argument("--allow-credentials",
                         action="store_true",
                         help="Allow credentials.")
@@ -285,13 +288,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_reasoning and not args.reasoning_parser:
         raise TypeError("Error: --enable-reasoning requires "
                         "--reasoning-parser")
-
-    # Ref https://api-docs.deepseek.com/guides/reasoning_model
-    # tool call and reasoning cannot be enabled at the same time.
-    if args.enable_auto_tool_choice and args.enable_reasoning:
-        raise TypeError(
-            "Error: --enable-auto-tool-choice and "
-            "--enable-reasoning cannot be enabled at the same time")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

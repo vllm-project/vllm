@@ -130,6 +130,8 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
 
   __m512i reg;
 
+  explicit BF16Vec32() : reg(_mm512_setzero_si512()) {}
+
   explicit BF16Vec32(const void* ptr) : reg((__m512i)_mm512_loadu_si512(ptr)) {}
 
   explicit BF16Vec32(__m512i data) : reg(data) {}
