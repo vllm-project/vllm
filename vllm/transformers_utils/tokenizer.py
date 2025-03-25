@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from __future__ import annotations
 
 import contextlib
 import os
@@ -124,12 +125,12 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     return tokenizer
 
 
-def patch_padding_side(tokenizer: "PreTrainedTokenizer") -> None:
+def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
     """Patch _pad method to accept `padding_side` for older tokenizers."""
     orig_pad = tokenizer._pad
 
     def _pad(
-        self: "PreTrainedTokenizer",
+        self: PreTrainedTokenizer,
         *args,
         padding_side: Optional[str] = None,
         **kwargs,
@@ -258,7 +259,7 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
 def cached_tokenizer_from_config(
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
     **kwargs: Any,
 ):
     return cached_get_tokenizer(
