@@ -197,8 +197,8 @@ def main(
 
 
 if __name__ == '__main__':
-    logger.info("This script benchmarks the paged attention kernel. "
-                "By default this kernel is no longer used in vLLM inference.")
+    logger.warning("This script benchmarks the paged attention kernel. "
+                   "By default this is no longer used in vLLM inference.")
 
     parser = FlexibleArgumentParser(
         description="Benchmark the paged attention kernel.")
