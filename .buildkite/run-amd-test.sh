@@ -136,7 +136,7 @@ if [[ $commands == *"--shard-id="* ]]; then
     echo "Shard ${GPU} commands:$commands_gpu"
     docker run \
         --device /dev/kfd --device /dev/dri \
-        --network host \
+        --network=host \
         --shm-size=16gb \
         --rm \
         -e HIP_VISIBLE_DEVICES="${GPU}" \
@@ -165,7 +165,7 @@ if [[ $commands == *"--shard-id="* ]]; then
 else
   docker run \
           --device /dev/kfd --device /dev/dri \
-          --network host \
+          --network=host \
           --shm-size=16gb \
           --rm \
           -e HIP_VISIBLE_DEVICES=0 \
