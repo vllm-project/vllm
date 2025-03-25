@@ -186,7 +186,7 @@ def fused_moe_kernel_gptq_awq(
                     (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                     other=0.0)
         b = tl.load(b_ptrs,
-                    cache_modifier="cg",
+                    cache_modifier=".cg",
                     eviction_policy="evict_last",)
         if use_int4_w4a16:
             b = (b >> b_shifter) & 0xF
@@ -392,7 +392,7 @@ def fused_moe_kernel(
         b = tl.load(b_ptrs,
                     mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
                     other=0.0,
-                    cache_modifier="cg",
+                    cache_modifier=".cg",
                     eviction_policy="evict_last",)
         # We accumulate along the K dimension.
         if use_int8_w8a16:
