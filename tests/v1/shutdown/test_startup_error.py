@@ -77,7 +77,10 @@ def test_llm_startup_error(monkeypatch, model, tensor_parallel_size,
         # Monkeypatch an error in the model.
         monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
 
-        with pytest.raises(Exception, match="initialization failed"):
+        with pytest.raises(
+                Exception,
+                match="initialization failed"
+                if enable_multiprocessing else "Simulated Error in startup!"):
             _ = LLM(model="meta-llama/Llama-3.2-1B",
                     enforce_eager=True,
                     tensor_parallel_size=tensor_parallel_size)
