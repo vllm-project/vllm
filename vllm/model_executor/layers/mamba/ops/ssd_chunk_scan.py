@@ -518,7 +518,7 @@ def _chunk_scan_fwd(
                 # no in this case no point to use initial states
                 initial_states = None
             elif chunk_indices is None and chunk_offsets is None:
-                # if chunk_indices and chunk_offsets both unset, then derive 
+                # if chunk_indices and chunk_offsets both unset, then derive
                 # from seq_idx
                 chunk_indices, chunk_offsets = seq_idx_to_chunk_indices_offsets(
                     seq_idx, chunk_size)
