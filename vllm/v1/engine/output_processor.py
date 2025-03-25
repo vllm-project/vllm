@@ -17,6 +17,49 @@ from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
 
 
+class RequestOutputCollector:
+    """
+    Collects streamed RequestOutputs per individual request,
+    for hand-off to the consuming asyncio generate task.
+
+    When streaming deltas, RequestOutputs are merged if the
+    producer gets ahead of the consumer.
+    """
+
+    def __init__(self, output_kind: RequestOutputKind):
+        self.aggregate = output_kind == RequestOutputKind.DELTA
+        self.output: Optional[RequestOutput] = None
+        self.ready = asyncio.Event()
+
+    def put(self, output: RequestOutput) -> None:
+        '''Non-blocking put operation'''
+        if self.output is None:
+            self.output = output
+            self.ready.set()
+        elif self.aggregate:
+            # Coalesce the outputs in delta case.
+            self.output.add(output)
+        else:
+            # Just replace latest in non-delta case.
+            self.output = output
+
+    async def get(self) -> RequestOutput:
+        '''Get operation blocks on put event'''
+        while (output := self.output) is None:
+            await self.ready.wait()
+        self.output = None
+        self.ready.clear()
+        return output
+
+    def get_nowait(self) -> Optional[RequestOutput]:
+        '''Non-blocking get operation'''
+        output = self.output
+        if output is not None:
+            self.output = None
+            self.ready.clear()
+        return output
+
+
 @dataclass
 class OutputProcessorOutput:
 
@@ -39,7 +82,7 @@ class RequestState:
         detokenizer: IncrementalDetokenizer,
         max_tokens_param: Optional[int],
         arrival_time: float,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ):
         self.request_id = request_id
@@ -66,7 +109,7 @@ class RequestState:
         request: EngineCoreRequest,
         parent_req: Optional[ParentRequest],
         request_index: int,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ) -> "RequestState":
         if not request.sampling_params.detokenize:
@@ -200,7 +243,7 @@ class OutputProcessor:
 
         for _, state in self.request_states.items():
             assert state.queue is not None
-            state.queue.put_nowait(e)
+            state.queue.put(e)
 
     def abort_requests(
         self,
@@ -224,7 +267,7 @@ class OutputProcessor:
         request: EngineCoreRequest,
         parent_req: Optional[ParentRequest] = None,
         request_index: int = 0,
-        queue: Optional[asyncio.Queue[RequestOutput]] = None,
+        queue: Optional[RequestOutputCollector] = None,
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
@@ -307,7 +350,7 @@ class OutputProcessor:
                     new_token_ids, finish_reason, stop_reason):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
-                    req_state.queue.put_nowait(request_output)
+                    req_state.queue.put(request_output)
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
