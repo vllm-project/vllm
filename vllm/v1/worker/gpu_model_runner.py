@@ -126,13 +126,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.uses_mrope = model_config.uses_mrope
 
         self.cuda_graph_capture_time = 0.0
-        if self.is_multimodal_model:
-            # NOTE: Initialized client is only used for processing dummy
-            # multimodal data into multimodal kwargs for GPU memory profiling.
-            # Only applicable to multimodal models with legacy input mapper.
-            self.mm_input_mapper_profiling = MMInputCacheClient(
-                self.model_config)
-            self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
