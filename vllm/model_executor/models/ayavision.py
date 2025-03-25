@@ -253,18 +253,75 @@ class AyaVisionDummyInputsBuilder(
 
 class AyaVisionMultiModalProcessor(
         BaseMultiModalProcessor[AyaVisionProcessingInfo]):
+    
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processed_outputs = super()._call_hf_processor(
+            prompt,
+            mm_data,
+            mm_kwargs,
+        )
+
+        # HF processor pops the `num_patches` kwarg, which is needed by vLLM
+        if (images := mm_data.get("images")) is not None:
+            assert isinstance(images, list)
+
+            parsed_images = (self._get_data_parser().parse_mm_data({
+                "image":
+                images
+            }).get_items("image", ImageProcessorItems))
+            image_sizes = [
+                parsed_images.get_image_size(i)
+                for i in range(len(parsed_images))
+            ]
+            hf_processor = self.info.get_hf_processor(**mm_kwargs)
+            image_processor = hf_processor.image_processor
+            num_patches = [self.info.get_num_patches(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                    patch_size=hf_processor.patch_size,
+                    min_patches=image_processor.min_patches,
+                    max_patches=image_processor.max_patches) for image_size in image_sizes]
+            image_repl_features = [self.info._prompt_split_image(num_patches=x,
+                                                 processor=hf_processor) for x in num_patches]
+
+
+            tokenizer = self.info.get_tokenizer()
+            image_repls_feature_tokens = [
+                tokenizer.encode(image_repl, add_special_tokens=False)
+                for image_repl in image_repl_features
+            ]
+            num_embeds = [
+                len(image_repl_feature_tokens)
+                for image_repl_feature_tokens in image_repls_feature_tokens
+            ]
+            processed_outputs["num_embeds"] = torch.tensor(num_embeds)
+
+            hf_config = self.info.get_hf_config()
+
+            embed_is_patch = [
+                torch.tensor(image_repl_tokens) == hf_config.image_token_index
+                for image_repl_tokens in image_repls_feature_tokens
+            ]
+            processed_outputs["embed_is_patch"] = embed_is_patch
+            processed_outputs["num_patches"] = torch.tensor(num_patches)
+
+        return processed_outputs
 
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        pixel_values = hf_inputs.get("pixel_values", torch.empty(0))
-        num_patches = torch.tensor([pixel_values.shape[0]])
+        num_patches = hf_inputs.get("num_patches", torch.empty(0))
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_patches),
-            num_patches=num_patches,
+            num_patches=MultiModalFieldConfig.batched("image"),
             num_embeds=MultiModalFieldConfig.batched("image"),
             embed_is_patch=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
@@ -308,7 +365,7 @@ def _get_num_hidden_layers(hf_config: AyaVisionConfig) -> int:
     # If we have one feature layer, initialize up to that layer
     if isinstance(feature_layers, int):
         return _get_layer_index(feature_layers, num_hidden_layers)
-    # If we have multiple feature layers, initialize up to the deepest one
+    # If we have multiple feature layers, initialize up to the deepest m
     elif isinstance(feature_layers, (list, tuple)):
         return max(
             _get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
@@ -395,12 +452,10 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         assert self.vision_tower is not None
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
-        print("_process_image_input | " * 5)
-        print(num_patches.tolist())
         image_features = self._image_pixels_to_features(
             self.vision_tower, pixel_values=pixel_values)
         image_embeds = self.multi_modal_projector(image_features)
-        return image_embeds.split(num_patches.tolist())
+        return image_embeds.split(num_patches.tolist()) if num_patches is not None else image_embeds
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -419,32 +474,31 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[AyaVisionImagePixelInputs]:
-        pixel_values: torch.Tensor = kwargs.pop("pixel_values", None)
-        if pixel_values is None:
-            return None
+        pixel_values = kwargs.pop("pixel_values", None)
+        num_patches = kwargs.pop("num_crops", None)
+        embed_is_patch = kwargs.pop("embed_is_patch", None)
+        num_embeds = kwargs.pop("num_embeds", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+        assert image_embeds is None, "Aya Vision does not support image_embeds."
 
         if not isinstance(pixel_values, (torch.Tensor, list)):
             raise ValueError("Incorrect type of pixel values. "
                              f"Got type: {type(pixel_values)}")
-        num_patches = pixel_values.shape[1]
-        if pixel_values.ndim == 5:
-            batch_size = pixel_values.shape[0]
-            num_patches = pixel_values.shape[1]
-            embed_is_patch = torch.full((batch_size, ),
-                                        True,
-                                        dtype=torch.bool,
-                                        device=pixel_values.device)
-            num_embeds = torch.full((batch_size, ),
-                                    num_patches,
-                                    dtype=torch.int,
-                                    device=pixel_values.device)
-            num_patches = torch.full((batch_size, ),
-                                     num_patches,
-                                     dtype=torch.int,
-                                     device=pixel_values.device)
+        if num_patches is None:
+            # num_patches got poped here
+            num_patches =  torch.tensor([x.shape[0] for x in pixel_values if x.ndim==4])
+        if num_patches is not None and not isinstance(num_patches, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of num_patches. "
+                             f"Got type: {type(num_patches)}")
 
-        else:
-            raise ValueError(f"pixel_values is incorrect {pixel_values.shape}")
+        if not isinstance(embed_is_patch, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of embed_is_patch. "
+                             f"Got type: {type(embed_is_patch)}")
+
+        if not isinstance(num_embeds, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of num_embeds. "
+                             f"Got type: {type(num_embeds)}")
+
         pixel_values = flatten_bn(pixel_values, concat=True)
 
         return AyaVisionImagePixelInputs(
@@ -470,8 +524,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
-        print("get_input_embeddings | " * 4)
-        print((input_ids == 255036).sum().item())
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
         if multimodal_embeddings is not None:
@@ -496,16 +548,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
                 "You must specify exactly one of input_ids or inputs_embeds")
-        if input_ids is not None:
-            special_image_mask = (
-                input_ids == self.config.image_token_index).unsqueeze(-1)
-            special_image_mask = special_image_mask.expand_as(
-                inputs_embeds).to(inputs_embeds.device)
-        else:
-            special_image_mask = torch.zeros_like(inputs_embeds,
-                                                  dtype=torch.bool).to(
-                                                      inputs_embeds.device)
-
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
