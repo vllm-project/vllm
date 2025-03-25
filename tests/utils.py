@@ -104,6 +104,9 @@ class RemoteOpenAIServer:
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
+        self.show_hidden_metrics = \
+            args.show_hidden_metrics_for_version is not None
+
         # download the model before starting the server to avoid timeout
         is_local = os.path.isdir(model)
         if not is_local:

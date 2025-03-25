@@ -66,7 +66,6 @@ def server(use_v1, default_server_args, request):
     env_dict = dict(VLLM_USE_V1='1' if use_v1 else '0')
     with RemoteOpenAIServer(MODEL_NAME, default_server_args,
                             env_dict=env_dict) as remote_server:
-        remote_server.showing_hidden_metrics = "show-hidden" in request.param
         yield remote_server
 
 
@@ -135,7 +134,7 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
     # Loop over all expected metric_families
     for metric_family, suffix_values_list in EXPECTED_VALUES.items():
         if ((use_v1 and metric_family not in EXPECTED_METRICS_V1)
-                or (not server.showing_hidden_metrics
+                or (not server.show_hidden_metrics
                     and metric_family in HIDDEN_DEPRECATED_METRICS)):
             continue
 
@@ -294,7 +293,7 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
     assert response.status_code == HTTPStatus.OK
 
     for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
-        if (not server.showing_hidden_metrics
+        if (not server.show_hidden_metrics
                 and metric not in HIDDEN_DEPRECATED_METRICS):
             assert metric in response.text
 
