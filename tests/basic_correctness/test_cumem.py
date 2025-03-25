@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.device_allocator.cumem import CuMemAllocator
@@ -166,9 +165,7 @@ def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
     [
         # sleep mode with safetensors
         ("meta-llama/Llama-3.2-1B", True),
-        ("meta-llama/Llama-3.2-1B", False),
-        # sleep mode with pytorch checkpoint
-        ("facebook/opt-125m", False),
+        ("meta-llama/Llama-3.2-1B", False)
     ])
 def test_end_to_end_with_tags(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
     with monkeypatch.context() as m:

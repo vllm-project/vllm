@@ -1219,7 +1219,13 @@ class LLM:
     def wake_up(self, tags: Optional[list[str]] = None):
         """
         Wake up the engine from sleep mode. See the :meth:`sleep` method
-        for more details."""
+        for more details.
+        
+        :param tags: An optional list of tags to reallocate the engine memory 
+            for specific memory allocations. Values must be in 
+            ("weights", "kv_cache",). If None, all memory allocations are
+            reallocated.
+        """
         self.llm_engine.wake_up(tags)
 
     # LEGACY

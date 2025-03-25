@@ -138,7 +138,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
         allocator = CuMemAllocator.get_instance()
         if tags is None:
-            # if not specific tags are provided, wake up all tags
+            # if specific tags are not provided, wake up all tags
             tags = ("weights", "kv_cache")
         else:
             tags = tuple(tags)
