@@ -267,7 +267,9 @@ def test_linear_decode_forward_triton_vs_reference(
                 continue
 
             for h in range(H):
-                decay = torch.exp(-slope_rate[h].item())
+                decay = torch.exp(torch.tensor(-slope_rate[h].item(), 
+                                              device=q.device, 
+                                              dtype=torch.float32))
 
                 # Get current query, key and value
                 q_bh = q[b, h, 0].float()
