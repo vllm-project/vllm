@@ -4,7 +4,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
-from typing import List, Optional, Set, Tuple, TypedDict, Union, cast
+from typing import List, Optional, Set, Tuple, TypedDict, Union
 
 import numpy as np
 import torch
@@ -41,8 +41,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -50,7 +49,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptInsertion, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import JSONTree, flatten_2d_lists, json_map_leaves
+from vllm.utils import flatten_2d_lists
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP, SupportsQuant)
@@ -58,6 +57,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
+from .vision import select_patch_features
 
 # TODO: hard-coded for now. Consider making it configurable.
 VIT_LAYERS = [-2, -9]
@@ -1584,15 +1584,13 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
 
         image_features = self._process_image_input(image_input)
 
-        nested_embeds = [
+        return flatten_2d_lists(
             self._get_mm_embeds(*args) for args in zip(
                 image_features,
                 image_input["feat_is_patch"],
                 image_input["num_crops"],
                 image_input["embed_is_patch"],
-            )
-        ]
-        return flatten_2d_lists(nested_embeds)
+            ))
 
     def get_input_embeddings(
         self,
@@ -1603,16 +1601,10 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
         if multimodal_embeddings is not None:
             assert self.img_patch_id is not None
 
-            # Extract the patch tokens scattered in _get_mm_embeds
-            patch_embeddings = json_map_leaves(
-                lambda x: x[~x.isnan()].view(-1, *x.shape[1:]),
-                cast(JSONTree[torch.Tensor], multimodal_embeddings),
-            )
-
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                cast(NestedTensors, patch_embeddings),
+                select_patch_features(multimodal_embeddings),
                 self.img_patch_id,
             )
         return inputs_embeds

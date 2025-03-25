@@ -783,8 +783,12 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             use_int8_w8a16=use_int8_w8a16,
             **config,
         )
-
     else:
+        config = config.copy()
+        BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
+        if block_shape is not None:
+            BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0],
+                                                 block_shape[1]))
         fused_moe_kernel[grid](
             A,
             B,
@@ -796,7 +800,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             expert_ids,
             num_tokens_post_padded,
             B.shape[1],
-            A.shape[1],
+            B.shape[2],
             EM,
             topk_ids.numel(),
             A.stride(0),
@@ -823,6 +827,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             compute_type=compute_type,
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
             **config,
         )
 
@@ -1317,8 +1322,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
-    assert w1.is_contiguous(), "Expert weights1 must be contiguous"
-    assert w2.is_contiguous(), "Expert weights2 must be contiguous"
+    assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
+    assert w2.stride(-1) == 1, "Stride of last dimension must be 1"
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]
