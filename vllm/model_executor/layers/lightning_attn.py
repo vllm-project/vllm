@@ -177,7 +177,7 @@ def _fwd_kv_parallel(
         k_trans = tl.load(K_trans_block_ptr - left_shift * d,
                           mask=kv_index[None, :] >= left_bound,
                           other=0.0)
-        v = tl.load(V_block_ptr - left_shift * d,
+        v = tl.load(V_block_ptr - left_shift * e,
                     mask=kv_index[:, None] >= left_bound,
                     other=0.0)
 
