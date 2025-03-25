@@ -24,6 +24,7 @@ from transformers import AutoModel, PretrainedConfig, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.attention import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, VllmConfig)
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -351,6 +352,7 @@ class TransformersModel(nn.Module):
         return loaded_params
 
 
+@support_torch_compile
 class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
                               SupportsPP):
     embedding_padding_modules = ["lm_head"]
