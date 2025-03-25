@@ -278,6 +278,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         *,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -294,6 +295,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         list[SamplingParams]]] = None,
         prompt_token_ids: Optional[list[int]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -310,6 +312,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         list[SamplingParams]]] = None,
         prompt_token_ids: Optional[list[list[int]]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -327,6 +330,7 @@ class LLM:
                                         list[SamplingParams]]] = None,
         *,
         prompt_token_ids: list[int],
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -344,6 +348,7 @@ class LLM:
                                         list[SamplingParams]]] = None,
         *,
         prompt_token_ids: list[list[int]],
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -359,6 +364,7 @@ class LLM:
         prompts: None,
         sampling_params: None,
         prompt_token_ids: Union[list[int], list[list[int]]],
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -1368,8 +1374,12 @@ class LLM:
             raise ValueError("Cannot set both guided_options_request and "
                              "params.guided_decoding.")
 
+        json = (guided_options.guided_json.model_dump_json() if
+                (guided_options.guided_json is not None
+                 and not isinstance(guided_options.guided_json, (dict, str)))
+                else guided_options.guided_json)
         params.guided_decoding = GuidedDecodingParams(
-            json=guided_options.guided_json,
+            json=json,
             regex=guided_options.guided_regex,
             choice=guided_options.guided_choice,
             grammar=guided_options.guided_grammar,
