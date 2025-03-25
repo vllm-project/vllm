@@ -220,14 +220,13 @@ jobs:
             RELEASED_SYNAPSE_VERSION: ${{ vars.RELEASED_SYNAPSE_VERSION }}
             BASE_BRANCH: ${{ needs.read_codeowners.outputs.pr_branch }}      
           run: |
-            if [[ $TARGET_BRANCH == "habana_main" ]]; then
-              synapse_version=${RELEASED_SYNAPSE_VERSION#v}
-            elif [[ $TARGET_BRANCH =~ v*.*.* ]]; then
+            version_regex='^v([0-9]+)\.([0-9]+)\.([0-9]+)$'
+            if [[ $TARGET_BRANCH =~ $version_regex ]]; then
               synapse_version=${TARGET_BRANCH#v}
             else
-              echo "Can't Calculate Synapse Version, Failing The Test"
-              exit 1
+              synapse_version=${RELEASED_SYNAPSE_VERSION#v}
             fi
+            echo "Using SynapseAI version ${synapse_version}"            
             synapse_build=$(curl "https://dms.habana-labs.com/api/v1.1/branch/info/v$synapse_version" | jq -r ".release_id")
             pt_version=${{ vars.PT_VERSION }}
             BUILD_TAG="Github-vLLM-Fork-${{ github.event.number }}-${{github.run_number}}"
@@ -291,7 +290,7 @@ jobs:
       name: Summarize Test Results
       runs-on: generic-runner
       needs: [TestRun,read_codeowners]
-      if: needs.TestRun.result != 'skipped' && needs.read_codeowners.result != 'skipped'
+      if: always() && needs.TestRun.result != 'skipped' && needs.read_codeowners.result != 'skipped'
       steps:
         - name: Checkout Repository
           uses: actions/checkout@v4
