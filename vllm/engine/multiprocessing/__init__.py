@@ -135,7 +135,8 @@ class RPCSleepRequest(Enum):
 
 @dataclass
 class RPCWakeUpRequest:
-    tags: list[str]
+    tags: Optional[list[str]] = None
+
 
 @dataclass
 class RPCIsSleepingRequest:

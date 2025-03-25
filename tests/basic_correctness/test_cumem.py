@@ -159,6 +159,7 @@ def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
         # cmp output
         assert output[0].outputs[0].text == output2[0].outputs[0].text
 
+
 @create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "model, use_v1",
@@ -167,7 +168,8 @@ def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
         ("meta-llama/Llama-3.2-1B", True),
         ("meta-llama/Llama-3.2-1B", False)
     ])
-def test_end_to_end_with_tags(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
+def test_end_to_end_with_tags(monkeypatch: pytest.MonkeyPatch, model: str,
+                              use_v1: bool):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
         free, total = torch.cuda.mem_get_info()
@@ -196,15 +198,15 @@ def test_end_to_end_with_tags(monkeypatch: pytest.MonkeyPatch, model: str, use_v
 
         llm.wake_up(tags=["weights"])
 
-        free_gpu_bytes_after_weights_wake_up, total = torch.cuda.mem_get_info()
-        used_bytes = total - free_gpu_bytes_after_weights_wake_up - used_bytes_baseline
+        free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
+        used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
 
         # should just reallocate memory for weights (1B model, ~2GiB weights)
         if use_v1:
             assert used_bytes < 10 * GiB_bytes
         else:
             assert used_bytes < 6 * GiB_bytes
-        
+
         # now allocate kv cache memory
         llm.wake_up(tags=["kv_cache"])
         output2 = llm.generate(prompt, sampling_params)

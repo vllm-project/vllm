@@ -7,7 +7,6 @@ from contextlib import contextmanager
 from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 
 import cloudpickle
-import torch
 import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
@@ -1223,8 +1222,7 @@ class LLM:
         
         :param tags: An optional list of tags to reallocate the engine memory 
             for specific memory allocations. Values must be in 
-            ("weights", "kv_cache",). If None, all memory allocations are
-            reallocated.
+            ("weights", "kv_cache",). If None, all memory is reallocated.
         """
         self.llm_engine.wake_up(tags)
 

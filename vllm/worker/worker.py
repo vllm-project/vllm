@@ -137,12 +137,8 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
         allocator = CuMemAllocator.get_instance()
-        if tags is None:
-            # if specific tags are not provided, wake up all tags
-            tags = ("weights", "kv_cache")
-        else:
-            tags = tuple(tags)
-        allocator.wake_up(tags=tags)
+        allocator.wake_up(tags=("weights",
+                                "kv_cache") if tags is None else tuple(tags))
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
