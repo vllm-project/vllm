@@ -110,9 +110,6 @@ def replace_linear_class(
 
 
 class TransformersModel(nn.Module):
-    embedding_padding_modules = ["lm_head"]
-    embedding_modules = ["embed_tokens"
-                         ]  # TODO transformers will have a util to get it
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -356,6 +353,9 @@ class TransformersModel(nn.Module):
 
 class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
                               SupportsPP):
+    embedding_padding_modules = ["lm_head"]
+    embedding_modules = ["embed_tokens"
+                         ]  # TODO transformers will have a util to get it
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -418,10 +418,14 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+
+        def maybe_add_model_prefix(name: str):
+            return name if name.startswith("lm_head.") else "model." + name
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(
-            (name, loaded_weight) for name, loaded_weight in weights)
+            (maybe_add_model_prefix(name), weight) for name, weight in weights)
