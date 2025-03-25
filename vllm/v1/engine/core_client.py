@@ -329,7 +329,8 @@ class SyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
+        self.outputs_queue: queue.Queue[Union[EngineCoreOutputs,
+                                              Exception]] = queue.Queue()
 
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
@@ -363,7 +364,7 @@ class SyncMPClient(MPClient):
                         self._validate_alive(frame.buffer)
                         outputs = decoder.decode(frame.buffer)
                     except Exception as e:
-                        raise self._format_exception(e) from None
+                        self.outputs_queue.put_nowait(e)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
@@ -381,7 +382,13 @@ class SyncMPClient(MPClient):
         self.output_queue_thread.start()
 
     def get_output(self) -> EngineCoreOutputs:
-        return self.outputs_queue.get()
+        # If an exception arises in process_outputs_socket task,
+        # it is forwarded to the outputs_queue so we can raise it
+        # from this (run_output_handler) task to shut down the server.
+        outputs = self.outputs_queue.get()
+        if isinstance(outputs, Exception):
+            raise self._format_exception(outputs) from None
+        return outputs
 
     def _send_input(self, request_type: EngineCoreRequestType,
                     request: Any) -> None:
