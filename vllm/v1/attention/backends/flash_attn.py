@@ -333,7 +333,7 @@ class FlashAttentionMetadataBuilder:
         def schedule(cu_query_lens, max_query_len, seqlens, max_seq_len,
                      causal):
             if self.aot_schedule:
-                scheduler_metadata = get_scheduler_metadata(
+                return get_scheduler_metadata(
                     batch_size=num_reqs,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
@@ -345,7 +345,6 @@ class FlashAttentionMetadataBuilder:
                     cu_seqlens_q=cu_query_lens,
                     causal=causal,
                 )
-                return scheduler_metadata
             return None
 
         if use_cascade:
