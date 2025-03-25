@@ -1496,6 +1496,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         dummy_lora_id: Optional[int] = None
         dummy_lora_request: LoRARequest = []
         if self.lora_config:
+            # The goal is to capture the LoRA kernels in cuda graphs.
+            # for this purpose, as single dummy lora is sufficient.
             dummy_lora_requests = self._add_dummy_loras(num_loras=1)
             assert len(dummy_lora_requests) == 1
             dummy_lora_request = dummy_lora_requests[0]
