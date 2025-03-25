@@ -472,6 +472,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.
   * ✅︎
   * ✅︎
+- * `TeleFLMForCausalLM`
+  * TeleFLM
+  * `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc.
+  * ✅︎
+  * ✅︎
 - * `XverseForCausalLM`
   * XVERSE
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.

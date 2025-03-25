@@ -13,8 +13,10 @@ from vllm.logger import init_logger
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
-                                           SchedulerOutput)
+from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
+                                       SchedulerOutput)
+from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.metrics.stats import SchedulerStats
@@ -25,7 +27,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 logger = init_logger(__name__)
 
 
-class Scheduler:
+class Scheduler(SchedulerInterface):
 
     def __init__(
         self,
@@ -602,7 +604,7 @@ class Scheduler:
 
                     # Check for stop and update request state.
                     # This must be called before we make the EngineCoreOutput.
-                    stopped = self._check_stop(request)
+                    stopped = check_stop(request, self.max_model_len)
                     if stopped:
                         self._free_request(request)
                         break
@@ -625,8 +627,7 @@ class Scheduler:
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            # Transmit partial if chunked prefill & prompt logprobs is enabled
-            if new_token_ids or prompt_logprobs_tensors is not None:
+            if new_token_ids:
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
                     EngineCoreOutput(
@@ -637,6 +638,9 @@ class Scheduler:
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
                         events=request.take_events()))
+            else:
+                # Invariant: EngineCore returns no partial prefill outputs.
+                assert not prompt_logprobs_tensors
 
             self.scheduled_req_ids.remove(request.request_id)
             if not stopped:
@@ -647,25 +651,6 @@ class Scheduler:
             outputs=outputs,
             scheduler_stats=self.make_stats(),
         )
-
-    def _check_stop(self, request: Request) -> bool:
-        if (request.num_tokens >= self.max_model_len
-                or request.num_output_tokens >= request.max_tokens):
-            request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-            return True
-
-        sampling_params = request.sampling_params
-        last_token_id = request.output_token_ids[-1]
-        if (not sampling_params.ignore_eos
-                and last_token_id == request.eos_token_id):
-            request.status = RequestStatus.FINISHED_STOPPED
-            return True
-
-        if last_token_id in (sampling_params.stop_token_ids or ()):
-            request.status = RequestStatus.FINISHED_STOPPED
-            request.stop_reason = last_token_id
-            return True
-        return False
 
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
@@ -715,16 +700,8 @@ class Scheduler:
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
 
-    def has_unfinished_requests(self) -> bool:
-        return self.get_num_unfinished_requests() > 0
-
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
-
-    def has_requests(self):
-        """Returns True if there are unfinished requests, or finished requests
-        not yet returned in SchedulerOutputs."""
-        return self.has_unfinished_requests() or self.has_finished_requests()
 
     def get_num_unscheduled_requests(self) -> int:
         """Number of requests that are not being processed by the executor."""

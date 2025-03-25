@@ -21,18 +21,9 @@ def test_collective_rpc(tp_size, backend):
     def echo_rank(self):
         return self.rank
 
-    from vllm.worker.worker import Worker
-
-    class MyWorker(Worker):
-
-        def echo_rank(self):
-            return self.rank
-
     llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
               enforce_eager=True,
               load_format="dummy",
               tensor_parallel_size=tp_size,
-              distributed_executor_backend=backend,
-              worker_cls=MyWorker)
-    for method in ["echo_rank", echo_rank]:
-        assert llm.collective_rpc(method) == list(range(tp_size))
+              distributed_executor_backend=backend)
+    assert llm.collective_rpc(echo_rank) == list(range(tp_size))
