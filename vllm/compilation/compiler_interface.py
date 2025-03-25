@@ -122,6 +122,9 @@ class AlwaysHitShapeEnv:
         return ""
 
 
+global GLOBAL_CACHE_KEY
+
+
 class InductorAdaptor(CompilerInterface):
     """
     The adaptor for the Inductor compiler, version 2.5 and 2.6.
@@ -221,16 +224,65 @@ class InductorAdaptor(CompilerInterface):
             # function renamed in 2.6
             original_load_name = None
 
+            from torch._dynamo.backends.common import aot_autograd
+            from torch._functorch._aot_autograd.autograd_cache import (
+                AOTAutogradCache, get_cache_key)
+            from torch._functorch._aot_autograd.schemas import AOTConfig
+
+            aot_config = AOTConfig(
+                fw_compiler=None,
+                bw_compiler=None,
+                inference_compiler=torch._inductor.compile_fx.compile_fx_inner,
+                partition_fn=None,
+                decompositions={},
+                num_params_buffers=0,
+                aot_id=0,
+                keep_inference_input_mutations=True,
+                dynamic_shapes=False,
+                aot_autograd_arg_pos_to_source=None,
+                is_export=False,
+                no_tangents=False,
+                enable_log=False,
+            )
+            fx_config = {"cudagraphs": False}
+
             def hijacked_compile_fx_inner(*args, **kwargs):
-                output = torch._inductor.compile_fx.compile_fx_inner(
-                    *args, **kwargs)
+                gm = args[0]
+                assert isinstance(gm, torch.nn.Module)
+                out = aot_autograd(
+                    fw_compiler=None,
+                    bw_compiler=None,
+                    inference_compiler=torch._inductor.compile_fx.
+                    compile_fx_inner,
+                    decompositions={},
+                    partition_fn=None,
+                    keep_inference_input_mutations=True,
+                    cudagraphs=False,
+                )(*args, **kwargs)
+                #cache_key, _ = autograd_cache_key(gm, args[1], aot_config, fx_config)
+                GLOBAL_CACHE_KEY = get_cache_key()
+                entry = AOTAutogradCache._lookup(GLOBAL_CACHE_KEY,
+                                                 local=True,
+                                                 remote=False)
+                breakpoint()
+                assert entry is not None
                 nonlocal hash_str
-                inductor_compiled_graph = output
-                if inductor_compiled_graph is not None:
-                    nonlocal file_path
-                    file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
-                    hash_str = inductor_compiled_graph._fx_graph_cache_key
-                return output
+                nonlocal file_path
+                hash_str = GLOBAL_CACHE_KEY
+                breakpoint()
+                file_path = (entry, aot_config, fx_config)
+                return out
+
+            # def hijacked_compile_fx_inner_OLD(*args, **kwargs):
+            #     output = torch._inductor.compile_fx.compile_fx_inner(
+            #         *args, **kwargs)
+            #     nonlocal hash_str
+            #     inductor_compiled_graph = output
+            #     if inductor_compiled_graph is not None:
+            #         nonlocal file_path
+            #         file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
+            #         hash_str = inductor_compiled_graph._fx_graph_cache_key
+            #     return output
 
         def hijack_compiled_fx_graph_hash(*args, **kwargs):
             out = compiled_fx_graph_hash(*args, **kwargs)
@@ -281,6 +333,7 @@ class InductorAdaptor(CompilerInterface):
             "failed to get the hash of the compiled graph")
         assert file_path is not None, (
             "failed to get the file path of the compiled graph")
+        breakpoint()
         return compiled_graph, (hash_str, file_path)
 
     def load(self,
@@ -291,7 +344,7 @@ class InductorAdaptor(CompilerInterface):
              runtime_shape: Optional[int] = None) -> Callable:
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
-        assert isinstance(handle[1], str)
+        #assert isinstance(handle[1], str)
         hash_str = handle[0]
 
         from torch._inductor.codecache import FxGraphCache
@@ -305,24 +358,32 @@ class InductorAdaptor(CompilerInterface):
                     f"the cache directory and try again."  # noqa
                 )
             elif torch.__version__ >= "2.6":
-                from torch._inductor.output_code import (
-                    CompiledFxGraphConstantsWithGm)
-                constants = CompiledFxGraphConstantsWithGm(graph)
-                inductor_compiled_graph, _ = FxGraphCache._lookup_graph(
-                    hash_str, example_inputs, True, None, constants)
-                assert inductor_compiled_graph is not None, (
-                    "Inductor cache lookup failed. Please remove"
-                    f"the cache directory and try again."  # noqa
-                )
+                breakpoint()
+                cache_value, aot_config, fx_config = handle[1]
+                inductor_compiled_graph = cache_value.wrap_post_compile(
+                    example_inputs, aot_config, fx_config)
 
-        # Inductor calling convention (function signature):
-        # f(list) -> tuple
-        # Dynamo calling convention (function signature):
-        # f(*args) -> Any
 
-        # need to know if the graph returns a tuple
-        from torch._inductor.compile_fx import graph_returns_tuple
-        returns_tuple = graph_returns_tuple(graph)
+#                from torch._inductor.output_code import (
+#                    CompiledFxGraphConstantsWithGm)
+#                constants = CompiledFxGraphConstantsWithGm(graph)
+#                inductor_compiled_graph, _ = FxGraphCache._lookup_graph(
+#                    hash_str, example_inputs, True, None, constants)
+#                assert inductor_compiled_graph is not None, (
+#                    "Inductor cache lookup failed. Please remove"
+#                    f"the cache directory and try again."  # noqa
+#                )
+
+# Inductor calling convention (function signature):
+# f(list) -> tuple
+# Dynamo calling convention (function signature):
+# f(*args) -> Any
+
+# need to know if the graph returns a tuple
+        return inductor_compiled_graph
+
+        #from torch._inductor.compile_fx import graph_returns_tuple
+        #returns_tuple = graph_returns_tuple(graph)
 
         # this is the callable we return to Dynamo to run
         def compiled_graph(*args):
