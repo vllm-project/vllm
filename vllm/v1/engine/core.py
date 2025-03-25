@@ -378,12 +378,20 @@ class EngineCoreProc(EngineCore):
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
+        waited = False
         while not self.global_unfinished_reqs and not (
                 self.scheduler.has_requests()):
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
+                waited = True
             req = self.input_queue.get()
             self._handle_client_request(*req)
+
+        if waited:
+            logger.debug(
+                "EngineCore loop active - local unfinished: %s, finished: %s.",
+                self.scheduler.has_unfinished_requests(),
+                self.scheduler.has_finished_requests())
 
         # Handle any more client requests.
         while not self.input_queue.empty():
