@@ -152,6 +152,10 @@ class Scheduler(SchedulerInterface):
 
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                num_new_tokens = min(
+                    num_new_tokens,
+                    self.scheduler_config.long_prefill_token_threshold)
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
@@ -299,6 +303,10 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens -= self.block_size
                     num_new_tokens = self.block_size
                     computed_blocks.pop()
+                if self.scheduler_config.long_prefill_token_threshold > 0:
+                    num_new_tokens = min(
+                        num_new_tokens,
+                        self.scheduler_config.long_prefill_token_threshold)
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
