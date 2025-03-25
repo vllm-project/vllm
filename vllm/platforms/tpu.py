@@ -10,8 +10,9 @@ from vllm.logger import init_logger
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
+    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
@@ -27,6 +28,10 @@ class TpuPlatform(Platform):
 
     supported_quantization: list[str] = [
         "tpu_int8", "compressed-tensors", "compressed_tensors"
+    ]
+
+    additional_env_vars: list[str] = [
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
     ]
 
     @classmethod
@@ -122,4 +127,9 @@ class TpuPlatform(Platform):
 
     @classmethod
     def use_all_gather(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        # V1 support on TPU is experimental
         return True

@@ -340,6 +340,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
             and v not in self.non_carry_over_env_vars
         ]
 
+        env_vars_to_copy.extend(current_platform.additional_env_vars)
+
         # Copy existing env vars to each worker's args
         for args in all_args_to_update_environment_variables:
             # TODO: refactor platform-specific env vars
@@ -559,6 +561,15 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
         logger.info("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM = %s",
                     envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
+        # Enlarge the default value of "RAY_CGRAPH_get_timeout" to 300 seconds
+        # (it is 10 seconds by default). This is a Ray environment variable to
+        # control the timeout of getting result from a compiled graph execution,
+        # i.e., the distributed execution that includes model forward runs and
+        # intermediate tensor communications, in the case of vllm.
+        os.environ.setdefault("RAY_CGRAPH_get_timeout", "300")  # noqa: SIM112
+        logger.info("RAY_CGRAPH_get_timeout is set to %s",
+                    os.environ["RAY_CGRAPH_get_timeout"])  # noqa: SIM112
+
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
             #

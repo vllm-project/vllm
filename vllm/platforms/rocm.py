@@ -12,8 +12,9 @@ from vllm.logger import init_logger
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
+    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
@@ -120,8 +121,9 @@ class RocmPlatform(Platform):
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if envs.VLLM_USE_V1:
-            logger.info("Using ROCm Attention backend on V1 engine.")
-            return "vllm.v1.attention.backends.rocm_attn.ROCmAttentionBackend"
+            logger.info("Using Triton Attention backend on V1 engine.")
+            return ("vllm.v1.attention.backends."
+                    "triton_attn.TritonAttentionBackend")
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.
@@ -248,3 +250,8 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fnuz
         else:
             return torch.float8_e4m3fn
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        # V1 support on AMD gpus is experimental
+        return True
