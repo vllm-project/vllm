@@ -121,15 +121,15 @@ stages:
     steps:
     - name: test_v1_core_engine_worker_g2
       flavor: g2
-      command: export PT_HPU_LAZY_MODE=1 && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/core tests/v1/engine tests/v1/worker  -s -vvv --log-cli-level=INFO 
+      command: export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/core tests/v1/engine tests/v1/worker  -s -vvv --log-cli-level=INFO 
     - name: test_v1_core_engine_worker_g3
       flavor: g3
-      command: export PT_HPU_LAZY_MODE=1 && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/core tests/v1/engine tests/v1/worker  -s -vvv --log-cli-level=INFO 
+      command: export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/core tests/v1/engine tests/v1/worker  -s -vvv --log-cli-level=INFO 
     - name: test_v1_entrypoints_g2
       flavor: g2
-      command: export PT_HPU_LAZY_MODE=1 && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/entrypoints  -s -vvv --log-cli-level=INFO 
+      command: export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/entrypoints  -s -vvv --log-cli-level=INFO 
     - name: test_v1_entrypoints_g3
       flavor: g3
-      command: export PT_HPU_LAZY_MODE=1 && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/entrypoints  -s -vvv --log-cli-level=INFO 
+      command: export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && pytest -v tests/v1/entrypoints  -s -vvv --log-cli-level=INFO 
 
     

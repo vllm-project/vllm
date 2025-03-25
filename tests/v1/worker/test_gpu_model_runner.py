@@ -5,8 +5,8 @@ from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
-                                           SchedulerOutput)
+from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
+                                       SchedulerOutput)
 
 
 @pytest.fixture

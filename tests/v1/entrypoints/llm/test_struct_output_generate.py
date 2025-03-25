@@ -11,6 +11,7 @@ import pytest
 
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 GUIDED_DECODING_BACKENDS_V1 = ["xgrammar"]
@@ -19,6 +20,9 @@ MODELS_TO_TEST = [
 ]
 
 
+@pytest.mark.skipif(
+    current_platform.is_hpu(),
+    reason="Guided decoding is not supported on HPU V1 backend")
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
@@ -57,6 +61,9 @@ def test_guided_json_completion(
         jsonschema.validate(instance=output_json, schema=sample_json_schema)
 
 
+@pytest.mark.skipif(
+    current_platform.is_hpu(),
+    reason="Guided decoding is not supported on HPU V1 backend")
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
@@ -101,6 +108,9 @@ def test_guided_json_completion_disable_any_whitespace(
         jsonschema.validate(instance=output_json, schema=sample_json_schema)
 
 
+@pytest.mark.skipif(
+    current_platform.is_hpu(),
+    reason="Guided decoding is not supported on HPU V1 backend")
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
@@ -140,6 +150,9 @@ def test_guided_json_object(
             assert isinstance(parsed_json, dict)
 
 
+@pytest.mark.skipif(
+    current_platform.is_hpu(),
+    reason="Guided decoding is not supported on HPU V1 backend")
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
@@ -168,6 +181,9 @@ def test_guided_json_unsupported_schema(
                      use_tqdm=True)
 
 
+@pytest.mark.skipif(
+    current_platform.is_hpu(),
+    reason="Guided decoding is not supported on HPU V1 backend")
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
@@ -211,6 +227,9 @@ def test_guided_grammar_ebnf(
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
+@pytest.mark.skipif(
+    current_platform.is_hpu(),
+    reason="Guided decoding is not supported on HPU V1 backend")
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
@@ -259,6 +278,9 @@ def test_guided_grammar_lark(
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
+@pytest.mark.skipif(
+    current_platform.is_hpu(),
+    reason="Guided decoding is not supported on HPU V1 backend")
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
@@ -287,6 +309,9 @@ def test_guided_grammar_ebnf_invalid(
         )
 
 
+@pytest.mark.skipif(
+    current_platform.is_hpu(),
+    reason="Guided decoding is not supported on HPU V1 backend")
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
@@ -324,6 +349,9 @@ def test_guided_regex(
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
+@pytest.mark.skipif(
+    current_platform.is_hpu(),
+    reason="Guided decoding is not supported on HPU V1 backend")
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
