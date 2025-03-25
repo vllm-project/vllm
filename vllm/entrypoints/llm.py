@@ -9,7 +9,7 @@ import cloudpickle
 import torch
 import torch.nn as nn
 from typing_extensions import TypeVar, deprecated
-import torch
+
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.config import CompilationConfig
