@@ -12,8 +12,8 @@ GPUs_per_dp_rank = 2
 DP_size = 2
 
 
-def main(dp_size, local_dp_rank, global_dp_rank, dp_master_ip, dp_master_port,
-         GPUs_per_dp_rank):
+def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
+         dp_master_port, GPUs_per_dp_rank):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
@@ -54,7 +54,7 @@ def main(dp_size, local_dp_rank, global_dp_rank, dp_master_ip, dp_master_port,
                                      max_tokens=[16, 20][global_dp_rank % 2])
 
     # Create an LLM.
-    llm = LLM(model="ibm-research/PowerMoE-3b",
+    llm = LLM(model=model,
               tensor_parallel_size=GPUs_per_dp_rank,
               enforce_eager=True,
               enable_expert_parallel=True)
@@ -70,6 +70,10 @@ def main(dp_size, local_dp_rank, global_dp_rank, dp_master_ip, dp_master_port,
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Data Parallel Inference")
+    parser.add_argument("--model",
+                        type=str,
+                        default="ibm-research/PowerMoE-3b",
+                        help="Model name or path")
     parser.add_argument("--dp-size",
                         type=int,
                         default=2,
@@ -117,8 +121,9 @@ if __name__ == "__main__":
     for local_dp_rank, global_dp_rank in enumerate(
             range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)):
         proc = Process(target=main,
-                       args=(dp_size, local_dp_rank, global_dp_rank,
-                             dp_master_ip, dp_master_port, tp_size))
+                       args=(args.model, dp_size, local_dp_rank,
+                             global_dp_rank, dp_master_ip, dp_master_port,
+                             tp_size))
         proc.start()
         procs.append(proc)
     exit_code = 0
