@@ -3,6 +3,7 @@
 import pickle
 from typing import Any, Optional
 
+import cloudpickle
 import torch
 from msgspec import msgpack
 
@@ -41,13 +42,16 @@ def custom_enc_hook(obj: Any) -> Any:
         # https://gist.github.com/tlrmchlsmth/8067f1b24a82b6e2f90450e7764fa103 # noqa: E501
         return msgpack.Ext(CUSTOM_TYPE_TENSOR, pickle.dumps(obj.numpy()))
 
-    return msgpack.Ext(CUSTOM_TYPE_PICKLE, pickle.dumps(obj))
+    # Use cloudpickle for all other objects (especially functions) to support
+    # serializing local functions, lambdas, and closures
+    return msgpack.Ext(CUSTOM_TYPE_PICKLE, cloudpickle.dumps(obj))
 
 
 def custom_ext_hook(code: int, data: memoryview) -> Any:
     if code == CUSTOM_TYPE_TENSOR:
         return torch.from_numpy(pickle.loads(data))
     if code == CUSTOM_TYPE_PICKLE:
-        return pickle.loads(data)
+        # Use cloudpickle for unpickling as well
+        return cloudpickle.loads(data)
 
     raise NotImplementedError(f"Extension type code {code} is not supported")
