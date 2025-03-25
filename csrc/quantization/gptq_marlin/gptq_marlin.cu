@@ -460,7 +460,7 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,
                                     int4* __restrict__ out_int4_ptr, int size_m,
                                     int size_k, int lda, int block_rows) {
-  int start_row = block_rows * blockIdx.x;
+  auto start_row = block_rows * blockIdx.x;
   int finish_row = start_row + block_rows;
   if (finish_row > size_m) {
     finish_row = size_m;
@@ -484,7 +484,7 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
     int base_k = 0;
 
     for (int i = 0; i < iters; i++) {
-      int cur_k = base_k + threadIdx.x;
+      auto cur_k = base_k + threadIdx.x;
       int src_pos = perm_int_ptr[cur_k];
 
       out_half[cur_k] = a_row_half[src_pos];
@@ -494,7 +494,7 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
 
     if (rest) {
       if (threadIdx.x < rest) {
-        int cur_k = base_k + threadIdx.x;
+        auto cur_k = base_k + threadIdx.x;
         int src_pos = perm_int_ptr[cur_k];
 
         out_half[cur_k] = a_row_half[src_pos];
@@ -723,8 +723,8 @@ __global__ void Marlin(
                 (threadIdx.x % b_sh_stride_threads) * b_thread_vecs;
   b_gl_rd += b_sh_stride * slice_col;
   b_gl_rd += b_gl_rd_delta_o * slice_row;
-  int b_sh_wr = threadIdx.x * b_thread_vecs;
-  int b_sh_rd = threadIdx.x * b_thread_vecs;
+  auto b_sh_wr = threadIdx.x * b_thread_vecs;
+  auto b_sh_rd = threadIdx.x * b_thread_vecs;
 
   // For act_order
   constexpr int k_iter_size = tb_k / b_sh_wr_iters;
@@ -743,7 +743,7 @@ __global__ void Marlin(
                 s_sh_stride * slice_col + threadIdx.x;
     }
   }
-  int s_sh_wr = threadIdx.x;
+  auto s_sh_wr = threadIdx.x;
   bool s_sh_wr_pred = threadIdx.x < s_sh_stride;
 
   // Zero-points
@@ -756,7 +756,7 @@ __global__ void Marlin(
                  zp_sh_stride * slice_col + threadIdx.x;
     }
   }
-  int zp_sh_wr = threadIdx.x;
+  auto zp_sh_wr = threadIdx.x;
   bool zp_sh_wr_pred = threadIdx.x < zp_sh_stride;
 
   // We use a different scale layout for grouped and column-wise quantization as
@@ -1047,7 +1047,7 @@ __global__ void Marlin(
           int4* sh_s_stage = sh_s + s_sh_stage * pipe;
           reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
         } else {
-          int warp_id = threadIdx.x / 32;
+          auto warp_id = threadIdx.x / 32;
           int n_warps = thread_n_blocks / 4;
 
           int warp_row = warp_id / n_warps;
@@ -1085,7 +1085,7 @@ __global__ void Marlin(
 
     // Determine "position" inside the thread-block (based on warp and
     // thread-id)
-    int warp_id = threadIdx.x / 32;
+    auto warp_id = threadIdx.x / 32;
     int n_warps =
         thread_n_blocks / 4;  // Each warp processes 4 16-size tiles over N
 
@@ -1094,7 +1094,7 @@ __global__ void Marlin(
 
     cur_k += warp_row * 16;
 
-    int th_id = threadIdx.x % 32;
+    auto th_id = threadIdx.x % 32;
     cur_k += (th_id % 4) * 2;  // Due to tensor-core layout for fp16 B matrix
 
     int s_col_shift =
@@ -1159,7 +1159,7 @@ __global__ void Marlin(
               (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
         }
       } else {
-        int warp_id = threadIdx.x / 32;
+        auto warp_id = threadIdx.x / 32;
         int n_warps = thread_n_blocks / 4;
 
         int warp_row = warp_id / n_warps;
@@ -1197,7 +1197,7 @@ __global__ void Marlin(
                                      (pipe / (group_blocks / thread_k_blocks)));
           reinterpret_cast<int4*>(&frag_zpf[k % 2])[0] = sh_zp_stage[zp_sh_rd];
         } else {
-          int warp_id = threadIdx.x / 32;
+          auto warp_id = threadIdx.x / 32;
           int n_warps = thread_n_blocks / 4;
 
           int warp_row = warp_id / n_warps;
@@ -1323,7 +1323,7 @@ __global__ void Marlin(
   auto thread_block_reduce = [&]() {
     constexpr int red_off = threads / b_sh_stride_threads / 2;
     if (red_off >= 1) {
-      int red_idx = threadIdx.x / b_sh_stride_threads;
+      auto red_idx = threadIdx.x / b_sh_stride_threads;
       constexpr int red_sh_stride = b_sh_stride_threads * 4 * 2;
       constexpr int red_sh_delta = b_sh_stride_threads;
       int red_sh_rd = red_sh_stride * (threadIdx.x / b_sh_stride_threads) +
@@ -1390,7 +1390,7 @@ __global__ void Marlin(
                     4 * (threadIdx.x / 32) + threadIdx.x % 4;
       c_gl_wr += (2 * thread_n_blocks) * slice_col;
       constexpr int c_sh_wr_delta = active_threads;
-      int c_sh_wr = threadIdx.x;
+      auto c_sh_wr = threadIdx.x;
 
       int row = (threadIdx.x % 32) / 4;
 
