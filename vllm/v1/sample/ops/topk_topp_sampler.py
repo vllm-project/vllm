@@ -138,8 +138,23 @@ def apply_top_k_top_p(
 
     This function sorts the logits tensor, which can be slow for large batches.
     """
-    if k is None and p is None:
+    if p is None:
+        if k is None:
+            return logits
+
+        # Avoid sorting vocab for top-k only case.
+
+        no_top_k_mask = k == logits.shape[1]
+        # Set non-top-k rows to 1 so that we can gather.
+        k = k.masked_fill(no_top_k_mask, 1).unsqueeze(1)
+        max_top_k = k.max()
+        k.sub_(1)
+        top_k_mask = logits.topk(max_top_k, dim=1).values.gather(1, k)
+        # Handle non-topk rows.
+        top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
+        logits.masked_fill_(logits < top_k_mask, -float("inf"))
         return logits
+
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     if k is not None:
