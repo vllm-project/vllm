@@ -11,7 +11,7 @@ NUM_HEADS = [4, 8]
 HEAD_SIZES = [64, 128]
 BATCH_SIZES = [1, 2]
 SEQ_LENGTHS = [16, 128]
-DTYPES = [torch.float16]
+DTYPES = [torch.float16, torch.float32, torch.bfloat16]
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
