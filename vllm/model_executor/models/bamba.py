@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inference-only Bamba model."""
 # Added by the IBM Team, 2024
-import math
 from typing import Iterable, Optional, Set, Tuple
 
 import torch
@@ -21,9 +20,9 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     MambaMixer2, extra_groups_for_head_shards)
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
     seq_idx_to_chunk_indices_offsets)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -258,6 +257,7 @@ ALL_DECODER_LAYER_TYPES = {
     "mamba": BambaMixerDecoderLayer
 }
 
+
 class BambaModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -329,10 +329,10 @@ class BambaModel(nn.Module):
                 seq_idx[srt:end] = i
             seq_idx.unsqueeze_(0)
 
-            # compute metadata for chunked prefill. 
-            # actually this is only needed if there are 
+            # compute metadata for chunked prefill.
+            # actually this is only needed if there are
             # initial states, but this is determinable
-            # only from attention metadata yet 
+            # only from attention metadata yet
             # unavailable from the current top-level forward.
             # Rather than complicating things to extract said
             # metadata, we simply just compute redundently and
