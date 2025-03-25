@@ -8,7 +8,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.tpu_model_runner import TPUModelRunner
+from vllm.v1.worker.tpu_model_runner import (TPUModelRunner,
+                                             _get_padded_token_len,
+                                             _get_paddings)
 
 # Mock torch_xla module since it may not be available in the test environments
 torch_xla_patcher = mock.patch.dict(
@@ -305,3 +307,21 @@ def test_update_states_request_unscheduled(model_runner):
 
     assert _is_req_added(model_runner, req_ids[1])
     assert not _is_req_scheduled(model_runner, req_ids[1])
+
+
+def test_get_paddings():
+    min_token_size, max_token_size, padding_gap = 16, 512, 64
+    expected_paddings = [16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
+    actual_paddings = _get_paddings(min_token_size, max_token_size,
+                                    padding_gap)
+    assert actual_paddings == expected_paddings
+
+
+def test_get_padded_token_len():
+    min_token_size, max_token_size, padding_gap = 16, 512, 64
+    paddings = _get_paddings(min_token_size, max_token_size, padding_gap)
+    assert _get_padded_token_len(paddings, 1) == 16
+    assert _get_padded_token_len(paddings, 16) == 16
+    assert _get_padded_token_len(paddings, 20) == 32
+    assert _get_padded_token_len(paddings, 300) == 320
+    assert _get_padded_token_len(paddings, 512) == 512
