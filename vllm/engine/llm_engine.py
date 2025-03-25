@@ -1109,7 +1109,7 @@ class LLMEngine:
 
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
-                output.hidden_states = outputs_by_sequence_group[
+                output[0].hidden_states = outputs_by_sequence_group[
                     i].hidden_states
             else:
                 output = [outputs_by_sequence_group[0][i]]
