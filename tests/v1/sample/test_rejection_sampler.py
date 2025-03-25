@@ -36,6 +36,8 @@ def create_logits_tensor(output_token_ids: list[list[int]],
 def create_sampling_metadata(
     all_greedy: bool,
     temperature: Optional[torch.Tensor] = None,
+    top_k: Optional[torch.Tensor] = None,
+    top_p: Optional[torch.Tensor] = None,
     generators: Optional[dict[int, Any]] = None,
 ) -> SamplingMetadata:
     """Create a v1 sampling metadata object with all_greedy set 
@@ -52,8 +54,8 @@ def create_sampling_metadata(
         temperature=temperature,
         all_greedy=all_greedy,
         all_random=not all_greedy,
-        top_p=None,
-        top_k=None,
+        top_p=top_p,
+        top_k=top_k,
         min_p=torch.empty(1, ),
         generators=generators,
         max_num_logprobs=0,
@@ -462,3 +464,147 @@ def estimate_rejection_sampling_pdf(
                            density=True)
 
     return hist.hist
+
+
+def _test_masked_logits(
+    rejection_sampler,
+    batch_size: int,
+    num_draft_tokens: int,
+    vocab_size: int,
+    target_logits: torch.Tensor,
+    unmasked_indices: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+):
+    # Set up test parameters
+    num_tokens = batch_size * num_draft_tokens
+
+    # Create random draft probabilities.
+    draft_probs = torch.rand((num_tokens, vocab_size),
+                             dtype=torch.float32,
+                             device=DEVICE)
+    draft_probs = F.softmax(draft_probs, dim=-1)
+
+    # Randomly sample draft token ids from draft probs
+    draft_token_ids = torch.multinomial(draft_probs, num_samples=1)
+    draft_token_ids = draft_token_ids.reshape(batch_size, num_draft_tokens)
+    draft_token_ids = draft_token_ids.tolist()
+
+    # Bonus tokens not used but required
+    bonus_token_ids = torch.zeros((batch_size, 1),
+                                  dtype=torch.int64,
+                                  device=DEVICE)
+
+    # Create spec decode metadata
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        draft_token_ids,
+        device=DEVICE,
+    )
+
+    # Run rejection sampling
+    output_token_ids = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=draft_probs,
+        target_logits=target_logits,
+        bonus_token_ids=bonus_token_ids,
+        sampling_metadata=sampling_metadata,
+    )
+
+    # Remove bonus tokens and reshape
+    output_token_ids = output_token_ids[:, :-1].flatten().tolist()
+
+    # Check that all sampled tokens are within the unmasked indices.
+    for i in range(num_tokens):
+        token_id = output_token_ids[i]
+        if token_id == PLACEHOLDER_TOKEN_ID:
+            continue
+        assert token_id in unmasked_indices[i]
+
+
+@pytest.mark.parametrize("top_k", [1, 5, 99])
+def test_top_k(rejection_sampler, top_k):
+    """Test rejection sampling with top-k sampling"""
+    vocab_size = 100
+    batch_size = 100
+    num_draft_tokens = 3
+    num_tokens = batch_size * num_draft_tokens
+
+    # Randomly create top-k indices.
+    top_k_indices = [
+        torch.randperm(vocab_size, device=DEVICE)[:top_k]
+        for _ in range(num_tokens)
+    ]
+    top_k_indices = torch.stack(top_k_indices)
+
+    # Create logits with the uniform distribution.
+    target_logits = torch.zeros((num_tokens, vocab_size), device=DEVICE)
+
+    # Increment the logits for top-k indices, a little bit more than the other
+    # ones. If the masking is effective, the non-topk indices will never be
+    # sampled despite the small difference in logits.
+    for i in range(num_tokens):
+        target_logits[i, top_k_indices[i]] += 0.1
+
+    # Create sampling metadata
+    temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE)
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=temperature,
+        top_k=torch.tensor([top_k] * batch_size,
+                           device=DEVICE,
+                           dtype=torch.int64),
+    )
+
+    _test_masked_logits(
+        rejection_sampler,
+        batch_size=batch_size,
+        num_draft_tokens=num_draft_tokens,
+        vocab_size=vocab_size,
+        target_logits=target_logits,
+        unmasked_indices=top_k_indices,
+        sampling_metadata=sampling_metadata,
+    )
+
+
+@pytest.mark.parametrize("top_p", [0.5, 0.9, 0.99])
+def test_top_p(rejection_sampler, top_p):
+    """Test rejection sampling with top-p sampling"""
+    vocab_size = 100
+    batch_size = 100
+    num_draft_tokens = 3
+    num_tokens = batch_size * num_draft_tokens
+
+    # Create logits with the uniform distribution.
+    target_logits = torch.randn((num_tokens, vocab_size), device=DEVICE)
+    temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE)
+    rescaled_logits = target_logits / temperature
+
+    logits_sort, logits_idx = rescaled_logits.sort(dim=-1, descending=False)
+    probs_sort = logits_sort.softmax(dim=-1)
+    probs_sum = probs_sort.cumsum(dim=-1)
+    top_p_mask = probs_sum <= 1 - top_p
+    # at least one
+    top_p_mask[:, -1] = False
+
+    # Get the top-p indices.
+    top_p_indices = []
+    for i in range(num_tokens):
+        top_p_indices.append(logits_idx[i][~top_p_mask[i]].tolist())
+
+    # Create sampling metadata
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=temperature,
+        top_p=torch.tensor([top_p] * batch_size,
+                           device=DEVICE,
+                           dtype=torch.float32),
+    )
+
+    _test_masked_logits(
+        rejection_sampler,
+        batch_size=batch_size,
+        num_draft_tokens=num_draft_tokens,
+        vocab_size=vocab_size,
+        target_logits=target_logits,
+        unmasked_indices=top_p_indices,
+        sampling_metadata=sampling_metadata,
+    )
