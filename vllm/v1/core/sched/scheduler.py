@@ -573,7 +573,8 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
-            if req_id in scheduler_output.scheduled_spec_decode_tokens:
+            scheduled_draft_tokens = scheduler_output.scheduled_spec_decode_tokens.get(req_id, 0)
+            if scheduled_draft_tokens > 0:
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
