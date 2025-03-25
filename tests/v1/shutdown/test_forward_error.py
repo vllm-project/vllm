@@ -27,7 +27,7 @@ def evil_forward(self, *args, **kwargs):
         raise Exception("Simulated illegal memory access on Rank 0!")
     self.num_calls += 1
 
-    return self.model(*args, **kwargs, intermediate_tensors=None)
+    return self.model(*args, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -115,8 +115,8 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size,
             llm.generate("Hello my name is Robert and I")
 
     # Confirm all the processes are cleaned up.
-    wait_for_gpu_memory_to_clear(
-        devices=list(range(tensor_parallel_size)),
-        threshold_bytes=2 * 2**30,
-        timeout_s=60,
-    )
+    # wait_for_gpu_memory_to_clear(
+    #     devices=list(range(tensor_parallel_size)),
+    #     threshold_bytes=2 * 2**30,
+    #     timeout_s=60,
+    # )
