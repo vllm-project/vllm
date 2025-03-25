@@ -1117,7 +1117,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 valid_sampled_token_ids, sampling_metadata)
 
         if self.requests is not None:
-            if self.requests['0'].sampling_params.return_hidden_states == True:
+            m = list(self.requests.keys())[0]
+            if self.requests[m].sampling_params.return_hidden_states == True:
                 return ModelRunnerOutput(
                     req_ids=self.input_batch.req_ids,
                     req_id_to_index=self.input_batch.req_id_to_index,
