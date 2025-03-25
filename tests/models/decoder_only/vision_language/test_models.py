@@ -163,24 +163,24 @@ VLM_TEST_SETTINGS = {
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     #### Extended model tests
-    # "aria": VLMTestInfo(
-    #     models=["rhymes-ai/Aria"],
-    #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-    #     prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
-    #     img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
-    #     max_model_len=4096,
-    #     max_num_seqs=2,
-    #     auto_cls=AutoModelForImageTextToText,
-    #     single_image_prompts=IMAGE_ASSETS.prompts({
-    #         "stop_sign": "<vlm_image>Please describe the image shortly.",
-    #         "cherry_blossom": "<vlm_image>Please infer the season with reason.",  # noqa: E501
-    #     }),
-    #     multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
-    #     stop_str=["<|im_end|>"],
-    #     image_size_factors=[(0.10, 0.15)],
-    #     max_tokens=64,
-    #     marks=[large_gpu_mark(min_gb=64)],
-    # ),
+    "aria": VLMTestInfo(
+        models=["rhymes-ai/Aria"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<vlm_image>Please describe the image shortly.",
+            "cherry_blossom": "<vlm_image>Please infer the season with reason.",  # noqa: E501
+        }),
+        multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
+        stop_str=["<|im_end|>"],
+        image_size_factors=[(0.10, 0.15)],
+        max_tokens=64,
+        marks=[large_gpu_mark(min_gb=64)],
+    ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
@@ -352,6 +352,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda vid_prompt: f"USER: {vid_prompt} ASSISTANT:",
         num_video_frames=16,
         max_model_len=4096,
+        max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
     ),
@@ -384,7 +385,7 @@ VLM_TEST_SETTINGS = {
     ),
     "minicpmo_26": VLMTestInfo(
         models=["openbmb/MiniCPM-o-2_6"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        test_type=(VLMTestType.IMAGE),
         prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
         max_model_len=4096,
@@ -393,9 +394,21 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmo_26_patch_hf_runner,
     ),
+    "minicpmo_26_multi_image": VLMTestInfo(
+        models=["openbmb/MiniCPM-o-2_6"],
+        test_type=(VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
+        hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+        patch_hf_runner=model_utils.minicpmo_26_patch_hf_runner,
+        marks=[large_gpu_mark(min_gb=32)],
+    ),
     "minicpmv_26": VLMTestInfo(
         models=["openbmb/MiniCPM-V-2_6"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        test_type=(VLMTestType.IMAGE),
         prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
         max_model_len=4096,
@@ -403,6 +416,18 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
+    ),
+    "minicpmv_26_multi_image": VLMTestInfo(
+        models=["openbmb/MiniCPM-V-2_6"],
+        test_type=(VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
+        hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+        patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],

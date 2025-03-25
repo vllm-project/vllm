@@ -361,6 +361,7 @@ def run_llava_next_video(questions: list[str],
     engine_args = EngineArgs(
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
         max_model_len=8192,
+        max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 

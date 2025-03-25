@@ -295,8 +295,6 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
 
         # HF processor pops the `num_crops` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
-            assert isinstance(images, list)
-
             parsed_images = (self._get_data_parser().parse_mm_data({
                 "image":
                 images
