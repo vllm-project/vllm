@@ -42,7 +42,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
-from .utils import (PPMissingLayer, is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, maybe_prefix)
 
 logger = init_logger(__name__)
@@ -109,12 +109,12 @@ def replace_linear_class(
     )
 
 
-class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
+class TransformersModel(nn.Module):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         logger.info("Using Transformers backend.")
 
@@ -132,9 +132,6 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.parallel_config = parallel_config
         self.quant_config = quant_config
 
-        self.vocab_size = model_config.get_vocab_size()
-        self.unpadded_vocab_size = model_config.get_vocab_size()
-
         self.pp_group = get_pp_group()
         self.pp_size = self.pp_group.world_size
         self.pp_rank = self.pp_group.rank_in_group
@@ -148,7 +145,6 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 torch_dtype=model_config.dtype,
                 trust_remote_code=model_config.trust_remote_code,
             )
-        prefix = self.model.base_model_prefix
 
         self.pipeline_parallel()
         self.tensor_parallel()
@@ -166,31 +162,11 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         # Attention layers
         self.attention_instances = self.create_attention_instances()
 
-        # Output embeddings
-        if not isinstance(getattr(self, "lm_head", None), PPMissingLayer):
-            self.unpadded_vocab_size = config.vocab_size
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-            if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(
-                    self.model.get_input_embeddings())
-
-            logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
-
         # Initialize buffers (e.g. rotary embedding inverse frequency)
         self.init_buffers(self.model)
 
         # Move remaining meta tensors to device (should happen last)
         self.meta_to_empty(self.model)
-
-        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(["hidden_states"],
@@ -245,9 +221,6 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             # Modules that should be on last rank
             if not self.pp_group.is_last_rank:
                 setattr(self.model, name, PPMissingLayer())
-
-        if not self.pp_group.is_last_rank:
-            self.lm_head = PPMissingLayer()
 
     def tensor_parallel(self):
         """
@@ -329,6 +302,9 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         for child in module.children():
             self.meta_to_empty(child)
 
+    def get_input_embeddings(self) -> nn.Module:
+        return self.model.get_input_embeddings()
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
@@ -359,21 +335,6 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
-        return logits
-
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
-
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
@@ -391,3 +352,76 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
         return loaded_params
+
+
+class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
+                              SupportsPP):
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config: PretrainedConfig = vllm_config.model_config.hf_config
+        quant_config: QuantizationConfig = vllm_config.quant_config
+
+        self.config = config
+
+        self.model = TransformersModel(vllm_config=vllm_config, prefix=prefix)
+
+        if get_pp_group().is_last_rank:
+            self.unpadded_vocab_size = config.vocab_size
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(
+                    self.model.get_input_embeddings())
+
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                    config.vocab_size,
+                                                    logit_scale)
+        else:
+            self.lm_head = PPMissingLayer()
+
+        self.sampler = get_sampler()
+
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        model_output = self.model(input_ids, positions, intermediate_tensors,
+                                  inputs_embeds)
+        return model_output
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
+
+    def sample(self, logits: torch.Tensor,
+               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
+
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(
+            (name, loaded_weight) for name, loaded_weight in weights)
