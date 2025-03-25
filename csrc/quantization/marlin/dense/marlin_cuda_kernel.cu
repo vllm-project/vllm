@@ -277,12 +277,12 @@ __global__ void Marlin(
       b_gl_stride * (threadIdx.x / b_sh_stride) + (threadIdx.x % b_sh_stride);
   b_gl_rd += b_sh_stride * slice_col;
   b_gl_rd += b_gl_rd_delta_o * slice_row;
-  int b_sh_wr = threadIdx.x;
-  int b_sh_rd = threadIdx.x;
+  auto b_sh_wr = threadIdx.x;
+  auto b_sh_rd = threadIdx.x;
 
   int s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
                 s_sh_stride * slice_col + threadIdx.x;
-  int s_sh_wr = threadIdx.x;
+  auto s_sh_wr = threadIdx.x;
   int s_sh_rd;
   // We use a different scale layout for grouped and column-wise quantization as
   // we scale a `half2` tile in column-major layout in the former and in
@@ -455,7 +455,7 @@ __global__ void Marlin(
   auto thread_block_reduce = [&]() {
     constexpr int red_off = threads / b_sh_stride / 2;
     if (red_off >= 1) {
-      int red_idx = threadIdx.x / b_sh_stride;
+      auto red_idx = threadIdx.x / b_sh_stride;
       constexpr int red_sh_stride = b_sh_stride * 4 * 2;
       constexpr int red_sh_delta = b_sh_stride;
       int red_sh_rd = red_sh_stride * (threadIdx.x / b_sh_stride) +
@@ -522,7 +522,7 @@ __global__ void Marlin(
                     4 * (threadIdx.x / 32) + threadIdx.x % 4;
       c_gl_wr += (2 * thread_n_blocks) * slice_col;
       constexpr int c_sh_wr_delta = active_threads;
-      int c_sh_wr = threadIdx.x;
+      auto c_sh_wr = threadIdx.x;
 
       int row = (threadIdx.x % 32) / 4;
 
