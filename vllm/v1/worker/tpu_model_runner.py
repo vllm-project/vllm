@@ -718,6 +718,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
                                          self.lora_config, self.device)
+            punica_wrapper = self.lora_manager._adapter_manager.punica_wrapper
+            if not self.enforce_eager:
+                punica_wrapper.mark_compiled()
+
         model = model.eval()
         xm.mark_step()
         xm.wait_device_ops()
@@ -808,12 +812,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         num_tokens = 16
         hsize = self.model_config.get_hidden_size()
         device = self.device
-
-        if self.lora_config is not None:
-            punica_wrapper = self.lora_manager._adapter_manager.punica_wrapper
-            torch._dynamo.mark_dynamic(punica_wrapper._embeddings_indices, 1)
-            torch._dynamo.mark_dynamic(punica_wrapper._sampler_indices_padded,
-                                       0)
 
         # Compile sampling step for different model+sampler outputs in bucketed
         # n_tokens x max_num_reqs. Graph is really small so this is fine.
