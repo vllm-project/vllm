@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
+import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
@@ -53,7 +54,6 @@ try:
 
         def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
             node_id = ray.get_runtime_context().get_node_id()
-            import vllm.platforms
             device_key = vllm.platforms.current_platform.ray_device_key
             if not device_key:
                 raise RuntimeError("current platform %s does not support ray.",
@@ -108,7 +108,7 @@ try:
             # We can remove this API after it is fixed in compiled graph.
             assert self.worker is not None, "Worker is not initialized"
             if not self.compiled_dag_cuda_device_set:
-                if current_platform.is_tpu():
+                if vllm.platforms.current_platform.is_tpu():
                     # Not needed
                     pass
                 else:

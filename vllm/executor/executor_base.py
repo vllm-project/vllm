@@ -9,6 +9,7 @@ from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
 import torch.nn as nn
 from typing_extensions import TypeVar
 
+import vllm.platforms
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -107,7 +108,7 @@ class ExecutorBase(ABC):
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: This is logged in the executor because there can be >1 workers.
-        import vllm.platforms
+
         logger.info("# %s blocks: %d, # CPU blocks: %d",
                     vllm.platforms.current_platform.device_name,
                     num_gpu_blocks, num_cpu_blocks)

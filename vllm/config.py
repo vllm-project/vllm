@@ -52,9 +52,9 @@ if TYPE_CHECKING:
                                                  PretrainedConfig]]
 else:
     me_quant = LazyLoader("model_executor", globals(),
-                          ".model_executor.layers.quantization")
+                          "vllm.model_executor.layers.quantization")
     me_models = LazyLoader("model_executor", globals(),
-                           ".model_executor.models")
+                           "vllm.model_executor.models")
 
     HfOverrides = None
     QuantizationConfig = None
