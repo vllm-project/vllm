@@ -170,6 +170,29 @@ def scatter_patch_features(
         embed_is_patch: A boolean mask indicating which image embeddings
           correspond to patch tokens for each image.
           Shape: `(num_images, num_embeds)`
+
+    Note:
+        The original code only considers patch tokens as feature
+        tokens, but our processor considers all image-related tokens
+        as feature tokens because the feature tokens need to be
+        consecutive in `input_ids`.
+
+    Example:
+        A simplified example for one item in the batch:
+
+        .. code-block::
+
+            Embedding tokens (from HF processor):
+            [<start> <patch> <patch>  <col>  <patch> <patch>  <col>  <end> ]
+
+            embed_is_patch (from HF processor):
+            [ False   True    True    False    True    True   False  False ]
+
+            Encoder outputs (from model):
+            [  p1      p2      p3      p4   ]
+
+            The resulting embedding tensor is:
+            [  nan     p1      p2      nan      p3      p4     nan    nan  ]
     """
     num_embeds_per_image = [
         e_is_patch.shape[0] for e_is_patch in embed_is_patch
