@@ -54,14 +54,14 @@ def test_num_computed_tokens_update(num_scheduler_steps: int,
 
     # Create sequence and add to engine
     prompt_len = 10
-
+    print("SSSSS")
     for req_idx, num_output_tokens in enumerate(num_output_tokens_list):
         seq, seq_group = create_dummy_prompt(request_id=str(req_idx),
                                              prompt_length=prompt_len,
                                              min_tokens=num_output_tokens,
                                              max_tokens=num_output_tokens)
         add_seq_group_to_engine(engine, seq_group)
-
+        print("AAAAA")
         assert seq.data.get_num_computed_tokens() == 0
 
         for _ in range(num_prompt_steps):
@@ -87,3 +87,13 @@ def test_num_computed_tokens_update(num_scheduler_steps: int,
         # Test correctness of num_computed_tokens after the sequence finish.
         assert seq.data.get_num_computed_tokens(
         ) == prompt_len + num_output_tokens - 1
+
+
+
+
+
+if __name__ == "__main__":
+    for i in range(1, 8,1):
+        for j in range(2):
+            for k in range(2):
+                test_num_computed_tokens_update(i,j,k)        

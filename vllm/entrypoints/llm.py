@@ -1192,6 +1192,7 @@ class LLM:
         self.llm_engine.stop_profile()
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+        print(device)
         return self.llm_engine.reset_prefix_cache(device)
 
     def sleep(self, level: int = 1):

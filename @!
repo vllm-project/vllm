@@ -61,7 +61,7 @@ from vllm.utils import (Counter, Device, deprecate_kwargs,
                         resolve_obj_by_qualname, weak_bind)
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.model_runner_base import InputProcessingError
-
+import pdb
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
@@ -954,16 +954,13 @@ class LLMEngine:
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
 
-    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+    def reset_prefix_cache(self) -> bool:
         """Reset prefix cache for all devices."""
 
         success = True
         for scheduler in self.scheduler:
-            success = success and scheduler.reset_prefix_cache(device)
+            success = success and scheduler.reset_prefix_cache()
         return success
-
-
-
 
     @staticmethod
     def _process_sequence_group_outputs(
@@ -1112,13 +1109,12 @@ class LLMEngine:
 
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
-                if self.model_config.task != "embed":
-                    for k in range(len(outputs_by_sequence_group[i])):
-                        output[k].hidden_states = outputs_by_sequence_group[i][k].hidden_states
-            else:         
+                for k in range(len(outputs_by_sequence_group[i])):
+                    output[k].hidden_states = outputs_by_sequence_group[i][k].hidden_states
+            else:
                 output = [outputs_by_sequence_group[0][i]]
-                if self.model_config.task == "embed":
-                    output[0].hidden_states = outputs_by_sequence_group[0].hidden_states
+                output[0].hidden_states = outputs_by_sequence_group[
+                    0].hidden_states
 
             if not is_async:
                 if self.scheduler_config.is_multi_step:
