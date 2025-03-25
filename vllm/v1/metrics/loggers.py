@@ -355,8 +355,7 @@ class PrometheusStatLogger(StatLoggerBase):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
-        self.gauge_num_tokens_waiting.set(
-            scheduler_stats.num_tokens_waiting)
+        self.gauge_num_tokens_waiting.set(scheduler_stats.num_tokens_waiting)
         self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
 
         self.counter_gpu_prefix_cache_queries.inc(
