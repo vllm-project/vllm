@@ -73,7 +73,7 @@ The Transformers fallback explicitly supports the following features:
 
 - <project:#quantization-index> (except GGUF)
 - <project:#lora-adapter>
-- <project:#distributed-serving> (pipeline parallel coming soon <gh-pr:12832>!)
+- <project:#distributed-serving> (requires `transformers>=4.49.0`)
 
 #### Remote code
 
@@ -101,7 +101,7 @@ class MyAttention(nn.Module):
 
   def forward(self, hidden_states, **kwargs): # <- kwargs are required
     ...
-    attention_interface = attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
     attn_output, attn_weights = attention_interface(
       self,
       query_states,
@@ -472,11 +472,21 @@ See [this page](#generative-models) for more information on how to use generativ
   * `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.
   * ✅︎
   * ✅︎
+- * `TeleFLMForCausalLM`
+  * TeleFLM
+  * `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc.
+  * ✅︎
+  * ✅︎
 - * `XverseForCausalLM`
   * XVERSE
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
   * ✅︎
   * ✅︎
+- * `Zamba2ForCausalLM`
+  * Zamba2
+  * `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.
+  *
+  *
 :::
 
 :::{note}
@@ -879,7 +889,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
-  * `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b`, etc.
+  * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, `mistral-community/pixtral-12b`, etc.
   *
   * ✅︎
   * ✅︎
@@ -946,7 +956,7 @@ V0 correctly implements the model's attention pattern:
 
 V1 currently uses a simplified attention pattern:
 - Uses causal attention for all tokens, including image tokens
-- Generates reasonable outputs but does not match the original model's attention for text + image inputs
+- Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": True}`
 - Will be updated in the future to support the correct behavior
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
