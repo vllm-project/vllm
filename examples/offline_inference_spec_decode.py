@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import gc
 import time
-from typing import List
 
 from vllm import LLM, SamplingParams
 
 
-def time_generation(llm: LLM, prompts: List[str],
+def time_generation(llm: LLM, prompts: list[str],
                     sampling_params: SamplingParams):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
