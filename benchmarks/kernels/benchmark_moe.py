@@ -30,20 +30,18 @@ class BenchmarkConfig(TypedDict):
     num_stages: int
 
 
-def benchmark_config(
-    config: BenchmarkConfig,
-    num_tokens: int,
-    num_experts: int,
-    shard_intermediate_size: int,
-    hidden_size: int,
-    topk: int,
-    dtype: torch.dtype,
-    use_fp8_w8a8: bool,
-    use_int8_w8a16: bool,
-    num_iters: int = 100,
-    block_quant_shape: List[int] = None,
-    use_deep_gemm: bool = False
-) -> float:
+def benchmark_config(config: BenchmarkConfig,
+                     num_tokens: int,
+                     num_experts: int,
+                     shard_intermediate_size: int,
+                     hidden_size: int,
+                     topk: int,
+                     dtype: torch.dtype,
+                     use_fp8_w8a8: bool,
+                     use_int8_w8a16: bool,
+                     num_iters: int = 100,
+                     block_quant_shape: List[int] = None,
+                     use_deep_gemm: bool = False) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
     if use_int8_w8a16:
@@ -556,7 +554,7 @@ def main(args: argparse.Namespace):
     else:
         batch_sizes = [args.batch_size]
 
-    use_deep_gemm = True if args.use_deep_gemm else False
+    use_deep_gemm = bool(args.use_deep_gemm)
 
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])
@@ -580,11 +578,10 @@ def main(args: argparse.Namespace):
 
         start = time.time()
         configs = _distribute(
-            "tune",
-            [(batch_size, E, shard_intermediate_size, hidden_size, topk, dtype,
-              use_fp8_w8a8, use_int8_w8a16, search_space, block_quant_shape,
-              use_deep_gemm)
-             for batch_size in batch_sizes])
+            "tune", [(batch_size, E, shard_intermediate_size, hidden_size,
+                      topk, dtype, use_fp8_w8a8, use_int8_w8a16, search_space,
+                      block_quant_shape, use_deep_gemm)
+                     for batch_size in batch_sizes])
         best_configs = {
             M: sort_config(config)
             for M, config in zip(batch_sizes, configs)
