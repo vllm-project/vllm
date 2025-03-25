@@ -115,10 +115,6 @@ class MarlinLinearKernel(MPLinearKernel):
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # marlin requires contiguous memory layout
-        # prefix caching may cause x to be non-contiguous
-        x = x.contiguous()  # no-op if already contiguous
-
         c = self.config
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
 
