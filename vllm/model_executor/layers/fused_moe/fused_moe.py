@@ -690,6 +690,11 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     M, K = hidden_states.shape
     N = w2.shape[-1]
 
+    # For now, disable DeepGemm for small N until better permute/unpermute
+    # ops are available.
+    if N <= 512:
+        return False
+
     if align > M or N % align != 0 or K % align != 0:
         return False
 
