@@ -30,3 +30,9 @@ def _prev_minor_version_was(version_str):
     # Note - this won't do the right thing when we release 1.0!
     assert __version_tuple__[0] == 0
     return version_str == f"{__version_tuple__[0]}.{__version_tuple__[1] - 1}"
+
+
+def _prev_minor_version():
+    """For the purpose of testing, return a previous minor version number."""
+    # In dev tree, this will return "0.-1", but that will work fine"
+    return f"{__version_tuple__[0]}.{__version_tuple__[1] - 1}"
