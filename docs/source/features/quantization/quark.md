@@ -34,8 +34,7 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID, device_map="auto", torch_dtype="auto",
 )
 model.eval()
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, padding_side="left")
-tokenizer.pad_token = tokenizer.eos_token
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
 
 ### 2. Preparing Calibration Dataloader
@@ -54,8 +53,7 @@ NUM_CALIBRATION_DATA = 512
 
 dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
 text_data = dataset["text"][:NUM_CALIBRATION_DATA]
-tokenized_outputs = tokenizer(text_data, return_tensors="pt", truncation=True,
-    padding=True)
+tokenized_outputs = tokenizer(text_data, return_tensors="pt", truncation=True)
 calib_dataloader = DataLoader(tokenized_outputs['input_ids'],
     batch_size=BATCH_SIZE, drop_last=True)
 ```
@@ -163,7 +161,6 @@ It will run gsm8k and wikitext evaluation tasks directly to evaluate the quantiz
 python3 quantize_quark.py --model_dir /path/to/Llama-3.1-8B-Instruct \
                           --output_dir /path/to/output \
                           --quant_scheme w_int8_per_channel_a_int8_per_tensor_sym \
-                          --kv_cache_dtype int8_per_tensor_static \
                           --pre_quantization_optimization rotation \
                           --pre_quantization_optimization smoothquant \
                           --num_calib_data 512 \
