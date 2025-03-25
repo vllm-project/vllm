@@ -83,9 +83,10 @@ class Worker(WorkerBase):
             "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes)
 
-    def wake_up(self) -> None:
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         allocator = CuMemAllocator.get_instance()
-        allocator.wake_up()
+        allocator.wake_up(tags=("weights",
+                                "kv_cache") if tags is None else tuple(tags))
 
     def init_device(self):
         if self.device_config.device.type == "cuda":

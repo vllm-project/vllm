@@ -698,7 +698,8 @@ if envs.VLLM_SERVER_DEV_MODE:
     @router.post("/wake_up")
     async def wake_up(raw_request: Request):
         logger.info("wake up the engine")
-        await engine_client(raw_request).wake_up()
+        tags = raw_request.query_params.get("tags", None)
+        await engine_client(raw_request).wake_up(tags)
         # FIXME: in v0 with frontend multiprocessing, the wake-up command
         # is sent but does not finish yet when we return a response.
         return Response(status_code=200)

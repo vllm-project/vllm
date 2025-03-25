@@ -1215,11 +1215,18 @@ class LLM:
         self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
 
-    def wake_up(self):
+    def wake_up(self, tags: Optional[list[str]] = None):
         """
         Wake up the engine from sleep mode. See the :meth:`sleep` method
-        for more details."""
-        self.llm_engine.wake_up()
+        for more details.
+        
+        :param tags: An optional list of tags to reallocate the engine memory 
+            for specific memory allocations. Values must be in 
+            ("weights", "kv_cache",). If None, all memory is reallocated.
+            wake_up should be called with all tags (or None) before the engine 
+            is used again.
+        """
+        self.llm_engine.wake_up(tags)
 
     # LEGACY
     def _convert_v1_inputs(
