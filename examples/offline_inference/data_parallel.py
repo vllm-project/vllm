@@ -8,9 +8,6 @@ import os
 from vllm import LLM, SamplingParams
 from vllm.utils import get_open_port
 
-GPUs_per_dp_rank = 2
-DP_size = 2
-
 
 def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
          dp_master_port, GPUs_per_dp_rank):
@@ -60,7 +57,10 @@ def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
               enable_expert_parallel=True)
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
-    for output in outputs:
+    for i, output in enumerate(outputs):
+        if i >= 5:
+            # print only 5 outputs
+            break
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"DP rank {global_dp_rank}, Prompt: {prompt!r}, "
