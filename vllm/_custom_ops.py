@@ -124,6 +124,18 @@ def paged_attention_rocm(
                                       kv_cache_dtype, k_scale, v_scale)
 
 
+def mla_decode_kvcache_cpu(
+    out: torch.Tensor,
+    query: torch.Tensor,
+    kv_cache: torch.Tensor,
+    scale: float,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    torch.ops._C_cpu.mla_decode_kvcache(out, query, kv_cache, scale,
+                                        block_tables, seq_lens)
+
+
 # pos encoding ops
 def rotary_embedding(
     positions: torch.Tensor,

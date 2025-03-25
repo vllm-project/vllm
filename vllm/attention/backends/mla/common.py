@@ -204,7 +204,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -212,18 +211,27 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
 from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
+
+if HAS_TRITON:
+    from vllm.attention.ops.triton_flash_attention import triton_attention
+    from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+else:
+    merge_attn_states = None
+    triton_attention = None
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
-    # For rocm use upstream flash attention
-    from flash_attn import flash_attn_varlen_func
     is_vllm_fa = False
-
-from vllm.attention.ops.triton_flash_attention import triton_attention
+    try:
+        # For rocm use upstream flash attention
+        from flash_attn import flash_attn_varlen_func
+    except ImportError:
+        flash_attn_varlen_func = None
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
