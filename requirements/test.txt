@@ -557,6 +557,8 @@ setuptools==75.8.0
     # via
     #   pytablewriter
     #   torch
+shellingham==1.5.4
+    # via typer
 six==1.16.0
     # via
     #   python-dateutil

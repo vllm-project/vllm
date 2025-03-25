@@ -589,7 +589,7 @@ def moe_align_block_size(
     topk_ids: torch.Tensor,
     block_size: int,
     num_experts: int,
-    expert_map: torch.Tensor = None
+    expert_map: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -1428,7 +1428,7 @@ def _moe_permute(
     expert_map: Optional[torch.Tensor], top_k_num: int, block_m: int,
     use_dg: bool
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
-           torch.Tensor, torch.Tensor]:
+           torch.Tensor, Optional[torch.Tensor]]:
     """
     Determine the sorted_token_ids, expert_ids and num_tokens_post_padded for
     The given problem size.  In addition, permute and replicate the input data
@@ -1585,6 +1585,10 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == dg.get_m_alignment_for_contiguous_layout()
 
+    cache1_view: Tuple[int, ...] = ()
+    cache2_view: Tuple[int, ...] = ()
+    cache3_view: Tuple[int, ...] = ()
+
     if use_dg:
         # If M is not divisible by the block size we run the largest
         # chunk we can using DeepGemm, the remainder is handed off to
@@ -1641,6 +1645,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
+
+        a1q_scale: Optional[torch.Tensor] = None
 
         if use_fp8_w8a8 or use_dg:
             qcurr_hidden_states, a1q_scale = _fp8_quantize(
@@ -1708,6 +1714,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                       intermediate_cache1.view(-1, N))
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+
+        a2q_scale: Optional[torch.Tensor] = None
 
         if use_fp8_w8a8 or use_dg:
             qintermediate_cache2, a2q_scale = _fp8_quantize(
