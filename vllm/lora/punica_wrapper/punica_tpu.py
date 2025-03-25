@@ -32,6 +32,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self._sampler_indices_padded = self._sampler_indices_padded.to(
             dtype=torch.int32)
 
+    def mark_compiled(self):
+        torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
+        torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)
+
     @property
     def embeddings_indices(self) -> torch.Tensor:
         """
