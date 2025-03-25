@@ -833,7 +833,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                            num_reqs_to_sample, device)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
-                self.model.sample_from_hidden(dummy_hidden, sampling_meta)
+                
+                with self.maybe_dummy_run_with_lora(self.lora_config, np.array([num_tokens], dtype=np.int32)):
+                    self.model.sample_from_hidden(dummy_hidden, sampling_meta)
+                    
                 xm.mark_step()
                 if num_reqs_to_sample >= self.max_num_reqs:
                     break
