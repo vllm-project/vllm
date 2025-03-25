@@ -13,6 +13,8 @@ from vllm.config import ModelConfig, ModelImpl
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FUSED_LAYER_NAME_MAPPING)
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_classification_model,
                                                  as_embedding_model,
@@ -169,4 +171,9 @@ def configure_quant_config(quant_config: QuantizationConfig,
         logger.warning(
             "The model class %s has not defined `packed_modules_mapping`, "
             "this may lead to incorrect mapping of quantized or ignored "
-            "modules", model_class.__name__)
+            "modules; falling back to old hardcoded mapping. "
+            "Please update the model definition as this fallback will be "
+            "deprecated in future releases",
+            model_class.__name__,
+        )
+        quant_config.packed_modules_mapping = FUSED_LAYER_NAME_MAPPING

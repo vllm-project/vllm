@@ -13,6 +13,14 @@ from vllm.scalar_type import ScalarType, scalar_types
 SUPPORTED_GPTQ_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
 SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
+# Note: this is a hack. We should update each model to register the
+# stacked params and get it from there instead in a future PR.
+# fused_name: List[shard_name]
+FUSED_LAYER_NAME_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"]
+}
+
 
 # Normalize the group_shape to the full extent for any dims that are -1
 def _normalize_quant_group_shape(x: torch.Tensor, group_shape: Tuple[int,
