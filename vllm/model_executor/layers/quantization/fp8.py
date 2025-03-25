@@ -47,7 +47,7 @@ if envs.VLLM_USE_DEEP_GEMM:
         logger.warning("Failed to import DeepGemm kernels.")
 
 
-def is_col_major(x: torch.Tensor) -> bool:
+def _is_col_major(x: torch.Tensor) -> bool:
     assert x.dim() == 3
     b, m, n = x.shape
     return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
@@ -605,10 +605,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # DeepGemm scales need to be transposed and aligned.  We try to do
             # it ahead of time for performance reasons.
             if self.allow_deep_gemm:
-                if is_col_major(layer.w13_weight_scale_inv):
+                if _is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
                         dg.get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
-                if is_col_major(layer.w2_weight_scale_inv):
+                if _is_col_major(layer.w2_weight_scale_inv):
                     layer.w2_weight_scale_inv = \
                         dg.get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
 
