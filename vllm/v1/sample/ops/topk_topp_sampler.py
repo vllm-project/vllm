@@ -72,14 +72,7 @@ class TopKTopPSampler(nn.Module):
                     "best performance, please install FlashInfer.")
                 self.forward = self.forward_native
         elif current_platform.is_tpu():
-            if envs.VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION:
-                logger.warning(
-                    "TPU-specific optimization for top-k & top-p sampling are "
-                    "disabled, falling back to PyTorch-native implementation "
-                    "which could be very slow.")
-                self.forward = self.forward_native
-            else:
-                self.forward = self.forward_tpu
+            self.forward = self.forward_tpu
         else:
             self.forward = self.forward_native
 
