@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import cpuinfo
 import psutil
+import requests
 import torch
 
 import vllm.envs as envs
@@ -226,7 +227,6 @@ class UsageMessage:
             self._send_to_server(data)
 
     def _send_to_server(self, data: dict[str, Any]) -> None:
-        import requests
 
         from vllm.connections import global_http_connection
 
