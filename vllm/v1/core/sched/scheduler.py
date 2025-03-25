@@ -255,26 +255,26 @@ class Scheduler(SchedulerInterface):
                 request = self.waiting[0]
 
                 # Waiting request skipping logic
-                skip_waiting_request = False
+                is_skipped = False
                 # Skip request if the structured output request is still waiting
                 # for FSM.
-                if (not skip_waiting_request
+                if (not is_skipped
                         and request.status == RequestStatus.WAITING_FOR_FSM):
                     structured_output_req = request.structured_output_request
-                    skip_waiting_request = (not structured_output_req or
-                                            not structured_output_req.grammar)
-                    if not skip_waiting_request:
+                    is_skipped = (not structured_output_req
+                                  or not structured_output_req.grammar)
+                    if not is_skipped:
                         request.status = RequestStatus.WAITING
 
                 # Skip request if max_loras can't be honored.
-                if (not skip_waiting_request and self.lora_config
+                if (not is_skipped and self.lora_config
                         and request.lora_request):
                     req_lora_id = request.lora_request.lora_int_id
-                    skip_waiting_request = (
-                        len(scheduled_loras) == self.lora_config.max_loras
-                        and (req_lora_id not in scheduled_loras))
+                    is_skipped = (len(scheduled_loras)
+                                  == self.lora_config.max_loras
+                                  and (req_lora_id not in scheduled_loras))
 
-                if skip_waiting_request:
+                if is_skipped:
                     skipped_waiting_requests.appendleft(request)
                     self.waiting.popleft()
                     continue
