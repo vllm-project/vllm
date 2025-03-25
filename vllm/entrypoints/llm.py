@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-import warnings
 from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 
 import cloudpickle
+import torch
 import torch.nn as nn
-from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
 import torch
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -36,8 +35,7 @@ from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           ScoringRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
-                                  RequestOutputKind, SamplingParams)
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
@@ -401,10 +399,10 @@ class LLM:
                 When it is a single value, it is applied to every prompt.
                 When it is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
-            prompt_token_ids: DEPRECATED. Token IDs for the prompts. If provided,
-                the `prompts` will be ignored.
-            prompt_embeds: Optional tensor of prompt embeddings to use instead of
-                text prompts.
+            prompt_token_ids: DEPRECATED. Token IDs for the prompts. If 
+                provided, the `prompts` will be ignored.
+            prompt_embeds: Optional tensor of prompt embeddings to use instead 
+                of text prompts.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
@@ -449,7 +447,8 @@ class LLM:
                                   prompts)
 
         # Handle prompt_embeds separately
-        # This is a simplified approach - you may need to adjust based on how prompt_embeds is used
+        # This is a simplified approach - you may need to adjust based on how
+        # prompt_embeds is used
         if prompt_embeds is not None:
             parsed_prompts.prompt_embeds = prompt_embeds
 
@@ -1284,10 +1283,10 @@ class LLM:
 
             parsed_prompts.append(item)
 
-        # We don't need to handle prompt_embeds here since it's handled in the generate method
+        # We don't need to handle prompt_embeds here since it's handled in the
+        # generate method
         return parsed_prompts
 
-<<<<<<< HEAD
     def _validate_and_add_requests(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
@@ -1423,6 +1422,3 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
-
-=======
->>>>>>> def7f49d ((vllm) fix pre commit error)

@@ -365,9 +365,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             else:
                 self.input_tokens = input_tokens or []
-                self.inputs_embeds = (
-                    inputs_embeds if inputs_embeds is not None else None
-                )
+                self.inputs_embeds = (inputs_embeds
+                                      if inputs_embeds is not None else None)
                 self.input_positions = input_positions or []
                 self.token_types = token_types or []
                 self.mrope_input_positions = mrope_input_positions or None
@@ -545,8 +544,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Compute tokens.
         tokens = seq_data.get_token_ids()[context_len:seq_len]
-        if seq_data.prompt_embeds is not None and seq_data.get_output_len() == 0:
-                prompt_embeds = seq_data.prompt_embeds[context_len:seq_len]
+        if seq_data.prompt_embeds is not None and seq_data.get_output_len(
+        ) == 0:
+            prompt_embeds = seq_data.prompt_embeds[context_len:seq_len]
         else:
             seq_data.prompt_embeds = None  # release memory
             prompt_embeds = None
@@ -871,7 +871,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             for cur_token_types in inter_data.token_types:
                 token_types.extend(cur_token_types)
             if inter_data.inputs_embeds is not None:
-                inputs_embeds.append(inter_data.inputs_embeds.to(self.runner.device))
+                inputs_embeds.append(
+                    inter_data.inputs_embeds.to(self.runner.device))
         if len(inputs_embeds) == 0:
             inputs_embeds = None
         elif len(inputs_embeds) == 1:
