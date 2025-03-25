@@ -66,6 +66,7 @@ class CPUCacheEngine:
             cache_config.cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
         )
 
         # Initialize the cache.

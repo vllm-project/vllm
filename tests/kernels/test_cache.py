@@ -749,3 +749,72 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
 
     ops.gather_cache(src_cache, dst, block_table, cu_seq_lens, batch_size)
     torch.testing.assert_close(dst, expected)
+
+
+@pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
+@pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS_MLA)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES_MLA)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS_MLA)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.cpu_model
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+@torch.inference_mode()
+def test_concat_and_cache_mla_cpu(
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    num_tokens: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
+    device = "cpu"
+    kv_cache_dtype = "auto"
+    current_platform.seed_everything(seed)
+    torch.set_default_device(device)
+
+    total_slots = num_blocks * block_size
+    slot_mapping_lst = random.sample(range(total_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst,
+                                dtype=torch.long,
+                                device=device)
+
+    kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=dtype, device=device)
+    k_pe = torch.randn(num_tokens,
+                       qk_rope_head_dim,
+                       dtype=dtype,
+                       device=device)
+    entry_size = kv_lora_rank + qk_rope_head_dim
+
+    scale = torch.tensor(0.1, dtype=torch.float32, device=device)
+    kv_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
+                                 kv_cache_dtype, device)
+    ref_temp = torch.zeros(*kv_cache.shape, dtype=dtype, device=device)
+
+    for i in range(num_tokens):
+        slot = slot_mapping[i].item()
+        block_idx = slot // block_size
+        block_offset = slot % block_size
+        ref_temp[block_idx, block_offset, :kv_lora_rank] = kv_c[i]
+        ref_temp[block_idx, block_offset, kv_lora_rank:] = k_pe[i]
+
+    if kv_cache_dtype == "fp8":
+        ref_kv_cache = torch.empty_like(ref_temp, dtype=kv_cache.dtype)
+        ops.convert_fp8(ref_kv_cache,
+                        ref_temp,
+                        scale.item(),
+                        kv_dtype=kv_cache_dtype)
+    else:
+        ref_kv_cache = ref_temp
+
+    opcheck(
+        torch.ops._C_cache_ops.concat_and_cache_mla,
+        (kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+
+    ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping,
+                             kv_cache_dtype, scale)
+    torch.testing.assert_close(kv_cache, ref_kv_cache)
