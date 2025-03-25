@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
-from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Tuple,
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
 import numpy as np
@@ -11,7 +12,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import PretrainedConfig, SiglipVisionConfig
+from transformers import PretrainedConfig, SiglipVisionConfig, ProcessorMixin, BatchFeature
 from transformers.utils import logging
 
 from vllm.config import VllmConfig
@@ -28,7 +29,14 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalInputs, NestedTensors
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors, MultiModalInputs)
+from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
+                                   ImageSize, MultiModalDataItems, AudioEmbeddingItems, AudioProcessorItems)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
@@ -121,8 +129,7 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
     return best_ratio
 
 
-def _find_target_aspect_ratio(image, image_size, max_num, min_num):
-    orig_width, orig_height = image.size
+def _find_target_aspect_ratio(orig_width: int, orig_height: int, image_size: int, max_num: int, min_num: int,):
 
     w_crop_num = math.ceil(orig_width / float(image_size))
     h_crop_num = math.ceil(orig_height / float(image_size))
@@ -150,8 +157,7 @@ def _find_target_aspect_ratio(image, image_size, max_num, min_num):
     return target_aspect_ratio, target_height, target_width
 
 
-def _get_padding_size(image, target_height, target_width):
-    orig_width, orig_height = image.size
+def _get_padding_size(orig_width: int, orig_height: int, target_height: int, target_width: int):
     ratio_width = target_width / orig_width
     ratio_height = target_height / orig_height
 
@@ -169,14 +175,14 @@ def dynamic_preprocess(image,
                        max_num=12,
                        image_size=384,
                        mask_size=27):
+    orig_width, orig_height = image.size
     target_aspect_ratio, target_height, target_width =\
           _find_target_aspect_ratio(
-        image, image_size, max_num, min_num)
+        orig_width, orig_height, image_size, max_num, min_num)
     padding_height, padding_width = _get_padding_size(image, target_height,
                                                       target_width)
 
     # Calculate the ratio
-    orig_width, orig_height = image.size
     ratio_width = target_width / orig_width
     ratio_height = target_height / orig_height
     if ratio_width < ratio_height:
@@ -858,8 +864,14 @@ def audio_feature_extractor() -> LogFbankProcessor:
     return LogFbankProcessor()
 
 
-def _compute_num_image_tokens(image, dynamic_hd_size, vit_image_size,
-                              vit_patch_size, token_compression_factor):
+def _compute_num_image_tokens(
+    orig_width: int,
+    orig_height: int,
+    dynamic_hd_size: int,
+    vit_image_size: int,
+    vit_patch_size: int,
+    token_compression_factor: int = 2,
+):
     """
     compute the number of tokens an image is expected to take up considering 
     the image encoder architecture and exclude output features containing 
@@ -876,7 +888,8 @@ def _compute_num_image_tokens(image, dynamic_hd_size, vit_image_size,
             "token_compression_factor"
 
     target_aspect_ratio, target_height, target_width = (
-        _find_target_aspect_ratio(image,
+        _find_target_aspect_ratio(orig_width,
+                                  orig_height,
                                   vit_image_size,
                                   dynamic_hd_size,
                                   min_num=1))
@@ -889,7 +902,7 @@ def _compute_num_image_tokens(image, dynamic_hd_size, vit_image_size,
     assert (target_height % vit_image_size == 0
             and target_width % vit_image_size == 0)
 
-    padding_height, padding_width = _get_padding_size(image, target_height,
+    padding_height, padding_width = _get_padding_size(orig_width, orig_height, target_height,
                                                       target_width)
     assert padding_width == 0 or padding_height == 0, \
         "padding_width or padding_height must be 0"
@@ -1218,7 +1231,7 @@ def input_processor_for_phi4mm(ctx: InputContext,
     )
 
 
-def _compute_audio_embed_size(hf_config, audio_frames):
+def _compute_audio_embed_size(hf_config: PretrainedConfig, audio_frames: int) -> int:
     """
     Compute the audio embedding size based on the audio frames and
     compression rate.
@@ -1423,16 +1436,269 @@ def cat_with_pad(tensors, dim, padding_value=0):
     return output
 
 
-@MULTIMODAL_REGISTRY.register_input_mapper("audio",
-                                           input_mapper_for_phi4mm_audio)
-@MULTIMODAL_REGISTRY.register_input_mapper("image",
-                                           input_mapper_for_phi4mm_image)
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "audio", get_max_phi4mm_audio_tokens)
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "image", get_max_phi4mm_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4mm)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_phi4mm)
+class Phi4MMProcessingInfo(BaseProcessingInfo):
+
+    @property
+    def image_tokens(self) -> list[str]:
+        return [f"<|image_{i+1}|>" for i in range(100)]
+
+    @property
+    def audio_tokens(self) -> list[str]:
+        return [f"<|audio_{i+1}|>" for i in range(100)]
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None, "audio": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {
+            "image": self.get_max_image_tokens(),
+            "audio": self.get_max_audio_tokens(),
+        }
+
+    def get_max_audio_tokens(self) -> int:
+        return 10000
+    
+    def get_max_image_tokens(self) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+        return self.get_num_image_tokens(
+            image_width=target_width, image_height=target_height)
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_encoder_name = hf_config.img_processor
+        if vision_encoder_name is None:
+            vision_encoder_name = SIGLIP_NAME
+        prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[vision_encoder_name]
+        dynamic_hd_size = prepro_config['dynamic_hd']
+        vit_image_size = prepro_config['vit_image_size']
+        vit_patch_size = prepro_config['vit_patch_size']
+        token_compression_factor = prepro_config['token_compression_factor']
+
+        image_num_tokens = _compute_num_image_tokens(
+            image_width, image_height, 
+            dynamic_hd_size=dynamic_hd_size,
+            vit_image_size=vit_image_size,
+            vit_patch_size=vit_patch_size,
+            token_compression_factor=token_compression_factor,
+        )
+
+        return image_num_tokens
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self.get_hf_config()
+        vision_encoder_name = hf_config.img_processor
+        if vision_encoder_name is None:
+            vision_encoder_name = SIGLIP_NAME
+        prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[vision_encoder_name]
+        dynamic_hd_size = prepro_config['dynamic_hd']
+        vit_image_size = prepro_config['vit_image_size']
+
+        max_side = vit_image_size * dynamic_hd_size
+        return ImageSize(height=max_side, width=vit_image_size)
+
+    def _compute_num_image_tokens(image, dynamic_hd_size, vit_image_size,
+                              vit_patch_size, token_compression_factor):
+        """
+        compute the number of tokens an image is expected to take up considering 
+        the image encoder architecture and exclude output features containing 
+        only padding pixels
+
+        for siglip, vit_image_size=448, vit_patch_size=14, so output will be 
+        32x32 feature map
+        NOTE right now, Phi4MM uses hard-coded token_compression_factor=2
+        """
+        assert vit_image_size % vit_patch_size == 0, \
+            "vit_image_size must be divisible by vit_patch_size"
+        assert vit_image_size // vit_patch_size % token_compression_factor == 0, \
+            "vit_image_size // vit_patch_size must be divisible by "\
+                "token_compression_factor"
+
+        target_aspect_ratio, target_height, target_width = (
+            _find_target_aspect_ratio(image,
+                                    vit_image_size,
+                                    dynamic_hd_size,
+                                    min_num=1))
+        assert target_aspect_ratio[
+            0] * vit_image_size == target_width, \
+                f"{target_aspect_ratio[0]} * {vit_image_size} != {target_width}"
+        assert target_aspect_ratio[
+            1] * vit_image_size == target_height, \
+                f"{target_aspect_ratio[1]} * {vit_image_size} != {target_height}"
+        assert (target_height % vit_image_size == 0
+                and target_width % vit_image_size == 0)
+
+        padding_height, padding_width = _get_padding_size(image, target_height,
+                                                        target_width)
+        assert padding_width == 0 or padding_height == 0, \
+            "padding_width or padding_height must be 0"
+
+        target_feat_width = target_width // vit_patch_size
+        target_feat_height = target_height // vit_patch_size
+        if padding_width >= vit_patch_size:
+            assert padding_height == 0, "padding_height not 0"
+            non_pad_feat_width = target_feat_width - math.floor(
+                padding_width / vit_patch_size)
+            non_pad_feat_height = target_feat_height
+        elif padding_height >= vit_patch_size:
+            assert padding_width == 0, "padding_width not 0"
+            non_pad_feat_height = target_feat_height - math.floor(
+                padding_height / vit_patch_size)
+            non_pad_feat_width = target_feat_width
+        else:
+            # small padding shorter than a vit patch
+            non_pad_feat_width = target_feat_width
+            non_pad_feat_height = target_feat_height
+
+        feat_width = non_pad_feat_width // token_compression_factor
+        feat_height = non_pad_feat_height // token_compression_factor
+        # NOTE it's possible that the non-padding feature is not divisible
+        if non_pad_feat_width % token_compression_factor != 0:
+            feat_width += 1
+        if non_pad_feat_height % token_compression_factor != 0:
+            feat_height += 1
+        num_hd_patch_tokens = feat_width * feat_height
+        num_hd_newline_tokens = feat_height
+        vit_feature_size = vit_image_size // vit_patch_size
+        num_global_image_tokens = (vit_feature_size // token_compression_factor)**2
+        num_sep_tokens = 1
+        num_global_image_newline_tokens = \
+            vit_feature_size // token_compression_factor
+
+        return (num_global_image_tokens + num_sep_tokens + num_hd_patch_tokens +
+                num_hd_newline_tokens + num_global_image_newline_tokens)
+
+
+class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_audios = mm_counts.get("audio", 0)
+        num_images = mm_counts.get("image", 0)
+
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images),
+            "audio": self._get_dummy_audios(length=_AUDIO_MAX_SOUNDFILE_SIZE,
+                                            num_audios=num_audios),
+        }
+
+        image_tokens: list[str] = self.info.image_tokens[:num_images]
+        audio_tokens: list[str] = self.info.audio_tokens[:num_audios]
+
+        return ProcessorInputs(
+            prompt_text="".join(image_tokens + audio_tokens),
+            mm_data=mm_data,
+        )
+
+
+class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, Any],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_tokens: list[str] = self.info.image_tokens  # type: ignore
+        audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
+
+        tokenizer = self.info.get_tokenizer()
+        bos_token_id = tokenizer.bos_token_id
+        assert isinstance(bos_token_id, int)
+
+        def get_image_replacement_phi4mm(item_idx: int):
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems))
+
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                image_size = images.get_image_size(item_idx)
+                num_image_tokens = self.info.get_num_image_tokens(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                    processor=hf_processor,
+                )
+
+            image_tokens = [_IMAGE_PLACEHOLDER_TOKEN_ID] * num_image_tokens
+
+            return image_tokens
+
+        def get_audio_replacement_phi4mm(item_idx: int):
+            audios = mm_items.get_items("audio", AudioProcessorItems)
+            # TODO(Isotr0py): support embedding inputs
+            audio_len = audios.get_audio_length(item_idx)
+            audio_frames, _ = compute_logfbank_output_size(audio_len, DUMMY_SAMPLING_FREQUENCY)
+            audio_embed_size = _compute_audio_embed_size(self.info.get_hf_config(), audio_frames)
+
+            audio_tokens = [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
+
+            return audio_tokens
+
+        num_images = mm_items.get_count("image", strict=False)
+        num_audios = mm_items.get_count("audio", strict=False)
+
+        image_repl = [
+            PromptReplacement(
+                modality="image",
+                target=image_token,
+                replacement=get_image_replacement_phi4mm,
+            ) for image_token in image_tokens[:num_images]
+        ]
+        audio_repl = [
+            PromptReplacement(
+                modality="image",
+                target=audio_token,
+                replacement=get_audio_replacement_phi4mm,
+            ) for audio_token in audio_tokens[:num_audios]
+        ]
+        return image_repl + audio_repl
+
+
+# @MULTIMODAL_REGISTRY.register_input_mapper("audio",
+#                                            input_mapper_for_phi4mm_audio)
+# @MULTIMODAL_REGISTRY.register_input_mapper("image",
+#                                            input_mapper_for_phi4mm_image)
+# @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
+#     "audio", get_max_phi4mm_audio_tokens)
+# @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
+#     "image", get_max_phi4mm_image_tokens)
+# @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4mm)
+# @INPUT_REGISTRY.register_input_processor(input_processor_for_phi4mm)
+@MULTIMODAL_REGISTRY.register_processor(
+    Phi4MMMultiModalProcessor,
+    info=Phi4MMProcessingInfo,
+    dummy_inputs=Phi4MMDummyInputsBuilder,
+)
 class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
                         SupportsV0Only):
     """
