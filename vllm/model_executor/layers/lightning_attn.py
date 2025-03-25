@@ -343,15 +343,15 @@ class _attention(torch.autograd.Function):
         # Initialize output tensor
         o = torch.empty((b, h, n, e), dtype=q.dtype, device=q.device)
 
-        # Set block sizes
-        BLOCK = 256
+        # 设置 BLOCK 大小为序列长度的上限，确保不超过 256
+        BLOCK = min(256, n)
         NUM_BLOCK = triton.cdiv(n, BLOCK)
 
-        CBLOCK = 32
+        CBLOCK = min(32, BLOCK)  # 确保 CBLOCK 不大于 BLOCK
         NUM_CBLOCK = BLOCK // CBLOCK
         assert BLOCK % CBLOCK == 0, "BLOCK must be a multiple of CBLOCK"
 
-        # Compute decay factors for keys
+        # 使用与序列长度匹配的数组大小
         array = torch.arange(0, BLOCK, device=q.device) + 1
         k_decay = torch.exp(-s * (BLOCK - array.reshape(1, -1)))
 
