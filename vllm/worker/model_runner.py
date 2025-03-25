@@ -863,7 +863,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         """
         # Combine and flatten intermediate data.
         input_tokens = []
-        inputs_embeds: Union[list[torch.Tensor], None] = []
+        inputs_embeds_: list[torch.Tensor] = []
         token_types = []
         for inter_data in self.inter_data_list:
             for cur_input_tokens in inter_data.input_tokens:
@@ -871,14 +871,15 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             for cur_token_types in inter_data.token_types:
                 token_types.extend(cur_token_types)
             if inter_data.inputs_embeds is not None:
-                inputs_embeds.append(
+                inputs_embeds_.append(
                     inter_data.inputs_embeds.to(self.runner.device))
-        if len(inputs_embeds) == 0:
+        inputs_embeds: Optional[torch.Tensor]
+        if len(inputs_embeds_) == 0:
             inputs_embeds = None
-        elif len(inputs_embeds) == 1:
-            inputs_embeds = inputs_embeds[0]
+        elif len(inputs_embeds_) == 1:
+            inputs_embeds = inputs_embeds_[0]
         else:
-            inputs_embeds = torch.cat(inputs_embeds, dim=0)
+            inputs_embeds = torch.cat(inputs_embeds_, dim=0)
 
         if not input_tokens:
             # This may happen when all prefill requests hit
