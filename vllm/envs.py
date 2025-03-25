@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import os
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -40,10 +41,6 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_CPU_MOE_PREPACK: bool = True
-    VLLM_OPENVINO_DEVICE: str = "CPU"
-    VLLM_OPENVINO_KVCACHE_SPACE: int = 0
-    VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
-    VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
@@ -75,7 +72,10 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
+    VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
+    VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -129,7 +129,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
 
     # Target device of vLLM, supporting [cuda (by default),
-    # rocm, neuron, cpu, openvino]
+    # rocm, neuron, cpu]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
 
@@ -295,7 +295,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # this is used for configuring the default logging level
     "VLLM_LOGGING_LEVEL":
-    lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO"),
+    lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
 
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX":
@@ -341,7 +341,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
 
     # (CPU backend only) CPU key-value cache space.
-    # default is 4GB
+    # default is 4 GiB
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
 
@@ -356,28 +356,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_MOE_PREPACK":
     lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
 
-    # OpenVINO device selection
-    # default is CPU
-    "VLLM_OPENVINO_DEVICE":
-    lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
-
-    # OpenVINO key-value cache space
-    # default is 4GB
-    "VLLM_OPENVINO_KVCACHE_SPACE":
-    lambda: int(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "0")),
-
-    # OpenVINO KV cache precision
-    # default is bf16 if natively supported by platform, otherwise f16
-    # To enable KV cache compression, please, explicitly specify u8
-    "VLLM_OPENVINO_CPU_KV_CACHE_PRECISION":
-    lambda: os.getenv("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION", None),
-
-    # Enables weights compression during model export via HF Optimum
-    # default is False
-    "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
-    lambda:
-    (os.environ.get("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", "0").lower() in
-     ("on", "true", "1")),
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
@@ -435,9 +413,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
     # Cache size (in GiB) for multimodal input cache
-    # Default is 8GiB
+    # Default is 4 GiB
     "VLLM_MM_INPUT_CACHE_GIB":
-    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "8")),
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -528,9 +506,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
 
+    # Disable aiter ops unless specifically enabled.
+    # Acts as a parent switch to enable the rest of the other operations.
+    "VLLM_ROCM_USE_AITER":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1")),
+
+    # use aiter rms norm op if aiter ops are enabled.
+    "VLLM_ROCM_USE_AITER_RMSNORM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
+             ("true", "1")),
+
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
     lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
+
+    # Pad the weights for the moe kernel
+    "VLLM_ROCM_MOE_PADDING":
+    lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
 
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
@@ -664,3 +657,43 @@ def set_vllm_use_v1(use_v1: bool):
             "explicitly by the user. Please raise this as a Github "
             "Issue and explicitly set VLLM_USE_V1=0 or 1.")
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
+
+
+def compute_hash() -> str:
+    """
+    WARNING: Whenever a new key is added to this environment
+    variables, ensure that it is included in the factors list if
+    it affects the computation graph. For example, different values
+    of VLLM_PP_LAYER_PARTITION will generate different computation
+    graphs, so it is included in the factors list. The env vars that 
+    affect the choice of different kernels or attention backends should
+    also be included in the factors list.
+    """
+    factors: list[Any] = []
+
+    # summarize environment variables
+    def factorize(name: str):
+        if __getattr__(name):
+            factors.append(__getattr__(name))
+        else:
+            factors.append("None")
+
+    # The values of envs may affects the computation graph.
+    # TODO(DefTruth): hash all environment variables?
+    # for key in environment_variables:
+    #     factorize(key)
+    environment_variables_to_hash = [
+        "VLLM_PP_LAYER_PARTITION",
+        "VLLM_MLA_DISABLE",
+        "VLLM_USE_TRITON_FLASH_ATTN",
+        "VLLM_USE_TRITON_AWQ",
+        "VLLM_DP_RANK",
+        "VLLM_DP_SIZE",
+    ]
+    for key in environment_variables_to_hash:
+        if key in environment_variables:
+            factorize(key)
+
+    hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+
+    return hash_str
