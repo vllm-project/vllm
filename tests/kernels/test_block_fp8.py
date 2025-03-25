@@ -229,7 +229,7 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 @torch.inference_mode()
 def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     if topk > E:
-        pytest.skip(f"Skipping test; topk={K} > E={E}")
+        pytest.skip(f"Skipping test; topk={topk} > E={E}")
 
     torch.manual_seed(seed)
     factor_for_scale = 1e-2
@@ -351,7 +351,7 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
 
 
 def fp8_perm(m, idx):
-    if m.dtype == torch.float8_e4m3fn:
+    if torch.is_floating_point(m) and torch.finfo(m.dtype).bits == 8:
         return m.view(dtype=torch.uint8)[idx,
                                          ...].view(dtype=torch.float8_e4m3fn)
     else:
@@ -378,8 +378,6 @@ def test_moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
     m_indices = torch.repeat_interleave(m_indices, block_m, dim=0)
 
     assert sorted_token_ids[sorted_token_ids >= num_tokens].sum() == 0
-
-    #print(f"sti {sorted_token_ids}")
 
     inv_perm = torch.argsort(sorted_token_ids)[:M*topk]
 
@@ -418,9 +416,6 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     a_q, a_s, m_indices, inv_perm = test_moe_permute(
         a_q, a_s, topk_ids, num_groups, topk, block_m)
 
-    # Fix this assert
-    #assert a_s.shape[1] == K // 128 and a_q.shape[0] == a_s.shape[0] == M * topk
-
     inter_out = torch.zeros((a_q.shape[0], w1[0].shape[0]),
                             dtype=torch.bfloat16,
                             device=a.device)
@@ -439,22 +434,8 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
         (act_out_q, act_out_s), (w2, w2_s), out, m_indices)
 
-    if True:
-        final_out = test_moe_unpermute(out, inv_perm, m_indices, topk,
-                                       num_groups, M, K, topk_weight, topk_ids)
-    else:
-        m_indices = torch.arange(0,
-                                 M * (topk + 1),
-                                 block_m,
-                                 dtype=torch.int,
-                                 device=out.device)
-
-        print(f"inv_perm {inv_perm}")
-        print(f"inv_perm[:m*topk] {inv_perm[:M*topk]}")
-
-        final_out = test_moe_unpermute_op(out, inv_perm, m_indices, topk,
-                                          num_groups, M, K, topk_weight,
-                                          topk_ids)
+    final_out = test_moe_unpermute(out, inv_perm, m_indices, topk,
+                                   num_groups, M, K, topk_weight, topk_ids)
 
     return final_out
 
@@ -502,6 +483,9 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     w1_s = torch.empty((E, n_tiles_w1, k_tiles_w1), dtype=torch.float32)
     w2_s = torch.empty((E, n_tiles_w2, k_tiles_w2), dtype=torch.float32)
 
+    w1_s = deep_gemm.get_col_major_tma_aligned_tensor(w1_s).contiguous()
+    w2_s = deep_gemm.get_col_major_tma_aligned_tensor(w2_s).contiguous()
+
     assert w1_s.shape == (E, (2 * N + 127) // 128, (K + 127) // 128)
     assert (w2.shape[-2] + block_n - 1) // block_n == w2_s.shape[-2]
 
@@ -509,17 +493,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
         w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
         w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
 
-    w1_sa = deep_gemm.get_col_major_tma_aligned_tensor(w1_s).contiguous()
-    w2_sa = deep_gemm.get_col_major_tma_aligned_tensor(w2_s).contiguous()
-
-    # TODO: move size alignment further up when setting up all shapes
-    if w1_sa.shape != w1_s.shape or w2_sa.shape != w2_s.shape:
-        print("UNALIGNED")
-        pytest.skip("UNALIGNED")
-
-    w1_s = w1_sa
-    w2_s = w2_sa
-
+    # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
                                            block_size)

@@ -523,8 +523,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
 
     if use_dg:
         assert use_fp8_w8a8
-        # Note: we do not apply weights here since it requires
-        # resizing the output.
+        # Note: we never apply the topk_weights here since it requires
+        # unpermuting and resizing the output.  This goes against the
+        # existing interface as the `mul_routed_weight` argument is
+        # ignored.  The weights are applied in _moe_unpermute.
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (A, A_scale), (B, B_scale), C, expert_ids)
 
@@ -856,7 +858,7 @@ def try_get_optimal_moe_config(
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
                                         is_marlin, block_shape)
 
-    # Try to remove this
+    # Enforce DeepGemm M blocking no matter what the config says.
     if use_deep_gemm:
         config['BLOCK_SIZE_M'] = dg.get_m_alignment_for_contiguous_layout()
 
@@ -905,10 +907,10 @@ def fused_topk(
                            topk,
                            dtype=torch.int32,
                            device=hidden_states.device)
-    token_expert_indices = torch.empty(M,
-                                       topk,
-                                       dtype=torch.int32,
-                                       device=hidden_states.device)
+    token_expert_indicies = torch.empty(M,
+                                        topk,
+                                        dtype=torch.int32,
+                                        device=hidden_states.device)
 
     gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
 
@@ -1316,15 +1318,18 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     assert not use_dg or block_m == dg.get_m_alignment_for_contiguous_layout()
 
     if use_dg:
+        # If M is not divisible by the block size we run the largest
+        # chunk we can using DeepGemm, the remainder is handed off to
+        # the Triton kernels.
         if M % block_m != 0:
             CHUNK_SIZE = min((M // block_m) * block_m, CHUNK_SIZE)
 
         assert w1_scale is not None
         assert w2_scale is not None
 
-        # We attempt to do this offline in Fp8MoEMethod, in which case these
-        # calls will be nops.  Otherwise, they'll be performed every time the
-        # layer is executed.
+        # We attempt to transpose and align offline in Fp8MoEMethod, in which
+        # case these calls will be nops.  Otherwise, they'll be performed every
+        # time the layer is executed.
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
@@ -1363,6 +1368,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         if tokens_in_chunk == 0:
             break
 
+        # Even if we are using DeepGemm, we must defer any chunks
+        # that are not blocked to Triton.
         skip_dg = use_dg and tokens_in_chunk % block_m != 0
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
@@ -1437,20 +1444,16 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
-        # is this correct in the loop? TODO: fold in moe_sum?
-        if use_dg and not skip_dg:
-            _moe_unpermute(out_hidden_states[begin_chunk_idx:end_chunk_idx],
-                           intermediate_cache3,
-                           inv_perm,
-                           expert_ids,
-                           top_k_num,
-                           global_num_experts,
-                           K,
-                           curr_topk_weights,
-                           curr_topk_ids)
-        else:
-            ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                        out_hidden_states[begin_chunk_idx:end_chunk_idx])
+        _moe_unpermute_and_reduce(out_hidden_states[begin_chunk_idx:end_chunk_idx],
+                                  intermediate_cache3.view(*intermediate_cache3.shape),
+                                  inv_perm,
+                                  expert_ids,
+                                  top_k_num,
+                                  global_num_experts,
+                                  K,
+                                  curr_topk_weights,
+                                  curr_topk_ids,
+                                  use_dg and not skip_dg)
 
     return out_hidden_states
 
