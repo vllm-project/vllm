@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
+import warnings
 from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
@@ -8,6 +9,7 @@ from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 import cloudpickle
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -35,7 +37,8 @@ from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           ScoringRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
+                                  RequestOutputKind, SamplingParams)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup

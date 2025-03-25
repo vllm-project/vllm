@@ -156,9 +156,6 @@ class TokenInputs(TypedDict):
     The original prompt text corresponding to the token IDs, if available.
     """
 
-    prompt_embeds: NotRequired[torch.Tensor]
-    """The embeddings of the prompt, if available."""
-
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
