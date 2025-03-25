@@ -6,6 +6,8 @@ import torch
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
 from vllm.utils import sha256
+# disable yapf here as it formats differently than isort such that both fail
+# yapf: disable
 from vllm.v1.core.kv_cache_utils import (NONE_HASH, BlockHashType,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
                                          PrefixCachingMetrics,
@@ -17,6 +19,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
+
+# yapf: enable
 
 
 def make_request(request_id,
