@@ -73,7 +73,7 @@ The Transformers fallback explicitly supports the following features:
 
 - <project:#quantization-index> (except GGUF)
 - <project:#lora-adapter>
-- <project:#distributed-serving> (pipeline parallel coming soon <gh-pr:12832>!)
+- <project:#distributed-serving> (requires `transformers>=4.49.0`)
 
 #### Remote code
 
@@ -470,6 +470,11 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `TeleChat2ForCausalLM`
   * TeleChat2
   * `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.
+  * ✅︎
+  * ✅︎
+- * `TeleFLMForCausalLM`
+  * TeleFLM
+  * `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc.
   * ✅︎
   * ✅︎
 - * `XverseForCausalLM`

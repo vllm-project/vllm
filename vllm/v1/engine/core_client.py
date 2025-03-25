@@ -262,9 +262,9 @@ class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
     circular reference back to the client object."""
 
+    ctx: Union[zmq.Context]
     core_engines: list[CoreEngine] = field(default_factory=list)
-    ctx: Union[zmq.Context] = None
-    output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
+    output_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     shutdown_path: Optional[str] = None
 
     def __call__(self):
