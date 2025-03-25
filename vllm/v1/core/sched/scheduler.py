@@ -244,7 +244,7 @@ class Scheduler(SchedulerInterface):
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        waiting_for_fsm: deque[Request] = deque()
+        skipped_waiting_requests: deque[Request] = deque()
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -260,7 +260,7 @@ class Scheduler(SchedulerInterface):
                         request.status = RequestStatus.WAITING
                     else:
                         waiting_structured_output_req = self.waiting.popleft()
-                        waiting_for_fsm.appendleft(
+                        skipped_waiting_requests.appendleft(
                             waiting_structured_output_req)
                         continue
 
@@ -355,8 +355,8 @@ class Scheduler(SchedulerInterface):
                     encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
-        if waiting_for_fsm:
-            self.waiting.extendleft(waiting_for_fsm)
+        if skipped_waiting_requests:
+            self.waiting.extendleft(skipped_waiting_requests)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
