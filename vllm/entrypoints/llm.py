@@ -492,8 +492,14 @@ class LLM:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
         """
-        return self.llm_engine.engine_core.collective_rpc(
-            method, timeout, args, kwargs)
+
+        # make it compatible with both V0 and V1
+        if hasattr(self.llm_engine, "engine_core"):
+            return self.llm_engine.engine_core.collective_rpc(
+                method, timeout, args, kwargs)
+        else:
+            return self.llm_engine.model_executor.collective_rpc(
+                method, timeout, args, kwargs)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
