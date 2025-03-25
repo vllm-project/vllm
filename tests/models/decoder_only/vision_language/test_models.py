@@ -352,6 +352,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda vid_prompt: f"USER: {vid_prompt} ASSISTANT:",
         num_video_frames=16,
         max_model_len=4096,
+        max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
     ),
