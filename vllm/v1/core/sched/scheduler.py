@@ -258,24 +258,24 @@ class Scheduler(SchedulerInterface):
                 skip_waiting_request = False
                 # Skip request if the structured output request is still waiting
                 # for FSM.
-                if request.status == RequestStatus.WAITING_FOR_FSM:
+                if (not skip_waiting_request
+                        and request.status == RequestStatus.WAITING_FOR_FSM):
                     structured_output_req = request.structured_output_request
-                    still_waiting_for_fsm = (not structured_output_req or
-                                             not structured_output_req.grammar)
-                    skip_waiting_request = (skip_waiting_request
-                                            or still_waiting_for_fsm)
-                    if not still_waiting_for_fsm:
+                    skip_waiting_request = (not structured_output_req or
+                                            not structured_output_req.grammar)
+                    if not skip_waiting_request:
                         request.status = RequestStatus.WAITING
 
                 # Skip request if max_loras can't be honored.
-                if self.lora_config and request.lora_request:
+                if (not skip_waiting_request and self.lora_config
+                        and request.lora_request):
                     req_lora_id = request.lora_request.lora_int_id
-                    skip_waiting_request = skip_waiting_request or (
-                        len(scheduled_loras) == self.lora_config.max_loras and
-                        (req_lora_id not in scheduled_loras))
+                    skip_waiting_request = (
+                        len(scheduled_loras) == self.lora_config.max_loras
+                        and (req_lora_id not in scheduled_loras))
 
                 if skip_waiting_request:
-                    skipped_waiting_requests.append(request)
+                    skipped_waiting_requests.appendleft(request)
                     self.waiting.popleft()
                     continue
 
