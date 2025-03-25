@@ -379,7 +379,7 @@ def test_moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
 
     assert sorted_token_ids[sorted_token_ids >= num_tokens].sum() == 0
 
-    inv_perm = torch.argsort(sorted_token_ids)[:M*topk]
+    inv_perm = torch.argsort(sorted_token_ids)[:M * topk]
 
     a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
     a = fp8_perm(a, sorted_token_ids)
@@ -413,8 +413,8 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
     a_q, a_s = per_token_group_quant_fp8(a, block_m)
 
-    a_q, a_s, m_indices, inv_perm = test_moe_permute(
-        a_q, a_s, topk_ids, num_groups, topk, block_m)
+    a_q, a_s, m_indices, inv_perm = test_moe_permute(a_q, a_s, topk_ids,
+                                                     num_groups, topk, block_m)
 
     inter_out = torch.zeros((a_q.shape[0], w1[0].shape[0]),
                             dtype=torch.bfloat16,
@@ -434,8 +434,8 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
         (act_out_q, act_out_s), (w2, w2_s), out, m_indices)
 
-    final_out = test_moe_unpermute(out, inv_perm, m_indices, topk,
-                                   num_groups, M, K, topk_weight, topk_ids)
+    final_out = test_moe_unpermute(out, inv_perm, m_indices, topk, num_groups,
+                                   M, K, topk_weight, topk_ids)
 
     return final_out
 
@@ -511,9 +511,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                         allow_deep_gemm=True)
 
         if M % 128 == 0:
-            out2 = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s,
-                                                w2_s, score, topk,
-                                                block_size)
+            out2 = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
+                                                score, topk, block_size)
         else:
             out2 = None
 
