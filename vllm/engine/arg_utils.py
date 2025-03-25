@@ -208,6 +208,7 @@ class EngineArgs:
     model_impl: str = "auto"
 
     calculate_kv_scales: Optional[bool] = None
+    split_qkv: Optional[bool] = False
 
     additional_config: Optional[Dict[str, Any]] = None
 
@@ -1029,6 +1030,12 @@ class EngineArgs:
             'Otherwise, the scales will default to 1.0.')
 
         parser.add_argument(
+            '--split-qkv',
+            action='store_true',
+            default=EngineArgs.split_qkv,
+            help='Whether to separate q, k and v calculations.')
+
+        parser.add_argument(
             "--additional-config",
             type=json.loads,
             default=None,
@@ -1148,6 +1155,7 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            split_qkv=self.split_qkv,
         )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,

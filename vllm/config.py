@@ -1019,6 +1019,7 @@ class CacheConfig:
             prefix caching enabled.
         enable_prefix_caching: Whether to enable prefix caching.
         cpu_offload_gb: Size of the CPU offload buffer in GiB.
+        split_qkv: Whether to split the QKV calculations.
     """
 
     def compute_hash(self) -> str:
@@ -1051,6 +1052,7 @@ class CacheConfig:
         enable_prefix_caching: bool = False,
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
+        split_qkv: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -1062,6 +1064,7 @@ class CacheConfig:
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
+        self.split_qkv = split_qkv
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()

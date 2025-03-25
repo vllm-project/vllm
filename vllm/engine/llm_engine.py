@@ -284,32 +284,26 @@ class LLMEngine:
                 usage_context,
                 extra_kvs={
                     # Common configuration
-                    "dtype":
-                    str(self.model_config.dtype),
+                    "dtype": str(self.model_config.dtype),
                     "tensor_parallel_size":
                     self.parallel_config.tensor_parallel_size,
-                    "block_size":
-                    self.cache_config.block_size,
+                    "block_size": self.cache_config.block_size,
                     "gpu_memory_utilization":
                     self.cache_config.gpu_memory_utilization,
 
                     # Quantization
-                    "quantization":
-                    self.model_config.quantization,
-                    "kv_cache_dtype":
-                    str(self.cache_config.cache_dtype),
+                    "quantization": self.model_config.quantization,
+                    "kv_cache_dtype": str(self.cache_config.cache_dtype),
 
                     # Feature flags
-                    "enable_lora":
-                    bool(self.lora_config),
-                    "enable_prompt_adapter":
-                    bool(self.prompt_adapter_config),
+                    "enable_lora": bool(self.lora_config),
+                    "enable_prompt_adapter": bool(self.prompt_adapter_config),
                     "enable_prefix_caching":
                     self.cache_config.enable_prefix_caching,
-                    "enforce_eager":
-                    self.model_config.enforce_eager,
+                    "enforce_eager": self.model_config.enforce_eager,
                     "disable_custom_all_reduce":
                     self.parallel_config.disable_custom_all_reduce,
+                    "split_qk_v": self.cache_config.split_qkv,
                 })
 
         if self.tokenizer:

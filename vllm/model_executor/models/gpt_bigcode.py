@@ -32,7 +32,8 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               SplitQKVParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -78,15 +79,25 @@ class GPTBigCodeAttention(nn.Module):
             total_num_kv_heads = total_num_heads
             self.num_kv_heads = self.num_heads
         self.kv_dim = self.head_dim * self.num_kv_heads
-        self.c_attn = QKVParallelLinear(
-            self.hidden_size,
-            self.head_dim,
-            total_num_heads,
-            total_num_kv_heads,
-            bias=True,
-            quant_config=quant_config,
-        )
-
+        self.split_qkv = cache_config.split_qkv
+        if self.split_qkv:
+            self.c_attn = SplitQKVParallelLinear(
+                self.hidden_size,
+                self.head_dim,
+                total_num_heads,
+                total_num_kv_heads,
+                bias=True,
+                quant_config=quant_config,
+            )
+        else:
+            self.c_attn = QKVParallelLinear(
+                self.hidden_size,
+                self.head_dim,
+                total_num_heads,
+                total_num_kv_heads,
+                bias=True,
+                quant_config=quant_config,
+            )
         self.c_proj = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
@@ -107,14 +118,17 @@ class GPTBigCodeAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        qkv, _ = self.c_attn(hidden_states)
-        q, k, v = qkv.split(
-            [
-                self.hidden_size // self.tensor_model_parallel_world_size,
-                self.kv_dim, self.kv_dim
-            ],
-            dim=-1,
-        )
+        if self.split_qkv:
+            q, k, v, _ = self.c_attn(hidden_states)
+        else:
+            qkv, _ = self.c_attn(hidden_states)
+            q, k, v = qkv.split(
+                [
+                    self.hidden_size // self.tensor_model_parallel_world_size,
+                    self.kv_dim, self.kv_dim
+                ],
+                dim=-1,
+            )
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         attn_output, _ = self.c_proj(attn_output)
         return attn_output
@@ -280,6 +294,7 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
+        cache_config = vllm_config.cache_config
 
         self.config = config
         self.lora_config = lora_config
@@ -302,6 +317,7 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
+        self.split_qkv = cache_config.split_qkv
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.transformer.get_input_embeddings(input_ids)
@@ -339,6 +355,13 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            # (new_name, orig_name, shard_id)
+            (".c_attn.q_proj", ".c_attn", "q"),
+            (".c_attn.k_proj", ".c_attn", "k"),
+            (".c_attn.v_proj", ".c_attn", "v"),
+        ]
+
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
@@ -350,15 +373,41 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 continue
             if is_pp_missing_parameter(name, self):
                 continue
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            # TODO (@robertgshaw2-neuralmagic): move to fp8 linear method
-            if "c_attn.input_scale" in name or "c_attn.weight_scale" in name:
-                weight_loader(param, loaded_weight, 'q')
-                weight_loader(param, loaded_weight, 'k')
-                weight_loader(param, loaded_weight, 'v')
+
+            if self.split_qkv and ".c_attn" in name:
+                attn_block = self.transformer.h[
+                    self.transformer.start_layer].attn
+                weight = {}
+                weight['q'], weight['k'], weight['v'] = loaded_weight.split(
+                    [
+                        attn_block.num_heads * attn_block.head_dim *
+                        attn_block.tensor_model_parallel_world_size,
+                        attn_block.num_kv_heads * attn_block.head_dim *
+                        attn_block.tensor_model_parallel_world_size,
+                        attn_block.num_kv_heads * attn_block.head_dim *
+                        attn_block.tensor_model_parallel_world_size,
+                    ],
+                    dim=0)
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                    new_name = name.replace(weight_name, param_name)
+                    param = params_dict[new_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, weight[shard_id])
+                    loaded_params.add(new_name)
+                continue
             else:
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+
+                # TODO (@robertgshaw2-neuralmagic): move to fp8 linear method
+                if ("c_attn.input_scale" in name
+                        or "c_attn.weight_scale" in name):
+                    weight_loader(param, loaded_weight, 'q')
+                    weight_loader(param, loaded_weight, 'k')
+                    weight_loader(param, loaded_weight, 'v')
+                else:
+                    weight_loader(param, loaded_weight)
+                loaded_params.add(name)
         return loaded_params
