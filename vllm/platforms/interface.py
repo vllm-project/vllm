@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
 else:
+    ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
 
