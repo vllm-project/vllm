@@ -178,7 +178,7 @@ def scatter_patch_features(
         consecutive in `input_ids`.
 
     Example:
-        A simplified example for one item in the batch:
+        A simplified example for one image:
 
         .. code-block::
 
@@ -194,9 +194,8 @@ def scatter_patch_features(
             The resulting embedding tensor is:
             [  nan     p1      p2      nan      p3      p4     nan    nan  ]
     """
-    num_embeds_per_image = [
-        e_is_patch.shape[0] for e_is_patch in embed_is_patch
-    ]
+    num_images, num_embeds = embed_is_patch.shape
+    num_embeds_per_image = [num_embeds] * num_images
 
     embeds_flat = features.new_full(
         (sum(num_embeds_per_image), features.shape[-1]),
