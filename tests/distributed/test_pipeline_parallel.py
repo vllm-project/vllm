@@ -175,6 +175,8 @@ TEXT_GENERATION_MODELS = {
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
+    # Tests TransformersModel
+    "ArthurZ/Ilama-3.2-1B": PPTestSettings.fast(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
@@ -243,6 +245,7 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Llama-3.2-1B-Instruct",
+    # "ArthurZ/Ilama-3.2-1B", NOTE: Uncomment after #13905
     "ibm/PowerLM-3b",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
