@@ -727,9 +727,9 @@ class InstructCoderDataset(HuggingFaceDataset):
     InstructCoder Dataset.
     https://huggingface.co/datasets/likaixin/InstructCoder
 
-    InstructCoder is the dataset designed to adapt LLMs for general code editing.
-    It consists of 114,239 instruction-input-output triplets and covers multiple
-    distinct code editing scenario.
+    InstructCoder is the dataset designed for general code editing.
+    It consists of 114,239 instruction-input-output triplets,
+    and covers multiple distinct code editing scenario.
     """
 
     DEFAULT_OUTPUT_LEN = 200 # this is the average default output length
