@@ -306,11 +306,7 @@ def expand_batch_to_tokens(
     """
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
-    expanded_x = torch.empty(
-        (num_tokens, ),
-        dtype=x.dtype,
-        device=x.device,
-    )
+    expanded_x = x.new_empty(num_tokens)
     expand_kernel[(batch_size, )](
         expanded_x,
         x,
