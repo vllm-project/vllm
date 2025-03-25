@@ -1024,7 +1024,7 @@ def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
     self = forward_context.no_compile_layers[layer_name]
     assert self.quant_method is not None
 
-    return self.forward_impl(hidden_states, router_logits)
+    return self.forward_impl_while(hidden_states, router_logits)
 
 
 def moe_forward_fake(hidden_states: torch.Tensor, router_logits: torch.Tensor,
