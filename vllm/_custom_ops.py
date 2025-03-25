@@ -541,11 +541,18 @@ def cutlass_scaled_mm(a: torch.Tensor,
             per_channel_tensor_scale_a = (scale_a.numel() == m)
             per_channel_tensor_scale_b = (scale_b.numel() == n)
 
+            # @TODO:
+            # Maybe broadcast the per-tensor-scale into per-channel-scale
+            # if one of the scale is a per-channel-scale.
+            # For now, it only supports
+            # per-tensor-per-tensor a8w8 scaled GEMM and
+            # per-channel-per-channel a8w8 scacled GEMM
             assert (
                 (per_tensor_scale_a and per_tensor_scale_b) or
                 (per_channel_tensor_scale_a and per_channel_tensor_scale_b)), (
-                    "Currently only support per-tensor or per-channel" +
-                    " scaled w8a8 gemm. `cutlass_scaled_mm` does not support" +
+                    "Currently only support per-tensor-per-tensor GEMM " +
+                    " and per-channel-per-channel GEMM through AITER"
+                    " w8a8 scaled gemm. `cutlass_scaled_mm` does not support" +
                     " ATIER block scaled GEMM yet.")
 
             from aiter import gemm_a8w8_CK
