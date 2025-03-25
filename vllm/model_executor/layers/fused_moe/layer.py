@@ -873,10 +873,19 @@ class FusedMoE(torch.nn.Module):
                            router_logits: torch.Tensor):
         max_tokens_across_dp = get_forward_context(
         ).dp_metadata.max_tokens_across_dp
+        cu_tokens_across_dp_cpu = get_forward_context(
+        ).dp_metadata.cu_tokens_across_dp_cpu
 
-        #TODO: we need to define a couple of ranges:
-        # 1. the range within this rank's M dimension that we are looping over
-        # 2. the range within the workspace buffer that our current chunk maps to.
+        #In this function we define two ranges:
+        # 1. chunk_range - The current iteration of the loops's range over the DP world tokens
+        # 2. my_tokens_in_chunk - The tokens within chunk_range that this DP rank owns.
+
+        chunk_range = torch.zeros(2, device=hidden_states.device)
+        chunk_range[1] = min(moe_dp_chunk_size, cu_tokens_across_dp_cpu[-1])
+
+        my_tokens_in_chunk = torch.zeros(2, device=hidden_states.device)
+        my_tokens_in_chunk[1] = min(my_dp_chunk_size,
+                                    chunk_range[1] - chunk_range[0])
 
         moe_dp_chunk_size = 256
         my_dp_chunk_size = moe_dp_chunk_size // self.dp_size
