@@ -295,7 +295,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                     q,
                     k,
                     v_padded,
-                    attn_bias=None,
+                    attn_bias=attn_metadata.attn_bias,
                     p=0.0,
                     scale=self.scale,
                     matmul_qk_op=self.matmul_qk,
