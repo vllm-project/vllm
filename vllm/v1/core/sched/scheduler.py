@@ -254,31 +254,30 @@ class Scheduler(SchedulerInterface):
 
                 request = self.waiting[0]
 
+                # Waiting request skipping logic
+                skip_waiting_request = False
+                # Skip request if the structured output request is still waiting
+                # for FSM.
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     structured_output_req = request.structured_output_request
-                    if structured_output_req and structured_output_req.grammar:
+                    still_waiting_for_fsm = (not structured_output_req or
+                                             not structured_output_req.grammar)
+                    skip_waiting_request = (skip_waiting_request
+                                            or still_waiting_for_fsm)
+                    if not still_waiting_for_fsm:
                         request.status = RequestStatus.WAITING
-                    else:
-                        waiting_structured_output_req = self.waiting.popleft()
-                        skipped_waiting_requests.appendleft(
-                            waiting_structured_output_req)
-                        continue
 
-                # Check that adding the request still respects the max_loras
-                # constraint.
+                # Skip request if max_loras can't be honored.
                 if self.lora_config and request.lora_request:
                     req_lora_id = request.lora_request.lora_int_id
-                    if len(scheduled_loras) == self.lora_config.max_loras and (
-                            req_lora_id not in scheduled_loras):
-                        # Cannot schedule.
-                        # TODO (varun): This means all the other requests in
-                        # the WAITING queue will be blocked by this request,
-                        # even if,
-                        # 1. these other requests do not use LoRA, or,
-                        # 2. these other requests use the already requested
-                        # LoRAs.
-                        # This is too conservative and could be optimized.
-                        break
+                    skip_waiting_request = skip_waiting_request or (
+                        len(scheduled_loras) == self.lora_config.max_loras and
+                        (req_lora_id not in scheduled_loras))
+
+                if skip_waiting_request:
+                    skipped_waiting_requests.append(request)
+                    self.waiting.popleft()
+                    continue
 
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
