@@ -35,7 +35,8 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import (load_chat_template,
+                                         resolve_hf_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -84,6 +85,7 @@ from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
+from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address, set_ulimit)
@@ -886,20 +888,22 @@ async def init_app_state(
         # Get the tokenizer to check official template
         tokenizer = await engine_client.get_tokenizer()
 
-        # Check if the tokenizer matches the chat template
-        has_different_template = False
-        if hasattr(tokenizer,
-                   "chat_template") and tokenizer.chat_template is not None:
-            # Only show warning if templates differ
-            has_different_template = tokenizer.chat_template != \
-                resolved_chat_template
+        # For HF tokenizer, check if the chat template matches.
+        # We don't need to check Mistral tokenizer
+        # because it doesn't support chat template
+        if not isinstance(tokenizer, MistralTokenizer):
+            hf_chat_template = resolve_hf_chat_template(
+                tokenizer,
+                chat_template=None,
+                tools=None,
+                trust_remote_code=model_config.trust_remote_code)
 
-        if has_different_template:
-            logger.warning(
-                "Using supplied chat template: %s\n"
-                "It is different from official chat template '%s'. "
-                "This discrepancy may lead to performance degradation.",
-                resolved_chat_template, args.model)
+            if hf_chat_template != resolved_chat_template:
+                logger.warning(
+                    "Using supplied chat template: %s\n"
+                    "It is different from official chat template '%s'. "
+                    "This discrepancy may lead to performance degradation.",
+                    resolved_chat_template, args.model)
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,

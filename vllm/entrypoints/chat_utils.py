@@ -306,7 +306,7 @@ def _detect_content_format(
         return "openai"
 
 
-def _resolve_hf_chat_template(
+def resolve_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
@@ -352,7 +352,7 @@ def _resolve_chat_template_content_format(
     trust_remote_code: bool,
 ) -> _ChatTemplateContentFormat:
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-        hf_chat_template = _resolve_hf_chat_template(
+        hf_chat_template = resolve_hf_chat_template(
             tokenizer,
             chat_template=chat_template,
             trust_remote_code=trust_remote_code,
@@ -1140,7 +1140,7 @@ def apply_hf_chat_template(
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
-    hf_chat_template = _resolve_hf_chat_template(
+    hf_chat_template = resolve_hf_chat_template(
         tokenizer,
         chat_template=chat_template,
         tools=tools,
