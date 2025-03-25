@@ -286,6 +286,10 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         ...
 
     @overload
+    def pop(self, key: _K, /, default: _V) -> _V:
+        ...
+
+    @overload
     def pop(self, key: _K, /, default: Union[_V, _T]) -> Union[_V, _T]:
         ...
 
