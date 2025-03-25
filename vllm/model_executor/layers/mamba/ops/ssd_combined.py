@@ -98,7 +98,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
     # - for handling chunked prefill, this requires i) initial_states
-    #   ii) seq_idx and iii) has_cu_seqlens to be all specified.
+    #   ii) seq_idx and iii) is_cont_batched to be all specified.
     # - When a new seq_idx is detected, we will stop passing the prev_state
     #   and switch accordingly to the init_state corresponding to the new seq_idx.
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
