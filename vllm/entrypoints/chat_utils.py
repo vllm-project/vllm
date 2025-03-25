@@ -556,11 +556,11 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
                 raise ValueError(\
                     "Only one message can have {'type': 'image_embeds'}")
             mm_inputs["image"] = image_embeds_lst[0]
-        elif "image" in items_by_modality:
+        if "image" in items_by_modality:
             mm_inputs["image"] = items_by_modality["image"] # A list of images
-        elif "audio" in items_by_modality:
+        if "audio" in items_by_modality:
             mm_inputs["audio"] = items_by_modality["audio"] # A list of audios
-        elif "video" in items_by_modality:
+        if "video" in items_by_modality:
             mm_inputs["video"] = items_by_modality["video"] # A list of videos
         return mm_inputs
 
@@ -589,11 +589,11 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
                 raise ValueError(
                     "Only one message can have {'type': 'image_embeds'}")
             mm_inputs["image"] = image_embeds_lst[0]
-        elif "image" in items_by_modality:
+        if "image" in items_by_modality:
             mm_inputs["image"] = items_by_modality["image"] # A list of images
-        elif "audio" in items_by_modality:
+        if "audio" in items_by_modality:
             mm_inputs["audio"] = items_by_modality["audio"] # A list of audios
-        elif "video" in items_by_modality:
+        if "video" in items_by_modality:
             mm_inputs["video"] = items_by_modality["video"] # A list of videos
         return mm_inputs
 
