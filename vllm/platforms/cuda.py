@@ -303,6 +303,10 @@ class CudaPlatformBase(Platform):
     def supports_fp8(cls) -> bool:
         return cls.has_device_capability(89)
 
+    @classmethod
+    def supports_v1(cls, model_config):
+        return True
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,

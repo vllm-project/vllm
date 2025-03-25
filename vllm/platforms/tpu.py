@@ -127,3 +127,7 @@ class TpuPlatform(Platform):
     @classmethod
     def use_all_gather(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_v1(cls, model_config):
+        return True

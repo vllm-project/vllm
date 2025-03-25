@@ -1669,11 +1669,8 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False
 
-        # No support for device type other than CUDA, AMD (experiemntal) or
-        # TPU (experimental) so far. Out-of-tree device support plugins can
-        # maintain their own v1 compatibility checks.
-        if not (current_platform.is_cuda_alike() or current_platform.is_tpu()
-                or current_platform.is_out_of_tree()):
+        # Platforms must decide if they can support v1 for this model
+        if not current_platform.supports_v1(model_config=model_config):
             _raise_or_fallback(
                 feature_name=f"device type={current_platform.device_type}",
                 recommend_to_remove=False)

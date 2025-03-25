@@ -12,7 +12,7 @@ import torch
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
 else:
     VllmConfig = None
@@ -370,6 +370,13 @@ class Platform:
         return (envs.VLLM_USE_V1
                 or parallel_config.distributed_executor_backend
                 == "external_launcher")
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> None:
+        """Returns whether the current platform can support v1 for the supplied
+        model configuration.
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):
