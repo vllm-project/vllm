@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
 
@@ -50,6 +51,8 @@ class StructuredOutputManager:
                     XgrammarBackend)
 
                 self.backend = XgrammarBackend(self.vllm_config)
+            elif backend_name == "guidance":
+                self.backend = GuidanceBackend(self.vllm_config)
             else:
                 raise ValueError(
                     f"Unsupported structured output backend: {backend_name}")
