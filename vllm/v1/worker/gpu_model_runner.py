@@ -45,7 +45,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 if TYPE_CHECKING:
     import xgrammar as xgr
 
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.scheduler_output import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -127,7 +127,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
-        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
@@ -151,7 +150,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
-            assert self.speculative_config.method == "ngram", \
+            # TODO: find a better way to check if we are using ngram.
+            assert self.speculative_config.ngram_prompt_lookup_min, \
                     "Currently, only ngram spec decode is supported in V1."
             if get_pp_group().is_last_rank:
                 self.drafter = NgramProposer()
@@ -159,8 +159,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # This usually takes less than 1 second.
                 self.drafter.propose(
                     np.zeros(1024, dtype=np.int32),
-                    self.speculative_config.prompt_lookup_min,
-                    self.speculative_config.prompt_lookup_max,
+                    self.speculative_config.ngram_prompt_lookup_min,
                     self.speculative_config.num_speculative_tokens,
                 )
                 self.rejection_sampler = RejectionSampler()
@@ -566,14 +565,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.positions_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
 
-        # Prepare for cascade attention if enabled & beneficial.
-        common_prefix_len = 0
-        if self.cascade_attn_enabled:
-            common_prefix_len = self._compute_cascade_attn_prefix_len(
-                num_scheduled_tokens,
-                scheduler_output.num_common_prefix_blocks,
-            )
-
+        # Prepare for cascade attention if needed.
+        common_prefix_len = self._compute_cascade_attn_prefix_len(
+            num_scheduled_tokens,
+            scheduler_output.num_common_prefix_blocks,
+        )
         attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
@@ -1120,14 +1116,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids, sampling_metadata)
 
-        return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=spec_token_ids,
-            logprobs=logprobs_lists,
-            prompt_logprobs_dict=prompt_logprobs_dict,
-        )
+        if self.requests is not None:
+            if self.requests['0'].sampling_params.return_hidden_states == True:
+                return ModelRunnerOutput(
+                    req_ids=self.input_batch.req_ids,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    spec_token_ids=spec_token_ids,
+                    logprobs=logprobs_lists,
+                    prompt_logprobs_dict=prompt_logprobs_dict,
+                    hidden_states=hidden_states)
+            else:
+                return ModelRunnerOutput(
+                    req_ids=self.input_batch.req_ids,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    spec_token_ids=spec_token_ids,
+                    logprobs=logprobs_lists,
+                    prompt_logprobs_dict=prompt_logprobs_dict,
+                )
 
     def generate_draft_token_ids(
         self,
@@ -1155,8 +1162,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             drafter_output = self.drafter.propose(
                 self.input_batch.token_ids_cpu[i, :end_idx],
-                self.speculative_config.prompt_lookup_min,
-                self.speculative_config.prompt_lookup_max,
+                self.speculative_config.ngram_prompt_lookup_min,
                 self.speculative_config.num_speculative_tokens,
             )
             if drafter_output is None or len(drafter_output) == 0:
@@ -1191,7 +1197,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not num_prompt_logprobs_dict:
             return {}
 
-        in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
@@ -1207,36 +1212,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
                 self.device, non_blocking=True)
 
-            # Set up target LogprobsTensors object.
-            logprobs_tensors = in_progress_dict.get(req_id)
-            if not logprobs_tensors:
-                # Create empty logprobs CPU tensors for the entire prompt.
-                # If chunked, we'll copy in slice by slice.
-                logprobs_tensors = LogprobsTensors.empty_cpu(
-                    num_prompt_tokens - 1, num_prompt_logprobs + 1)
-                in_progress_dict[req_id] = logprobs_tensors
-
             # Determine number of logits to retrieve.
-            start_idx = request.num_computed_tokens
-            start_tok = start_idx + 1
+            start_tok = request.num_computed_tokens + 1
             num_remaining_tokens = num_prompt_tokens - start_tok
-            if num_tokens <= num_remaining_tokens:
+            if num_tokens < num_remaining_tokens:
                 # This is a chunk, more tokens remain.
-                # In the == case, there are no more prompt logprobs to produce
-                # but we want to defer returning them to the next step where we
-                # have new generated tokens to return.
                 num_logits = num_tokens
             else:
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
-                prompt_logprobs_dict[req_id] = logprobs_tensors
-
-            if num_logits <= 0:
-                # This can happen for the final chunk if we prefilled exactly
-                # (num_prompt_tokens - 1) tokens for this request in the prior
-                # step. There are no more prompt logprobs to produce.
-                continue
 
             # Get the logits corresponding to this req's prompt tokens.
             # If this is a partial request (i.e. chunked prefill),
@@ -1257,23 +1242,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logprobs, num_prompt_logprobs, tgt_token_ids)
 
             # Transfer GPU->CPU async.
-            chunk_slice = slice(start_idx, start_idx + num_logits)
-            logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
-                token_ids, non_blocking=True)
-            logprobs_tensors.logprobs[chunk_slice].copy_(logprobs,
-                                                         non_blocking=True)
-            logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
-                ranks, non_blocking=True)
+            prompt_logprobs_dict[req_id] = LogprobsTensors(
+                token_ids.to("cpu", non_blocking=True),
+                logprobs.to("cpu", non_blocking=True),
+                ranks.to("cpu", non_blocking=True),
+            )
 
         # Remove requests that have completed prefill from the batch
         # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
             del num_prompt_logprobs_dict[req_id]
-            del in_progress_dict[req_id]
 
         # Must synchronize the non-blocking GPU->CPU transfers.
-        if prompt_logprobs_dict:
-            torch.cuda.synchronize()
+        torch.cuda.synchronize()
 
         return prompt_logprobs_dict
 
@@ -1529,6 +1510,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
+     
+        
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -1573,9 +1556,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
+            self.kv_caches)       
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+    
+    def get_kv_cache_spec(self) -> KVCacheSpec:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
@@ -1587,7 +1571,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
-        kv_cache_spec: dict[str, KVCacheSpec] = {}
+        kv_cache_spec: KVCacheSpec = {}
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
                 continue
@@ -1600,7 +1584,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype,
+                    dtype=attn_module.dtype,
                     use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):

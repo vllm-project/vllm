@@ -539,7 +539,9 @@ class Scheduler(SchedulerInterface):
 
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
-
+        if model_runner_output.hidden_states is not None:
+            hidden_states = model_runner_output.hidden_states
+   
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
@@ -627,17 +629,29 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids:
+            if new_token_ids or prompt_logprobs_tensors is not None:
                 # Add EngineCoreOutput for this Request.
-                outputs.append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=new_token_ids,
-                        finish_reason=request.get_finished_reason(),
-                        new_logprobs=new_logprobs,
-                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                if model_runner_output.hidden_states is not None:
+                    outputs.append(
+                        EngineCoreOutput(
+                            request_id=req_id,
+                            new_token_ids=new_token_ids,
+                            finish_reason=request.get_finished_reason(),
+                            new_logprobs=new_logprobs,
+                            new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                            stop_reason=request.stop_reason,
+                            events=request.take_events(),
+                            hidden_states=hidden_states))
+                else:
+                    outputs.append(
+                        EngineCoreOutput(
+                            request_id=req_id,
+                            new_token_ids=new_token_ids,
+                            finish_reason=request.get_finished_reason(),
+                            new_logprobs=new_logprobs,
+                            new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                            stop_reason=request.stop_reason,
+                            events=request.take_events()))              
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

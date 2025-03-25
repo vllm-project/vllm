@@ -39,7 +39,14 @@ def custom_enc_hook(obj: Any) -> Any:
         # NOTE(rob): it is fastest to use numpy + pickle
         # when serializing torch tensors.
         # https://gist.github.com/tlrmchlsmth/8067f1b24a82b6e2f90450e7764fa103 # noqa: E501
-        return msgpack.Ext(CUSTOM_TYPE_TENSOR, pickle.dumps(obj.numpy()))
+        # to make sure we put tensor on cpu before serializing it
+        if obj.device.type == 'cuda':
+            if obj.dtype == torch.bfloat16:
+                obj = obj.to(torch.float32)
+            return msgpack.Ext(CUSTOM_TYPE_TENSOR,
+                               pickle.dumps(obj.cpu().numpy()))
+        else:
+            return msgpack.Ext(CUSTOM_TYPE_TENSOR, pickle.dumps(obj.numpy()))
 
     return msgpack.Ext(CUSTOM_TYPE_PICKLE, pickle.dumps(obj))
 

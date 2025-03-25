@@ -782,7 +782,7 @@ class LLMEngine:
                 tokenizer=self.get_tokenizer(lora_request=lora_request))
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
-            prompt,
+            prompt,      
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
@@ -954,12 +954,12 @@ class LLMEngine:
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
 
-    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+    def reset_prefix_cache(self) -> bool:
         """Reset prefix cache for all devices."""
 
         success = True
         for scheduler in self.scheduler:
-            success = success and scheduler.reset_prefix_cache(device)
+            success = success and scheduler.reset_prefix_cache()
         return success
 
     @staticmethod
@@ -1106,10 +1106,15 @@ class LLMEngine:
                 continue
 
             output: List[SequenceGroupOutput]
+
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
+                output.hidden_states = outputs_by_sequence_group[
+                    i].hidden_states
             else:
                 output = [outputs_by_sequence_group[0][i]]
+                output[0].hidden_states = outputs_by_sequence_group[
+                    0].hidden_states
 
             if not is_async:
                 if self.scheduler_config.is_multi_step:
@@ -1156,10 +1161,12 @@ class LLMEngine:
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)
+
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
-                use_cache=self.use_cached_outputs)
+                use_cache=self.use_cached_outputs,
+                hidden_states=output[0].hidden_states)
             if request_output:
                 ctx.request_outputs.append(request_output)
 

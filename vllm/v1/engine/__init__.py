@@ -5,6 +5,7 @@ import time
 from typing import Any, Optional, Union
 
 import msgspec
+import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
@@ -101,6 +102,7 @@ class EngineCoreOutput(
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
+    hidden_states: Optional[torch.Tensor] = None
 
     @property
     def finished(self) -> bool:

@@ -1685,7 +1685,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
+
         previous_hidden_states = kwargs.get("previous_hidden_states")
+
+        # overrides self.return_hidden_states that was assigned during initialization
+        # the rationale is giving users the option to receive hidden states or not
+        # from the same model without re-initializing it
+        if model_input.sampling_metadata.seq_groups:
+            self.return_hidden_states = model_input.sampling_metadata.seq_groups[
+                0].sampling_params.return_hidden_states
+
         if prefill_meta is None and decode_meta.use_cuda_graph:
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
