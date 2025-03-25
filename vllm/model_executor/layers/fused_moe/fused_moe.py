@@ -510,6 +510,20 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     M = A.shape[0]
     num_tokens = M * top_k
 
+    if use_fp8_w8a8:
+        assert B_scale is not None
+        assert (block_shape is None or triton.cdiv(B.shape[-2], block_shape[0])
+                == B_scale.shape[-2])
+        assert (block_shape is None or triton.cdiv(B.shape[-1], block_shape[1])
+                == B_scale.shape[-1])
+
+    elif use_int8_w8a16 or use_int4_w4a16:
+        assert B_scale is not None
+        assert block_shape is None or block_shape[0] == 0
+    else:
+        assert A_scale is None
+        assert B_scale is None
+
     EM = sorted_token_ids.shape[0]
     if A.shape[0] < config["BLOCK_SIZE_M"]:
         # optimize for small batch_size.
@@ -1357,7 +1371,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                       dtype=hidden_states.dtype)
     intermediate_cache3 = cache13[:M_sum * K].view(*cache3_view)
 
-
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -1444,16 +1457,11 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
-        _moe_unpermute_and_reduce(out_hidden_states[begin_chunk_idx:end_chunk_idx],
-                                  intermediate_cache3.view(*intermediate_cache3.shape),
-                                  inv_perm,
-                                  expert_ids,
-                                  top_k_num,
-                                  global_num_experts,
-                                  K,
-                                  curr_topk_weights,
-                                  curr_topk_ids,
-                                  use_dg and not skip_dg)
+        _moe_unpermute_and_reduce(
+            out_hidden_states[begin_chunk_idx:end_chunk_idx],
+            intermediate_cache3.view(*intermediate_cache3.shape), inv_perm,
+            expert_ids, top_k_num, global_num_experts, K, curr_topk_weights,
+            curr_topk_ids, use_dg and not skip_dg)
 
     return out_hidden_states
 
