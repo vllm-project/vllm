@@ -22,6 +22,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     MambaMixer2, extra_groups_for_head_shards)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
+    seq_idx_to_chunk_indices_offsets)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -256,41 +258,6 @@ ALL_DECODER_LAYER_TYPES = {
     "mamba": BambaMixerDecoderLayer
 }
 
-
-def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
-
-    # convert seq_idx to chunk indices and offsets
-    # - derive the cu_seqlens
-    _, cu_seqlens = torch.where(seq_idx.diff())
-    cu_seqlens += 1
-
-    # outputs will have length expansion of chunks that do not divide
-    # chunk_size
-    N = math.ceil(seq_idx.shape[-1] / chunk_size) + (cu_seqlens % chunk_size
-                                                     > 0).sum()
-    chunk_indices = torch.arange(N, dtype=torch.int, device=seq_idx.device)
-    chunk_offsets = torch.zeros((N, ), dtype=torch.int, device=seq_idx.device)
-
-    cu_seqlens = cu_seqlens.tolist() + [seq_idx.shape[-1]]
-    p = 0  # num of insertions
-    for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
-
-        # if does not divide chunk_size, then there is one chunk insertion
-        p += (s % chunk_size > 0)
-
-        # get the dimensions
-        # - the + 1 for _e is to shift the boundary by one chunk
-        # - this shifting is not needed if chunk_size divides e
-        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
-                                                             > 0)
-
-        # adjust inidces and offsets
-        chunk_indices[_s:_e] -= p
-        chunk_offsets[_s] = s % chunk_size
-
-    return chunk_indices, chunk_offsets
-
-
 class BambaModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -361,8 +328,17 @@ class BambaModel(nn.Module):
                     )):
                 seq_idx[srt:end] = i
             seq_idx.unsqueeze_(0)
-            # Compute mamba2 metadata tensors that are reused across layers
-            chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
+
+            # compute metadata for chunked prefill. 
+            # actually this is only needed if there are 
+            # initial states, but this is determinable
+            # only from attention metadata yet 
+            # unavailable from the current top-level forward.
+            # Rather than complicating things to extract said
+            # metadata, we simply just compute redundently and
+            # will be silently ignored inside the mamba kernels.
+            # if not needed.
+            chunk_indices, chunk_offsets = seq_idx_to_chunk_indices_offsets(
                 seq_idx, self.config.mamba_chunk_size)
 
         if get_pp_group().is_first_rank:
@@ -378,7 +354,6 @@ class BambaModel(nn.Module):
 
         residual = None
         num_attn = 0
-        extra_args = {}
         for i in range(len(self.layers)):
             layer = self.layers[i]
             if isinstance(layer, BambaAttentionDecoderLayer):
@@ -388,19 +363,15 @@ class BambaModel(nn.Module):
             if isinstance(layer, BambaMixerDecoderLayer):
                 layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
                     i - num_attn)
-                extra_args = {
-                    'chunk_indices': chunk_indices,
-                    'chunk_offsets': chunk_offsets,
-                }
 
-            # print(f"{len(extra_args)=}")
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
                 mamba_cache_params=layer_mamba_cache_params,
                 sequence_idx=seq_idx,
-                **extra_args,
+                chunk_indices=chunk_indices,
+                chunk_offsets=chunk_offsets,
             )
 
         if not get_pp_group().is_last_rank:

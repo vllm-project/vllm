@@ -392,6 +392,13 @@ class MambaMixer2(CustomOp):
         chunk_indices: Optional[torch.Tensor] = None,
         chunk_offsets: Optional[torch.Tensor] = None,
     ):
+        # For the mamba2 triton kernels to operate in continuous batching,
+        # the sequence_idx is needed to be passed in. Also, for the kernels
+        # to operate in chunked prefill, the chunk_indices and chunk_offsets
+        # can be optionally passed in; it is more efficient to pre-compute
+        # once since they are common to all layers. If they are not provided
+        # then they will be derived from sequence_idx inside the kernels
+
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
         seq_len, _ = hidden_states.shape
