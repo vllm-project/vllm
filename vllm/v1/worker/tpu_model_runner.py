@@ -23,7 +23,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
-from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
+from vllm.utils import LayerBlockType, LazyLoader, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
                                                PallasAttentionBackend,
                                                PallasMetadata)
@@ -38,7 +38,11 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
+    import xgrammar as xgr
+
     from vllm.v1.core.sched.output import SchedulerOutput
+else:
+    xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
 
@@ -362,6 +366,7 @@ class TPUModelRunner:
                 max_num_scheduled_tokens_all_reqs, num_tokens)
         num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req,
                                                 dtype=np.int32)
+
         assert max_num_scheduled_tokens_all_reqs > 0
 
         # Get request indices.
@@ -613,8 +618,22 @@ class TPUModelRunner:
                 kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
             )
-        selected_token_ids = self.model.sample_from_hidden(
-            hidden_states, tpu_sampling_metadata)
+
+        if scheduler_output.grammar_bitmask is not None:
+            sample_hidden_states = \
+                hidden_states[tpu_sampling_metadata.indices_do_sample]
+            logits = self.model.compute_logits(sample_hidden_states)
+            logits = logits.to("cpu", dtype=torch.float32)
+            self.apply_grammar_bitmask(scheduler_output, logits)
+            logits = logits.to(self.device, dtype=self.dtype)
+            selected_token_ids = torch.where(tpu_sampling_metadata.do_argmax,
+                            torch.argmax(logits, dim=-1, keepdim=True),
+                            self.model.sample(logits, tpu_sampling_metadata)\
+                                                .sampled_token_ids)
+        else:
+            selected_token_ids = self.model.sample_from_hidden(
+                hidden_states, tpu_sampling_metadata)
+
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
@@ -870,6 +889,53 @@ class TPUModelRunner:
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
+    def apply_grammar_bitmask(
+        self,
+        scheduler_output: "SchedulerOutput",
+        logits: torch.Tensor,
+    ):
+        # Serialization of np.ndarray is much more efficient than a tensor,
+        # so we receive it in that format.
+        grammar_bitmask = scheduler_output.grammar_bitmask
+        if grammar_bitmask is None:
+            return
+
+        # We receive the structured output bitmask from the scheduler, but the
+        # indices of the requests in the batch may not match the indices of
+        # the bitmask since the scheduler doesn't know how the gpu runner is
+        # ordering the requests in the batch. We need to sort the bitmask to
+        # match the order of the requests used here.
+        struct_out_req_batch_indices: dict[str, int] = {}
+        indices_match = True
+        for req_id in self.input_batch.req_ids:
+            mask_index = scheduler_output.structured_output_request_ids.get(
+                req_id)
+            if mask_index is None:
+                # not a structured output request
+                continue
+            batch_index = self.input_batch.req_id_to_index[req_id]
+            if batch_index != mask_index:
+                indices_match = False
+            struct_out_req_batch_indices[req_id] = batch_index
+
+        if not indices_match:
+            # Sort the bitmask to match the order of the requests
+            sorted_bitmask = np.zeros_like(grammar_bitmask)
+            for req_id, batch_index in struct_out_req_batch_indices.items():
+                orig_index = scheduler_output.structured_output_request_ids[
+                    req_id]
+                sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
+            grammar_bitmask = sorted_bitmask
+
+        grammar_bitmask = torch.from_numpy(grammar_bitmask)
+
+        # TODO: compatibility with spec decode
+        xgr.apply_token_bitmask_inplace(
+            logits,
+            grammar_bitmask.to("cpu", non_blocking=True),
+            indices=list(struct_out_req_batch_indices.values()),
+        )
+
 
 class ModelWrapperV1(nn.Module):
 
@@ -943,6 +1009,7 @@ class ModelWrapperV1(nn.Module):
 
     def get_input_embeddings(self, *args, **kwargs):
         return self.model.get_input_embeddings(*args, **kwargs)
+
 
 
 def _get_padded_number(n: int, multiple: int) -> int:
