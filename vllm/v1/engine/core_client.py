@@ -208,6 +208,9 @@ class InprocClient(EngineCoreClient):
     def pin_lora(self, lora_id: int) -> bool:
         return self.engine_core.pin_lora(lora_id)
 
+    def collective_rpc(self, method: Callable, *args, **kwargs) -> Any:
+        return self.engine_core.collective_rpc(method, *args, **kwargs)
+
 
 @dataclass
 class BackgroundResources:
