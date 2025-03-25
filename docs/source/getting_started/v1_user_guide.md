@@ -129,6 +129,9 @@ in progress.
 - **Spec Decode**: Currently, only ngram-based spec decode is supported in V1. There
   will be follow-up work to support other types of spec decode (e.g., see [PR #13933](https://github.com/vllm-project/vllm/pull/13933)). We will prioritize the support for Eagle, MTP compared to draft model based spec decode.
 
+- **Multimodal Models**: V1 is almost fully compatible with V0 except that interleaved modality input is not supported yet.
+  See [here](https://github.com/orgs/vllm-project/projects/8) for the status of upcoming features and optimizations.
+
 #### Features to Be Supported
 
 - **FP8 KV Cache**: While vLLM V1 introduces new FP8 kernels for model weight quantization, support for an FP8 key–value cache is not yet available. Users must continue using FP16 (or other supported precisions) for the KV cache.
@@ -156,6 +159,9 @@ vLLM V1 is currently optimized for decoder-only transformers. Models requiring
 
 For a complete list of supported models, see the [list of supported models](https://docs.vllm.ai/en/latest/models/supported_models.html).
 
-## FAQ
+## Frequently Asked Questions
 
-TODO
+**I'm using vLLM V1 and I'm getting CUDA OOM errors. What should I do?**
+The default `max_num_seqs` has been raised from `256` in V0 to `1024` in V1. If you encounter CUDA OOM only when using V1 engine, try setting a lower value of `max_num_seqs` or `gpu_memory_utilization`.
+
+On the other hand, if you get an error about insufficient memory for the cache blocks, you should increase `gpu_memory_utilization` as this indicates that your GPU has sufficient memory but you're not allocating enough to vLLM for KV cache blocks.
