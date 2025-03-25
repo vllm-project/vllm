@@ -239,7 +239,7 @@ def choice_as_grammar(choice: list[str]) -> str:
     return grammar
 
 
-def validate_structured_output_request(
+def validate_structured_output_request_xgrammar(
         sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
