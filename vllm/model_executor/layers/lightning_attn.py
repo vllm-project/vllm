@@ -461,7 +461,7 @@ def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
         q: Query tensor of shape [batch, heads, seq_len, dim]
         k: Key tensor of shape [batch, heads, seq_len, dim]
         v: Value tensor of shape [batch, heads, seq_len, dim_v]
-        ed: Decay rate tensor
+        ed: Decay rate tensor of shape [heads]
         block_size: Size of blocks for block-sparse attention
         kv_history: Optional key-value history from previous computations
         
@@ -471,6 +471,9 @@ def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
     """
     d = q.shape[-1]
     e = v.shape[-1]
+
+    if ed.dim() == 1:
+        ed = ed.view(1, -1, 1, 1)
 
     # Split the computation into chunks for better parallelism
     m = 128 if d >= 128 else 64

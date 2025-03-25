@@ -34,11 +34,12 @@ def test_lightning_attention(
     q = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
     k = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
     v = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
-    ed = torch.rand(seq_len, device="cuda")
-    
+
+    ed = torch.rand(num_heads, device="cuda")
+
     try:
         output2, kv2 = lightning_attention2_parallel(q, k, v, ed)
-        
+
         assert output2.shape == (batch_size, num_heads, seq_len, head_size)
         assert kv2.shape[0] == batch_size
         assert kv2.shape[1] == num_heads
@@ -136,48 +137,40 @@ def test_lightning_attention_vs_reference(
     q = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
     k = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
     v = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
-    ed = torch.rand(seq_len, device="cuda")
 
-    # 尝试使用 lightning_attention，如果失败则跳过测试
+    ed = torch.rand(num_heads, device="cuda")
+
     try:
         lightning_output, _ = lightning_attention(q, k, v, ed)
-        
-        # 参考实现：带指数衰减的注意力
+
         def reference_lightning_attention(q, k, v, ed):
             b, h, n, d = q.shape
-            # 转换为float32以获得更好的精度
             q_f = q.float()
             k_f = k.float()
             v_f = v.float()
 
-            # 创建输出张量
             output = torch.zeros_like(q_f)
 
-            # 分别计算每个批次和头
             for bi in range(b):
                 for hi in range(h):
+                    decay_rate = ed[hi].item()
                     for qi in range(n):
-                        # 只考虑因果关系的键值对(qi >= ki)
                         for ki in range(qi + 1):
-                            # 根据位置差异计算指数衰减
                             position_diff = qi - ki
-                            decay = torch.exp(-ed[position_diff].item())
+                            decay = torch.exp(-decay_rate * position_diff)
 
-                            # 计算查询和键的点积
                             qk = torch.sum(q_f[bi, hi, qi] * k_f[bi, hi, ki])
 
-                            # 应用衰减并累加到输出
                             output[bi, hi, qi] += decay * qk * v_f[bi, hi, ki]
 
             return output.to(q.dtype)
-        
+
         reference_output = reference_lightning_attention(q, k, v, ed)
-        
-        # 比较两种实现的结果
-        torch.testing.assert_close(
-            lightning_output, reference_output, 
-            rtol=1e-1, atol=1e-1  # 使用较宽松的容差
-        )
+
+        torch.testing.assert_close(lightning_output,
+                                   reference_output,
+                                   rtol=1e-1,
+                                   atol=1e-1)
     except Exception as e:
         pytest.skip(f"Skipping test due to error: {str(e)}")
 
@@ -212,7 +205,8 @@ def test_linear_decode_forward_triton_vs_reference(
 
     slot_idx = torch.arange(batch_size, device="cuda")
 
-    # Create kv_caches's copy to ensure both implementations use the same initial values
+    # Create kv_caches's copy to ensure both
+    # implementations use the same initial values
     kv_caches_copy = kv_caches.clone()
 
     # Using Triton implementation
@@ -230,9 +224,10 @@ def test_linear_decode_forward_triton_vs_reference(
                 continue
 
             for h in range(H):
-                decay = torch.exp(torch.tensor(-slope_rate[h].item(), 
-                                              device=q.device, 
-                                              dtype=torch.float32))
+                decay = torch.exp(
+                    torch.tensor(-slope_rate[h].item(),
+                                 device=q.device,
+                                 dtype=torch.float32))
 
                 # Get current query, key and value
                 q_bh = q[b, h, 0].float()
