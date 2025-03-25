@@ -164,9 +164,10 @@ def _fwd_kv_parallel(
         V_block_ptr += CBLOCK * e
         k_decay_ptr += CBLOCK
 
-    tl.store(KV_block_ptr, 
+    tl.store(KV_block_ptr,
              kv.to(KV_block_ptr.dtype.element_ty),
-             mask=tl.arange(0, D_FBLOCK)[:, None] < d and tl.arange(0, E_FBLOCK)[None, :] < e)
+             mask=tl.arange(0, D_FBLOCK)[:, None] < d
+             and tl.arange(0, E_FBLOCK)[None, :] < e)
 
 
 @triton.jit
@@ -207,9 +208,10 @@ def _fwd_kv_reduce(
         block_decay = tl.exp(-s.to(tl.float32) * block_size)
 
         kv_cur = tl.load(KV_block_ptr).to(tl.float32)
-        tl.store(KV_block_ptr, 
+        tl.store(KV_block_ptr,
                  kv_pre.to(KV_block_ptr.dtype.element_ty),
-                 mask=tl.arange(0, D_FBLOCK)[:, None] < d and tl.arange(0, E_FBLOCK)[None, :] < e)
+                 mask=tl.arange(0, D_FBLOCK)[:, None] < d
+                 and tl.arange(0, E_FBLOCK)[None, :] < e)
 
         kv_pre = block_decay * kv_pre + kv_cur
         KV_block_ptr += d * e
