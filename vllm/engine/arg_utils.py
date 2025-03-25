@@ -118,7 +118,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
-    prefix_caching_hash_algo: Optional[str] = None
+    prefix_caching_hash_algo: str = "builtin"
     disable_sliding_window: bool = False
     disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
@@ -478,11 +478,11 @@ class EngineArgs:
         )
         parser.add_argument(
             "--prefix-caching-hash-algo",
-            type=nullable_str,
-            choices=["builtin", "sha256", None],
+            type=str,
+            choices=["builtin", "sha256"],
             default=EngineArgs.prefix_caching_hash_algo,
             help="Set the hash algorithm for prefix caching. "
-            "Options are 'builtin' (Python's built-in hash) or 'sha256'"
+            "Options are 'builtin' (Python's built-in hash) or 'sha256' "
             "(collision resistant). Defaults to 'builtin'.",
         )
         parser.add_argument('--disable-sliding-window',
