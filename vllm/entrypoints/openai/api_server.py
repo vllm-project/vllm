@@ -883,11 +883,23 @@ async def init_app_state(
 
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
-        logger.warning(
-            "Using supplied chat template: %s\n"
-            "It is different from official chat template '%s'. "
-            "This discrepancy may lead to performance degradation.",
-            resolved_chat_template, args.model)
+        # Get the tokenizer to check official template
+        tokenizer = await engine_client.get_tokenizer()
+
+        # Check if the tokenizer matches the chat template
+        has_different_template = False
+        if hasattr(tokenizer,
+                   "chat_template") and tokenizer.chat_template is not None:
+            # Only show warning if templates differ
+            has_different_template = tokenizer.chat_template != \
+                resolved_chat_template
+
+        if has_different_template:
+            logger.warning(
+                "Using supplied chat template: %s\n"
+                "It is different from official chat template '%s'. "
+                "This discrepancy may lead to performance degradation.",
+                resolved_chat_template, args.model)
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
