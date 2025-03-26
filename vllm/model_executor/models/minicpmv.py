@@ -247,11 +247,13 @@ def _minicpmv_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         tgt_sizes=MultiModalFieldConfig.batched("image"),
         image_embeds=MultiModalFieldConfig.batched("image"),
         embed_is_patch=MultiModalFieldConfig.batched("image"),
+        image_orders=MultiModalFieldConfig.batched("image"),
         video_pixel_values=MultiModalFieldConfig.batched("video"),
         video_image_sizes=MultiModalFieldConfig.batched("video"),
         video_tgt_sizes=MultiModalFieldConfig.batched("video"),
         video_embeds=MultiModalFieldConfig.batched("video"),
         video_embed_is_patch=MultiModalFieldConfig.batched("video"),
+        video_orders=MultiModalFieldConfig.batched("video"),
         image_token_id=MultiModalFieldConfig.shared("image", num_images),
         video_token_id=MultiModalFieldConfig.shared("video", num_videos),
     )
@@ -771,8 +773,10 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 [index for index, m in enumerate(matches) if m == modality])
             for modality in self.info.get_supported_mm_limits()
         }
+
         result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
                                return_mm_hashes)
+
         # Exclude <image_id>x</image_id> from placeholders
         if "image" in result["mm_placeholders"] and \
             self.info.get_model_version() == (2, 6):
@@ -781,6 +785,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                                  length=p["length"] - 3 - idx // 10)
                 for idx, p in enumerate(result["mm_placeholders"]["image"])
             ]
+
         result["mm_kwargs"].update(**mm_orders)
 
         unk_token_id = torch.tensor(tokenizer.get_vocab()["<unk>"])

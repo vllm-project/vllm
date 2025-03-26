@@ -117,6 +117,7 @@ def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         audio_feature_lens=MultiModalFieldConfig.batched("audio"),
         audio_embeds=MultiModalFieldConfig.batched("audio"),
         audio_embed_is_patch=MultiModalFieldConfig.batched("audio"),
+        audio_orders=MultiModalFieldConfig.batched("audio"),
         audio_token_id=MultiModalFieldConfig.shared("audio", num_audios),
     )
 
