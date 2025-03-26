@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import direct_register_custom_op, round_up
 
 from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
                                    rocm_aiter_fused_experts,
@@ -1421,8 +1421,7 @@ def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
     A permutation routine that works on fp8 types.
     """
     if torch.is_floating_point(m) and torch.finfo(m.dtype).bits == 8:
-        return m.view(dtype=torch.uint8)[idx,
-                                         ...].view(dtype=torch.float8_e4m3fn)
+        return m.view(dtype=torch.uint8)[idx, ...].view(dtype=m.dtype)
     else:
         return m[idx, ...]
 
@@ -1450,8 +1449,7 @@ def _moe_permute(
     if use_dg:
         # Replicate activations
         max_token_id = top_k_num * tokens_in_chunk
-        pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) *
-                    block_m) - sorted_token_ids.numel()
+        pad_size = round_up(sorted_token_ids.numel(), block_m) - sorted_token_ids.numel()
         if pad_size > 0:
             sorted_token_ids = torch.nn.functional.pad(sorted_token_ids,
                                                        (0, pad_size),
@@ -1462,20 +1460,12 @@ def _moe_permute(
         expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
         inv_perm = torch.argsort(sorted_token_ids)[:max_token_id]
 
-        curr_hidden_states = curr_hidden_states.view(
-            curr_hidden_states.shape[0], -1,
-            curr_hidden_states.shape[1]).repeat(1, top_k_num, 1).reshape(
-                -1, curr_hidden_states.shape[1])
-
         # Permute according to sorted token ids.
-        curr_hidden_states = _fp8_perm(curr_hidden_states, sorted_token_ids)
+        curr_hidden_states = _fp8_perm(curr_hidden_states,
+                                       sorted_token_ids // top_k_num)
 
         if a1q_scale is not None:
-            a1q_scale = a1q_scale.view(a1q_scale.shape[0], -1,
-                                       a1q_scale.shape[1]).repeat(
-                                           1, top_k_num,
-                                           1).reshape(-1, a1q_scale.shape[1])
-            a1q_scale = a1q_scale[sorted_token_ids]
+            a1q_scale = a1q_scale[sorted_token_ids // top_k_num]
 
     return (curr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
             num_tokens_post_padded, inv_perm)
@@ -1611,7 +1601,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
         M_sum = topk_ids.numel() + global_num_experts * (block_m - 1)
-        M_sum = ((M_sum + block_m - 1) // block_m) * block_m
+        M_sum = round_up(M_sum, block_m)
 
         cache1_view = (M_sum, N)
         cache3_view = (M_sum, K)
