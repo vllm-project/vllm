@@ -41,7 +41,6 @@ def custom_enc_hook(obj: Any) -> Any:
         # https://gist.github.com/tlrmchlsmth/8067f1b24a82b6e2f90450e7764fa103 # noqa: E501
         return msgpack.Ext(CUSTOM_TYPE_TENSOR, pickle.dumps(obj.numpy()))
 
-    # serializing local functions, lambdas, and closures
     return msgpack.Ext(CUSTOM_TYPE_PICKLE, pickle.dumps(obj))
 
 
