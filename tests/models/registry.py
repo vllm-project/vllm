@@ -319,7 +319,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 }
 
 _FALLBACK_MODEL = {
-    "TransformersModel": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
+    "TransformersForCausalLM": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
 }
 
 _EXAMPLE_MODELS = {
