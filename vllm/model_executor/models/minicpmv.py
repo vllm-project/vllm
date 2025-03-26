@@ -366,10 +366,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         return get_version_by_config(self.get_hf_config())
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        mm_limits = {"image": None}
         if self.get_model_version() == (2, 6):
-            return {"image": None, "video": None}
-        else:
-            return {"image": None}
+            mm_limits["video"] = None
+
+        return mm_limits
 
     def get_mm_max_tokens_per_item(
         self,
@@ -379,70 +380,79 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         mm_max_tokens = {"image": self.get_max_image_tokens()}
         if self.get_model_version() == (2, 6):
             mm_max_tokens["video"] = self.get_max_video_tokens(seq_len)
+
         return mm_max_tokens
+
+    def get_slice_image_placeholder(
+        self,
+        image_size: ImageSize,
+        # For MiniCPM V/O 2.6
+        image_idx: int = 0,
+        max_slice_nums: Optional[int] = None,
+        use_image_id: bool = True,
+    ) -> str:
+        image_processor = self.get_image_processor()
+        version = self.get_model_version()
+
+        if version == (2, 0) or version == (2, 5):
+            return image_processor.get_slice_image_placeholder(image_size)
+
+        return image_processor.get_slice_image_placeholder(
+            image_size,
+            image_idx=image_idx,
+            max_slice_nums=max_slice_nums,
+            use_image_id=use_image_id,
+        )
+
+    def get_num_image_tokens(
+        self,
+        image_size: ImageSize,
+        max_slice_nums: Optional[int] = None,
+        use_image_id: bool = True,
+    ) -> int:
+        tokenizer = self.get_tokenizer()
+        image_placeholders = self.get_slice_image_placeholder(
+            image_size,
+            max_slice_nums=max_slice_nums,
+            use_image_id=use_image_id,
+        )
+        image_token_ids = tokenizer.encode(image_placeholders,
+                                           add_special_tokens=False)
+
+        return len(image_token_ids)
+
+    def get_max_image_tokens(self) -> int:
+        image_size = self.get_image_size_with_most_features()
+        return self.get_num_image_tokens(image_size)
+
+    def get_image_max_slice_num(self) -> int:
+        return getattr(self.get_hf_config(), "max_slice_num", 9)
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        image_size = getattr(self.get_hf_config(), "image_size", 448)
+        max_slice_num = self.get_image_max_slice_num()
+        return ImageSize(width=image_size, height=image_size * max_slice_num)
 
     def get_max_video_frame_tokens(self) -> int:
         frame_size = self.get_video_frame_size_with_most_features()
-        return self.get_num_image_tokens(frame_size,
-                                         self.get_video_max_slice_num())
+
+        return self.get_num_image_tokens(
+            frame_size,
+            max_slice_nums=self.get_video_max_slice_num(),
+            use_image_id=False,
+        )
 
     def get_max_video_tokens(self, seq_len: int) -> int:
         return self.get_max_video_frame_tokens(
         ) * self.get_num_frames_with_most_features(seq_len)
 
-    def get_slice_query_num(self) -> int:
-        hf_config = self.get_hf_config()
-        query_num = getattr(hf_config, "query_num", 64)
-        return query_num
-
-    def get_max_slice_num(self) -> int:
-        hf_config = self.get_hf_config()
-        max_slice_num = getattr(hf_config, "max_slice_num", 9)
-        return max_slice_num
-
-    def get_sliced_grid(self, image_size: ImageSize,
-                        max_slice_num: int) -> Tuple[int, int]:
-        if self.get_model_version() == (2, 6):
-            slice_grid = self.get_image_processor().get_sliced_grid(
-                image_size, max_slice_num)
-        else:
-            slice_grid = self.get_image_processor().get_sliced_grid(image_size)
-        return slice_grid
-
-    def get_num_image_tokens(self, image_size: ImageSize,
-                             max_slice_num: int) -> int:
-        slice_grid = self.get_sliced_grid(image_size, max_slice_num)
-        num_tokens = self.get_slice_query_num(
-        ) + 2  # <image>(<unk> * query_num)</image>
-        if slice_grid is not None:
-            if self.get_model_version() == (2, 6):
-                num_additional_tokens = 0
-            else:
-                # <slice><image>(<unk> * query_num)</image></slice>
-                num_additional_tokens = 2
-            num_tokens += ((self.get_slice_query_num() + 2) \
-                            * slice_grid[0] * slice_grid[1]) \
-                            + slice_grid[1] - 1 + num_additional_tokens
-        return num_tokens
-
-    def get_image_slice_nums(self, image_size: torch.Tensor,
-                             max_slice_nums: int) -> int:
-        grid = self.get_sliced_grid(image_size, max_slice_nums)
-        return 1 if grid is None else grid[0] * grid[1] + 1
-
-    def get_max_image_tokens(self) -> int:
-        image_size = self.get_image_size_with_most_features()
-        return self.get_num_image_tokens(image_size, self.get_max_slice_num())
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        # Result in the max possible feature size (h:w = 9:1)
-        return self.get_default_image_sizes(self.get_max_slice_num())
-
     def get_video_max_slice_num(self) -> int:
         return 1
 
     def get_video_frame_size_with_most_features(self) -> ImageSize:
-        return self.get_default_image_sizes(self.get_video_max_slice_num())
+        image_size = getattr(self.get_hf_config(), "image_size", 448)
+        max_slice_num = self.get_video_max_slice_num()
+        return ImageSize(width=image_size, height=image_size * max_slice_num)
 
     def get_max_video_frames(self, max_tokens: int) -> int:
         num_frame_tokens = self.get_max_video_frame_tokens()
@@ -464,10 +474,6 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         num_frames = max(max_total_frames // max(max_videos, 1), 1)
 
         return num_frames
-
-    def get_default_image_sizes(self, num_slices: int) -> ImageSize:
-        image_size = getattr(self.get_hf_config(), "image_size", 448)
-        return ImageSize(width=image_size, height=image_size * num_slices)
 
 
 _I = TypeVar("_I",
@@ -517,24 +523,17 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def _get_data_parser(self) -> MultiModalDataParser:
         return MiniCPMVMultiModalDataParser()
 
-    def get_slice_image_placeholder(self, image_size: ImageSize,
-                                    **kwargs) -> str:
-        image_processor = self.info.get_image_processor()
-        version = self.info.get_model_version()
-        if version == (2, 0) or version == (2, 5):
-            return image_processor.get_slice_image_placeholder(image_size)
-        return image_processor.get_slice_image_placeholder(
-            image_size, **kwargs)
-
     def get_image_prompt_texts(self,
                                image_size: ImageSize,
                                image_idx: int = 0) -> str:
-        return self.get_slice_image_placeholder(image_size,
-                                                image_idx=image_idx)
+        return self.info.get_slice_image_placeholder(
+            image_size,
+            image_idx=image_idx,
+        )
 
     def get_video_prompt_texts(self, image_size: ImageSize,
                                num_frames: int) -> str:
-        return self.get_slice_image_placeholder(
+        return self.info.get_slice_image_placeholder(
             image_size=image_size,
             image_idx=0,
             max_slice_nums=self.info.get_video_max_slice_num(),

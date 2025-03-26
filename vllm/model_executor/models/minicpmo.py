@@ -164,7 +164,7 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     audio_pattern = "(<audio>./</audio>)"
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "video": None, "audio": None}
+        return {**super().get_supported_mm_limits(), "audio": None}
 
     def get_mm_max_tokens_per_item(
         self,
@@ -172,10 +172,24 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
         return {
-            "image": self.get_max_image_tokens(),
-            "audio": self.get_max_audio_tokens(),
-            "video": self.get_max_video_tokens(seq_len),
+            **super().get_mm_max_tokens_per_item(seq_len, mm_counts),
+            "audio":
+            self.get_max_audio_tokens(),
         }
+
+    def get_audio_placeholder(
+        self,
+        audio_lens: int,
+        chunk_input: bool = True,
+        chunk_length: int = 1,
+    ) -> str:
+        hf_processor = self.get_hf_processor()
+
+        return hf_processor.get_audio_placeholder(
+            audio_lens,
+            chunk_input=chunk_input,
+            chunk_length=chunk_length,
+        )
 
     def get_default_audio_pool_step(self) -> int:
         return 2
@@ -262,12 +276,17 @@ class MiniCPMOMultiModalProcessor(
         return MiniCPMOMultiModalDataParser(
             target_sr=self.info.get_default_audio_sampling_rate())
 
-    def get_audio_prompt_texts(self,
-                               audio_lens: int,
-                               chunk_input: bool = True,
-                               chunk_length: int = 1) -> str:
-        return self.info.get_hf_processor().get_audio_placeholder(
-            audio_lens, chunk_input, chunk_length)
+    def get_audio_prompt_texts(
+        self,
+        audio_lens: int,
+        chunk_input: bool = True,
+        chunk_length: int = 1,
+    ) -> str:
+        return self.info.get_audio_placeholder(
+            audio_lens,
+            chunk_input=chunk_input,
+            chunk_length=chunk_length,
+        )
 
     def process_audios(
         self,
