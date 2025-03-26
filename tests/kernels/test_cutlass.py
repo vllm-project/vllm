@@ -510,7 +510,6 @@ def test_cutlass_support_opcheck():
     opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability, ))
 
 
-# TODO add bias
 @pytest.mark.parametrize("num_experts", [8, 64])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])

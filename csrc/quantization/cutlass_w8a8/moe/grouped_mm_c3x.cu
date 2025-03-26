@@ -8,7 +8,7 @@
 
 using namespace cute;
 
-#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ == 900
   #define ENABLE_SM90_KERNEL_LEVEL 1
 #endif
 

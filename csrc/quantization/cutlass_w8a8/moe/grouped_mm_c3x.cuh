@@ -12,7 +12,7 @@
 
 using namespace cute;
 
-#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ == 900
   #define ENABLE_SM90_KERNEL_LEVEL 1
 #endif
 
@@ -68,7 +68,7 @@ struct cutlass_3x_group_gemm {
           LayoutB*, AlignmentAB, ElementAccumulator, TileShape, ClusterShape,
           Stages, KernelSchedule>::CollectiveOp;
 
-  using KernelType = enable_sm90_or_later<cutlass::gemm::kernel::GemmUniversal<
+  using KernelType = enable_sm90_only<cutlass::gemm::kernel::GemmUniversal<
       ProblemShape, CollectiveMainloop, CollectiveEpilogue>>;
 
   struct GemmKernel : public KernelType {};
@@ -84,7 +84,7 @@ void cutlass_group_gemm_caller(
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
-  int num_experts = (int)expert_offsets.size(0);
+  int num_experts = static_cast<int>(expert_offsets.size(0));
   int k_size = a_tensors.size(1);
   int n_size = out_tensors.size(1);
 
