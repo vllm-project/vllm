@@ -302,16 +302,26 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
 def determine_expert_map(
         ep_size: int, ep_rank: int,
-        global_num_experts: int) -> Tuple[int, Optional[torch.Tensor]]:
+        global_num_experts: int,
+        num_expert_group: int = 1) -> Tuple[int, Optional[torch.Tensor]]:
     """
         Calculates how many experts should be assigned to each rank for EP and
-        creates a mapping from global to local expert index. Experts are
-        distributed evenly across ranks. Any remaining are assigned to the
-        last rank.
+        creates a mapping from global to local expert index.
+        
+        If num_expert_group > 1, experts are distributed in a group-aware manner,
+        ensuring experts from each group are spread evenly across ranks using
+        round-robin assignment.
+        
+        Otherwise, experts are distributed using a simple round-robin approach
+        across all ranks, which evenly distributes any remainder instead of
+        overloading the last rank.
 
         Args:
             ep_size (int): The size of the expert parallel group
+            ep_rank (int): The rank in the expert parallel group
             global_num_experts (int): The total number of experts in the model.
+            num_expert_group (int): Number of expert groups for grouped MoE models.
+                                   Defaults to 1 (no grouping).
 
         Returns:
             Tuple[int, Optional[torch.Tensor]]: A tuple containing:
@@ -326,22 +336,45 @@ def determine_expert_map(
     if ep_size == 1:
         return (global_num_experts, None)
 
-    local_num_experts = global_num_experts // ep_size
-
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
-    # Create a expert map for the local experts
-    if ep_rank < (ep_size - 1):
-        # Each non-last rank gets local_num_experts experts.
-        expert_map[ep_rank * local_num_experts:
-                        (ep_rank + 1) * local_num_experts] = \
-            torch.arange(0, local_num_experts, dtype=torch.int32)
+    
+    if num_expert_group > 1:
+        # Group-aware distribution
+        # Ensure we have a valid number of experts per group
+        assert global_num_experts % num_expert_group == 0, \
+            f"Number of experts ({global_num_experts}) must be divisible by " \
+            f"number of groups ({num_expert_group})"
+        
+        experts_per_group = global_num_experts // num_expert_group
+        local_expert_count = 0
+        
+        for group_idx in range(num_expert_group):
+            group_start_idx = group_idx * experts_per_group
+            
+            for i in range(experts_per_group):
+                # Distribute experts in a round-robin fashion within each group
+                expert_idx = group_start_idx + i
+                assigned_rank = i % ep_size
+                
+                if assigned_rank == ep_rank:
+                    expert_map[expert_idx] = local_expert_count
+                    local_expert_count += 1
+        
+        local_num_experts = local_expert_count
     else:
-        # All remaining experts are assigned to the last rank.
-        local_num_experts = (global_num_experts - ep_rank * local_num_experts)
-
-        expert_map[-local_num_experts:] = \
-            torch.arange(0, local_num_experts, dtype=torch.int32)
+        # Simple round-robin distribution across all experts
+        local_expert_count = 0
+        
+        for expert_idx in range(global_num_experts):
+            assigned_rank = expert_idx % ep_size
+            
+            if assigned_rank == ep_rank:
+                expert_map[expert_idx] = local_expert_count
+                local_expert_count += 1
+        
+        local_num_experts = local_expert_count
+    
     return (local_num_experts, expert_map)
 
 
@@ -429,7 +462,8 @@ class FusedMoE(torch.nn.Module):
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
+                global_num_experts=self.global_num_experts,
+                num_expert_group=self.num_expert_group if self.use_grouped_topk else 1)
         else:
             # Adjust TP size for DP attention
             self.tp_rank = tp_rank + self.tp_size * self.dp_rank
