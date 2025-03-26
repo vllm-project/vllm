@@ -201,7 +201,7 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _FALLBACK_MODEL = {
-    "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "TransformersModel": ("transformers", "TransformersModel"),
 }
 # yapf: enable
 
@@ -425,7 +425,7 @@ class _ModelRegistry:
 
         # make sure Transformers fallback are put at the last
         if len(normalized_arch) != len(architectures):
-            normalized_arch.append("TransformersForCausalLM")
+            normalized_arch.append("TransformersModel")
         return normalized_arch
 
     def inspect_model_cls(
