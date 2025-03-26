@@ -156,19 +156,7 @@ def apply_top_k_top_p(
             return logits
 
         # Avoid sorting vocab for top-k only case.
-
-        no_top_k_mask = k == logits.shape[1]
-        # Set non-top-k rows to 1 so that we can gather.
-        k = k.masked_fill(no_top_k_mask, 1)
-        max_top_k = k.max()
-        # topk.values tensor has shape [batch_size, max_top_k].
-        # Convert top k to 0-based index in range [0, max_top_k).
-        k_index = k.sub_(1).unsqueeze(1)
-        top_k_mask = logits.topk(max_top_k, dim=1).values.gather(1, k_index)
-        # Handle non-topk rows.
-        top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
-        logits.masked_fill_(logits < top_k_mask, -float("inf"))
-        return logits
+        return apply_top_k_only(logits, k)
 
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
@@ -191,6 +179,31 @@ def apply_top_k_top_p(
 
     # Re-sort the probabilities.
     logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
+    return logits
+
+
+def apply_top_k_only(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Apply top-k mask to the logits.
+
+    This implementation doesn't involve sorting the entire vocab.
+
+    The logits tensor may be updated in-place.
+    """
+    no_top_k_mask = k == logits.shape[1]
+    # Set non-top-k rows to 1 so that we can gather.
+    k = k.masked_fill(no_top_k_mask, 1)
+    max_top_k = k.max()
+    # topk.values tensor has shape [batch_size, max_top_k].
+    # Convert top k to 0-based index in range [0, max_top_k).
+    k_index = k.sub_(1).unsqueeze(1)
+    top_k_mask = logits.topk(max_top_k, dim=1).values.gather(1, k_index)
+    # Handle non-topk rows.
+    top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
+    logits.masked_fill_(logits < top_k_mask, -float("inf"))
     return logits
 
 
