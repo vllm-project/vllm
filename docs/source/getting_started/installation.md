@@ -21,8 +21,8 @@ installation/ai_accelerator
   - Intel/AMD x86
   - ARM AArch64
   - Apple silicon
+  - IBM Z (S390X)
 - <project:installation/ai_accelerator.md>
   - Google TPU
   - Intel Gaudi
   - AWS Neuron
-  - OpenVINO

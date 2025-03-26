@@ -7,7 +7,7 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Literal,
 
 import torch
 from torch import Tensor
-from typing_extensions import TypeIs, TypeVar
+from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -22,7 +22,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-T = TypeVar("T", default=Union[list[Tensor], Tensor, tuple[Tensor, ...]])
+MultiModalEmbeddings = Union[list[Tensor], Tensor, tuple[Tensor, ...]]
+"""
+The output embeddings must be one of the following formats:
+
+- A list or tuple of 2D tensors, where each tensor corresponds to
+    each input multimodal data item (e.g, image).
+- A single 3D tensor, with the batch dimension grouping the 2D tensors.
+"""
 
 
 @runtime_checkable
@@ -38,16 +45,11 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def get_multimodal_embeddings(self, **kwargs) -> T:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
-
-        The output embeddings must be one of the following formats:
-    
-        - A list or tuple of 2D tensors, where each tensor corresponds to
-          each input multimodal data item (e.g, image).
-        - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 
         Note:
             The returned multimodal embeddings must be in the same order as
@@ -62,7 +64,7 @@ class SupportsMultiModal(Protocol):
     def get_input_embeddings(
         self,
         input_ids: Tensor,
-        multimodal_embeddings: Optional[T] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         attn_metadata: Optional["AttentionMetadata"] = None,
     ) -> Tensor:
         ...
@@ -71,7 +73,7 @@ class SupportsMultiModal(Protocol):
     def get_input_embeddings(
         self,
         input_ids: Tensor,
-        multimodal_embeddings: Optional[T] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 
@@ -451,7 +453,7 @@ class SupportsQuant:
     packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
     quant_config: Optional[QuantizationConfig] = None
 
-    def __new__(cls, *args, **kwargs) -> "SupportsQuant":
+    def __new__(cls, *args, **kwargs) -> Self:
         from .utils import WeightsMapper  # avoid circular import
 
         instance = super().__new__(cls)
@@ -477,7 +479,7 @@ class SupportsQuant:
                 for module in quant_config.ignored_modules
             ]
 
-            # 3. set model's quantization config
+            # 3. set module's quantization config
             instance.quant_config = quant_config
 
         return instance

@@ -42,7 +42,7 @@ class AWQConfig(QuantizationConfig):
         return (f"AWQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
                 f"zero_point={self.zero_point}, "
-                f"ignored_modules={self.ignored_modules})")
+                f"modules_to_not_convert={self.ignored_modules})")
 
     def get_name(self) -> str:
         return "awq"
@@ -68,9 +68,9 @@ class AWQConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
-        ignored_modules = cls.get_from_keys_or(config, ["ignored_modules"],
-                                               None)
-        return cls(weight_bits, group_size, zero_point, ignored_modules)
+        modules_to_not_convert = cls.get_from_keys_or(
+            config, ["modules_to_not_convert"], None)
+        return cls(weight_bits, group_size, zero_point, modules_to_not_convert)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["LinearMethodBase"]:
