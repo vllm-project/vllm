@@ -91,7 +91,9 @@ pull_request_rules:
 - name: label-tpu
   description: Automatically apply tpu label
   conditions:
-    - files~=tpu
+    - or:
+      - files~=tpu
+      - files~=pallas
   actions:
     label:
       add:
