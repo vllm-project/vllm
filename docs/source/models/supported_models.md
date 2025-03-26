@@ -853,7 +853,7 @@ See [this page](#generative-models) for more information on how to use generativ
   *
 - * `MolmoForCausalLM`
   * Molmo
-  * T + I
+  * T + I<sup>+</sup>
   * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-7B-O-0924`, etc.
   * ✅︎
   * ✅︎
