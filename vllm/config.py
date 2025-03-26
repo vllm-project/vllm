@@ -800,10 +800,18 @@ class ModelConfig:
 
     @property
     def is_deepseek_mla(self) -> bool:
-        return (hasattr(self.hf_text_config, "model_type")) \
-                and (self.hf_text_config.model_type in \
-                    ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'))\
-                and (self.hf_text_config.kv_lora_rank is not None)
+        if not hasattr(self.hf_text_config, "model_type"):
+            return False
+        elif self.hf_text_config.model_type in \
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'):
+            return self.hf_text_config.kv_lora_rank is not None
+        elif self.hf_text_config.model_type == 'eagle':
+            # if the model is an EAGLE module, check for the
+            # underlying architecture
+            return self.hf_text_config.model.model_type in \
+                    ('deepseek_v2', 'deepseek_v3') \
+                and self.hf_text_config.kv_lora_rank is not None
+        return False
 
     def get_head_size(self) -> int:
         # TODO remove hard code
@@ -1116,6 +1124,7 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        prefix_caching_hash_algo: str = "builtin",
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
     ) -> None:
@@ -1127,6 +1136,7 @@ class CacheConfig:
         self.is_attention_free = is_attention_free
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
+        self.prefix_caching_hash_algo = prefix_caching_hash_algo
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
         self._verify_args()
@@ -1176,6 +1186,13 @@ class CacheConfig:
             raise NotImplementedError(
                 "Prefix caching is not supported with sliding window. "
                 "Run with --disable-sliding-window to use prefix caching.")
+
+        if self.enable_prefix_caching and self.prefix_caching_hash_algo not in (
+                "builtin", "sha256"):
+            raise ValueError(
+                "Unknown prefix caching hash algorithm: "
+                f"{self.prefix_caching_hash_algo}. Must be either "
+                "'builtin' or 'sha256'.")
 
     def verify_with_parallel_config(
         self,
