@@ -1108,8 +1108,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
-        for i, generator in self.input_batch.generators.items():
-            req_id = self.input_batch.req_ids[i]
+        for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -1117,7 +1116,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Ignore the sampled token for partial prefills.
                 # Rewind the generator state as if the token was not sampled.
                 # This relies on cuda-specific torch-internal impl details
-                generator.set_offset(generator.get_offset() - 4)
+                generator = self.input_batch.generators.get(i, None)
+                if generator is not None:
+                    generator.set_offset(generator.get_offset() - 4)
                 valid_sampled_token_ids[i] = []
 
         if not self.use_spec_decode:
