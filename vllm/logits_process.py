@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, Union, Dict, Any
+from typing import Callable, Union, Any
 
 import torch
 
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
 LogitsProcessor = Union[Callable[[list[int], torch.Tensor], torch.Tensor],
-                        Callable[[list[int], torch.Tensor, Dict[str, Any]],
+                        Callable[[list[int], torch.Tensor, dict[str, Any]],
                                  torch.Tensor]]
 """LogitsProcessor is a function that takes a list
 of previously generated tokens, the logits tensor
-for the next token and, optionally, an third `kwargs` contains 
+for the next token and, optionally, an third `kwargs` contains
 the sequence id and prompt token, and returns a modified tensor of logits
 to sample from.
 
@@ -22,7 +22,10 @@ class CustomProcessor:
     ...
 
     def __call__(
-        self, past_token_ids: List[int], logits: torch.Tensor, **kwargs: Dict[str, Any]
+        self,
+        past_token_ids: List[int],
+        logits: torch.Tensor,
+        **kwargs: dict[str, Any],
     ) -> torch.Tensor:
 
         seq_id = kwargs.get("seq_id")
