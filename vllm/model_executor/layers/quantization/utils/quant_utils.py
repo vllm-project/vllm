@@ -9,6 +9,10 @@ import torch
 from vllm.model_executor.layers.quantization.qqq import (
     MARLIN_QQQ_SUPPORTED_NUM_BITS)
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.platforms import current_platform
+
+if current_platform.is_hpu():
+    import habana_frameworks.torch.utils.experimental as htexp
 
 SUPPORTED_GPTQ_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
 SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
@@ -65,6 +69,10 @@ def scaled_quantize(
         "but could be extended to support other dtypes"
 
     finfo = torch.finfo(quant_dtype)
+    if quant_dtype == torch.float8_e4m3fn \
+        and htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2:
+        finfo = torch.finfo(torch.float8_e4m3fnuz)
+
 
     # Reshape (M, N) into (BLK_M, BLOCK_SIZE_M, BLK_N, BLOCK_SIZE_N)
     assert x.ndim == 2

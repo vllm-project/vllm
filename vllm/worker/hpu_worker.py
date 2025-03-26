@@ -374,6 +374,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.model_runner.bucketing_ctx.num_hpu_blocks = num_gpu_blocks
 
         with HabanaMemoryProfiler() as m:
             self._init_cache_engine()

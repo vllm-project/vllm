@@ -641,3 +641,18 @@ def extract_layer_index(layer_name: str) -> int:
     assert len(int_vals) == 1, (f"layer name {layer_name} should"
                                 " only contain one integer")
     return int_vals[0]
+
+
+def get_input_mask(hidden_states: torch.Tensor,
+                   valid_len: torch.Tensor) -> torch.Tensor:
+    """
+    Get input tensor's mask which are zeros for all padding data,
+    ones for valid tokens
+    """
+    # input_ids: (B, T, H), valid_len: (B)
+    seq_len = hidden_states.shape[1]
+    mask = torch.arange(seq_len).expand(len(valid_len),
+                                        seq_len) < valid_len.unsqueeze(1)
+    # mask: (B, T)
+    mask = mask.to(hidden_states.dtype)
+    return mask

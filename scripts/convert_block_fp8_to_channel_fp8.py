@@ -15,8 +15,16 @@ logger = logging.getLogger(__name__)
 SAFETENSORS = "safetensors"
 WEIGHT_SCALE_NAME = "weight_scale_inv"
 MODEL_STATE_DICT_MAPPING_FILENAME = "model.safetensors.index.json"
-FULL_RANGE = 448.0  # torch.finfo(torch.float8_e4m3fnuz).max for Gaudi2
 # end constants
+
+def get_device_and_range():
+    device = os.popen("hl-smi -Q name -f csv | tail -n 1").read().strip()
+    if 'HL-225' in device:
+        return device, 240.0
+    elif 'HL-328' in device:
+        return device, 448.0
+    else:
+        raise ValueError(f"Unknown device: {device}")
 
 def get_input_scales(pkl_path):
     input_scales = {}
@@ -182,9 +190,9 @@ def main(model_path: str, qmodel_path: str, input_scales_path: str) -> None:
                     weight = f.get_tensor(weight_name)
                     qtensors[weight_name] = weight
                     qtensor_mapping[weight_name] = filename
-
-        logger.info(f"[{i+1}/{len(all_weight_filename)}] Saving {len(qtensors)} tensors to {qmodel_file_path}")
-        save_file(qtensors, qmodel_file_path)
+        if bool(qtensors):
+            logger.info(f"[{i+1}/{len(all_weight_filename)}] Saving {len(qtensors)} tensors to {qmodel_file_path}")
+            save_file(qtensors, qmodel_file_path)
     if input_scales.keys():
         logger.warning(f"warning: the following input_scales are unused:")
         for k in input_scales.keys():
@@ -211,6 +219,10 @@ if __name__ == "__main__":
 
     if os.path.exists(args.qmodel_path):
         raise ValueError(f"{args.qmodel_path} already exists, please remove or backup.")
+    
+    DEVICE, FULL_RANGE = get_device_and_range()
+    logger.info(f"Using device: {DEVICE} with full range: {FULL_RANGE}")
+
     main(args.model_path, args.qmodel_path, args.input_scales_path)
 
     print("Conversion is completed.")

@@ -158,6 +158,9 @@ class ProcessWorkerWrapper:
         self._task_queue = self.mp.Queue()
         self.result_queue = result_handler.result_queue
         self.tasks = result_handler.tasks
+        # To make sure the logs are saved under different folders
+        if current_platform.is_hpu():
+            os.environ["ID"] = str(rank)
         self.process: BaseProcess = self.mp.Process(  # type: ignore[attr-defined]
             target=_run_worker_process,
             name="VllmWorkerProcess",

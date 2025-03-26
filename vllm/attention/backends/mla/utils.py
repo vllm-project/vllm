@@ -29,8 +29,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
-
 from vllm.platforms import current_platform
+
+if current_platform.is_hpu():
+    from vllm_hpu_extension.ops import is_hpu_gaudi2
+
 if current_platform.is_cuda_alike():
     try:
         from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -189,10 +192,24 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def _v_up_proj_and_o_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
             if is_fp8(self.W_UV_O):
-                output_parallel = apply_fp8_linear_generic(
-                    x.flatten(start_dim=1), self.W_UV_O, self.W_UV_O_scales,
-                    self.reqaunt_input_group_shape,
-                    self.reqaunt_weight_group_shape)
+                if current_platform.is_hpu():
+                    x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0/self.kv_b_proj.input_scale, False, False, torch.float8_e4m3fn)[0]
+                    output_parallel = torch.ops.hpu.fp8_gemm_v2(
+                        A=x_fp8.flatten(start_dim=1),
+                        trans_A=False,
+                        B=self.W_UV_O,
+                        trans_B=True,
+                        D=None,
+                        out_dtype=x.dtype,
+                        A_scale_inv=self.kv_b_proj.input_scale,
+                        B_scale_inv=self.W_UV_O_scales,
+                        bias=None,
+                        accumulate=False)
+                else:
+                    output_parallel = apply_fp8_linear_generic(
+                        x.flatten(start_dim=1), self.W_UV_O, self.W_UV_O_scales,
+                        self.reqaunt_input_group_shape,
+                        self.reqaunt_weight_group_shape)
             else:
                 output_parallel = torch.matmul(x.flatten(start_dim=1),
                                                self.W_UV_O)
@@ -209,11 +226,26 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def _q_proj_and_k_up_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
             if is_fp8(self.W_Q_UK):
-                return apply_fp8_linear_generic(
-                    x, self.W_Q_UK, self.W_Q_UK_scales,
-                    self.reqaunt_input_group_shape,
-                    self.reqaunt_weight_group_shape).view(
-                        -1, self.num_heads, self.kv_lora_rank)
+                if current_platform.is_hpu():
+                    x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0/self.q_proj.input_scale, False, False, torch.float8_e4m3fn)[0]
+                    return torch.ops.hpu.fp8_gemm_v2(
+                        A=x_fp8,
+                        trans_A=False,
+                        B=self.W_Q_UK,
+                        trans_B=True,
+                        D=None,
+                        out_dtype=x.dtype,
+                        A_scale_inv=self.q_proj.input_scale,
+                        B_scale_inv=self.W_Q_UK_scales,
+                        bias=None,
+                        accumulate=False).view(
+                            -1, self.num_heads, self.kv_lora_rank)
+                else:
+                    return apply_fp8_linear_generic(
+                        x, self.W_Q_UK, self.W_Q_UK_scales,
+                        self.reqaunt_input_group_shape,
+                        self.reqaunt_weight_group_shape).view(
+                            -1, self.num_heads, self.kv_lora_rank)
             return torch.matmul(x, self.W_Q_UK)\
                 .view(-1, self.num_heads, self.kv_lora_rank)
         else:
@@ -349,15 +381,20 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             # for decode, as a result we end up with absorbed weights for decode
             # and another copy of raw weights for prefill.
             #
-            self.W_UK, self.W_UV = kv_b_proj_weight.split(
-                [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            # self.W_UK, self.W_UV = kv_b_proj_weight.split(
+            #     [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             # We absorb `W_UK` into `W_Q` resulting in either W_Q_UK or W_UQ_UK
             # depending q_lora_rank, the former if q_lora_rank is None, the
             # latter otherwise
             # basically if q_lora_rank is none we are absorbing into q_proj
             # instead of UQ
-            W_Q_UK = torch.einsum("qnd,lnd -> qnl", W_Q, W_UK)\
-                .flatten(start_dim=1).contiguous()
+            if current_platform.is_hpu() and is_hpu_gaudi2():
+                W_Q_UK = torch.einsum(
+                    "qnd,lnd -> qnl", W_Q.bfloat16(),
+                    W_UK.bfloat16()).flatten(start_dim=1).contiguous().float()
+            else:
+                W_Q_UK = torch.einsum("qnd,lnd -> qnl", W_Q,
+                                      W_UK).flatten(start_dim=1).contiguous()
 
             if is_fp8(weight_dtype) and requantization_enabled:
                 W_Q_UK, W_Q_UK_scales = scaled_quantize(
@@ -373,8 +410,16 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
             W_O = get_and_maybe_dequant_weights(self.o_proj)\
                 .view(-1, self.num_heads, self.v_head_dim)
-            W_UV_O = torch.einsum("lnd,hnd -> nlh", W_UV, W_O)\
-                .flatten(start_dim=0, end_dim=1).contiguous()
+
+            if current_platform.is_hpu() and is_hpu_gaudi2():
+                W_UV_O = torch.einsum("lnd,hnd -> nlh", W_UV.bfloat16(),
+                                      W_O.bfloat16()).flatten(
+                                          start_dim=0,
+                                          end_dim=1).contiguous().float()
+            else:
+                W_UV_O = torch.einsum("lnd,hnd -> nlh", W_UV,
+                                      W_O).flatten(start_dim=0,
+                                                   end_dim=1).contiguous()
 
             if is_fp8(weight_dtype) and requantization_enabled:
                 W_UV_O, W_UV_O_scales = scaled_quantize(

@@ -18,8 +18,13 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
 from vllm.platforms import current_platform
 
+FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
+if current_platform.is_hpu():
+    import habana_frameworks.torch.utils.experimental as htexp
+    if htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2:
+        FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
+
 logger = init_logger(__name__)
-FULL_RANGE = 448.0
 
 current_platform_fp8_dtype = (torch.float8_e4m3fnuz
                               if current_platform.is_rocm() else
@@ -160,9 +165,9 @@ def pad_block_fp8_weight_naive(weight, weight_scale, block_size):
 
 def dynamic_quant(data, single_scale = False):
     if single_scale:
-        scale = ((torch.abs(data)).max() + 1e-8) / 240.0
+        scale = ((torch.abs(data)).max() + 1e-8) / FP8_MAX
     else:
-        scale = ((torch.abs(data)).max(dim=-1).values + 1e-8) / 240.0 #torch.finfo(torch.float8_e4m3fn).max
+        scale = ((torch.abs(data)).max(dim=-1).values + 1e-8) / FP8_MAX
         scale = scale.unsqueeze(-1)
     data_fp8 = torch.ops.hpu.cast_to_fp8_v2(data, 1.0 / scale, False, False, torch.float8_e4m3fn)[0]
     return data_fp8, scale.float()
