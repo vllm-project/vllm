@@ -229,7 +229,10 @@ class TransformersModel(nn.Module):
         Apply the model's tensor parallelization plan.
         Currently only supports linear layers.
         """
-        if self.tp_size > 1 and self.config.base_model_tp_plan is None:
+        if not self.model.supports_tp_plan:
+            if self.tp_size <= 1:
+                return
+
             raise ValueError(
                 f"{type(self.model)} does not support tensor parallel yet!")
 
