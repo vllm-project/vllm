@@ -317,23 +317,31 @@ class Plamo2MambaMixer(nn.Module):
 
 class DenseMLP(nn.Module):
 
-    def __init__(self,
-                 config: PlamoConfig,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(
+        self,
+        config: PlamoConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_up_proj = torch.nn.Linear(self.hidden_size,
-                                            self.intermediate_size * 2,
-                                            bias=False)
-        self.down_proj = torch.nn.Linear(self.intermediate_size,
-                                         self.hidden_size,
-                                         bias=False)
+        self.gate_up_proj = MergedColumnParallelLinear(
+            self.hidden_size, [self.intermediate_size] * 2,
+            bias=False,
+            prefix=f"{prefix}.gate_up_proj",
+            quant_config=quant_config)
+        self.down_proj = RowParallelLinear(self.intermediate_size,
+                                           self.hidden_size,
+                                           bias=False,
+                                           prefix=f"{prefix}.down_proj",
+                                           quant_config=quant_config)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        h = self.gate_up_proj(hidden_states)
+        h = self.gate_up_proj(hidden_states)[0]
         h = _swiglu(h)
-        return self.down_proj(h)  # type: ignore
+        output, _ = self.down_proj(h)
+        return output  # type: ignore
 
 
 class Plamo2AttentionMixer(nn.Module):
