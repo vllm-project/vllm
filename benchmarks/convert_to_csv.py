@@ -1,7 +1,11 @@
+from argparse import ArgumentParser
 import pandas as pd
 
-df_sgl = pd.read_json("sgl-results.json", lines=True)
-df_sgl.to_csv("sgl-results.csv")
+parser = ArgumentParser()
+parser.add_argument("--input-path", type=str, required=True)
+parser.add_argument("--output-path", type=str, required=True)
 
-df_vllm = pd.read_json("vllm-results.json", lines=True)
-df_vllm.to_csv("vllm-results.csv")
+if __name__ == "__main__":
+    args = parser.parse_args()
+    df = pd.read_json(args.input_path, lines=True)
+    df.to_csv(args.output_path)
