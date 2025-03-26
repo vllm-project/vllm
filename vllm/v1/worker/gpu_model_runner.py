@@ -1116,10 +1116,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Ignore the sampled token for partial prefills.
                 # Rewind the generator state as if the token was not sampled.
                 # This relies on cuda-specific torch-internal impl details
-                generator = self.input_batch.generators.get(i, None)
+                generator = self.input_batch.generators.get(i)
                 if generator is not None:
                     generator.set_offset(generator.get_offset() - 4)
-                valid_sampled_token_ids[i] = []
+                valid_sampled_token_ids[i].clear()
 
         if not self.use_spec_decode:
             spec_token_ids = None

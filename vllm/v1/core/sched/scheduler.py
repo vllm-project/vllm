@@ -153,9 +153,9 @@ class Scheduler(SchedulerInterface):
 
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
-            if self.scheduler_config.long_prefill_token_threshold > 0:
-                num_new_tokens = min(
-                    num_new_tokens,
+            if (0 < self.scheduler_config.long_prefill_token_threshold <
+                    num_new_tokens):
+                num_new_tokens = (
                     self.scheduler_config.long_prefill_token_threshold)
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
@@ -303,9 +303,9 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens -= self.block_size
                     num_new_tokens = self.block_size
                     computed_blocks.pop()
-                if self.scheduler_config.long_prefill_token_threshold > 0:
-                    num_new_tokens = min(
-                        num_new_tokens,
+                if (0 < self.scheduler_config.long_prefill_token_threshold <
+                        num_new_tokens):
+                    num_new_tokens = (
                         self.scheduler_config.long_prefill_token_threshold)
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
@@ -575,7 +575,7 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = sampled_token_ids[req_index]
 
             scheduled_spec_token_ids = (
-                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
@@ -623,8 +623,8 @@ class Scheduler(SchedulerInterface):
                     break
 
             # Extract sample logprobs if needed.
-            if (logprobs is not None
-                    and request.sampling_params.logprobs is not None):
+            if (request.sampling_params.logprobs is not None
+                    and logprobs is not None):
                 # NOTE: once we support N tokens per step (spec decode),
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
