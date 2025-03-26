@@ -5,9 +5,10 @@ from enum import Enum
 from typing import Callable, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
-from vllm import envs
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -15,6 +16,8 @@ from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    is_rocm_aiter_moe_enabled, shuffle_weights)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -96,8 +99,36 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
+    def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        # Pad the weight tensor. This is an optimization on ROCm platform, which
+        # can benefit from tensors located far enough from one another in memory
+        if (envs.VLLM_ROCM_MOE_PADDING and current_platform.is_rocm()
+                and weight.stride(-1) == 1
+                and (weight.stride(-2) * weight.element_size()) % 512 == 0):
+            num_pad = 256 // weight.element_size()
+            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
+            torch.cuda.empty_cache()
+        return weight
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+
+        layer.w13_weight = torch.nn.Parameter(self._maybe_pad_weight(
+            layer.w13_weight.data),
+                                              requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(self._maybe_pad_weight(
+            layer.w2_weight.data),
+                                             requires_grad=False)
+
+        if is_rocm_aiter_moe_enabled():
+            # reshaping weights is required for aiter moe kernel.
+            shuffled_w13, shuffled_w2 = shuffle_weights(
+                layer.w13_weight.data, layer.w2_weight.data)
+
+            layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                  requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                 requires_grad=False)
 
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
