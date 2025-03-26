@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from argparse import ArgumentError
+
 import pytest
 
 from vllm import envs
@@ -31,6 +33,24 @@ def test_prefix_caching_from_cli():
     args = parser.parse_args(["--enable-prefix-caching"])
     vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
     assert vllm_config.cache_config.enable_prefix_caching
+
+    # default hash algorithm is "builtin"
+    assert vllm_config.cache_config.prefix_caching_hash_algo == "builtin"
+
+    # set hash algorithm to sha256
+    args = parser.parse_args(["--prefix-caching-hash-algo", "sha256"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.prefix_caching_hash_algo == "sha256"
+
+    # set hash algorithm to builtin
+    args = parser.parse_args(["--prefix-caching-hash-algo", "builtin"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.prefix_caching_hash_algo == "builtin"
+
+    # an invalid hash algorithm raises an error
+    parser.exit_on_error = False
+    with pytest.raises(ArgumentError):
+        args = parser.parse_args(["--prefix-caching-hash-algo", "invalid"])
 
 
 def test_defaults_with_usage_context():
