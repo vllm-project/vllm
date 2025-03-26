@@ -616,16 +616,13 @@ class MiniCPMO(MiniCPMV2_6):
 
     # Copied from HF repo of MiniCPM-o-2_6,
     # designed for batched inputs and outputs
-    def get_audio_hidden_states(self, data: MiniCPMOAudioInputs,
+    def get_audio_hidden_states(self, data: MiniCPMOAudioFeatureInputs,
                                 chunk_length: int) -> list[torch.Tensor]:
-        wavforms = data.get(
-            "audio_features",
-            [])  # (bs, 80, frames) or [], multi audios need filled in advance
-        audio_feature_lens_raw = [data.get("audio_feature_lens",
-                                           [])]  # list, [[x1, x2], [y1], [z1]]
+        # (bs, 80, frames) or [], multi audios need filled in advance
+        wavforms = data["audio_features"]
 
-        if len(wavforms) == 0:
-            return []
+        # list, [[x1, x2], [y1], [z1]]
+        audio_feature_lens_raw = [data["audio_feature_lens"]]
 
         audio_feature_lens = torch.hstack(audio_feature_lens_raw)
         batch_size, _, max_mel_seq_len = wavforms.shape
@@ -750,14 +747,14 @@ class MiniCPMO(MiniCPMV2_6):
 
         return modalities
 
-    def _process_audio_inputs(
+    def _process_audio_input(
         self,
         audio_inputs: MiniCPMOAudioInputs,
-        chunk_length: int,
     ) -> torch.Tensor:
         if audio_inputs["type"] == "audio_embeds":
             return audio_inputs["audio_embeds"]
 
+        chunk_length = self.config.audio_chunk_length
         return self.get_audio_hidden_states(audio_inputs, chunk_length)[0]
 
     def _process_multimodal_inputs(self, modalities: dict):
@@ -765,13 +762,13 @@ class MiniCPMO(MiniCPMV2_6):
 
         for modality in modalities:
             if modality == "audios":
-                image_input = modalities["audios"]
-                image_features = self._process_audio_input(image_input)
+                audio_input = modalities["audios"]
+                audio_features = self._process_audio_input(audio_input)
                 multimodal_embeddings += tuple(
                     flatten_2d_lists(
                         scatter_patch_features(*args) for args in zip(
-                            image_features,
-                            image_input["embed_is_patch"],
+                            audio_features,
+                            audio_input["embed_is_patch"],
                         )))
 
         return multimodal_embeddings
