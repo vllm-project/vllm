@@ -246,8 +246,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         type=int,
                         default=None,
                         help='Max number of prompt characters or prompt '
-                        'ID numbers being printed in log.'
-                        '\n\nDefault: Unlimited')
+                        'ID numbers being printed in log.')
 
     parser.add_argument(
         "--disable-fastapi-docs",
