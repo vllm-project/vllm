@@ -19,6 +19,12 @@ except ImportError:
 
 
 class TopKTopPSampler(nn.Module):
+    """
+    Module that performs optional top-k and top-p filtering followed by
+    weighted random sampling of logits.
+
+    Implementations may update the logits tensor in-place.
+    """
 
     def __init__(self):
         super().__init__()
@@ -84,7 +90,11 @@ class TopKTopPSampler(nn.Module):
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """PyTorch-native implementation of top-k and top-p sampling."""
+        """
+        PyTorch-native implementation of top-k and top-p sampling.
+
+        The logits tensor may be updated in-place.
+        """
         logits = apply_top_k_top_p(logits, k, p)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators)
@@ -136,7 +146,10 @@ def apply_top_k_top_p(
 ) -> torch.Tensor:
     """Apply top-k and top-p masks to the logits.
 
-    This function sorts the logits tensor, which can be slow for large batches.
+    If a top-p is used, this function will sort the logits tensor,
+    which can be slow for large batches.
+
+    The logits tensor may be updated in-place.
     """
     if p is None:
         if k is None:
