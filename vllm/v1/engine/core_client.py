@@ -115,6 +115,13 @@ class EngineCoreClient(ABC):
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        raise NotImplementedError
+
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
@@ -149,6 +156,14 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def pin_lora_async(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    async def collective_rpc_async(
+            self,
+            method: Union[str, Callable[..., _R]],
+            timeout: Optional[float] = None,
+            args: tuple = (),
+            kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         raise NotImplementedError
 
 
@@ -208,8 +223,12 @@ class InprocClient(EngineCoreClient):
     def pin_lora(self, lora_id: int) -> bool:
         return self.engine_core.pin_lora(lora_id)
 
-    def collective_rpc(self, method: Callable, *args, **kwargs) -> Any:
-        return self.engine_core.collective_rpc(method, *args, **kwargs)
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
 
 @dataclass
@@ -566,7 +585,7 @@ class AsyncMPClient(MPClient):
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self._call_utility_async("pin_lora", lora_id)
 
-    async def collective_rpc(
+    async def collective_rpc_async(
             self,
             method: Union[str, Callable[..., _R]],
             timeout: Optional[float] = None,
