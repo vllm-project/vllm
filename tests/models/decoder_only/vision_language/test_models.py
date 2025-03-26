@@ -431,7 +431,7 @@ VLM_TEST_SETTINGS = {
     ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
-        test_type=(VLMTestType.IMAGE),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=identity,
         max_model_len=4096,
         max_num_seqs=2,
