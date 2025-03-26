@@ -1643,7 +1643,7 @@ def cutlass_moe_fp8(
         0], "w1 scales expert number mismatch"
     assert w1_q.shape[0] == w2_scale.shape[
         0], "w2 scales expert number mismatch"
-    assert a2_scale is None or a2_scale.shape == a1_scale.shape, "Intermediate scale shape mismatch"  # noqa: E501
+    assert a2_scale is None or a1_scale is None or a2_scale.shape == a1_scale.shape, "Intermediate scale shape mismatch"  # noqa: E501
     assert ab_strides1.shape[0] == w1_q.shape[
         0], "AB Strides 1 expert number mismatch"
     assert c_strides1.shape[0] == w1_q.shape[
@@ -1660,7 +1660,8 @@ def cutlass_moe_fp8(
     n = w2_q.size(1)
 
     topk = topk_ids.size(1)
-    per_act_token = a1_scale.numel() != 1
+    per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+        a2_scale.numel() != 1 if a2_scale is not None else False)
 
     a_q, a1_scale = ops.scaled_fp8_quant(
         a, a1_scale, use_per_token_if_dynamic=per_act_token)
