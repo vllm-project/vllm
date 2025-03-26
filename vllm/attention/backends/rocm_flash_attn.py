@@ -884,9 +884,8 @@ def _sdpa_attention(
 
     for i, seq_len in enumerate(seq_lens):
         end = start + seq_len
-        with torch.backends.cuda.sdp_kernel(enable_math=True,
-                                            enable_flash=False,
-                                            enable_mem_efficient=False):
+        with torch.nn.attention.sdpa_kernel(
+                torch.nn.attention.SDPBackend.MATH):
             sub_out = torch.nn.functional.scaled_dot_product_attention(
                 query[:, start:end, :],
                 key[:, start:end, :],
