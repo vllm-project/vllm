@@ -17,13 +17,18 @@ class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return 75
 
     @classmethod
+    def is_supported(
+        cls,
+        compute_capability: Optional[int] = None
+    ) -> Tuple[bool, Optional[str]]:
+        if current_platform.is_rocm() or current_platform.is_cuda():
+            return cls._current_capability_supported(compute_capability)
+
+        return False, "Triton scaled_mm requires running on ROCm or CUDA."
+
+    @classmethod
     def can_implement(
             cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
-        if current_platform.is_cpu():
-            return (
-                False,
-                "TritonScaledMMLinearKernel requires Triton which is not " +
-                "currently supported on CPU.")
         if not c.input_symmetric:
             return (False,
                     "TritonScaledMMLinearKernel only supports symmetric " +

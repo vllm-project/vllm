@@ -21,12 +21,24 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         return 75
 
     @classmethod
-    def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def is_supported(
+        cls,
+        compute_capability: Optional[int] = None
+    ) -> Tuple[bool, Optional[str]]:
+        # Cutlass is also supported on CPU
+        if current_platform.is_cpu():
+            return True, ""
 
-        if (not current_platform.is_cuda() and not current_platform.is_cpu()):
+        if not current_platform.is_cuda():
             return False, "CutlassScaledMM requires running on CUDA or CPU."
 
+        # Defer to compute-capability-based support determination
+        return super().is_supported(compute_capability)
+
+    @classmethod
+    def can_implement(
+            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+        # All schemes supported
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

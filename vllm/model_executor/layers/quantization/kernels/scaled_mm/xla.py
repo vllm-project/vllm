@@ -18,17 +18,18 @@ from .ScaledMMLinearKernel import (ScaledMMLinearKernel,
 class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
     @classmethod
-    def get_min_capability(cls) -> int:
-        raise NotImplementedError(
-            "TPU platform does have a concept of compute capability, "
-            "this method should not be called.")
+    def is_supported(
+        cls,
+        compute_capability: Optional[int] = None
+    ) -> Tuple[bool, Optional[str]]:
+        if not current_platform.is_tpu():
+            return False, "ScaledMMXLA requires running on TPU."
+
+        return True, None
 
     @classmethod
     def can_implement(
             cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
-
-        if not current_platform.is_tpu():
-            return False, "ScaledMMXLA requires running on TPU."
 
         if c.is_static_input_scheme:
             return False, "ScaledMMXLA requires dynamic activation scales."
