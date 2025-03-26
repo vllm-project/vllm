@@ -175,7 +175,7 @@ TEXT_GENERATION_MODELS = {
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
-    # Tests TransformersModel
+    # Tests TransformersForCausalLM
     "ArthurZ/Ilama-3.2-1B": PPTestSettings.fast(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
