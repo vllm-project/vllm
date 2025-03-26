@@ -54,6 +54,26 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
     ) -> None:
+        """
+        Create an AsyncLLM.
+
+        Args:
+            vllm_config (VllmConfig)
+            executor_class (Executor)
+            log_stats (bool): Whether to log stats.
+            usage_context (UsageContext): Usage context of the LLM.
+            input_registry (InputRegistry): Input registry.
+            use_cached_outputs (bool): Whether to use cached outputs.
+            log_requests (bool): Whether to log requests.
+            start_engine_loop (bool): Whether to start the engine loop.
+            stat_loggers (dict[str, StatLoggerBase]): customized stat loggers
+                for the LLM. PLEASE BE AWARE THAT STAT LOGGER IS NOT STABLE
+                IN V1, AND ITS BASE CLASS INTERFACE MIGHT CHANGE.
+                If not provided, default stat loggers will be used.
+
+        Returns:
+            None
+        """
         if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
