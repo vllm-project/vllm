@@ -4,7 +4,6 @@ import time
 from collections.abc import Mapping
 from typing import Optional, Union
 
-import vllm.platforms
 from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
@@ -138,7 +137,7 @@ class Processor:
                                  f" != {engine_level_backend}")
         else:
             params.guided_decoding.backend = engine_level_backend
-
+        import vllm.platforms
         if vllm.platforms.current_platform.is_tpu():
             raise ValueError("Structured output is not supported on TPU.")
 
