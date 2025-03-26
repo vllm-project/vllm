@@ -310,12 +310,15 @@ class RandomDataset(BenchmarkDataset):
             np.random.randint(0, vocab_size, size=prefix_len * 2).tolist()
             if prefix_len > 0 else []
         )
-        prefix_token_ids = tokenizer(
-            tokenizer.decode(double_prefix_token_ids)
-        ).input_ids
-        while len(prefix_token_ids) < prefix_len:
-            prefix_token_ids *= 2
-        prefix_token_ids = prefix_token_ids[:prefix_len]
+        if prefix_len > 0:
+            prefix_token_ids = tokenizer(
+                tokenizer.decode(double_prefix_token_ids)
+            ).input_ids
+            while len(prefix_token_ids) < prefix_len:
+                prefix_token_ids *= 2
+            prefix_token_ids = prefix_token_ids[:prefix_len]
+        else:
+            prefix_token_ids = []
 
         input_low = int(input_len * range_ratio)
         output_low = int(output_len * range_ratio)
