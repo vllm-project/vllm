@@ -153,7 +153,7 @@ class FunctionDefinition(OpenAIBaseModel):
     name: str
     description: Optional[str] = None
     parameters: Optional[dict[str, Any]] = None
-
+    strict: Optional[bool] = False
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
@@ -628,7 +628,53 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 for tool in data["tools"]:
                     if tool["function"]["name"] == specified_function_name:
                         valid_tool = True
+                        
+                        # validate strict mode if enabled 
+                        if tool["function"].get("strict"):
+                          params = tool["function"].get("parameters")
+                          if params:
+                            # ensure parameters is a valid JSON Schema object
+                            if not isinstance(params, dict):
+                                raise ValueError(
+                                    f"Tool '{specified_function_name}': "
+                                    "parameters must be a JSON Schema object"
+                                )
+                            if params.get("type") != "object":
+                                raise ValueError(
+                                    f"Tool '{specified_function_name}': "
+                                    "In strict mode, parameters must be of "
+                                    "type 'object'"
+                                )
+                            # ensure additionalProperties is false in strict mode
+                            if params.get("additionalProperties", True):
+                                raise ValueError(
+                                    f"Tool '{specified_function_name}': "
+                                    "In strict mode, additionalProperties "
+                                    "must be false"
+                                )
+                                
+                            # validate properties and required fields
+                            properties = params.get("properties", {})
+                            required = params.get("required", [])
+                            if not isinstance(properties, dict):
+                                raise ValueError(
+                                    f"Tool '{specified_function_name}': "
+                                    "properties must be an object"
+                                )
+                            if not isinstance(required, list):
+                                raise ValueError(
+                                    f"Tool '{specified_function_name}': "
+                                    "required must be an array"
+                                )
+                            for prop_name in properties.keys():
+                                if prop_name not in required:
+                                    raise ValueError(
+                                        f"Tool '{specified_function_name}': "
+                                        f"In strict mode, non-nullable property "
+                                        f"'{prop_name}' must be listed in required"
+                                    )
                         break
+
                 if not valid_tool:
                     raise ValueError(
                         "The tool specified in `tool_choice` does not match any"
