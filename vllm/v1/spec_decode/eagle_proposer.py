@@ -31,88 +31,70 @@ class EagleProposer:
             num_draft_tokens_to_propose: int,
             attention_metadata: FlashAttentionMetadata) -> list[SamplerOutput]:
         """
-        Generates draft token IDs using the Eagle model for speculative decoding.
+        Generates speculative draft token IDs using the Eagle model.
 
-        This function constructs and processes the Eagle model inputs based on 
-        the target model's output and attention metadata. It executes forward
-        passes through the Eagle model to generate multiple speculative draft
+        This function aligns the Eagle model's KV cache with the target model’s output 
+        before generating speculative tokens. It first performs a prefill pass,
+        followed by iterative speculation passes to generate additional draft
         tokens.
 
-        Let us consider this example to walk through the logic in the EagleProposer.
-        Let us suppose we have 3 sequences S1 which is a completed prefill starting
-        at the 0 position, S2 is a pratial prefill starting at non-zero position
-        (not the first chunk) and S3 which is a decode.
-        
-        Target Model
-        Sequences - [S1, S2, S3]
-        Tokens - [T11, T12, T13, T14, T21, T22, T23, T31, T32, T33]
-        Positions - [0,1,2,3,9,10,11,44,45,46]
-        Hidden States -[H11,H12,H13,H14,H21,H22,H23,H31,H32,H33]
-        Sampled Token Ids - [[T15],[],[T32]]
-        Next Prompt Token Ids - [[],[T24],[]]
+        Example:
+        Consider three sequences:
+        - S1: A completed prefill sequence starting at position 0.
+        - S2: A partial prefill sequence starting at a nonzero position.
+        - S3: A decoding sequence.
 
+        Target Model:
+        Sequences: [S1, S2, S3]
+        Tokens: [T11, T12, T13, T14, T21, T22, T23, T31, T32, T33]
+        Positions: [0, 1, 2, 3, 9, 10, 11, 44, 45, 46]
+        Hidden States: [H11, H12, H13, H14, H21, H22, H23, H31, H32, H33]
+        Sampled Tokens: [[T15], [], [T32]]
+        Next Prompt Tokens: [[], [T24], []]
 
-        First we use the hidden states, input positions and tokens from the
-        target model to run a prefill in the Eagle to align the KV cache of
-        the target model with that of Eagle. After the prefill we run
-        forward passes with Eagle as needed for more speculative tokens.
+        The first forward pass in Eagle aligns its KV cache with that
+        of the target model.
 
-        Eagle Prefill Forward Pass
-        Sequences - [S1, S2, S3]
-        Tokens - [T12, T13, T14, T15, T22, T23, T24, T32]
-        Positions - [0,1,2,3,9,10,11,44]
-        Previous Hidden States - [H11,H12,H13,H14,H21,H22,H23,H31]
-        Hidden States -[E1,E2,E3,E4,E5,E6,E7,E8]
-        Sampled Tokens - [[T16],[T25],[T33']]
+        Eagle Prefill Forward Pass:
+        Sequences: [S1, S2, S3]
+        Tokens: [T12, T13, T14, T15, T22, T23, T24, T32]
+        Positions: [0, 1, 2, 3, 9, 10, 11, 44]
+        Previous Hidden States: [H11, H12, H13, H14, H21, H22, H23, H31]
+        Sampled Tokens: [[T16], [T25], [T33']]
 
-        Note that for S1 we drop the token T11 which is the token
-        at position 0. For S2 and S3 we don't need to consider
-        tokens T21 and T31 respectively because they have already
-        been processed in previous steps. Also note that a token positon
-        in Eagle is always less by 1 compared to the target model since
-        we always drop the token at position 0.
+        Note that for S1, we drop T11 (position 0). For S2 and S3, 
+        T21 and T31 are skipped since they were processed earlier. 
+        Eagle positions are always one less than the target model 
+        due to dropping the first token.        
 
-        Eagle speculation passes as needed.
-        Sequences - [S1, S2, S3]
-        Tokens - [T16, T25, T33']
-        Positions - [4,12,45]
-        Previous Hidden States - [E4,E7,E8]
-        
+        Subsequent Eagle speculative passes generate additional tokens per sequence.
+
         Args:
-            target_model_input_ids: Input token IDs used in the target model.
-            target_model_positions: Positional indices corresponding to 
-                `target_model_input_ids`.
-            target_model_hidden_states: Hidden states produced by the 
-                target model during inference.
-            target_model_seq_lens: List of sequence lengths in the 
-                target model.
-            sampled_token_ids: Previously sampled token IDs from the
-                target model.
-            next_prompt_token_ids: The next prompt token IDs for 
-                each sequence, if available.
-            is_prefill: Flags indicating whether each sequence is in 
-                the prefill stage.
-            num_draft_tokens_to_propose: Number of speculative draft tokens 
-                to generate per sequence.
-            attention_metadata: Attention Metadata that was used by the
-                target model for its forward pass.
+            target_model_input_ids: Input token IDs used by the target model.
+            target_model_positions: Corresponding positional indices.
+            target_model_hidden_states: Hidden states from the target model.
+            target_model_seq_lens: Sequence lengths in the target model.
+            sampled_token_ids: Previously sampled tokens from the target model.
+            next_prompt_token_ids: Next prompt tokens, if available.
+            is_prefill: Boolean flags indicating prefill sequences.
+            num_draft_tokens_to_propose: Number of speculative tokens to
+                generate per sequence.
+            attention_metadata: Attention metadata from the target model's
+                forward pass.
 
         Returns:
-            list[SamplerOutput]: A list of sampled token outputs generated by 
-            the Eagle model. The cardinality of the list will be equal to 
-            num_draft_tokens_to_propose. Each SamplerOutput will contain
-            sampled tokens for all sequences including the partial prefill
-            ones.
-        """
-        # Calculate start locations for sequences and their respective lengths
+            list[SamplerOutput]: A list of sampled token outputs from Eagle,
+            with length `num_draft_tokens_to_propose`. Each SamplerOutput 
+            includes sampled tokens for all sequences, including 
+            partial prefill ones.
+        """ 
+        # Compute start positions for each sequence in the target model.
         target_model_start_locs = [0] + list(
             itertools.accumulate(target_model_seq_lens))[:-1]
-        # Calculate the expected sequence lengths and sequence start locations
-        # in Eagle.
-        # If this is a prefill then the expected Eagle sequence length will be
-        # the same as that of the target model sequence. If it is a decode the
-        # the expected sequence length will be the number of tokens accepted
-        # by the target model.
+
+        # Determine expected sequence lengths in the Eagle model:
+        # - For prefill sequences, lengths remain unchanged.
+        # - For decoding sequences, lengths match the number of accepted tokens.
         eagle_seq_lens = [
             target_model_seq_lens[i]
             if is_prefill[i] else len(sampled_token_ids[i])
@@ -143,76 +125,52 @@ class EagleProposer:
             dtype=torch.int,
             device=target_model_positions.device)
 
-        # Initialize tensors for eagle model inputs based on the
-        # expected eagle sequence lengths that we have computed.
-        eagle_input_ids = torch.zeros(eagle_num_tokens,
-                                      dtype=target_model_positions.dtype,
-                                      device=target_model_input_ids.device)
-        eagle_positions = torch.zeros(eagle_num_tokens,
-                                      dtype=target_model_positions.dtype,
-                                      device=target_model_positions.device)
+        # Initialize Eagle model input tensors
+        eagle_input_ids = torch.zeros(
+            eagle_num_tokens,
+            dtype=target_model_positions.dtype,
+            device=target_model_input_ids.device)
+        eagle_positions = torch.zeros(
+            eagle_num_tokens, 
+            dtype=target_model_positions.dtype,
+            device=target_model_positions.device)
         eagle_prev_hidden_states = torch.zeros(
             (eagle_num_tokens, target_model_hidden_states.shape[1]),
             dtype=target_model_hidden_states.dtype,
             device=target_model_hidden_states.device)
-        eagle_slot_mappings = torch.zeros(eagle_num_tokens,
-                                          dtype=target_model_positions.dtype,
-                                          device=target_model_positions.device)
+        eagle_slot_mappings = torch.zeros(eagle_num_tokens, dtype=target_model_positions.dtype, device=target_model_positions.device)
 
-        # Populate the eagle model inputs for the first forward pass.
+        # Populate Eagle model inputs for the first forward pass.
         for req_idx in range(len(eagle_seq_lens)):
             eagle_start_loc = eagle_start_locs[req_idx]
             eagle_seq_len = eagle_seq_lens[req_idx]
             target_model_start_loc = target_model_start_locs[req_idx]
-            target_model_start_position = target_model_positions[
-                target_model_start_loc]
+            target_model_start_position = target_model_positions[target_model_start_loc]
 
-            # Populate Eagle positions. The start positions will be the same
-            # as the start position in the target model.
-            eagle_positions[
-                eagle_start_loc:eagle_start_loc + eagle_seq_len] =\
-                    torch.arange(
-                        target_model_start_position,
-                        target_model_start_position + eagle_seq_len)
+            # Assign positions: Start positions match the target model.
+            eagle_positions[eagle_start_loc:eagle_start_loc + eagle_seq_len] = \
+                torch.arange(target_model_start_position, target_model_start_position + eagle_seq_len)
 
-            # Populate previous hidden states to use in the Eagle model using
-            # the hidden states of the target model.
-            eagle_prev_hidden_states[
-                eagle_start_loc:eagle_start_loc + eagle_seq_len] =\
-                    target_model_hidden_states[
-                        target_model_start_loc :\
-                            target_model_start_loc + eagle_seq_len]
+            # Assign previous hidden states from the target model.
+            eagle_prev_hidden_states[eagle_start_loc:eagle_start_loc + eagle_seq_len] = \
+                target_model_hidden_states[target_model_start_loc:target_model_start_loc + eagle_seq_len]
 
-            # Populate the eagle slot mappings to be used in the Eagle
-            # attention metadata.
-            target_model_start_slot_position =\
-                attention_metadata.slot_mapping[target_model_start_loc]
-            eagle_slot_mappings[
-                eagle_start_loc:eagle_start_loc + eagle_seq_len] =\
-                torch.arange(
-                    target_model_start_slot_position,
-                    target_model_start_slot_position + eagle_seq_len)
+            # Assign slot mappings for attention.
+            target_model_start_slot_position = attention_metadata.slot_mapping[target_model_start_loc]
+            eagle_slot_mappings[eagle_start_loc:eagle_start_loc + eagle_seq_len] = \
+                torch.arange(target_model_start_slot_position, target_model_start_slot_position + eagle_seq_len)
 
+            # Populate input IDs based on prefill or decoding.
             if is_prefill[req_idx]:
-                # Drop the first input id. If this is a partial prefill then
-                # use the next prompt token as the last token input else if it
-                # is a completed prefill then use the  sampled token.
-                eagle_input_ids[eagle_start_loc :\
-                    eagle_start_loc + eagle_seq_len -1] =\
-                        target_model_input_ids[
-                            target_model_start_loc + 1 :\
-                                target_model_start_loc + eagle_seq_len]
-                eagle_input_ids[
-                    eagle_start_loc +
-                    eagle_seq_len] = next_prompt_token_ids[req_idx][0] if len(
-                        next_prompt_token_ids[req_idx]
-                    ) == 1 else sampled_token_ids_tensors[req_idx][0]
+                # Drop the first token and use either next prompt or sampled token.
+                eagle_input_ids[eagle_start_loc:eagle_start_loc + eagle_seq_len - 1] = \
+                    target_model_input_ids[target_model_start_loc + 1: target_model_start_loc + eagle_seq_len]
+                eagle_input_ids[eagle_start_loc + eagle_seq_len - 1] = \
+                    next_prompt_token_ids[req_idx][0] if next_prompt_token_ids[req_idx] else sampled_token_ids_tensors[req_idx][0]
             else:
-                # Non prefill sequences. For these sequences the inputs are
-                # from the tokens sampled and accepted by the target model.
-                eagle_input_ids[eagle_start_loc :\
-                    eagle_start_loc + eagle_seq_len] = \
-                        sampled_token_ids_tensors[req_idx][:eagle_seq_len]
+                # Use sampled tokens for decoding sequences.
+                eagle_input_ids[eagle_start_loc:eagle_start_loc + eagle_seq_len] = \
+                    sampled_token_ids_tensors[req_idx][:eagle_seq_len]
 
         # Construct the attention metadata to use in the Eagle model
         eagle_attention_metadata = attention_metadata
