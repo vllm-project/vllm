@@ -12,9 +12,8 @@ from vllm.logger import init_logger
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import VllmConfig
 else:
-    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
@@ -250,8 +249,3 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fnuz
         else:
             return torch.float8_e4m3fn
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        # V1 support on AMD gpus is experimental
-        return True

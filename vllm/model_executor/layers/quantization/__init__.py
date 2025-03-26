@@ -18,9 +18,11 @@ QUANTIZATION_METHODS: List[str] = [
     # The order of gptq methods is important for config.py iteration over
     # override_quantization_method(..)
     "marlin",
+    "bitblas",
     "gguf",
     "gptq_marlin_24",
     "gptq_marlin",
+    "gptq_bitblas",
     "awq_marlin",
     "gptq",
     "compressed-tensors",
@@ -84,6 +86,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .aqlm import AQLMConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
+    from .bitblas import BitBLASConfig
     from .bitsandbytes import BitsAndBytesConfig
     from .compressed_tensors.compressed_tensors import (  # noqa: E501
         CompressedTensorsConfig)
@@ -93,6 +96,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .fp8 import Fp8Config
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
+    from .gptq_bitblas import GPTQBitBLASConfig
     from .gptq_marlin import GPTQMarlinConfig
     from .gptq_marlin_24 import GPTQMarlin24Config
     from .hqq_marlin import HQQMarlinConfig
@@ -117,9 +121,11 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         # The order of gptq methods is important for config.py iteration over
         # override_quantization_method(..)
         "marlin": MarlinConfig,
+        "bitblas": BitBLASConfig,
         "gguf": GGUFConfig,
         "gptq_marlin_24": GPTQMarlin24Config,
         "gptq_marlin": GPTQMarlinConfig,
+        "gptq_bitblas": GPTQBitBLASConfig,
         "awq_marlin": AWQMarlinConfig,
         "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,

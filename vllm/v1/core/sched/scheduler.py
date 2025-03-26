@@ -152,10 +152,6 @@ class Scheduler(SchedulerInterface):
 
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
-            if self.scheduler_config.long_prefill_token_threshold > 0:
-                num_new_tokens = min(
-                    num_new_tokens,
-                    self.scheduler_config.long_prefill_token_threshold)
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
@@ -239,16 +235,16 @@ class Scheduler(SchedulerInterface):
                 encoder_budget = new_encoder_budget
 
         # Record the LoRAs in scheduled_running_reqs
-        scheduled_loras: set[int] = set()
+        requested_loras: set[int] = set()
         if self.lora_config:
-            scheduled_loras = set(
+            requested_loras = set(
                 req.lora_request.lora_int_id for req in scheduled_running_reqs
                 if req.lora_request and req.lora_request.lora_int_id > 0)
-            assert len(scheduled_loras) <= self.lora_config.max_loras
+            assert len(requested_loras) <= self.lora_config.max_loras
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        skipped_waiting_requests: deque[Request] = deque()
+        waiting_for_fsm: deque[Request] = deque()
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -258,30 +254,31 @@ class Scheduler(SchedulerInterface):
 
                 request = self.waiting[0]
 
-                # Waiting request skipping logic
-                is_skipped = False
-                # Skip request if the structured output request is still waiting
-                # for FSM.
-                if (not is_skipped
-                        and request.status == RequestStatus.WAITING_FOR_FSM):
+                if request.status == RequestStatus.WAITING_FOR_FSM:
                     structured_output_req = request.structured_output_request
-                    is_skipped = (not structured_output_req
-                                  or not structured_output_req.grammar)
-                    if not is_skipped:
+                    if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
+                    else:
+                        waiting_structured_output_req = self.waiting.popleft()
+                        waiting_for_fsm.appendleft(
+                            waiting_structured_output_req)
+                        continue
 
-                # Skip request if max_loras can't be honored.
-                if (not is_skipped and self.lora_config
-                        and request.lora_request):
+                # Check that adding the request still respects the max_loras
+                # constraint.
+                if self.lora_config and request.lora_request:
                     req_lora_id = request.lora_request.lora_int_id
-                    is_skipped = (len(scheduled_loras)
-                                  == self.lora_config.max_loras
-                                  and (req_lora_id not in scheduled_loras))
-
-                if is_skipped:
-                    skipped_waiting_requests.appendleft(request)
-                    self.waiting.popleft()
-                    continue
+                    if len(requested_loras) == self.lora_config.max_loras and (
+                            req_lora_id not in requested_loras):
+                        # Cannot schedule.
+                        # TODO (varun): This means all the other requests in
+                        # the WAITING queue will be blocked by this request,
+                        # even if,
+                        # 1. these other requests do not use LoRA, or,
+                        # 2. these other requests use the already requested
+                        # LoRAs.
+                        # This is too conservative and could be optimized.
+                        break
 
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
@@ -302,10 +299,6 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens -= self.block_size
                     num_new_tokens = self.block_size
                     computed_blocks.pop()
-                if self.scheduler_config.long_prefill_token_threshold > 0:
-                    num_new_tokens = min(
-                        num_new_tokens,
-                        self.scheduler_config.long_prefill_token_threshold)
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
@@ -343,7 +336,7 @@ class Scheduler(SchedulerInterface):
                         f"Invalid request status: {request.status}")
 
                 if self.lora_config and request.lora_request:
-                    scheduled_loras.add(request.lora_request.lora_int_id)
+                    requested_loras.add(request.lora_request.lora_int_id)
                 req_to_new_block_ids[request.request_id] = [
                     b.block_id for b in computed_blocks + new_blocks
                 ]
@@ -362,8 +355,8 @@ class Scheduler(SchedulerInterface):
                     encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
-        if skipped_waiting_requests:
-            self.waiting.extendleft(skipped_waiting_requests)
+        if waiting_for_fsm:
+            self.waiting.extendleft(waiting_for_fsm)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
