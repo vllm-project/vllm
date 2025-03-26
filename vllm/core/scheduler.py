@@ -1556,14 +1556,14 @@ class Scheduler:
         else:
             preemption_mode = PreemptionMode.RECOMPUTE
 
-        if self.num_cumulative_preemption % 50 == 0:
-            logger.warning(
-                "Sequence group %s is preempted by %s mode because there is "
-                "not enough KV cache space. This can affect the end-to-end "
-                "performance. Increase gpu_memory_utilization or "
-                "tensor_parallel_size to provide more KV cache memory. "
-                "total_num_cumulative_preemption=%d", seq_group.request_id,
-                preemption_mode, self.num_cumulative_preemption + 1)
+        # if self.num_cumulative_preemption % 50 == 0:
+        #     logger.warning(
+        #         "Sequence group %s is preempted by %s mode because there is "
+        #         "not enough KV cache space. This can affect the end-to-end "
+        #         "performance. Increase gpu_memory_utilization or "
+        #         "tensor_parallel_size to provide more KV cache memory. "
+        #         "total_num_cumulative_preemption=%d", seq_group.request_id,
+        #         preemption_mode, self.num_cumulative_preemption + 1)
         self.num_cumulative_preemption += 1
 
         if preemption_mode == PreemptionMode.RECOMPUTE:
