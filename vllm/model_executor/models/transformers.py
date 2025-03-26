@@ -344,7 +344,9 @@ class TransformersModel(nn.Module):
         for name, loaded_weight in weights:
             # Use "model" instead of base_model_prefix because
             # the base model attribute in vLLM is always `model`
-            name = maybe_prefix("model", name)
+            if not name.startswith(prefix := "model."):
+                name = prefix + name
+
             if is_pp_missing_parameter(name, self):
                 continue
             if name in params_dict:
