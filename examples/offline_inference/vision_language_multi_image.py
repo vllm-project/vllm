@@ -91,8 +91,6 @@ def load_gemma3(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         max_model_len=8192,
         max_num_seqs=2,
-        # Default is False; setting it to True is not supported in V1 yet
-        mm_processor_kwargs={"do_pan_and_scan": True},
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
@@ -342,7 +340,6 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
         limit_mm_per_prompt={"image": len(image_urls)},
         enable_lora=True,
         max_lora_rank=320,
-        lora_extra_vocab_size=0,
     )
 
     placeholders = "".join(f"<|image_{i}|>"

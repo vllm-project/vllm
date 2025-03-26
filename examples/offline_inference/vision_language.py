@@ -169,7 +169,6 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         max_model_len=2048,
         max_num_seqs=2,
-        # Default is False; setting it to True is not supported in V1 yet
         mm_processor_kwargs={"do_pan_and_scan": True},
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
@@ -362,6 +361,7 @@ def run_llava_next_video(questions: list[str],
     engine_args = EngineArgs(
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
         max_model_len=8192,
+        max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
@@ -682,7 +682,6 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         enable_lora=True,
         max_lora_rank=320,
-        lora_extra_vocab_size=0,
     )
 
     return ModelRequestData(
