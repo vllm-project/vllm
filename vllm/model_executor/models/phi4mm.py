@@ -1447,7 +1447,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         return [f"<|audio_{i+1}|>" for i in range(100)]
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "audio": None}
+        return {"image": None}
 
     def get_mm_max_tokens_per_item(
         self,
@@ -1456,7 +1456,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
     ) -> Mapping[str, int]:
         return {
             "image": self.get_max_image_tokens(),
-            "audio": self.get_max_audio_tokens(),
+            # "audio": self.get_max_audio_tokens(),
         }
 
     def get_max_audio_tokens(self) -> int:
@@ -1513,7 +1513,7 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        num_audios = mm_counts.get("audio", 0)
+        # num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = \
@@ -1524,20 +1524,35 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images),
-            "audio": self._get_dummy_audios(length=_AUDIO_MAX_SOUNDFILE_SIZE,
-                                            num_audios=num_audios),
+            # "audio": self._get_dummy_audios(length=_AUDIO_MAX_SOUNDFILE_SIZE,
+            #                                 num_audios=num_audios),
         }
 
         image_tokens: list[str] = self.info.image_tokens[:num_images]
-        audio_tokens: list[str] = self.info.audio_tokens[:num_audios]
+        # audio_tokens: list[str] = self.info.audio_tokens[:num_audios]
 
         return ProcessorInputs(
-            prompt_text="".join(image_tokens + audio_tokens),
+            prompt_text="".join(image_tokens),
             mm_data=mm_data,
         )
 
 
 class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if mm_data:
+            processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        else:
+            tokenizer = self.info.get_tokenizer()
+            processed_outputs = tokenizer(prompt,
+                                          add_special_tokens=True,
+                                          return_tensors="pt")
+        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -1560,10 +1575,6 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
 
-        tokenizer = self.info.get_tokenizer()
-        bos_token_id = tokenizer.bos_token_id
-        assert isinstance(bos_token_id, int)
-
         def get_image_replacement_phi4mm(item_idx: int):
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems))
@@ -1575,7 +1586,6 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
-                    processor=hf_processor,
                 )
 
             image_tokens = [_IMAGE_PLACEHOLDER_TOKEN_ID] * num_image_tokens
