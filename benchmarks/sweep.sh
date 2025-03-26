@@ -21,7 +21,7 @@ do
         --num-prompts $NUM_PROMPTS \
         --seed $REQUEST_RATE \
         --ignore-eos \
-        --result-filename "$results.json" \
+        --result-filename "results.json" \
         --save-result
 
 done
