@@ -13,10 +13,13 @@ with open('stats.log', 'w') as f:
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95,  max_tokens=100)
 
 # Create an LLM.
-# llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.011, max_model_len=384, preemption_mode="swap", scheduling_policy='priority', enable_prefix_caching=True)
-llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.15, max_model_len=384, preemption_mode="swap", scheduling_policy='priority')
+# facebook/opt-1.3b or facebook/opt-2.7b
+# llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.011, max_model_len=384, preemption_mode="swap", scheduling_policy='priority')
+# llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.15, max_model_len=384, preemption_mode="swap", scheduling_policy='priority')
+# llm = LLM(model="facebook/opt-1.3b", gpu_memory_utilization=0.05, max_model_len=384, preemption_mode="swap", scheduling_policy='priority')
+llm = LLM(model="facebook/opt-2.7b", gpu_memory_utilization=0.1, max_model_len=384, preemption_mode="swap", scheduling_policy='priority')
 
-for factor in np.arange(0, 4, 0.1):
+for factor in np.arange(0, 12, 0.4):
     with open('config.log', 'w') as f:
         f.write(f'{factor}')
     

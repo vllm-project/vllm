@@ -267,6 +267,9 @@ class Worker(LocalOrDistributedWorkerBase):
         logger.info(msg)
         # Final cleanup
         gc.collect()
+        
+        with open('num_blocks.log', 'w') as f: 
+            f.write(f'num_gpu_blocks: {num_gpu_blocks}, num_cpu_blocks: {num_cpu_blocks}\n')
 
         return num_gpu_blocks, num_cpu_blocks
 
