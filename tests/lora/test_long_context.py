@@ -34,6 +34,7 @@ def run_with_both_engines_long_context_lora(request, monkeypatch):
     use_v1 = request.param
     # Tests decorated with `@skip_v1` are only run without v1
     skip_v1 = request.node.get_closest_marker("skip_v1")
+    skip_v0 = request.node.get_closest_marker("skip_v0")
 
     if use_v1:
         if skip_v1:
@@ -41,6 +42,8 @@ def run_with_both_engines_long_context_lora(request, monkeypatch):
         monkeypatch.setenv('VLLM_USE_V1', '1')
         monkeypatch.setenv('VLLM_ALLOW_LONG_MAX_MODEL_LEN', '1')
     else:
+        if skip_v0:
+            pytest.skip("Skipping test on vllm V0")
         monkeypatch.setenv('VLLM_USE_V1', '0')
 
     yield
@@ -156,7 +159,7 @@ def lora_llm(long_context_infos):
         max_num_batched_tokens=4096 * 8,
         tensor_parallel_size=4,
         # FIXME enable async output processor
-        disable_async_output_proc=True,
+        disable_async_output_proc=False,
         distributed_executor_backend="mp",
         enable_chunked_prefill=True,
         enable_prefix_caching=False,
@@ -167,15 +170,20 @@ def lora_llm(long_context_infos):
     del llm
 
 
+# ooms with running both v0 and v1 on CI. Looks like the model memory is
+# not being released.
+@pytest.mark.skip_v0
 def test_rotary_emb_replaced(dist_init):
     """Verify rotary emb in all the layers are replaced"""
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.worker.model_runner import ModelRunner
 
-    engine_args = EngineArgs("meta-llama/Llama-2-7b-hf",
-                             long_lora_scaling_factors=(4.0, ),
-                             enable_lora=True)
+    engine_args = EngineArgs(
+        "meta-llama/Llama-2-7b-hf",
+        long_lora_scaling_factors=(4.0, ),
+        enable_lora=True,
+    )
     engine_config = engine_args.create_engine_config()
 
     if envs.VLLM_USE_V1:
@@ -199,6 +207,7 @@ def test_rotary_emb_replaced(dist_init):
                 assert isinstance(module, LinearScalingRotaryEmbeddingWithLoRA)
             else:
                 assert isinstance(module, LinearScalingRotaryEmbedding)
+
     # Llama 2 has 32 layers.
     assert rotary_emb_count == 32
 
