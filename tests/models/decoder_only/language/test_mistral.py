@@ -10,7 +10,6 @@ import jsonschema
 import jsonschema.exceptions
 import pytest
 
-from tests.utils import maybe_test_rocm_aiter
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (  # noqa
     MistralToolParser)
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
@@ -175,7 +174,6 @@ SAMPLE_JSON_SCHEMA = {
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-@maybe_test_rocm_aiter
 def test_models(hf_runner, vllm_runner, example_prompts, model: str,
                 dtype: str, max_tokens: int, num_logprobs: int) -> None:
     # TODO(sang): Sliding window should be tested separately.
@@ -201,7 +199,6 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-@maybe_test_rocm_aiter
 def test_mistral_format(vllm_runner, example_prompts, model: str, dtype: str,
                         max_tokens: int, num_logprobs: int) -> None:
     with vllm_runner(
@@ -234,7 +231,6 @@ def test_mistral_format(vllm_runner, example_prompts, model: str, dtype: str,
 
 @pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@maybe_test_rocm_aiter
 def test_mistral_symbolic_languages(vllm_runner, model: str,
                                     dtype: str) -> None:
     with vllm_runner(model,
@@ -254,7 +250,6 @@ def test_mistral_symbolic_languages(vllm_runner, model: str,
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("model",
                          MISTRAL_FORMAT_MODELS)  # v1 can't do func calling
-@maybe_test_rocm_aiter
 def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
     with vllm_runner(model,
                      dtype=dtype,
@@ -286,7 +281,6 @@ def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("guided_backend",
                          ["outlines", "lm-format-enforcer", "xgrammar"])
-@maybe_test_rocm_aiter
 def test_mistral_guided_decoding(vllm_runner, model: str,
                                  guided_backend: str) -> None:
     with vllm_runner(model, dtype='bfloat16',
