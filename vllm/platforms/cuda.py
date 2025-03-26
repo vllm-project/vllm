@@ -20,8 +20,9 @@ from vllm.utils import import_pynvml
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
+    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
@@ -302,6 +303,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def supports_fp8(cls) -> bool:
         return cls.has_device_capability(89)
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        return True
 
 
 # NVML utils
