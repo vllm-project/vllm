@@ -483,7 +483,8 @@ class EngineArgs:
             default=EngineArgs.prefix_caching_hash_algo,
             help="Set the hash algorithm for prefix caching. "
             "Options are 'builtin' (Python's built-in hash) or 'sha256' "
-            "(collision resistant). Defaults to 'builtin'.",
+            "(collision resistant but with certain overheads). Defaults "
+            "to 'builtin'.",
         )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',

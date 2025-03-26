@@ -560,7 +560,7 @@ def test_cache_blocks(hash_fn):
         num_cached_blocks=0,
         num_full_blocks=2,
         block_size=block_size,
-        hash_function=hash_fn,
+        hash_fn=hash_fn,
     )
 
     assert len(block_pool.cached_block_hash_to_block) == 2
@@ -575,7 +575,7 @@ def test_cache_blocks(hash_fn):
         num_cached_blocks=2,
         num_full_blocks=3,
         block_size=block_size,
-        hash_function=hash_fn,
+        hash_fn=hash_fn,
     )
     assert len(block_pool.cached_block_hash_to_block) == 3
     assert blocks[0].block_hash is not None

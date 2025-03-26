@@ -75,7 +75,7 @@ class BlockPool:
         num_cached_blocks: int,
         num_full_blocks: int,
         block_size: int,
-        hash_function: Callable,
+        hash_fn: Callable,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
@@ -94,7 +94,7 @@ class BlockPool:
             num_full_blocks: The number of blocks that are full and should
                 be cached after this function.
             block_size: Number of tokens in each block.
-            hash_function: The hash function to use for block hashes.
+            hash_fn: The hash function to use for block hashes.
         """
         if num_cached_blocks == num_full_blocks:
             return
@@ -140,8 +140,7 @@ class BlockPool:
                     request, start_token_idx, end_token_idx, -1)
 
                 # Compute the hash of the current block.
-                block_hash = hash_block_tokens(hash_function,
-                                               prev_block_hash_value,
+                block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
                                                block_tokens, extra_keys)
                 block_hashes.append(block_hash)
 

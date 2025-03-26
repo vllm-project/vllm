@@ -250,7 +250,7 @@ class KVCacheManager:
             num_cached_blocks=num_cached_blocks,
             num_full_blocks=num_full_blocks_after_append,
             block_size=self.block_size,
-            hash_function=self.caching_hash_fn,
+            hash_fn=self.caching_hash_fn,
         )
 
         self.num_cached_block[
