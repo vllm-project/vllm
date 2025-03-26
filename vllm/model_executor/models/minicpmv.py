@@ -535,17 +535,13 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             use_image_id=False,
         ) * num_frames
 
-    def get_vision_embed_is_patch(
+    def get_embed_is_patch(
         self,
         input_ids: list[int],
     ) -> torch.Tensor:
         tokenizer = self.info.get_tokenizer()
-
-        ignore_tokens = [tokenizer.im_start_id, tokenizer.im_end_id]
-        if hasattr(tokenizer, "slice_start_id"):
-            ignore_tokens += [tokenizer.slice_start_id, tokenizer.slice_end_id]
-
-        return torch.isin(torch.tensor(input_ids), torch.tensor(ignore_tokens))
+        unk_token_id = torch.tensor(tokenizer.get_vocab()["<unk>"])
+        return torch.tensor(input_ids) == unk_token_id
 
     def process_images(
         self,
@@ -581,7 +577,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         ]
 
         embed_is_patch = [
-            self.get_vision_embed_is_patch(image_repl_tokens)
+            self.get_embed_is_patch(image_repl_tokens)
             for image_repl_tokens in image_repls_feature_tokens
         ]
         image_inputs["embed_is_patch"] = embed_is_patch
@@ -631,7 +627,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         ]
 
         embed_is_patch = [
-            self.get_vision_embed_is_patch(video_repl_tokens)
+            self.get_embed_is_patch(video_repl_tokens)
             for video_repl_tokens in video_repls_feature_tokens
         ]
         video_inputs["embed_is_patch"] = embed_is_patch
@@ -787,9 +783,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             ]
         result["mm_kwargs"].update(**mm_orders)
 
-        unk_token = torch.tensor(tokenizer.get_vocab()["<unk>"])
-        result["mm_kwargs"].update(image_token_id=unk_token,
-                                   video_token_id=unk_token)
+        unk_token_id = torch.tensor(tokenizer.get_vocab()["<unk>"])
+        result["mm_kwargs"].update(image_token_id=unk_token_id,
+                                   video_token_id=unk_token_id)
 
         return result
 

@@ -263,16 +263,6 @@ class MiniCPMOMultiModalProcessor(
         return self.info.get_hf_processor().get_audio_placeholder(
             audio_lens, chunk_input, chunk_length)
 
-    def get_audio_embed_is_patch(
-        self,
-        input_ids: list[int],
-    ) -> torch.Tensor:
-        tokenizer = self.info.get_tokenizer()
-
-        ignore_tokens = [tokenizer.audio_start_id, tokenizer.audio_end_id]
-
-        return torch.isin(torch.tensor(input_ids), torch.tensor(ignore_tokens))
-
     def process_audios(
         self,
         mm_data: Mapping[str, object],
@@ -320,7 +310,7 @@ class MiniCPMOMultiModalProcessor(
         ]
 
         embed_is_patch = [
-            self.get_audio_embed_is_patch(audio_repl_tokens)
+            self.get_embed_is_patch(audio_repl_tokens)
             for audio_repl_tokens in audio_repls_feature_tokens
         ]
         audio_inputs["audio_embed_is_patch"] = embed_is_patch
@@ -397,8 +387,8 @@ class MiniCPMOMultiModalProcessor(
         )
 
         tokenizer = self.info.get_tokenizer()
-        unk_token = torch.tensor(tokenizer.get_vocab()["<unk>"])
-        result["mm_kwargs"].update(audio_token_id=unk_token)
+        unk_token_id = torch.tensor(tokenizer.get_vocab()["<unk>"])
+        result["mm_kwargs"].update(audio_token_id=unk_token_id)
 
         return result
 
