@@ -1124,6 +1124,7 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        prefix_caching_hash_algo: str = "builtin",
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
     ) -> None:
@@ -1135,6 +1136,7 @@ class CacheConfig:
         self.is_attention_free = is_attention_free
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
+        self.prefix_caching_hash_algo = prefix_caching_hash_algo
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
         self._verify_args()
@@ -1184,6 +1186,13 @@ class CacheConfig:
             raise NotImplementedError(
                 "Prefix caching is not supported with sliding window. "
                 "Run with --disable-sliding-window to use prefix caching.")
+
+        if self.enable_prefix_caching and self.prefix_caching_hash_algo not in (
+                "builtin", "sha256"):
+            raise ValueError(
+                "Unknown prefix caching hash algorithm: "
+                f"{self.prefix_caching_hash_algo}. Must be either "
+                "'builtin' or 'sha256'.")
 
     def verify_with_parallel_config(
         self,
