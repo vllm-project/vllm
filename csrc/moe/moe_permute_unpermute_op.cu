@@ -11,10 +11,12 @@ void moe_permute(
     torch::Tensor& token_expert_indicies,            // [n_token, topk]
     const std::optional<torch::Tensor>& expert_map,  // [n_expert]
     int64_t n_expert, int64_t n_local_expert, int64_t topk,
-    torch::Tensor& permuted_input,               // [topk * n_token, hidden]
-    torch::Tensor& expert_first_token_offset,    // [n_local_expert + 1]
-    torch::Tensor& src_row_id2dst_row_id_map) {  // [n_token, topk]
-
+    const std::optional<int64_t>& align_block_size,
+    torch::Tensor&
+        permuted_input,  // [topk * n_token/align_block_size_m, hidden]
+    torch::Tensor& expert_first_token_offset,  // [n_local_expert + 1]
+    torch::Tensor& src_row_id2dst_row_id_map,  // [n_token, topk]
+    torch::Tensor& m_indices) {                // [align_expand_m]
   TORCH_CHECK(topk_weights.scalar_type() == at::ScalarType::Float,
               "topk_weights must be float32");
   TORCH_CHECK(expert_first_token_offset.scalar_type() == at::ScalarType::Long,
@@ -32,6 +34,8 @@ void moe_permute(
       "token_expert_indicies shape must be same as src_row_id2dst_row_id_map");
   auto n_token = input.sizes()[0];
   auto n_hidden = input.sizes()[1];
+  auto align_block_size_value =
+      align_block_size.has_value() ? align_block_size.value() : -1;
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const long sorter_size =
       CubKeyValueSorter::getWorkspaceSize(n_token * topk, n_expert);
@@ -40,6 +44,8 @@ void moe_permute(
       torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
   auto permuted_experts_id = torch::empty_like(topk_ids);
   auto dst_row_id2src_row_id_map = torch::empty_like(src_row_id2dst_row_id_map);
+  auto align_expert_first_token_offset =
+      torch::zeros_like(expert_first_token_offset);
 
   CubKeyValueSorter sorter{};
   int64_t* valid_num_ptr = nullptr;
@@ -57,8 +63,8 @@ void moe_permute(
     int* expert_map_ptr = reinterpret_cast<int*>(expert_map.value().data_ptr());
     valid_num_ptr =
         get_ptr<int64_t>(expert_first_token_offset) + n_local_expert;
-    preprocess_topk_id_launcher(get_ptr<int>(topk_ids), n_token * topk,
-                                expert_map_ptr, n_expert, stream);
+    preprocessTopkIdLauncher(get_ptr<int>(topk_ids), n_token * topk,
+                             expert_map_ptr, n_expert, stream);
   }
   // std::cout << "tops id " << topk_ids << std::endl;
   // expert sort topk expert id and scan expert id get expert_first_token_offset
@@ -71,15 +77,27 @@ void moe_permute(
   // std::cout << "permuted_experts_id" << permuted_experts_id << std::endl;
   // std::cout << "dst_row_id2src_row_id_map" << dst_row_id2src_row_id_map
   //           << std::endl;
+
   // dispatch expandInputRowsKernelLauncher
   MOE_DISPATCH(input.scalar_type(), [&] {
     expandInputRowsKernelLauncher<scalar_t>(
         get_ptr<scalar_t>(input), get_ptr<scalar_t>(permuted_input),
-        get_ptr<float>(topk_weights), nullptr,
+        get_ptr<float>(topk_weights), get_ptr<int>(permuted_experts_id),
         get_ptr<int>(dst_row_id2src_row_id_map),
-        get_ptr<int>(src_row_id2dst_row_id_map), n_token, valid_num_ptr,
-        n_hidden, topk, stream);
+        get_ptr<int>(src_row_id2dst_row_id_map),
+        get_ptr<int64_t>(expert_first_token_offset), n_token, valid_num_ptr,
+        n_hidden, topk, n_local_expert, align_block_size_value, stream);
   });
+
+  // get m_indices and update expert_first_token_offset with align block
+  getMIndices(get_ptr<int64_t>(expert_first_token_offset),
+              get_ptr<int64_t>(align_expert_first_token_offset),
+              get_ptr<int>(m_indices), n_local_expert, align_block_size_value,
+              stream);
+  if (align_block_size.has_value()) {
+    // update align_expert_first_token_offset
+    expert_first_token_offset.copy_(align_expert_first_token_offset);
+  }
 }
 
 void moe_unpermute(
@@ -98,9 +116,9 @@ void moe_unpermute(
   TORCH_CHECK(
       permuted_hidden_states.scalar_type() == hidden_states.scalar_type(),
       "topk_ids dtype must be same as src_row_id2dst_row_id_map");
-  TORCH_CHECK(permuted_hidden_states.size(0) == hidden_states.size(0) * topk,
-              "permuted_hidden_states must be [n_token * topk, n_hidden],"
-              "hidden_states must be [n_token, n_hidden]");
+  // TORCH_CHECK(permuted_hidden_states.size(0) == hidden_states.size(0) * topk,
+  //             "permuted_hidden_states must be [n_token * topk, n_hidden],"
+  //             "hidden_states must be [n_token, n_hidden]");
   auto n_token = hidden_states.size(0);
   auto n_hidden = hidden_states.size(1);
   auto stream = at::cuda::getCurrentCUDAStream().stream();

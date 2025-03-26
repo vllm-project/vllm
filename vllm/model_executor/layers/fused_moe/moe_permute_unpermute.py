@@ -12,6 +12,7 @@ def moe_permute(
     n_expert: int,
     n_local_expert:int,
     expert_map: Optional[torch.Tensor] = None,
+    align_block_size:Optional[int]=None
 ) -> list[torch.Tensor]:
     """
     This function expands and permutes activation to gather uncontinuous tokens 
@@ -27,18 +28,29 @@ def moe_permute(
     - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
         from the global expert space to the local expert space of the expert 
         parallel shard.
+    - align_block_size (Optional[int]): align group gemm block size for deepgemm
     Returns:
     - permuted_hidden_states (torch.Tensor): permuted activation.
     - expert_first_token_offset (torch.Tensor): offset of the first token
-       of each expert for grouped gemm.
+       of each expert for standard grouped gemm. if enable 'align_block_size'
+       expert_first_token_offset will align up to 'align_block_size'.
     - src_row_id2dst_row_id_map (torch.Tensor): idx map for moe_unpermute.
+    - m_indices: m_indices for grouped gemm in deepgemm,`m_indices[i]` records 
+    the group which the j-th row of the LHS belong to.`
     """
     n_token, n_hidden = hidden_states.shape
+    permuted_row_size = n_token * topk
+    if align_block_size is not None:
+       permuted_row_size = (permuted_row_size + n_expert * (align_block_size-1) + align_block_size - 1) // align_block_size * align_block_size
+
     permuted_hidden_states = torch.empty(
-        (n_token * topk, n_hidden),
+        (permuted_row_size, n_hidden),
         dtype=hidden_states.dtype,
         device=hidden_states.device,
     )
+    m_indices = torch.empty(permuted_row_size,
+                            dtype=torch.int32,
+                            device=hidden_states.device,).fill_(-1)
     expert_first_token_offset = torch.empty(
         n_local_expert + 1, dtype=torch.int64, device=hidden_states.device
     )
@@ -54,14 +66,17 @@ def moe_permute(
         n_expert,
         n_local_expert,
         topk,
+        align_block_size,
         permuted_hidden_states,
         expert_first_token_offset,
         src_row_id2dst_row_id_map,
+        m_indices 
     )
     return [
         permuted_hidden_states,
         expert_first_token_offset,
         src_row_id2dst_row_id_map,
+        m_indices
     ]
 
 

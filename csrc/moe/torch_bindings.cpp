@@ -67,8 +67,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "moe_permute(Tensor! input, Tensor! topk_weight, Tensor! topk_ids,"
       "Tensor! token_expert_indicies, Tensor? expert_map, int n_expert,"
       "int n_local_expert,"
-      "int topk, Tensor! permuted_input, Tensor! expert_first_token_offset, "
-      "Tensor!src_row_id2dst_row_id_map)->()");
+      "int topk, int? align_block_size,Tensor! permuted_input, Tensor! "
+      "expert_first_token_offset, Tensor! src_row_id2dst_row_id_map, Tensor! "
+      "m_indices)->()");
 
   m.def(
       "moe_unpermute(Tensor! permuted_hidden_states, Tensor! topk_weights,"
