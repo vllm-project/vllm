@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
@@ -73,6 +74,29 @@ def _apply_rotary_emb(
         return torch.cat((o1, o2), dim=-1)
     else:
         return torch.stack((o1, o2), dim=-1).flatten(-2)
+
+@CustomOp.register("kaiju_rotary_embedding")
+class KaijuRotaryEmbedding(CustomOp):
+    def __init__(
+        self, 
+        hf_config: PretrainedConfig, 
+        dtype: torch.dtype
+    ) -> None:
+        super().__init__()
+        # BC: "rope_type" was originally "type"
+        if hasattr(hf_config, "rope_scaling") and hf_config.rope_scaling is not None:
+            self.rope_type = hf_config.rope_scaling.get("rope_type", hf_config.rope_scaling.get("type"))
+        else:
+            self.rope_type = "default"
+        self.max_seq_len_cached = hf_config.max_position_embeddings
+        self.original_max_seq_len = hf_config.max_position_embeddings
+
+        self.config = hf_config
+        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+
+        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.original_inv_freq = self.inv_freq
 
 
 @CustomOp.register("rotary_embedding")

@@ -271,3 +271,61 @@ class GemmaRMSNorm(CustomOp):
                 self.forward_static)
             self._is_compiled = True
         return self.forward_native(x, residual)
+
+
+
+@CustomOp.register("kaiju_rms_norm")
+class KaijuRMSNorm(CustomOp):
+    """RMS normalization for Kaiju.
+
+    Differences from standard RMSNorm:
+        1. No learnable weight parameter
+        2. Clams output to be in range of [-4, 4]
+        3. Calculation is done in fp32 and then converted to orig_dtype
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.variance_epsilon = eps
+        self.hidden_size = hidden_size
+
+    @staticmethod
+    def forward_static(
+        variance_epsilon: float,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        input_dtype = x.dtype
+        x = x.to(torch.float32)
+        variance = x.pow(2).mean(dim=-1, keepdim=True)
+        x = x * torch.rsqrt(variance + variance_epsilon)
+        return x.to(input_dtype).clamp(-4, 4)
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        return self.forward_static(self.variance_epsilon, x)
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        if torch.compiler.is_compiling():
+            return self.forward_native(x)
+
+        if not getattr(self, "_is_compiled", False):
+            self.forward_static = torch.compile(  # type: ignore
+                self.forward_static)
+            self._is_compiled = True
+        return self.forward_native(x, residual)
+
+    def extra_repr(self) -> str:
+        s = f"hidden_size={self.hidden_size}"
+        s += f", eps={self.variance_epsilon}"
+        return s
