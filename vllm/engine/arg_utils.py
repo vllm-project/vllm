@@ -391,16 +391,13 @@ class EngineArgs:
             default='xgrammar',
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
-            'https://github.com/outlines-dev/outlines, '
-            'https://github.com/mlc-ai/xgrammar, and '
-            'https://github.com/noamgat/lm-format-enforcer.'
-            ' Can be overridden per request via guided_decoding_backend'
-            ' parameter.\n'
-            'Backend-specific options can be supplied in a comma-separated '
-            'list following a colon after the backend name. Valid backends and '
-            'all available options are: [xgrammar:no-fallback, '
-            'xgrammar:disable-any-whitespace, '
-            'outlines:no-fallback, lm-format-enforcer:no-fallback]')
+            'https://github.com/mlc-ai/xgrammar and '
+            'https://github.com/guidance-ai/llguidance.'
+            'Valid backend values are "xgrammar", "guidance", and "auto". '
+            'With "auto", we will make opinionated choices based on request'
+            'contents and what the backend libraries currently support, so '
+            'the behavior is subject to change in each release. '
+            'The default is xgrammar.')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,
@@ -1539,9 +1536,9 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Only support Xgrammar for guided decoding so far.
+        # Xgrammar and Guidance are supported.
         SUPPORTED_GUIDED_DECODING = [
-            "xgrammar", "xgrammar:disable-any-whitespace"
+            "xgrammar", "xgrammar:disable-any-whitespace", "guidance", "auto"
         ]
         if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
             _raise_or_fallback(feature_name="--guided-decoding-backend",
@@ -1616,21 +1613,11 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No TransformersModel support so far.
-        if (model_config.model_impl == ModelImpl.TRANSFORMERS
-                or model_config.model_impl == "transformers"):
-            _raise_or_fallback(
-                feature_name=f"model_impl={model_config.model_impl}",
-                recommend_to_remove=False)
-            return False
-
         # No Concurrent Partial Prefills so far.
         if (self.max_num_partial_prefills
                 != EngineArgs.max_num_partial_prefills
                 or self.max_long_partial_prefills
-                != EngineArgs.max_long_partial_prefills
-                or self.long_prefill_token_threshold
-                != EngineArgs.long_prefill_token_threshold):
+                != EngineArgs.max_long_partial_prefills):
             _raise_or_fallback(feature_name="Concurrent Partial Prefill",
                                recommend_to_remove=False)
             return False
@@ -1669,9 +1656,8 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False
 
-        # No support for device type other than CUDA, AMD (experiemntal) or
-        # TPU (experimental) so far.
-        if not (current_platform.is_cuda_alike() or current_platform.is_tpu()):
+        # Platforms must decide if they can support v1 for this model
+        if not current_platform.supports_v1(model_config=model_config):
             _raise_or_fallback(
                 feature_name=f"device type={current_platform.device_type}",
                 recommend_to_remove=False)
