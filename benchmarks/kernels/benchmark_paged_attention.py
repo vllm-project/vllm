@@ -7,9 +7,12 @@ from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
                         create_kv_caches_with_random)
+
+logger = init_logger(__name__)
 
 NUM_BLOCKS = 128 * 1024
 PARTITION_SIZE = 512
@@ -193,6 +196,9 @@ def main(
 
 
 if __name__ == '__main__':
+    logger.warning("This script benchmarks the paged attention kernel. "
+                   "By default this is no longer used in vLLM inference.")
+
     parser = FlexibleArgumentParser(
         description="Benchmark the paged attention kernel.")
     parser.add_argument("--version",
