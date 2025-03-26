@@ -53,7 +53,9 @@ class EagleProposer:
         Next Prompt Tokens: [[], [T24], []]
 
         The first forward pass in Eagle aligns its KV cache with that
-        of the target model.
+        of the target model and generated the first proposal. The
+        input to the eagle model for the first forward pass will be
+        the following.
 
         Eagle Prefill Forward Pass:
         Sequences: [S1, S2, S3]
@@ -68,7 +70,7 @@ class EagleProposer:
         due to dropping the first token.        
 
         Subsequent Eagle speculative passes generate additional tokens
-        per sequence.
+        per sequence as needed.
 
         Args:
             target_model_input_ids: Input token IDs used by the target model.
