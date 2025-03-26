@@ -464,10 +464,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         max_images = mm_config.get_limit_per_prompt("image")
         max_videos = mm_config.get_limit_per_prompt("video")
 
-        # count <image_idx></image_idx> tokens
-        # which are not in get_max_image_tokens
-        max_image_tokens = self.get_max_image_tokens(
-        ) * max_images + 4 * max_images
+        max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self.get_max_video_frames(seq_len -
                                                      max_image_tokens)
 
