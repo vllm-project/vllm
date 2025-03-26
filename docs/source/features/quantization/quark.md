@@ -74,8 +74,16 @@ calib_dataloader = DataLoader(tokenized_outputs['input_ids'],
 
 We need to set the quantization configuration, you can check
 [quark config guide](https://quark.docs.amd.com/latest/pytorch/user_guide_config_description.html)
-for further details. Here we use FP8 per-tensor quantization on weight, activate,
+for further details. Here we use FP8 per-tensor quantization on weight, activation,
 kv-cache and the quantization algorithm is autosmoothquant.
+
+:::{note}
+Note the quantization algorithm need json config file and the config file is located in
+[Quark Pytorch examples](https://quark.docs.amd.com/latest/pytorch/pytorch_examples.html),
+under the directory `examples/torch/language_modeling/llm_ptq/models`. For example,
+autosmoothquant config file for llama is
+`examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json`.
+:::
 
 ```python
 from quark.torch.quantization import (Config, QuantizationConfig,
@@ -102,7 +110,7 @@ layer_quant_config = kv_cache_quant_config.copy()
 
 # Define algorithm config with config file.
 LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE =
-    'Quark/examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json'
+    'examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json'
 algo_config = load_quant_algo_config_from_file(LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE)
 
 EXCLUDE_LAYERS = ["lm_head"]
@@ -120,7 +128,7 @@ Then we can apply the quantization. After quantizing, we need to freeze the
 quantized model first before exporting. Note that we need to export model with format of
 HuggingFace `safetensors`, you can refer to
 [HuggingFace format exporting](https://quark.docs.amd.com/latest/pytorch/export/quark_export_hf.html)
-for more exporting details.
+for more exporting format details.
 
 ```python
 from quark.torch import ModelQuantizer, ModelExporter
@@ -171,9 +179,10 @@ include the `add_bos_token=True` argument when running evaluations.
 
 Here is the resulting scores of models quantized with different Quark quantization configurations.
 All the quantization scheme is per-tensor of activation, weight and kv-cache.
-| model | Meta-Llama-3-8B-Instruct-FP8-Dynamic | Meta-Llama-3-8B-Instruct-FP8-Static | Meta-Llama-3-8B-Instruct-FP8-Static-Autosmoothquant
-|----------|----------|----------|----------|
-| gsm8k/5-shot | xxx | xxx | xxx |
+| model | Meta-Llama-3-8B-Instruct |Meta-Llama-3-8B-Instruct-FP8-Dynamic | Meta-Llama-3-8B-Instruct-FP8-Static | Meta-Llama-3-8B-Instruct-FP8-Static-Autosmoothquant |
+|----------|----------|----------|----------|----------|
+| gsm8k/flexible-extract | xxx | xxx | xxx | xxx |
+| gsm8k/strict-match | xxx | xxx | xxx | xxx |
 
 
 ## Quark Quantization Script
