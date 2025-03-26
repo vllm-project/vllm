@@ -1800,6 +1800,8 @@ class ChatCompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
     prompt_token_ids: Optional[list[int]] = None
+    stats: Optional[dict[str, Any]] = Field(
+        default=None, description="vLLM-specific engine stats.")
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
 

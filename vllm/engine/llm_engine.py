@@ -5,7 +5,7 @@ import time
 from collections import Counter as collectionsCounter
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Literal, Mapping, NamedTuple, Optional)
@@ -42,8 +42,9 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
-                           Sequence, SequenceGroup, SequenceGroupBase,
+from vllm.sequence import (ExecuteModelRequest, InbandEngineStats,
+                           ParallelSampleSequenceGroup, Sequence,
+                           SequenceGroup, SequenceGroupBase,
                            SequenceGroupMetadata, SequenceGroupOutput,
                            SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
@@ -833,6 +834,14 @@ class LLMEngine:
             success = success and scheduler.reset_prefix_cache(device)
         return success
 
+    def _get_inband_engine_stats(self, cur_stats: Stats):
+        stats_dict = asdict(cur_stats)
+        inband_fields = {
+            field_name: stats_dict[field_name]
+            for field_name in InbandEngineStats.__annotations__
+        }
+        return InbandEngineStats(**inband_fields)
+
     def _process_model_outputs(self,
                                ctx: SchedulerContext,
                                request_id: Optional[str] = None) -> None:
@@ -943,6 +952,10 @@ class LLMEngine:
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)
+                stats_snapshot = self._get_stats(scheduler_outputs, outputs,
+                                                 finished_before, skip)
+                inband_stats = self._get_inband_engine_stats(stats_snapshot)
+                seq_group.set_inband_engine_stats(inband_stats)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
@@ -977,6 +990,10 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
+                stats_snapshot = self._get_stats(scheduler_outputs, outputs,
+                                                 finished_before, skip)
+                inband_stats = self._get_inband_engine_stats(stats_snapshot)
+                seq_group.set_inband_engine_stats(inband_stats)
                 seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,

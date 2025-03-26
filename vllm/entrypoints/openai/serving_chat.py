@@ -47,6 +47,7 @@ from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sequence import InbandEngineStats
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
                                                 truncate_tool_call_ids,
@@ -162,7 +163,8 @@ class OpenAIServingChat(OpenAIServing):
         self,
         request: ChatCompletionRequest,
         raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], ChatCompletionResponse,
+    ) -> Union[AsyncGenerator[str, None], tuple[ChatCompletionResponse,
+                                                Optional[InbandEngineStats]],
                ErrorResponse]:
         """
         Chat Completion API similar to OpenAI's API.
@@ -1148,7 +1150,8 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> Union[ErrorResponse, ChatCompletionResponse]:
+    ) -> Union[ErrorResponse, tuple[ChatCompletionResponse,
+                                    Optional[InbandEngineStats]]]:
 
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
@@ -1416,6 +1419,7 @@ class OpenAIServingChat(OpenAIServing):
             prompt_token_ids=(final_res.prompt_token_ids
                               if request.return_token_ids else None),
             kv_transfer_params=final_res.kv_transfer_params,
+            stats=final_res.inband_engine_stats,
         )
 
         # Log complete response if output logging is enabled
