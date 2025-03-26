@@ -1613,14 +1613,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No TransformersModel support so far.
-        if (model_config.model_impl == ModelImpl.TRANSFORMERS
-                or model_config.model_impl == "transformers"):
-            _raise_or_fallback(
-                feature_name=f"model_impl={model_config.model_impl}",
-                recommend_to_remove=False)
-            return False
-
         # No Concurrent Partial Prefills so far.
         if (self.max_num_partial_prefills
                 != EngineArgs.max_num_partial_prefills
