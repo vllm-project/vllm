@@ -1435,7 +1435,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             if params.seed is not None:
                 params.seed += i
             seq_group = engine._add_processed_request(
-                request_id,
+                request_id_i,
                 params=params,
                 **kwargs,
             )  # type: ignore
