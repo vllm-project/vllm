@@ -33,7 +33,7 @@ docker run --privileged --net host --shm-size=16G -it \
     && python3 /workspace/vllm/examples/offline_inference/tpu.py \
     && echo TEST_6 \
     && pytest -s -v /workspace/vllm/tests/tpu/worker/test_tpu_model_runner.py" \
-    && echo TEST_6 \
+    && echo TEST_7 \
     && pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py" \
 
 
