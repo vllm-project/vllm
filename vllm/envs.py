@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
-    VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = True
+    VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
