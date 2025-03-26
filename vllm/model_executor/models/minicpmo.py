@@ -233,20 +233,20 @@ class MiniCPMODummyInputsBuilder(
 
         processor_inputs = super().get_dummy_processor_inputs(
             seq_len, mm_counts)
-        mm_data = {
-            "image":
-            processor_inputs.mm_data["image"],
-            "video":
-            processor_inputs.mm_data["video"],
+
+        audio_prompt_texts = self.info.audio_pattern * num_audios
+        audio_mm_data = {
             "audio":
             self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
 
-        audio_prompt_texts = self.info.audio_pattern * num_audios
-
-        return ProcessorInputs(prompt_text=processor_inputs.prompt_text + \
-                               audio_prompt_texts,
-                               mm_data=mm_data)
+        return ProcessorInputs(
+            prompt_text=processor_inputs.prompt_text + audio_prompt_texts,
+            mm_data={
+                **processor_inputs.mm_data,
+                **audio_mm_data,
+            },
+        )
 
 
 class MiniCPMOMultiModalProcessor(
@@ -289,7 +289,8 @@ class MiniCPMOMultiModalProcessor(
             prompts=[self.info.audio_pattern] * len(parsed_audios),
             mm_data={"audios": [[audio] for audio in parsed_audios]},
             mm_kwargs={
-                **mm_kwargs, "chunk_input": True
+                **mm_kwargs,
+                "chunk_input": True,
             },
             out_keys={"audio_features", "audio_feature_lens"},
         )
