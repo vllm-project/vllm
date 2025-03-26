@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
+from vllm.utils import direct_register_custom_op, round_up
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -1352,7 +1352,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
         M_sum = topk_ids.numel() + global_num_experts * (block_m - 1)
-        M_sum = ((M_sum + block_m - 1) // block_m) * block_m
+        M_sum = round_up(M_sum, block_m)
 
         cache1_view = (M_sum, N)
         cache3_view = (M_sum, K)
