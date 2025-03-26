@@ -181,7 +181,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
                                   return_mm_hashes)
 
-        image_token_id = self.get_hf_config().image_token_index
+        image_token_id = self.info.get_hf_config().image_token_index
         # Check that the number of image tokens in the decoder prompt matches
         # the number of images provided in mm_data
         num_image_tokens = mm_inputs['prompt_token_ids'].count(image_token_id)
