@@ -405,11 +405,7 @@ class RequestOutputFactory:
                use_cache: bool = False,
                hidden_states: Optional[torch.Tensor] = None):
         if seq_group.pooled_data is not None:
-            if hidden_states is not None:
-                return PoolingRequestOutput.from_seq_group(
-                    seq_group, hidden_states)
-            else:
-                return PoolingRequestOutput.from_seq_group(seq_group)
+            return PoolingRequestOutput.from_seq_group(seq_group)
         else:
             if hidden_states is not None:
                 return RequestOutput.from_seq_group(seq_group, use_cache,
