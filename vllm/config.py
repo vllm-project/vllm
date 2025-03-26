@@ -221,6 +221,9 @@ class ModelConfig:
         factors.append(self.trust_remote_code)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
+        # rope cos/sin cache depends on the max_position_embeddings
+        factors.append(
+            getattr(self.hf_config, "max_position_embeddings", "None"))
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __init__(
@@ -798,10 +801,18 @@ class ModelConfig:
 
     @property
     def is_deepseek_mla(self) -> bool:
-        return (hasattr(self.hf_text_config, "model_type")) \
-                and (self.hf_text_config.model_type in \
-                    ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'))\
-                and (self.hf_text_config.kv_lora_rank is not None)
+        if not hasattr(self.hf_text_config, "model_type"):
+            return False
+        elif self.hf_text_config.model_type in \
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'):
+            return self.hf_text_config.kv_lora_rank is not None
+        elif self.hf_text_config.model_type == 'eagle':
+            # if the model is an EAGLE module, check for the
+            # underlying architecture
+            return self.hf_text_config.model.model_type in \
+                    ('deepseek_v2', 'deepseek_v3') \
+                and self.hf_text_config.kv_lora_rank is not None
+        return False
 
     def get_head_size(self) -> int:
         # TODO remove hard code
@@ -852,11 +863,8 @@ class ModelConfig:
                 return self.hf_config.attn_config["kv_n_heads"]
             return self.hf_config.num_attention_heads
         if self.hf_config.model_type == "dbrx":
-            return getattr(
-                self.hf_config.attn_config,
-                "kv_n_heads",
-                self.hf_config.num_attention_heads,
-            )
+            return getattr(self.hf_config.attn_config, "kv_n_heads",
+                           self.hf_config.num_attention_heads)
 
         if self.is_attention_free:
             return 0
@@ -1208,7 +1216,6 @@ class TokenizerPoolConfig:
             The way the config will be used depends on the
             pool type.
     """
-
     pool_size: int
     pool_type: Union[str, type["BaseTokenizerGroup"]]
     extra_config: dict
@@ -1262,11 +1269,9 @@ class TokenizerPoolConfig:
             else:
                 tokenizer_pool_extra_config_parsed = (
                     tokenizer_pool_extra_config or {})
-            tokenizer_pool_config = cls(
-                tokenizer_pool_size,
-                tokenizer_pool_type,
-                tokenizer_pool_extra_config_parsed,
-            )
+            tokenizer_pool_config = cls(tokenizer_pool_size,
+                                        tokenizer_pool_type,
+                                        tokenizer_pool_extra_config_parsed)
         else:
             tokenizer_pool_config = None
         return tokenizer_pool_config
@@ -1500,7 +1505,6 @@ class ParallelConfig:
             # current node and we aren't in a ray placement group.
 
             from vllm.executor import ray_utils
-
             backend = "mp"
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_neuron():
@@ -1519,10 +1523,8 @@ class ParallelConfig:
                     backend = "ray"
                 else:
                     from ray import is_initialized as ray_is_initialized
-
                     if ray_is_initialized():
                         from ray.util import get_current_placement_group
-
                         if get_current_placement_group():
                             backend = "ray"
             self.distributed_executor_backend = backend
@@ -2659,8 +2661,8 @@ def _get_and_verify_max_len(
     for key in possible_keys:
         max_len = getattr(hf_config, key, None)
         if max_len is not None:
-            max_len_key = (key
-                           if max_len < derived_max_model_len else max_len_key)
+            max_len_key = key if max_len < derived_max_model_len \
+                else max_len_key
             derived_max_model_len = min(derived_max_model_len, max_len)
 
     # If sliding window is manually disabled, max_length should be less
@@ -2689,10 +2691,8 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            "%s. Assuming the model's maximum length is %d.",
-            possible_keys,
-            default_max_len,
-        )
+            "%s. Assuming the model's maximum length is %d.", possible_keys,
+            default_max_len)
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
