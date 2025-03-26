@@ -1117,7 +1117,7 @@ class LLMEngine:
                         output[k].hidden_states = outputs_by_sequence_group[i][k].hidden_states
             else:         
                 output = [outputs_by_sequence_group[0][i]]
-                if self.model_config.task == "embed":
+                if self.model_config.task != "embed":
                     output[0].hidden_states = outputs_by_sequence_group[0].hidden_states
 
             if not is_async:
