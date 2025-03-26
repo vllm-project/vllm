@@ -39,7 +39,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         self.bnb_4bit_use_double_quant = bnb_4bit_use_double_quant
         self.llm_int8_enable_fp32_cpu_offload = llm_int8_enable_fp32_cpu_offload
         self.llm_int8_has_fp16_weight = llm_int8_has_fp16_weight
-        self.llm_int8_skip_modules = llm_int8_skip_modules or []
+        self.ignored_modules = llm_int8_skip_modules or []
         self.llm_int8_threshold = llm_int8_threshold
 
         if self.bnb_4bit_quant_storage not in ["uint8"]:
@@ -52,7 +52,7 @@ class BitsAndBytesConfig(QuantizationConfig):
                 f"bnb_4bit_compute_dtype={self.bnb_4bit_compute_dtype}, "
                 f"bnb_4bit_quant_storage={self.bnb_4bit_quant_storage}, "
                 f"bnb_4bit_quant_type={self.bnb_4bit_quant_type}, "
-                f"llm_int8_skip_modules={self.llm_int8_skip_modules})")
+                f"llm_int8_skip_modules={self.ignored_modules})")
 
     @classmethod
     def get_name(self) -> str:
@@ -122,25 +122,25 @@ class BitsAndBytesConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
-            if is_layer_skipped_bnb(prefix, self.llm_int8_skip_modules):
+            if is_layer_skipped_bnb(prefix, self.ignored_modules):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
         return None
 
 
-def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
+def is_layer_skipped_bnb(prefix: str, ignored_modules: List[str]):
     # Split the prefix into its dot-separated components
     components = prefix.split('.')
 
     # Check if any of the skip modules exactly matches any component
     substr_check = any(module_name in components
-                       for module_name in llm_int8_skip_modules)
+                       for module_name in ignored_modules)
 
     # Allow certain layers to not be quantized
     set_components = set(".".join(components[:i + 1])
                          for i in range(len(components)))
-    set_llm_int8_skip_modules = set(llm_int8_skip_modules)
-    prefix_check = len(set_llm_int8_skip_modules & set_components) != 0
+    set_ignored_modules = set(ignored_modules)
+    prefix_check = len(set_ignored_modules & set_components) != 0
 
     return substr_check or prefix_check
 
