@@ -150,6 +150,8 @@ RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     pip install /install/*.whl
 
+RUN ln -sf $(ls ${ROCM_PATH}/lib/libamdhip64.so) /usr/lib/libamdhip64.so
+
 ARG BASE_IMAGE
 ARG HIPBLAS_COMMON_BRANCH
 ARG HIPBLASLT_BRANCH
