@@ -177,8 +177,8 @@ async def test_request_wrong_content_type(server: RemoteOpenAIServer):
 @pytest.mark.parametrize(
     "server_args",
     [
-        pytest.param(["--enable-server-load-tracking"],
-                     id="enable-server-load-tracking")
+        pytest.param(["--enable-http-middleware"],
+                     id="enable-http-middleware"),
     ],
     indirect=True,
 )
@@ -211,6 +211,22 @@ async def test_server_load(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("load"))
     assert response.status_code == HTTPStatus.OK
     assert response.json().get("server_load") == 1
+
+    metrics_response = requests.get(server.url_for("metrics"))
+    assert metrics_response.status_code == HTTPStatus.OK
+
+    metric_family = "server_load"
+
+    found_metric = False
+
+    for family in text_string_to_metric_families(metrics_response.text):
+        if family.name == metric_family:
+            for sample in family.samples:
+                if sample.value == 1:
+                    found_metric = True
+                    break
+
+    assert found_metric
 
     # Wait for the completion request to finish.
     await completion_future

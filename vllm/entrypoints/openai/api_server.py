@@ -81,7 +81,7 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import (http_error_counter, http_middleware,
-                                    load_aware_call, with_cancellation)
+                                    server_load_gauge, with_cancellation)
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -320,10 +320,15 @@ def mount_metrics(app: FastAPI):
 
         # Register http service level metrics
         http_error_counter.register(registry)
+        server_load_gauge.register(registry)
+        server_load_gauge.set_function(lambda: app.state.server_load_metrics)
 
         # Add prometheus asgi middleware to route /metrics requests
         metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
     else:
+        # Register http service level metrics
+        server_load_gauge.set_function(lambda: app.state.server_load_metrics)
+
         # Add prometheus asgi middleware to route /metrics requests
         metrics_route = Mount("/metrics", make_asgi_app())
 
@@ -455,7 +460,6 @@ async def show_version():
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)])
 @with_cancellation
-@load_aware_call
 @http_middleware
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
@@ -478,7 +482,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 @router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
 @with_cancellation
-@load_aware_call
 @http_middleware
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
@@ -498,7 +501,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 @router.post("/v1/embeddings", dependencies=[Depends(validate_json_request)])
 @with_cancellation
-@load_aware_call
 @http_middleware
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
@@ -546,7 +548,6 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 
 @router.post("/pooling", dependencies=[Depends(validate_json_request)])
 @with_cancellation
-@load_aware_call
 @http_middleware
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
@@ -566,7 +567,6 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
 
 @router.post("/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
-@load_aware_call
 @http_middleware
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
@@ -586,7 +586,6 @@ async def create_score(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
-@load_aware_call
 @http_middleware
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
     logger.warning(
@@ -598,7 +597,6 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/audio/transcriptions")
 @with_cancellation
-@load_aware_call
 @http_middleware
 async def create_transcriptions(request: Annotated[TranscriptionRequest,
                                                    Form()],
@@ -624,7 +622,6 @@ async def create_transcriptions(request: Annotated[TranscriptionRequest,
 
 @router.post("/rerank", dependencies=[Depends(validate_json_request)])
 @with_cancellation
-@load_aware_call
 @http_middleware
 async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
@@ -976,7 +973,6 @@ async def init_app_state(
     ) if model_config.runner_type == "transcription" else None
     state.task = model_config.task
 
-    state.enable_server_load_tracking = args.enable_server_load_tracking
     state.enable_http_middleware = args.enable_http_middleware
     state.server_load_metrics = 0
 
