@@ -1435,7 +1435,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             if params.seed is not None:
                 params.seed += i
             seq_group = engine._add_processed_request(
-                request_id_i,
+                request_id,
                 params=params,
                 **kwargs,
             )  # type: ignore
@@ -1460,7 +1460,6 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             prompt_adapter_request=seq_group.prompt_adapter_request,
             priority=seq_group.priority,
         )
-
         group.streaming = params.output_kind == RequestOutputKind.DELTA
         group.output_produced = False
 
