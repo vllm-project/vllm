@@ -77,7 +77,7 @@ def apply_gemm_rocm(x: torch.Tensor,
                           weight.shape[0],
                           dtype=x.dtype,
                           device=x.device)
-        ops.wvSpltK(weight, x_view, out, n, cu_count)
+        ops.wvSplitK(weight, x_view, out, n, cu_count)
         return out.view(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192:
         out = torch.empty(x_view.shape[0],

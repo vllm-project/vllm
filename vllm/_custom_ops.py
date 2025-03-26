@@ -1133,9 +1133,9 @@ def LLMM1(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
     torch.ops._rocm_C.LLMM1(a, b, out, rows_per_block)
 
 
-def wvSpltK(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor, N: int,
-            cu_count: int) -> None:
-    torch.ops._rocm_C.wvSpltK(a, b, out, N, cu_count)
+def wvSplitK(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor, N: int,
+             cu_count: int) -> None:
+    torch.ops._rocm_C.wvSplitK(a, b, out, N, cu_count)
 
 
 # moe

@@ -182,9 +182,9 @@ void LLMM1(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
 // This version targets cases where A[] fits LDS capacity
 template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSpltK_hf_sml_(const int K, const int N, const DTYPE* B,
-                    const DTYPE* __restrict__ A, DTYPE* C, const int _WvPrGrp,
-                    const int CuCount) {
+    wvSplitK_hf_sml_(const int K, const int N, const DTYPE* B,
+                     const DTYPE* __restrict__ A, DTYPE* C, const int _WvPrGrp,
+                     const int CuCount) {
   using half8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
   union bigType {
@@ -429,9 +429,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 }
 #else   // !defined(__HIP__MI300_MI250__) TODO: Add NAVI support
 template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
-__global__ void wvSpltK_hf_sml_(const int K, const int N, const DTYPE* B,
-                                const DTYPE* __restrict__ A, DTYPE* C,
-                                const int _WvPrGrp, const int CuCount) {
+__global__ void wvSplitK_hf_sml_(const int K, const int N, const DTYPE* B,
+                                 const DTYPE* __restrict__ A, DTYPE* C,
+                                 const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__MI300_MI250__) TODO: Add NAVI support
@@ -440,9 +440,9 @@ __global__ void wvSpltK_hf_sml_(const int K, const int N, const DTYPE* B,
 // This version targets cases where A[] marginally exceeds LDS capacity
 template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSpltK_hf_(const int K, const int N, const DTYPE* B,
-                const DTYPE* __restrict__ A, DTYPE* C, const int _WvPrGrp,
-                const int CuCount) {
+    wvSplitK_hf_(const int K, const int N, const DTYPE* B,
+                 const DTYPE* __restrict__ A, DTYPE* C, const int _WvPrGrp,
+                 const int CuCount) {
   using half8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
   union bigType {
@@ -712,9 +712,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
 #else   // !defined(__HIP__MI300_MI250__) TODO: Add NAVI support
 template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
-__global__ void wvSpltK_hf_(const int K, const int N, const DTYPE* B,
-                            const DTYPE* __restrict__ A, DTYPE* C,
-                            const int _WvPrGrp, const int CuCount) {
+__global__ void wvSplitK_hf_(const int K, const int N, const DTYPE* B,
+                             const DTYPE* __restrict__ A, DTYPE* C,
+                             const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__MI300_MI250__) TODO: Add NAVI support
@@ -723,9 +723,9 @@ __global__ void wvSpltK_hf_(const int K, const int N, const DTYPE* B,
 // This version targets big A[] cases, where it is much larger than LDS capacity
 template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSpltK_hf_big_(const int K, const int N, const DTYPE* B,
-                    const DTYPE* __restrict__ A, DTYPE* C, const int _WvPrGrp,
-                    const int CuCount) {
+    wvSplitK_hf_big_(const int K, const int N, const DTYPE* B,
+                     const DTYPE* __restrict__ A, DTYPE* C, const int _WvPrGrp,
+                     const int CuCount) {
   using half8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
 
@@ -1049,9 +1049,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 }
 #else   // !defined(__HIP__MI300_MI250__) TODO: Add NAVI support
 template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
-__global__ void wvSpltK_hf_big_(const int K, const int N, const DTYPE* B,
-                                const DTYPE* __restrict__ A, DTYPE* C,
-                                const int _WvPrGrp, const int CuCount) {
+__global__ void wvSplitK_hf_big_(const int K, const int N, const DTYPE* B,
+                                 const DTYPE* __restrict__ A, DTYPE* C,
+                                 const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__MI300_MI250__) TODO: Add NAVI support
@@ -1085,48 +1085,48 @@ int mindiv(int N, int div1, int div2) {
   return rtn;
 }
 
-void wvSpltK_(void* in_a, void* in_b, void* out_c, const int M_in,
-              const int K_in, const int N_in, cudaStream_t stream,
-              const int CuCount = 0) {
+void wvSplitK_(void* in_a, void* in_b, void* out_c, const int M_in,
+               const int K_in, const int N_in, cudaStream_t stream,
+               const int CuCount = 0) {
   dim3 grid(CuCount);
   half* af4 = reinterpret_cast<half*>(in_a);
   const half* bf4 = reinterpret_cast<const half*>(in_b);
   auto* c = reinterpret_cast<half*>(out_c);
 
-#define WVSPLTK(_WvPrGrp, _YTILEs, _YTILEm, _YTILEb, _UNRLs, _UNRLm, _UNRLb, \
-                _N)                                                          \
-  {                                                                          \
-    dim3 block(64, _WvPrGrp);                                                \
-    if ((K_in * N_in <= 32 * 1024) && (M_in % _YTILEs == 0)) {               \
-      int __wvPrGrp = mindiv(M_in, CuCount * _YTILEs, _WvPrGrp);             \
-      wvSpltK_hf_sml_<64, _YTILEs, _WvPrGrp, 8, _UNRLs, _N>                  \
-          <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,   \
-                                       CuCount);                             \
-    } else if (K_in * N_in <= 32 * 1024 * 1.2) {                             \
-      int __wvPrGrp = mindiv(M_in, CuCount * _YTILEm, _WvPrGrp);             \
-      wvSpltK_hf_<64, _YTILEm, _WvPrGrp, 8, _UNRLm, _N>                      \
-          <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,   \
-                                       CuCount);                             \
-    } else {                                                                 \
-      int __wvPrGrp = mindiv(M_in, CuCount * _YTILEb, _WvPrGrp);             \
-      wvSpltK_hf_big_<64, _YTILEb, _WvPrGrp, 8, _UNRLb, _N>                  \
-          <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,   \
-                                       CuCount);                             \
-    }                                                                        \
+#define WVSPLITK(_WvPrGrp, _YTILEs, _YTILEm, _YTILEb, _UNRLs, _UNRLm, _UNRLb, \
+                 _N)                                                          \
+  {                                                                           \
+    dim3 block(64, _WvPrGrp);                                                 \
+    if ((K_in * N_in <= 32 * 1024) && (M_in % _YTILEs == 0)) {                \
+      int __wvPrGrp = mindiv(M_in, CuCount * _YTILEs, _WvPrGrp);              \
+      wvSplitK_hf_sml_<64, _YTILEs, _WvPrGrp, 8, _UNRLs, _N>                  \
+          <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,    \
+                                       CuCount);                              \
+    } else if (K_in * N_in <= 32 * 1024 * 1.2) {                              \
+      int __wvPrGrp = mindiv(M_in, CuCount * _YTILEm, _WvPrGrp);              \
+      wvSplitK_hf_<64, _YTILEm, _WvPrGrp, 8, _UNRLm, _N>                      \
+          <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,    \
+                                       CuCount);                              \
+    } else {                                                                  \
+      int __wvPrGrp = mindiv(M_in, CuCount * _YTILEb, _WvPrGrp);              \
+      wvSplitK_hf_big_<64, _YTILEb, _WvPrGrp, 8, _UNRLb, _N>                  \
+          <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,    \
+                                       CuCount);                              \
+    }                                                                         \
   }
 
   switch (N_in) {
     case 1:
-      WVSPLTK(16, 2, 2, 2, 2, 2, 2, 1)  // MI308
+      WVSPLITK(16, 2, 2, 2, 2, 2, 2, 1)  // MI308
       break;
     case 2:
-      WVSPLTK(16, 2, 2, 2, 2, 2, 2, 2)  // MI308
+      WVSPLITK(16, 2, 2, 2, 2, 2, 2, 2)  // MI308
       break;
     case 3:
-      WVSPLTK(16, 4, 7, 7, 1, 1, 1, 3)  // MI308
+      WVSPLITK(16, 4, 7, 7, 1, 1, 1, 3)  // MI308
       break;
     case 4:
-      WVSPLTK(16, 4, 7, 7, 1, 1, 1, 4)  // MI308
+      WVSPLITK(16, 4, 7, 7, 1, 1, 1, 4)  // MI308
       break;
     default:
       throw std::runtime_error("Unsupported N value: " + std::to_string(M_in) +
@@ -1140,11 +1140,11 @@ void wvSpltK_(void* in_a, void* in_b, void* out_c, const int M_in,
   }
 }
 
-void wvSpltK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
-             const int64_t N_in, const int64_t CuCount) {
+void wvSplitK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
+              const int64_t N_in, const int64_t CuCount) {
   auto M = in_a.size(0);
   auto K = in_a.size(1);
   int N = N_in;
-  wvSpltK_(in_a.data_ptr(), in_b.data_ptr(), out_c.data_ptr(), M, K, N,
-           at::cuda::getCurrentCUDAStream(), CuCount);
+  wvSplitK_(in_a.data_ptr(), in_b.data_ptr(), out_c.data_ptr(), M, K, N,
+            at::cuda::getCurrentCUDAStream(), CuCount);
 }

@@ -22,9 +22,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
-      "wvSpltK(Tensor in_a, Tensor in_b, Tensor! out_c, int N_in,"
+      "wvSplitK(Tensor in_a, Tensor in_b, Tensor! out_c, int N_in,"
       "        int CuCount) -> ()");
-  rocm_ops.impl("wvSpltK", torch::kCUDA, &wvSpltK);
+  rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
 
   // Custom attention op
   // Compute the attention between an input query and the cached
