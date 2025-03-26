@@ -944,18 +944,35 @@ def _get_paddings(min_token_size: int, max_token_size: int,
                   padding_gap: int) -> list[int]:
     """Generate a list of padding size, starting from min_token_size, 
     ending with a number that can cover max_token_size
-    first increase the size to twice, 
-    then increase the padding size by padding_gap.
+    
+    If padding_gap == 0 then:
+        increase 2X each time (exponential)
+    else:
+        first increase the size to twice, 
+        then increase the padding size by padding_gap.
     """
     paddings = []
     num = min_token_size
-    while num <= padding_gap:
-        paddings.append(num)
-        num *= 2
-    num //= 2
-    while num < max_token_size:
-        num += padding_gap
-        paddings.append(num)
+
+    if padding_gap == 0:
+        logger.info("Using exponential paddings:")
+        while num <= max_token_size:
+            logger.info("    %d", num)
+            paddings.append(num)
+            num *= 2
+
+    else:
+        logger.info("Using incremental paddings:")
+        while num <= padding_gap:
+            logger.info("    %d", num)
+            paddings.append(num)
+            num *= 2
+        num //= 2
+        while num < max_token_size:
+            num += padding_gap
+            logger.info("    %d", num)
+            paddings.append(num)
+
     return paddings
 
 
