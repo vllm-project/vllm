@@ -58,8 +58,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         scale: float,
     ):
-        if self.no_lora:
-            return y
         return bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
 
     def expand(
@@ -69,8 +67,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         add_inputs: bool,
     ):
-        if self.no_lora:
-            return y
         return bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
 
     def expand_slice(
@@ -83,8 +79,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y_total_size: int,
         add_inputs: bool,
     ) -> torch.Tensor:
-        if self.no_lora:
-            return y
         return bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices,
                                  y_offset, y_slice_size, add_inputs)
 
@@ -272,10 +266,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
-        # Temporary fix to pipeline bubble bug
-        if self.no_lora or lora_a_stacked.sum() == 0:
-            return y
-
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
@@ -299,4 +289,3 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self.batch_size = 1
         self._lora_indices_per_batch[:self.batch_size].copy_(
             token_lora_tensor[:self.batch_size])
-        self.no_lora = torch.all(token_lora_tensor == -1).item()
