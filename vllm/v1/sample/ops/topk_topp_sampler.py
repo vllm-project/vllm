@@ -119,11 +119,7 @@ class TopKTopPSampler(nn.Module):
         # to significant speed up on TPU compared to using apply_top_k_top_p.
         if k is not None and p is None:
             logits = top_k_only(logits, k)
-        else:
-            # TODO Placeholder for TPU optimized topp kernel
-            # logits = apply_top_k_top_p(logits, k, p)
-            pass
-
+        # TODO Add TPU optimized topp kernel and topk+topp
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators)
 

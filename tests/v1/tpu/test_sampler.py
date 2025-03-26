@@ -15,6 +15,7 @@ if not envs.VLLM_USE_V1:
     )
 
 
+# TODO remove this test once VLLM_XLA_CHECK_RECOMPILATION does not error out
 @pytest.mark.parametrize("model_name", ["D4nt3/Qwen2.5-two-layers"])
 @pytest.mark.skipif(not current_platform.is_tpu(),
                     reason="This test needs a TPU")
@@ -77,13 +78,7 @@ def test_sampler_different(model_name: str):
     Test significantly different sampling params to assert the model produces 
     different results.
     """
-    llm = LLM(
-        model_name,
-        enforce_eager=True,
-        max_num_seqs=1,
-        max_model_len=64,
-        # TODO: setting to 0.5 or it will go OOM
-        gpu_memory_utilization=0.5)
+    llm = LLM(model_name, enforce_eager=True, max_num_seqs=1, max_model_len=64)
     prompts = [
         "Write a short story about a robot that dreams for the first time."
     ]
@@ -93,3 +88,15 @@ def test_sampler_different(model_name: str):
     sampling_params = SamplingParams(temperature=0.1, min_p=0.8, max_tokens=64)
     output2 = llm.generate(prompts, sampling_params)
     assert output[0].outputs[0].text != output2[0].outputs[0].text
+
+    # Batch-case with TopK
+    for B in [4, 16]:
+        p = prompts * B
+        sampling_params = [
+            SamplingParams(temperature=0.1, min_p=0.8, max_tokens=64, top_k=12)
+        ] * B
+        # disable on first prompt to check top k handles it
+        sampling_params[0].top_k = -1
+        sampling_params[0].min_p = 0
+        output = llm.generate(p, sampling_params)
+        assert output[0].outputs[0].text != output[-1].outputs[0].text
