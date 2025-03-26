@@ -106,6 +106,7 @@ def _lora_shrink(
     num_tokens_per_lora: torch.Tensor,  # shape [max-loras + 1]
     lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
+    no_lora_flag_cpu: torch.Tensor,  # shape [1]
     scaling: float,
 ) -> None:
     """
@@ -126,8 +127,16 @@ def _lora_shrink(
             identifies the region in token_indices_sorted_by_lora_ids that
             LoRA lora_ids[i] should process.
         lora_ids (torch.Tensor): LoRA ids to process.
+        no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates
+            if there are any requests that require LoRA.
         scaling (float): Scaling factor.
     """
+
+    assert no_lora_flag_cpu.numel() == 1
+    if no_lora_flag_cpu.item():
+        # None of the inputs require LoRA.
+        return
+
     assert inputs.dtype == lora_a_weights[0].dtype
     assert inputs.dtype in [torch.float16, torch.bfloat16]
     for weight in lora_a_weights:
@@ -138,6 +147,8 @@ def _lora_shrink(
     assert output_tensor.is_contiguous()
 
     # metadata sanity check
+    M = inputs.size(0)
+    assert token_lora_mapping.size(0) == M
     assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(
         0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
@@ -146,7 +157,6 @@ def _lora_shrink(
     (lora_ptr_tensor, lora_strides_d0, lora_strides_d1,
      lora_strides_d2) = _get_lora_a_ptr(lora_a_weights, inputs.device)
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
-    M = inputs.size(0)
     NUM_SLICES = len(lora_a_weights)
     MAX_LORAS = lora_ids.size(0)
 
@@ -218,6 +228,7 @@ def _lora_shrink_fake(
     num_tokens_per_lora: torch.Tensor,
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
+    no_lora_flag_cpu: torch.Tensor,
     scaling: float,
 ) -> None:
     return
