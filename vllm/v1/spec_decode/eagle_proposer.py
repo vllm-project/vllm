@@ -108,7 +108,7 @@ class EagleProposer:
             for i in range(len(target_model_seq_lens))
         ]
         eagle_num_tokens = sum(eagle_seq_lens)
-        num_seqs = len(target_model_seq_lens)
+        num_seqs = len(eagle_seq_lens)
         eagle_start_locs = [0] + list(
             itertools.accumulate(eagle_seq_lens))[:-1]
 
@@ -148,7 +148,7 @@ class EagleProposer:
                                           device=target_model_positions.device)
 
         # Populate Eagle model inputs for the first forward pass.
-        for req_idx in range(len(eagle_seq_lens)):
+        for req_idx in range(num_seqs):
             eagle_start_loc = eagle_start_locs[req_idx]
             eagle_seq_len = eagle_seq_lens[req_idx]
             target_model_start_loc = target_model_start_locs[req_idx]
