@@ -115,7 +115,7 @@ class TPUSupportedSamplingMetadata:
                                     device=input_batch.device),
             # TODO enable more and avoid returning None values
             top_p=None,  # input_batch.top_p[:padded_num_reqs],
-            top_k=input_batch.top_k[:],
+            top_k=input_batch.top_k[:padded_num_reqs],
             min_p=input_batch.min_p[:padded_num_reqs],
             generators=input_batch.generators,
             indices_do_sample=indices_do_sample)
