@@ -5,7 +5,13 @@ import functools
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from prometheus_client import Counter
 from starlette.background import BackgroundTask, BackgroundTasks
+
+http_error_counter = Counter(
+    "http_error_count",
+    "Total error count across requests with non 2xx response code",
+)
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -104,6 +110,39 @@ def load_aware_call(func):
                 response.background = tasks
         else:
             raw_request.app.state.server_load_metrics -= 1
+
+        return response
+
+    return wrapper
+
+
+# to avoid the performance hit of a middleware, we can use a decorator
+# to handle all http related overhead logic
+def http_middleware(func):
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        raw_request = kwargs.get("raw_request",
+                                 args[1] if len(args) > 1 else None)
+
+        if raw_request is None:
+            raise ValueError(
+                "raw_request required when http middleware is enabled")
+
+        if not raw_request.app.state.enable_http_middleware:
+            return await func(*args, **kwargs)
+
+        try:
+            response = await func(*args, **kwargs)
+        except Exception:
+            http_error_counter.inc()
+            raise
+
+        status_code = (response.status_code
+                       if hasattr(response, "status_code") else
+                       response.code if hasattr(response, "code") else None)
+        if status_code and not (200 <= status_code < 300):
+            http_error_counter.inc()
 
         return response
 

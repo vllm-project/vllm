@@ -80,7 +80,8 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import load_aware_call, with_cancellation
+from vllm.entrypoints.utils import (http_error_counter, http_middleware,
+                                    load_aware_call, with_cancellation)
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -291,6 +292,8 @@ async def validate_json_request(raw_request: Request):
     content_type = raw_request.headers.get("content-type", "").lower()
     media_type = content_type.split(";", maxsplit=1)[0]
     if media_type != "application/json":
+        if raw_request.app.state.enable_http_middleware:
+            http_error_counter.inc()
         raise HTTPException(
             status_code=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
             detail="Unsupported Media Type: Only 'application/json' is allowed"
@@ -314,6 +317,9 @@ def mount_metrics(app: FastAPI):
                      prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
+
+        # Register http service level metrics
+        http_error_counter.register(registry)
 
         # Add prometheus asgi middleware to route /metrics requests
         metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
@@ -450,6 +456,7 @@ async def show_version():
              dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
+@http_middleware
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -472,6 +479,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 @router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
+@http_middleware
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -491,6 +499,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 @router.post("/v1/embeddings", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
+@http_middleware
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
@@ -538,6 +547,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 @router.post("/pooling", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
+@http_middleware
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
     if handler is None:
@@ -557,6 +567,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
 @router.post("/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
+@http_middleware
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
@@ -576,6 +587,7 @@ async def create_score(request: ScoreRequest, raw_request: Request):
 @router.post("/v1/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
+@http_middleware
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
     logger.warning(
         "To indicate that Score API is not part of standard OpenAI API, we "
@@ -587,6 +599,7 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
 @router.post("/v1/audio/transcriptions")
 @with_cancellation
 @load_aware_call
+@http_middleware
 async def create_transcriptions(request: Annotated[TranscriptionRequest,
                                                    Form()],
                                 raw_request: Request):
@@ -612,6 +625,7 @@ async def create_transcriptions(request: Annotated[TranscriptionRequest,
 @router.post("/rerank", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
+@http_middleware
 async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
     if handler is None:
@@ -811,6 +825,8 @@ def build_app(args: Namespace) -> FastAPI:
         err = ErrorResponse(message=str(exc),
                             type="BadRequestError",
                             code=HTTPStatus.BAD_REQUEST)
+        if app.state.enable_http_middleware:
+            http_error_counter.inc()
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
@@ -961,6 +977,7 @@ async def init_app_state(
     state.task = model_config.task
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
+    state.enable_http_middleware = args.enable_http_middleware
     state.server_load_metrics = 0
 
 
