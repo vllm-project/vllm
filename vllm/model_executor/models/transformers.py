@@ -360,7 +360,7 @@ class TransformersModel(nn.Module):
 class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
                               SupportsPP):
     embedding_padding_modules = ["lm_head"]
-    embedding_modules = ["model.embed_tokens"
+    embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
