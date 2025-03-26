@@ -1099,7 +1099,7 @@ class EngineArgs:
         parser.add_argument(
             "--reasoning-parser",
             type=str,
-            choices=["deepseek_r1"],
+            choices=["deepseek_r1", "granite"],
             default=None,
             help=
             "Select the reasoning parser depending on the model that you're "
