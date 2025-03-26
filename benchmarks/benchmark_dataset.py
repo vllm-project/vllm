@@ -312,7 +312,10 @@ class RandomDataset(BenchmarkDataset):
         )
         prefix_token_ids = tokenizer(
             tokenizer.decode(double_prefix_token_ids)
-        ).input_ids[:prefix_len]
+        ).input_ids
+        while len(prefix_token_ids) < prefix_len:
+            prefix_token_ids *= 2
+        prefix_token_ids = prefix_token_ids[:prefix_len]
 
         input_low = int(input_len * range_ratio)
         output_low = int(output_len * range_ratio)
@@ -331,11 +334,10 @@ class RandomDataset(BenchmarkDataset):
                          vocab_size).tolist()
             token_sequence = prefix_token_ids + inner_seq
             total_input_len = prefix_len + int(input_lens[i])
-            prompt = tokenizer.decode(
-                tokenizer(
-                    tokenizer.decode(token_sequence)
-                ).input_ids[:total_input_len]
-            )
+            token_sequence = tokenizer(tokenizer.decode(token_sequence)).input_ids
+            while len(token_sequence) < total_input_len:
+                token_sequence *= 2
+            prompt = tokenizer.decode(token_sequence[:total_input_len])
             requests.append(
                 SampleRequest(
                     prompt=prompt,
