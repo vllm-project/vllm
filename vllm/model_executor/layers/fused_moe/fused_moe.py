@@ -1573,8 +1573,7 @@ def fused_moe(
 
 #TODO make the grouped gemm kernel consistent with scaled gemm kernel
 def cutlass_moe_fp8(
-    a_q: torch.Tensor,
-    a_scale: torch.Tensor,
+    a: torch.Tensor,
     w1_q: torch.Tensor,
     w2_q: torch.Tensor,
     w1_scale: torch.Tensor,
@@ -1585,7 +1584,8 @@ def cutlass_moe_fp8(
     c_strides1: torch.Tensor,
     ab_strides2: torch.Tensor,
     c_strides2: torch.Tensor,
-    intermediate_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
     out_dtype: torch.dtype = torch.half,
 ) -> torch.Tensor:
     """
@@ -1595,10 +1595,8 @@ def cutlass_moe_fp8(
     grouped gemm.
 
     Parameters:
-    - a_q (torch.Tensor): The fp8-quantized input tensor to the MoE layer.
+    - a (torch.Tensor): The input tensor to the MoE layer.
         Shape: [M, K]
-    - a_scale (torch.Tensor): The fp32 scale to dequantize a_q.
-        Shape: scalar or [M]
     - w1_q (torch.Tensor): The first set of fp8-quantized expert weights.
         Shape: [num_experts, K, 2N] (the weights are passed transposed)
     - w2_q (torch.Tensor): The second set of fp8-quantized expert weights.
@@ -1616,9 +1614,11 @@ def cutlass_moe_fp8(
     - ab_strides2 (torch.Tensor): The input and weights strides of the second
         grouped gemm.
     - c_strides2 (torch.Tensor): The output strides of the second grouped gemm.
-    - intermediate_scale (Optional[torch.Tensor]): The optional fp32 scale to
-        quantize and dequantize the intermediate result between the gemms.
-        Shape: scalar
+    - a1_scale (Optional[torch.Tensor]): The optional fp32 scale to quantize a.
+        Shape: scalar or [M]
+    - a2_scale (Optional[torch.Tensor]): The optional fp32 scale to
+        quantize the intermediate result between the gemms.
+        Shape: scalar or [M]
     - out_dtype (torch.Tensor): The output tensor type.
 
     Returns:
@@ -1626,14 +1626,14 @@ def cutlass_moe_fp8(
     """
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
-    assert a_q.dtype == torch.float8_e4m3fn
     assert w1_q.dtype == torch.float8_e4m3fn
     assert w2_q.dtype == torch.float8_e4m3fn
-    assert a_q.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
+    assert a.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
     assert w1_q.shape[2] == w2_q.shape[1] * 2, "Hidden size mismatch w2"
     assert w1_q.shape[0] == w2_q.shape[0], "Expert number mismatch"
-    assert a_scale.dim() == 0 or a_scale.shape[0] == 1 or a_scale.shape[
-        0] == a_q.shape[0], "Input scale shape mismatch"
+    assert a1_scale is None or a1_scale.dim(
+    ) == 0 or a1_scale.shape[0] == 1 or a1_scale.shape[0] == a.shape[
+        0], "Input scale shape mismatch"
     assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 or w1_scale.shape[
         1] == w1_q.shape[2], "W1 scale shape mismatch"
     assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 or w2_scale.shape[
@@ -1643,9 +1643,7 @@ def cutlass_moe_fp8(
         0], "w1 scales expert number mismatch"
     assert w1_q.shape[0] == w2_scale.shape[
         0], "w2 scales expert number mismatch"
-    assert intermediate_scale is None or intermediate_scale.dim(
-    ) == 0 or intermediate_scale.shape[
-        0] == 1, "Intermediate scale shape mismatch"
+    assert a2_scale is None or a2_scale.shape == a1_scale.shape, "Intermediate scale shape mismatch"  # noqa: E501
     assert ab_strides1.shape[0] == w1_q.shape[
         0], "AB Strides 1 expert number mismatch"
     assert c_strides1.shape[0] == w1_q.shape[
@@ -1657,12 +1655,15 @@ def cutlass_moe_fp8(
     assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
 
     num_experts = w1_q.size(0)
-    m = a_q.size(0)
+    m = a.size(0)
     k = w1_q.size(1)
     n = w2_q.size(1)
 
     topk = topk_ids.size(1)
-    per_act_token = a_scale.numel() != 1
+    per_act_token = a1_scale.numel() != 1
+
+    a_q, a1_scale = ops.scaled_fp8_quant(
+        a, a1_scale, use_per_token_if_dynamic=per_act_token)
     device = a_q.device
 
     expert_offsets = torch.empty((num_experts + 1),
@@ -1683,24 +1684,22 @@ def cutlass_moe_fp8(
                                 k)
 
     rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
-    rep_a_scales = a_scale[a_map] if per_act_token else a_scale
+    rep_a1_scales = a1_scale[a_map] if per_act_token else a1_scale
 
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=out_dtype)
     c2 = torch.empty((m * topk, k), device=device, dtype=out_dtype)
 
-    ops.cutlass_moe_mm(c1, rep_a_q, w1_q, rep_a_scales, w1_scale,
+    ops.cutlass_moe_mm(c1, rep_a_q, w1_q, rep_a1_scales, w1_scale,
                        expert_offsets[:-1], problem_sizes1, ab_strides1,
                        ab_strides1, c_strides1)
 
     intermediate = torch.empty((m * topk, n), device=device, dtype=out_dtype)
     torch.ops._C.silu_and_mul(intermediate, c1)
 
-    intemediate_q, intermediate_scales = ops.scaled_fp8_quant(
-        intermediate,
-        intermediate_scale,
-        use_per_token_if_dynamic=per_act_token)
+    intemediate_q, a2_scale = ops.scaled_fp8_quant(
+        intermediate, a2_scale, use_per_token_if_dynamic=per_act_token)
 
-    ops.cutlass_moe_mm(c2, intemediate_q, w2_q, intermediate_scales, w2_scale,
+    ops.cutlass_moe_mm(c2, intemediate_q, w2_q, a2_scale, w2_scale,
                        expert_offsets[:-1], problem_sizes2, ab_strides2,
                        ab_strides2, c_strides2)
 
