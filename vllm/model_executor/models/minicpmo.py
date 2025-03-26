@@ -35,8 +35,7 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, NestedTensors)
+from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
 from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
                                    DictEmbeddingItems, ModalityData,
                                    ModalityDataItems, MultiModalDataItems,
@@ -316,10 +315,10 @@ class MiniCPMOMultiModalProcessor(
         ]
         audio_inputs["audio_embed_is_patch"] = embed_is_patch
 
-        return audio_inputs
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        audio_inputs["audio_token_id"] = torch.tensor(unk_token_id)
 
-    def get_placeholder_match_pattern(self) -> str:
-        return r"\(<(image|video|audio)>./</\1>\)"
+        return audio_inputs
 
     def process_mm_inputs(
         self,
@@ -372,26 +371,6 @@ class MiniCPMOMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _minicpmo_field_config(hf_inputs)
-
-    def apply(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        return_mm_hashes: bool = False,
-    ) -> MultiModalInputs:
-        result = super().apply(
-            prompt=prompt,
-            mm_data=mm_data,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            return_mm_hashes=return_mm_hashes,
-        )
-
-        tokenizer = self.info.get_tokenizer()
-        unk_token_id = torch.tensor(tokenizer.get_vocab()["<unk>"])
-        result["mm_kwargs"].update(audio_token_id=unk_token_id)
-
-        return result
 
 
 class MultiModalProjector(nn.Module):

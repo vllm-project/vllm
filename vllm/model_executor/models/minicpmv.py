@@ -50,9 +50,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, NestedTensors,
-                                    PlaceholderRange)
+from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
 from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
                                    ImageProcessorItems, ImageSize,
                                    ModalityData, ModalityDataItems,
@@ -584,6 +582,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         ]
         image_inputs["embed_is_patch"] = embed_is_patch
 
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        image_inputs["image_token_id"] = torch.tensor(unk_token_id)
+
         return image_inputs
 
     def process_videos(
@@ -634,10 +635,12 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         ]
         video_inputs["embed_is_patch"] = embed_is_patch
 
-        return {f"video_{k}": v for k, v in video_inputs.items()}
+        video_inputs = {f"video_{k}": v for k, v in video_inputs.items()}
 
-    def get_placeholder_match_pattern(self) -> str:
-        return r"\(<(image|video)>./</\1>\)"
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        video_inputs["video_token_id"] = torch.tensor(unk_token_id)
+
+        return video_inputs
 
     def process_mm_inputs(
         self,
@@ -689,15 +692,29 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Do not support combination inputs of images and videos for now
-        # Try to handle interleaved multimodal data
         tokenizer = self.info.get_tokenizer()
+
+        input_ids = torch.tensor([tokenizer.encode(prompt)])
         mm_inputs = self.process_mm_inputs(mm_data, mm_kwargs)
 
+        # Do not support combination inputs of images and videos for now
+        # Try to handle interleaved multimodal data
+        prompt_text = (prompt if isinstance(prompt, str) else
+                       tokenizer.decode(prompt))
+
+        mm_orders = {
+            f"{modality}_orders":
+            torch.tensor([
+                match.start() for match in re.finditer(
+                    rf"\(<({modality})>./</\1>\)", prompt_text)
+            ])
+            for modality in self.info.get_supported_mm_limits()
+        }
+
         return BatchFeature({
-            "input_ids":
-            torch.tensor([tokenizer.encode(prompt)]),
+            "input_ids": input_ids,
             **mm_inputs,
+            **mm_orders,
         })
 
     def _hf_processor_applies_updates(
@@ -755,44 +772,19 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _minicpmv_field_config(hf_inputs)
 
-    def apply(
+    def _cached_apply_hf_processor(
         self,
         prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
+        mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        return_mm_hashes: bool = False,
-    ) -> MultiModalInputs:
-        tokenizer = self.info.get_tokenizer()
-        if isinstance(prompt, list):
-            prompt = tokenizer.decode(prompt)
-
-        matches = re.findall(self.get_placeholder_match_pattern(), prompt)
-        mm_orders = {
-            f"{modality}_orders":
-            torch.tensor(
-                [index for index, m in enumerate(matches) if m == modality])
-            for modality in self.info.get_supported_mm_limits()
-        }
-
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                               return_mm_hashes)
-
-        # Exclude <image_id>x</image_id> from placeholders
-        if "image" in result["mm_placeholders"] and \
-            self.info.get_model_version() == (2, 6):
-            result["mm_placeholders"]["image"] = [
-                PlaceholderRange(offset=p["offset"] + 3 + idx // 10,
-                                 length=p["length"] - 3 - idx // 10)
-                for idx, p in enumerate(result["mm_placeholders"]["image"])
-            ]
-
-        result["mm_kwargs"].update(**mm_orders)
-
-        unk_token_id = torch.tensor(tokenizer.get_vocab()["<unk>"])
-        result["mm_kwargs"].update(image_token_id=unk_token_id,
-                                   video_token_id=unk_token_id)
-
-        return result
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
+        # mm_orders cannot be cached independent of the input text
+        return self._apply_hf_processor_main(
+            prompt=prompt,
+            mm_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            enable_hf_prompt_update=True,
+        )
 
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
