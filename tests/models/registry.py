@@ -34,6 +34,11 @@ class _HfExamplesInfo:
     The minimum version of HF Transformers that is required to run this model.
     """
 
+    max_transformers_version: Optional[str] = None
+    """
+    The maximum version of HF Transformers that this model runs on.
+    """
+
     is_available_online: bool = True
     """
     Set this to ``False`` if the name of this architecture no longer exists on
@@ -57,21 +62,30 @@ class _HfExamplesInfo:
         If the installed transformers version does not meet the requirements,
         perform the given action.
         """
-        if self.min_transformers_version is None:
+        if (self.min_transformers_version is None
+                and self.max_transformers_version is None):
             return
 
         current_version = TRANSFORMERS_VERSION
-        required_version = self.min_transformers_version
-        if Version(current_version) < Version(required_version):
+        min_version = self.min_transformers_version
+        max_version = self.max_transformers_version
+        if min_version and Version(current_version) < Version(min_version):
             msg = (
                 f"You have `transformers=={current_version}` installed, but "
-                f"`transformers>={required_version}` is required to run this "
+                f"`transformers>={min_version}` is required to run this "
                 "model")
+        elif max_version and Version(current_version) > Version(max_version):
+            msg = (
+                f"You have `transformers=={current_version}` installed, but "
+                f"`transformers<={max_version}` is required to run this "
+                "model")
+        else:
+            return
 
-            if on_fail == "error":
-                raise RuntimeError(msg)
-            else:
-                pytest.skip(msg)
+        if on_fail == "error":
+            raise RuntimeError(msg)
+        else:
+            pytest.skip(msg)
 
     def check_available_online(
         self,
@@ -268,11 +282,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3",  # noqa: E501
                                                       hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
     "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
+                                max_transformers_version="4.48",
                                 trust_remote_code=True),
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
                                 extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
+                                        max_transformers_version="4.48",
                                         extras={"olmo": "allenai/Molmo-7B-O-0924"},  # noqa: E501
                                         trust_remote_code=True),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B",
