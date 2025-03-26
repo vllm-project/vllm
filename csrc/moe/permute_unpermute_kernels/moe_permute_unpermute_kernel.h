@@ -146,7 +146,7 @@ __device__ inline int64_t findTotalEltsLessThanTarget(T const* sorted_indices,
 // element is the total number of valid tokens
 __global__ void computeExpertFirstTokenOffsetKernel(
     int const* sorted_experts, int64_t const sorted_experts_len,
-    int64_t const num_experts, int64_t* expert_first_token_offset) {
+    int const num_experts, int64_t* expert_first_token_offset) {
   // First, compute the global tid. We only need 1 thread per expert.
   int const expert = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -175,9 +175,9 @@ void computeExpertFirstTokenOffset(int const* sorted_indices,
 //
 void sortAndScanExpert(int* expert_for_source_row, int* source_rows,
                        int* permuted_experts, int* permuted_rows,
-                       int64_t* expert_first_token_offset, int64_t num_rows,
-                       int64_t num_experts, int64_t num_experts_per_node,
-                       int64_t k, CubKeyValueSorter& sorter, void* sorter_ws,
+                       int64_t* expert_first_token_offset, int num_rows,
+                       int num_experts, int num_experts_per_node, int k,
+                       CubKeyValueSorter& sorter, void* sorter_ws,
                        cudaStream_t stream) {
   int64_t const expanded_num_rows = k * num_rows;
   // We need to use the full num_experts because that is the sentinel value used
@@ -193,20 +193,56 @@ void sortAndScanExpert(int* expert_for_source_row, int* source_rows,
                                 stream);
 }
 
-template <typename T, bool CHECK_SKIPPED>
+template <typename T, bool CHECK_SKIPPED, bool ALIGN_BLOCK_SIZE>
 __global__ void expandInputRowsKernel(
     T const* unpermuted_input, T* permuted_output, float* unpermuted_scales,
-    float* permuted_scales, int const* expanded_dest_row_to_expanded_source_row,
-    int* expanded_source_row_to_expanded_dest_row, int64_t const num_rows,
-    int64_t const* num_dest_rows, int64_t const cols, int64_t k) {
+    int* sorted_experts, int const* expanded_dest_row_to_expanded_source_row,
+    int* expanded_source_row_to_expanded_dest_row,
+    int64_t* expert_first_token_offset, int64_t const num_rows,
+    int64_t const* num_dest_rows, int64_t const cols, int64_t k,
+    int num_local_experts, int align_block_size) {
   // Reverse permutation map.
   // I do this so that later, we can use the source -> dest map to do the k-way
   // reduction and unpermuting. I need the reverse map for that reduction to
   // allow each threadblock to do 1 k-way reduce without atomics later in MoE. 1
   // thread block will be responsible for all k summations.
-  int64_t const expanded_dest_row = blockIdx.x;
+  int64_t expanded_dest_row = blockIdx.x;
   int64_t const expanded_source_row =
       expanded_dest_row_to_expanded_source_row[expanded_dest_row];
+  int expert_id = sorted_experts[expanded_dest_row];
+
+  extern __shared__ int64_t smem_expert_first_token_offset[];
+  int64_t align_expanded_row_accumulate = 0;
+  if constexpr (ALIGN_BLOCK_SIZE) {
+    // load g2s
+    for (int idx = threadIdx.x; idx < num_local_experts + 1;
+         idx += blockDim.x) {
+      smem_expert_first_token_offset[idx] =
+          __ldg(expert_first_token_offset + idx);
+    }
+    __syncthreads();
+    int lane_idx = threadIdx.x & 31;
+
+    if (lane_idx == 0) {
+      // set token_offset_in_expert = 0 if this expert is not local expert
+      int token_offset_in_expert =
+          expert_id >= num_local_experts
+              ? 0
+              : expanded_dest_row - smem_expert_first_token_offset[expert_id];
+      int64_t accumulate_align_offset = 0;
+#pragma unroll 1
+      for (int eidx = 1; eidx <= min(expert_id, num_local_experts); eidx++) {
+        auto n_token_in_expert = smem_expert_first_token_offset[eidx] -
+                                 smem_expert_first_token_offset[eidx - 1];
+        accumulate_align_offset += (n_token_in_expert + align_block_size - 1) /
+                                   align_block_size * align_block_size;
+      }
+      expanded_dest_row = accumulate_align_offset + token_offset_in_expert;
+    }
+    // lane0 shuffle broadcast align_expanded_dest_row
+    expanded_dest_row = __shfl_sync(0xffffffff, expanded_dest_row, 0);
+  }
+
   if (threadIdx.x == 0) {
     assert(expanded_dest_row <= INT32_MAX);
     expanded_source_row_to_expanded_dest_row[expanded_source_row] =
@@ -235,30 +271,37 @@ __global__ void expandInputRowsKernel(
          elem_index += stride) {
       dest_row_ptr[elem_index] = source_row_ptr[elem_index];
     }
-
-    if (permuted_scales && threadIdx.x == 0) {
-      int64_t const source_k_idx = source_row * k + source_k_rank;
-      permuted_scales[expanded_dest_row] = unpermuted_scales[source_k_idx];
-    }
   }
 }
 template <typename T>
 void expandInputRowsKernelLauncher(
     T const* unpermuted_input, T* permuted_output, float* unpermuted_scales,
-    float* permuted_scales, int const* expanded_dest_row_to_expanded_source_row,
-    int* expanded_source_row_to_expanded_dest_row, int64_t const num_rows,
+    int* sorted_experts, int const* expanded_dest_row_to_expanded_source_row,
+    int* expanded_source_row_to_expanded_dest_row,
+    int64_t* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_valid_tokens_ptr, int64_t const cols, int const k,
-    cudaStream_t stream) {
+    int num_local_experts, const int& align_block_size, cudaStream_t stream) {
   int64_t const blocks = num_rows * k;
   int64_t const threads = 256;
-  auto func = (num_valid_tokens_ptr != nullptr)
-                  ? expandInputRowsKernel<T, true>
-                  : expandInputRowsKernel<T, false>;
-  func<<<blocks, threads, 0, stream>>>(unpermuted_input, permuted_output,
-                                       unpermuted_scales, permuted_scales,
-                                       expanded_dest_row_to_expanded_source_row,
-                                       expanded_source_row_to_expanded_dest_row,
-                                       num_rows, num_valid_tokens_ptr, cols, k);
+  using FuncPtr = decltype(&expandInputRowsKernel<T, true, true>);
+  FuncPtr func_map[2][2] = {
+      {&expandInputRowsKernel<T, false, false>,
+       &expandInputRowsKernel<T, false, true>},
+      {&expandInputRowsKernel<T, true, false>,
+       &expandInputRowsKernel<T, true, true>},
+  };
+  bool is_check_skip = num_valid_tokens_ptr != nullptr;
+  bool is_align_block_size = align_block_size != -1;
+  auto func = func_map[is_check_skip][is_align_block_size];
+
+  int64_t smem_size = sizeof(int64_t) * (num_local_experts + 1);
+
+  func<<<blocks, threads, smem_size, stream>>>(
+      unpermuted_input, permuted_output, unpermuted_scales, sorted_experts,
+      expanded_dest_row_to_expanded_source_row,
+      expanded_source_row_to_expanded_dest_row, expert_first_token_offset,
+      num_rows, num_valid_tokens_ptr, cols, k, num_local_experts,
+      align_block_size);
 }
 
 template <class T, class U>
@@ -363,8 +406,8 @@ void finalizeMoeRoutingKernelLauncher(
       num_valid_ptr);
 }
 
-__global__ void preprocess_topk_id(int* topk_id_ptr, int size,
-                                   int* expert_map_ptr, int num_experts) {
+__global__ void preprocessTopkIdKernel(int* topk_id_ptr, int size,
+                                       int* expert_map_ptr, int num_experts) {
   auto tidx = threadIdx.x;
   auto bidx = blockIdx.x;
   auto lidx = tidx & 31;
@@ -395,12 +438,69 @@ __global__ void preprocess_topk_id(int* topk_id_ptr, int size,
   }
 }
 
-void preprocess_topk_id_launcher(int* topk_id_ptr, int size,
-                                 int* expert_map_ptr, int num_experts,
-                                 cudaStream_t stream) {
+void preprocessTopkIdLauncher(int* topk_id_ptr, int size, int* expert_map_ptr,
+                              int num_experts, cudaStream_t stream) {
   int block = std::min(size, 1024);
   int grid = (size + block - 1) / block;
   int smem_size = (num_experts) * sizeof(int);
-  preprocess_topk_id<<<grid, block, smem_size, stream>>>(
+  preprocessTopkIdKernel<<<grid, block, smem_size, stream>>>(
       topk_id_ptr, size, expert_map_ptr, num_experts);
+}
+
+template <bool ALIGN_BLOCK_SIZE>
+__global__ void getMIndicesKernel(int64_t* expert_first_token_offset,
+                                  int64_t* align_expert_first_token_offset,
+                                  int* m_indices, const int num_local_expert,
+                                  const int align_block_size) {
+  int eidx = blockIdx.x;
+  int tidx = threadIdx.x;
+  extern __shared__ int64_t smem_expert_first_token_offset[];
+  for (int i = tidx; i <= num_local_expert; i += blockDim.x) {
+    smem_expert_first_token_offset[tidx] = __ldg(expert_first_token_offset + i);
+  }
+  __syncthreads();
+  auto last_token_offset = smem_expert_first_token_offset[eidx + 1];
+  auto first_token_offset = smem_expert_first_token_offset[eidx];
+  int n_token_in_expert = last_token_offset - first_token_offset;
+
+  if constexpr (ALIGN_BLOCK_SIZE) {
+    // round up to ALIGN_BLOCK_SIZE
+    int64_t accumulate_align_offset = 0;
+    for (int i = 1; i <= eidx + 1; i++) {
+      int n_token = smem_expert_first_token_offset[i] -
+                    smem_expert_first_token_offset[i - 1];
+      accumulate_align_offset =
+          accumulate_align_offset + (n_token + align_block_size - 1) /
+                                        align_block_size * align_block_size;
+      if (i == eidx) {
+        first_token_offset = accumulate_align_offset;
+      }
+      // last block store align_expert_first_token_offset
+      if (eidx == num_local_expert - 1 && threadIdx.x == 0) {
+        align_expert_first_token_offset[i] = accumulate_align_offset;
+      }
+    }
+  }
+  for (int idx = tidx; idx < n_token_in_expert; idx += blockDim.x) {
+    // update m_indice with expert id
+    m_indices[first_token_offset + idx] = eidx;
+  }
+}
+
+void getMIndices(int64_t* expert_first_token_offset,
+                 int64_t* align_expert_first_token_offset, int* m_indices,
+                 int num_local_expert, const int align_block_size,
+                 cudaStream_t stream) {
+  int block = 256;
+  int grid = num_local_expert;
+  int smem_size = sizeof(int64_t) * (num_local_expert + 1);
+  if (align_block_size == -1) {
+    getMIndicesKernel<false><<<grid, block, smem_size, stream>>>(
+        expert_first_token_offset, align_expert_first_token_offset, m_indices,
+        num_local_expert, align_block_size);
+  } else {
+    getMIndicesKernel<true><<<grid, block, smem_size, stream>>>(
+        expert_first_token_offset, align_expert_first_token_offset, m_indices,
+        num_local_expert, align_block_size);
+  }
 }
