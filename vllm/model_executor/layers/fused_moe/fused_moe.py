@@ -1449,7 +1449,8 @@ def _moe_permute(
     if use_dg:
         # Replicate activations
         max_token_id = top_k_num * tokens_in_chunk
-        pad_size = round_up(sorted_token_ids.numel(), block_m) - sorted_token_ids.numel()
+        pad_size = round_up(sorted_token_ids.numel(),
+                            block_m) - sorted_token_ids.numel()
         if pad_size > 0:
             sorted_token_ids = torch.nn.functional.pad(sorted_token_ids,
                                                        (0, pad_size),
