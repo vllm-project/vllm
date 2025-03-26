@@ -1,17 +1,18 @@
 #pragma once
 
-#define MOE_SWITCH(TYPE, ...)                       \
-  at::ScalarType _st = ::detail::scalar_type(TYPE); \
-  switch (_st) {                                    \
-    __VA_ARGS__                                     \
-    default:                                        \
-      TORCH_CHECK(false, "dispatch fail!")          \
+#define MOE_SWITCH(TYPE, ...)                                     \
+  at::ScalarType _st = ::detail::scalar_type(TYPE);               \
+  switch (_st) {                                                  \
+    __VA_ARGS__                                                   \
+    default:                                                      \
+      TORCH_CHECK(false, "[moe permute]data type dispatch fail!") \
   }
 
 #define MOE_DISPATCH_CASE(enum_type, ...)                  \
   case enum_type: {                                        \
     using scalar_t = ScalarType2CudaType<enum_type>::type; \
-    return __VA_ARGS__();                                  \
+    __VA_ARGS__();                                         \
+    break;                                                 \
   }
 #define MOE_DISPATCH_FLOAT_CASE(...)                          \
   MOE_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)       \
