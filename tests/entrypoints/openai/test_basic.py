@@ -7,6 +7,7 @@ import openai
 import pytest
 import pytest_asyncio
 import requests
+from prometheus_client.parser import text_string_to_metric_families
 
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -219,3 +220,72 @@ async def test_server_load(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("load"))
     assert response.status_code == HTTPStatus.OK
     assert response.json().get("server_load") == 0
+
+
+@pytest.mark.parametrize(
+    "server_args",
+    [
+        pytest.param(["--enable-http-middleware"],
+                     id="enable-http-middleware"),
+    ],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_http_error_count(server: RemoteOpenAIServer):
+    # Check initial server load
+    response = requests.get(server.url_for("load"))
+    assert response.status_code == HTTPStatus.OK
+    assert response.json().get("server_load") == 0
+
+    NUM_EXPECTED_ERRORS = 3
+
+    # exceed max tokens, should raise exception
+    bad_request_1 = requests.post(
+        server.url_for("v1/completions"),
+        headers={"Content-Type": "application/json"},
+        json={
+            "prompt": "Give me a long story",
+            "max_tokens": 999999999,
+            "temperature": 0,
+        },
+    )
+    # invalid payload
+    bad_request_2 = requests.post(
+        server.url_for("v1/completions"),
+        headers={"Content-Type": "application/json"},
+        json={
+            "bad_prompt": "Give me a long story",
+            "max_tokens": 100,
+            "temperature": 0,
+        },
+    )
+    # invalid content type
+    bad_request_3 = requests.post(
+        server.url_for("v1/completions"),
+        headers={"Content-Type": "bad/application/json"},
+        json={
+            "prompt": "Give me a long story",
+            "max_tokens": 100,
+            "temperature": 0,
+        },
+    )
+
+    assert bad_request_1.status_code != 200
+    assert bad_request_2.status_code != 200
+    assert bad_request_3.status_code != 200
+
+    response = requests.get(server.url_for("metrics"))
+    assert response.status_code == HTTPStatus.OK
+
+    metric_family = "http_error_count"
+
+    found_metric = False
+
+    for family in text_string_to_metric_families(response.text):
+        if family.name == metric_family:
+            for sample in family.samples:
+                if sample.value == NUM_EXPECTED_ERRORS:
+                    found_metric = True
+                    break
+
+    assert found_metric

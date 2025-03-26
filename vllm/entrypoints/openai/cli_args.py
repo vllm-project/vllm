@@ -267,6 +267,12 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help=
         "If set to True, enable tracking server_load_metrics in the app state."
     )
+    parser.add_argument(
+        "--enable-http-middleware",
+        action="store_true",
+        default=False,
+        help="If set to True, enable http middleware decorator.",
+    )
 
     return parser
 
