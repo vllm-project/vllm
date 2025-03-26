@@ -5,7 +5,7 @@ import time
 from collections import Counter as collectionsCounter
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
                     List, Mapping, NamedTuple, Optional)
@@ -45,7 +45,8 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
+from vllm.sequence import (ExecuteModelRequest, InbandEngineStats,
+                           ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceStatus)
@@ -222,7 +223,6 @@ class LLMEngine:
                 "This should not happen. As a workaround, try using "
                 "LLMEngine.from_vllm_config(...) or explicitly set "
                 "VLLM_USE_V1=0 or 1 and report this issue on Github.")
-
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -237,7 +237,6 @@ class LLMEngine:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config  # noqa
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
-
         logger.info(
             "Initializing a V0 LLM engine (v%s) with config: %s, "
             "use_cached_outputs=%s, ",
@@ -1013,6 +1012,14 @@ class LLMEngine:
             seq_group.update_num_computed_tokens(
                 seq_group_meta.token_chunk_size)
 
+    def _get_inband_engine_stats(self, cur_stats: Stats):
+        stats_dict = asdict(cur_stats)
+        inband_fields = {
+            field_name: stats_dict[field_name]
+            for field_name in InbandEngineStats.__annotations__
+        }
+        return InbandEngineStats(**inband_fields)
+
     def _process_model_outputs(self,
                                ctx: SchedulerContext,
                                request_id: Optional[str] = None) -> None:
@@ -1156,6 +1163,10 @@ class LLMEngine:
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)
+                stats_snapshot = self._get_stats(scheduler_outputs, outputs,
+                                                 finished_before, skip)
+                inband_stats = self._get_inband_engine_stats(stats_snapshot)
+                seq_group.set_inband_engine_stats(inband_stats)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
@@ -1199,6 +1210,10 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
+                stats_snapshot = self._get_stats(scheduler_outputs, outputs,
+                                                 finished_before, skip)
+                inband_stats = self._get_inband_engine_stats(stats_snapshot)
+                seq_group.set_inband_engine_stats(inband_stats)
                 seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,

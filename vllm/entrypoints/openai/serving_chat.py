@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob
+from vllm.sequence import InbandEngineStats, Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
                                                 truncate_tool_call_ids)
@@ -119,7 +119,8 @@ class OpenAIServingChat(OpenAIServing):
         self,
         request: ChatCompletionRequest,
         raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], ChatCompletionResponse,
+    ) -> Union[AsyncGenerator[str, None], tuple[ChatCompletionResponse,
+                                                Optional[InbandEngineStats]],
                ErrorResponse]:
         """
         Chat Completion API similar to OpenAI's API.
@@ -769,11 +770,11 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> Union[ErrorResponse, ChatCompletionResponse]:
+    ) -> Union[ErrorResponse, tuple[ChatCompletionResponse,
+                                    Optional[InbandEngineStats]]]:
 
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
-
         try:
             async for res in result_generator:
                 final_res = res
@@ -786,7 +787,6 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         choices: list[ChatCompletionResponseChoice] = []
-
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
             token_ids = output.token_ids
@@ -949,7 +949,7 @@ class OpenAIServingChat(OpenAIServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
-        )
+        ), final_res.inband_engine_stats
 
         return response
 
