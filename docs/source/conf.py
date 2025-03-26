@@ -85,6 +85,7 @@ html_static_path = ["_static"]
 html_js_files = ["custom.js"]
 html_css_files = ["custom.css"]
 
+myst_heading_anchors = 2
 myst_url_schemes = {
     'http': None,
     'https': None,

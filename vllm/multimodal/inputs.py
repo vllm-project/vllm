@@ -16,7 +16,8 @@ from PIL.Image import Image
 from transformers import BatchFeature
 from typing_extensions import NotRequired, TypeAlias
 
-from vllm.utils import JSONTree, full_groupby, is_list_of, json_map_leaves
+from vllm.jsontree import JSONTree, json_map_leaves
+from vllm.utils import full_groupby, is_list_of
 
 if TYPE_CHECKING:
     from .hasher import MultiModalHashDict
@@ -433,6 +434,10 @@ class MultiModalFieldConfig:
             :func:`MultiModalFieldConfig.flat`
         """
 
+        if size_per_item.ndim != 1:
+            raise ValueError("size_per_item should be a 1-D tensor, "
+                             f"but found shape: {size_per_item.shape}")
+
         slice_idxs = [0, *accumulate(size_per_item)]
         slices = [
             slice(slice_idxs[i], slice_idxs[i + 1])
@@ -659,6 +664,13 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         )
 
         return cast(BatchedTensorInputs, json_mapped)
+
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key)
+
+        for items in self._items_by_modality.values():
+            for item in items:
+                item.pop(key, None)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):

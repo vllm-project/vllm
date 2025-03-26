@@ -127,7 +127,7 @@ __device__ __forceinline__ T from_float(const float& inp) {
 
 template <typename T>
 __device__ __forceinline__ _B16x4 from_floatx4(const floatx4& inp) {
-  union tmpcvt {
+  [[maybe_unused]] union tmpcvt {
     uint16_t u;
     _Float16 f;
     __hip_bfloat16 b;
@@ -160,7 +160,7 @@ __device__ __forceinline__ _B16x4 from_floatx4(const floatx4& inp) {
 template <typename T>
 __device__ __forceinline__ _B16x4 addx4(const _B16x4& inp1,
                                         const _B16x4& inp2) {
-  union tmpcvt {
+  [[maybe_unused]] union tmpcvt {
     uint16_t u;
     _Float16 f;
     __hip_bfloat16 b;
@@ -284,18 +284,18 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     int max_ctx_blocks, const float* k_scale, const float* v_scale) {
   // clang-format on
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;
-  const int warpid = threadIdx.x / WARP_SIZE;
-  const int laneid = threadIdx.x % WARP_SIZE;
+  const auto warpid = threadIdx.x / WARP_SIZE;
+  const auto laneid = threadIdx.x % WARP_SIZE;
   const int lane4id = laneid % 4;
   const int lane16id = laneid % 16;
   const int rowid = laneid / 16;
 
-  const int seq_idx = blockIdx.x;
-  const int partition_idx = blockIdx.y;
+  const auto seq_idx = blockIdx.x;
+  const auto partition_idx = blockIdx.y;
 
   constexpr int T_PAR_SIZE = 256;  // token partition size set to 256
 
-  const int max_num_partitions = gridDim.y;
+  const auto max_num_partitions = gridDim.y;
 
   const int context_len = context_lens[seq_idx];
 
@@ -308,8 +308,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   constexpr int GQA_RATIO4 = DIVIDE_ROUND_UP(GQA_RATIO, 4);
 
-  __shared__ float shared_qk_max[NWARPS][16 + 1];
-  __shared__ float shared_exp_sum[NWARPS][16 + 1];
+  [[maybe_unused]] __shared__ float shared_qk_max[NWARPS][16 + 1];
+  [[maybe_unused]] __shared__ float shared_exp_sum[NWARPS][16 + 1];
   // shared_logits is used for multiple purposes
   __shared__ _B16x4 shared_logits[NWARPS][4][16][4];
 
@@ -346,9 +346,9 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // can be interpreted as B8x16 for 8 bit types
   _B16x8 Klocal[TLOOP][QKHELOOP];
 
-  const int wg_start_head_idx = blockIdx.z * GQA_RATIO;
-  const int wg_start_kv_head_idx = blockIdx.z;
-  const int total_num_heads = gridDim.z * GQA_RATIO;
+  const auto wg_start_head_idx = blockIdx.z * GQA_RATIO;
+  const auto wg_start_kv_head_idx = blockIdx.z;
+  const auto total_num_heads = gridDim.z * GQA_RATIO;
 
   // for QK mfma, tokens in multiples of TOKENS_PER_WARP are spread across warps
   // each mfma takes QH16xT16x16HE across warp
@@ -426,7 +426,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const cache_t* k_ptr2 = k_ptr + kblock_number * kv_block_stride;
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
-    const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
+    [[maybe_unused]] const int kglobal_token_idx =
+        partition_start_token_idx + klocal_token_idx;
     const int kphysical_block_offset = klocal_token_idx % BLOCK_SIZE;
     const cache_t* k_ptr3 = k_ptr2 + kphysical_block_offset * KX;
 
@@ -788,14 +789,14 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     int max_ctx_blocks, const float* k_scale, const float* v_scale) {
   // clang-format on
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;
-  const int warpid = threadIdx.x / WARP_SIZE;
-  const int laneid = threadIdx.x % WARP_SIZE;
+  const auto warpid = threadIdx.x / WARP_SIZE;
+  const auto laneid = threadIdx.x % WARP_SIZE;
   const int lane4id = laneid % 4;
 
-  const int seq_idx = blockIdx.x;
-  const int partition_idx = blockIdx.y;
-  const int partition_size = blockDim.x;
-  const int max_num_partitions = gridDim.y;
+  const auto seq_idx = blockIdx.x;
+  const auto partition_idx = blockIdx.y;
+  const auto partition_size = blockDim.x;
+  const auto max_num_partitions = gridDim.y;
 
   const int context_len = context_lens[seq_idx];
   const int partition_start_token_idx = partition_idx * partition_size;
@@ -837,8 +838,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     qk_max[h] = -FLT_MAX;
   }
 
-  const int wg_start_head_idx = blockIdx.z * GQA_RATIO;
-  const int wg_start_kv_head_idx = blockIdx.z;
+  const auto wg_start_head_idx = blockIdx.z * GQA_RATIO;
+  const auto wg_start_kv_head_idx = blockIdx.z;
 
   const int warp_start_token_idx =
       partition_start_token_idx + warpid * WARP_SIZE;
@@ -856,7 +857,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
 
     const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
     // token id within partition
-    const int local_token_idx = threadIdx.x;
+    const auto local_token_idx = threadIdx.x;
     // token id within sequence
     const int global_token_idx = partition_start_token_idx + local_token_idx;
 
@@ -1125,7 +1126,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
 
   __syncthreads();
 
-  const int num_heads = gridDim.z * GQA_RATIO;
+  const auto num_heads = gridDim.z * GQA_RATIO;
   float* max_logits_ptr =
       max_logits + seq_idx * num_heads * max_num_partitions + partition_idx;
   float* exp_sums_ptr =
@@ -1267,14 +1268,14 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                            // max_num_partitions, head_size]
     const int* __restrict__ context_lens,  // [num_seqs]
     const int max_num_partitions) {
-  const int num_heads = gridDim.x;
-  const int head_idx = blockIdx.x;
-  const int seq_idx = blockIdx.y;
+  const auto num_heads = gridDim.x;
+  const auto head_idx = blockIdx.x;
+  const auto seq_idx = blockIdx.y;
   const int context_len = context_lens[seq_idx];
   const int num_partitions = DIVIDE_ROUND_UP(context_len, PARTITION_SIZE);
-  constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
-  const int warpid = threadIdx.x / WARP_SIZE;
-  const int laneid = threadIdx.x % WARP_SIZE;
+  [[maybe_unused]] constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
+  const auto warpid = threadIdx.x / WARP_SIZE;
+  [[maybe_unused]] const auto laneid = threadIdx.x % WARP_SIZE;
 
   __shared__ float shared_global_exp_sum;
   // max num partitions supported is warp_size * NPAR_LOOPS
@@ -1293,7 +1294,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 
   #pragma unroll
     for (int i = 0; i < NPAR_LOOPS; i++) {
-      const int partition_no = i * WARP_SIZE + threadIdx.x;
+      const auto partition_no = i * WARP_SIZE + threadIdx.x;
       valid_partition[i] =
           (partition_no < num_partitions) ? partition_no : last_valid_partition;
     }
@@ -1323,7 +1324,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     }
   #pragma unroll
     for (int i = 0; i < NPAR_LOOPS; i++) {
-      const int partition_no = i * WARP_SIZE + threadIdx.x;
+      const auto partition_no = i * WARP_SIZE + threadIdx.x;
       rescaled_exp_sum[i] *= (partition_no < num_partitions)
                                  ? expf(reg_max_logit[i] - max_logit)
                                  : 0.0f;
@@ -1335,7 +1336,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     }
   #pragma unroll
     for (int i = 0; i < NPAR_LOOPS; i++) {
-      const int partition_no = i * WARP_SIZE + threadIdx.x;
+      const auto partition_no = i * WARP_SIZE + threadIdx.x;
       shared_exp_sums[partition_no] = rescaled_exp_sum[i];
     }
 

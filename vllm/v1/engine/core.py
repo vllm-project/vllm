@@ -19,9 +19,13 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import get_exception_traceback, zmq_socket_ctx
-from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
-from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
+from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
+                        zmq_socket_ctx)
+from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
+                                         unify_kv_cache_configs)
+from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
@@ -65,7 +69,23 @@ class EngineCore:
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
-        self.scheduler = Scheduler(
+        if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
+            Scheduler = resolve_obj_by_qualname(
+                vllm_config.scheduler_config.scheduler_cls)
+        else:
+            Scheduler = vllm_config.scheduler_config.scheduler_cls
+
+        # This warning can be removed once the V1 Scheduler interface is
+        # finalized and we can maintain support for scheduler classes that
+        # implement it
+        if Scheduler is not V1Scheduler:
+            logger.warning(
+                "Using configured V1 scheduler class %s. "
+                "This scheduler interface is not public and "
+                "compatibility may not be maintained.",
+                vllm_config.scheduler_config.scheduler_cls)
+
+        self.scheduler: SchedulerInterface = Scheduler(
             scheduler_config=vllm_config.scheduler_config,
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
@@ -102,15 +122,27 @@ class EngineCore:
         # memory can be allocated for kv cache.
         available_gpu_memory = self.model_executor.determine_available_memory()
 
+        assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
-        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
-                                                available_gpu_memory)
-        num_gpu_blocks_set = set(config.num_blocks
-                                 for config in kv_cache_configs)
-        assert len(num_gpu_blocks_set) == 1, (
-            f"num_gpu_blocks need to be the same across workers, "
-            f"but they are different: {num_gpu_blocks_set}")
-        num_gpu_blocks = num_gpu_blocks_set.pop()
+        kv_cache_configs = [
+            get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
+                                available_gpu_memory_one_worker)
+            for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
+            zip(kv_cache_specs, available_gpu_memory)
+        ]
+
+        # Since we use a shared centralized controller, we need the
+        # `kv_cache_config` to be consistent across all workers to make sure
+        # all the memory operators can be applied to all workers.
+        unify_kv_cache_configs(kv_cache_configs)
+
+        # All workers have the same kv_cache_config except layer names, so use
+        # an arbitrary one to get the number of blocks.
+        assert all([
+            cfg.num_blocks == kv_cache_configs[0].num_blocks
+            for cfg in kv_cache_configs
+        ])
+        num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution
@@ -137,7 +169,7 @@ class EngineCore:
         req = Request.from_engine_core_request(request)
         if req.use_structured_output:
             # Start grammar compilation asynchronously
-            self.structured_output_manager.populate_cache(req)
+            self.structured_output_manager.grammar_init(req)
 
         self.scheduler.add_request(req)
 
@@ -161,16 +193,6 @@ class EngineCore:
                 scheduler_stats=self.scheduler.make_stats(),
             )
         scheduler_output = self.scheduler.schedule()
-
-        # This case may occur when the only unfinished requests are
-        # structured output requests where the grammar has not finished
-        # compiling yet, so there's nothing to run.
-        if scheduler_output.total_num_scheduled_tokens == 0:
-            return EngineCoreOutputs(
-                outputs=[],
-                scheduler_stats=self.scheduler.make_stats(),
-            )
-
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
@@ -205,23 +227,18 @@ class EngineCore:
                 self.batch_queue.put_nowait(
                     (future, scheduler_output))  # type: ignore
 
-        # If all requests are scheduled or the job queue is full,
+        scheduled_batch = (scheduler_output is not None
+                           and scheduler_output.total_num_scheduled_tokens > 0)
+
+        # If no more requests can be scheduled and the job queue is not empty,
         # block until the first batch in the job queue is finished.
-        if (scheduler_output is None
-                or scheduler_output.total_num_scheduled_tokens == 0):
-            try:
-                future, scheduler_output = self.batch_queue.get(
-                    timeout=POLLING_TIMEOUT_S)
-                # Blocking until the first result is available.
-                model_output = future.result()
-                self.batch_queue.task_done()
-                engine_core_outputs = self.scheduler.update_from_output(
-                    scheduler_output, model_output)
-            except queue.Empty:
-                # If the queue is empty (timeout at .get), return
-                # an empty EngineCoreOutputs for logging.
-                engine_core_outputs = EngineCoreOutputs(
-                    outputs=[], scheduler_stats=self.scheduler.make_stats())
+        if not scheduled_batch and not self.batch_queue.empty():
+            future, scheduler_output = self.batch_queue.get_nowait()
+            # Blocking until the first result is available.
+            model_output = future.result()
+            self.batch_queue.task_done()
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output)
 
         return engine_core_outputs
 
@@ -239,6 +256,9 @@ class EngineCore:
 
     def wake_up(self):
         self.model_executor.wake_up()
+
+    def is_sleeping(self) -> bool:
+        return self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
         self.model_executor.collective_rpc("execute_dummy_batch")
