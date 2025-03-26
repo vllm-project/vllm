@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.platforms import current_platform
 
 
@@ -70,7 +71,11 @@ def apply_gemm_rocm(x: torch.Tensor,
     n = x_view.shape[0]
     cu_count = current_platform.get_cu_count()
 
-    if bias is not None or x.dtype != torch.float16 or k % 8 != 0:
+    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM is True and \
+                    bias is None and \
+                    x.dtype is torch.float16 and k % 8 == 0)
+
+    if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
     if m > 8 and n <= 4:
         out = torch.empty(x_view.shape[0],

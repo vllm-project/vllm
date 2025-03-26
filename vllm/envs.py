@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+    VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
@@ -515,6 +516,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
+             ("true", "1")),
+
+    # use rocm skinny gemms
+    "VLLM_ROCM_USE_SKINNY_GEMM":
+    lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
              ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
