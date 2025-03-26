@@ -545,14 +545,18 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         parsed_images = (self._get_data_parser().parse_mm_data({
             "image": images
-        }).get_items("image", ImageProcessorItems))
+        }).get_items("image",
+                     (MiniCPMVImageEmbeddingItems, ImageProcessorItems)))
 
-        image_inputs = self._base_call_hf_processor(
-            prompts=[self.info.image_pattern] * len(parsed_images),
-            mm_data={"images": [[image] for image in parsed_images]},
-            mm_kwargs=mm_kwargs,
-            out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
-        )
+        if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
+            image_inputs = {}
+        else:
+            image_inputs = self._base_call_hf_processor(
+                prompts=[self.info.image_pattern] * len(parsed_images),
+                mm_data={"images": [[image] for image in parsed_images]},
+                mm_kwargs=mm_kwargs,
+                out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
+            )
 
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
@@ -589,20 +593,25 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         parsed_videos = (self._get_data_parser().parse_mm_data({
             "video": videos
-        }).get_items("video", VideoProcessorItems))
+        }).get_items("video",
+                     (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)))
 
-        max_slice_num = self.info.get_video_max_slice_num()
-
-        video_inputs = self._base_call_hf_processor(
-            prompts=[
-                self.info.image_pattern * len(video) for video in parsed_videos
-            ],
-            mm_data={"images": list(parsed_videos)},
-            mm_kwargs={
-                **mm_kwargs, "max_slice_nums": max_slice_num
-            },
-            out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
-        )
+        if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
+            video_inputs = {}
+        else:
+            video_inputs = self._base_call_hf_processor(
+                prompts=[
+                    self.info.image_pattern * len(video)
+                    for video in parsed_videos
+                ],
+                mm_data={"images": list(parsed_videos)},
+                mm_kwargs={
+                    **mm_kwargs,
+                    "max_slice_nums":
+                    self.info.get_video_max_slice_num(),
+                },
+                out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
+            )
 
         frame_sizes = [
             parsed_videos.get_frame_size(i) for i in range(len(parsed_videos))

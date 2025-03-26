@@ -287,32 +287,44 @@ class MiniCPMOMultiModalProcessor(
 
         parsed_audios = (self._get_data_parser().parse_mm_data({
             "audio": audios
-        }).get_items("audio", AudioProcessorItems))
+        }).get_items("audio",
+                     (MiniCPMOAudioEmbeddingItems, AudioProcessorItems)))
 
-        audio_inputs = self._base_call_hf_processor(
-            prompts=[self.info.audio_pattern] * len(parsed_audios),
-            mm_data={"audios": [[audio] for audio in parsed_audios]},
-            mm_kwargs={
-                **mm_kwargs,
-                "chunk_input": True,
-            },
-            out_keys={"audio_features", "audio_feature_lens"},
-        )
+        if isinstance(parsed_audios, MiniCPMOAudioEmbeddingItems):
+            audio_inputs = {}
 
-        # Avoid padding since we need the output for each audio to be
-        # independent of other audios for the cache to work correctly
-        unpadded_audio_features = [
-            feat[:, :feature_len] for feat, feature_len in zip(
-                audio_inputs["audio_features"],
-                audio_inputs["audio_feature_lens"],
+            audio_lens = [
+                self.info.get_audio_len_by_num_chunks(
+                    sum(map(len,
+                            parsed_audios.get(i)["audio_embeds"])))
+                for i in range(len(parsed_audios))
+            ]
+        else:
+            audio_inputs = self._base_call_hf_processor(
+                prompts=[self.info.audio_pattern] * len(parsed_audios),
+                mm_data={"audios": [[audio] for audio in parsed_audios]},
+                mm_kwargs={
+                    **mm_kwargs,
+                    "chunk_input": True,
+                },
+                out_keys={"audio_features", "audio_feature_lens"},
             )
-        ]
-        audio_inputs["audio_features"] = unpadded_audio_features
 
-        audio_lens = [
-            parsed_audios.get_audio_length(i)
-            for i in range(len(parsed_audios))
-        ]
+            # Avoid padding since we need the output for each audio to be
+            # independent of other audios for the cache to work correctly
+            unpadded_audio_features = [
+                feat[:, :feature_len] for feat, feature_len in zip(
+                    audio_inputs["audio_features"],
+                    audio_inputs["audio_feature_lens"],
+                )
+            ]
+            audio_inputs["audio_features"] = unpadded_audio_features
+
+            audio_lens = [
+                parsed_audios.get_audio_length(i)
+                for i in range(len(parsed_audios))
+            ]
+
         audio_repl_features = [
             self.get_audio_prompt_texts(audio_len) for audio_len in audio_lens
         ]
@@ -365,8 +377,7 @@ class MiniCPMOMultiModalProcessor(
             if isinstance(audios, MiniCPMOAudioEmbeddingItems):
                 single_audio_embeds = audios.get(item_idx)["audio_embeds"]
                 audio_len = self.info.get_audio_len_by_num_chunks(
-                    sum(chunk_embeds.shape[0]
-                        for chunk_embeds in single_audio_embeds))
+                    sum(map(len, single_audio_embeds)))
             else:
                 audio_len = audios.get_audio_length(item_idx)
 
