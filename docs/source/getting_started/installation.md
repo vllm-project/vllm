@@ -26,4 +26,3 @@ installation/ai_accelerator
   - Google TPU
   - Intel Gaudi
   - AWS Neuron
-  - OpenVINO
