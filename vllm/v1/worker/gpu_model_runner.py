@@ -45,7 +45,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 if TYPE_CHECKING:
     import xgrammar as xgr
 
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput    
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -127,6 +127,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
+        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
@@ -150,8 +151,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
+            
             # TODO: find a better way to check if we are using ngram.
-            assert self.speculative_config.ngram_prompt_lookup_min, \
+            assert self.speculative_config.method == "ngram", \          
                     "Currently, only ngram spec decode is supported in V1."
             if get_pp_group().is_last_rank:
                 self.drafter = NgramProposer()
@@ -159,7 +161,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # This usually takes less than 1 second.
                 self.drafter.propose(
                     np.zeros(1024, dtype=np.int32),
-                    self.speculative_config.ngram_prompt_lookup_min,
+                    self.speculative_config.prompt_lookup_min,
+                    self.speculative_config.prompt_lookup_max,                    
                     self.speculative_config.num_speculative_tokens,
                 )
                 self.rejection_sampler = RejectionSampler()
@@ -566,10 +569,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 non_blocking=True)
 
         # Prepare for cascade attention if needed.
-        common_prefix_len = self._compute_cascade_attn_prefix_len(
-            num_scheduled_tokens,
-            scheduler_output.num_common_prefix_blocks,
-        )
+        common_prefix_len = 0
+        if self.cascade_attn_enabled:
+            common_prefix_len = self._compute_cascade_attn_prefix_len(
+                num_scheduled_tokens,
+                scheduler_output.num_common_prefix_blocks,
+            )
         attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
@@ -1127,16 +1132,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     logprobs=logprobs_lists,
                     prompt_logprobs_dict=prompt_logprobs_dict,
                     hidden_states=hidden_states)
-            else:
-                return ModelRunnerOutput(
-                    req_ids=self.input_batch.req_ids,
-                    req_id_to_index=self.input_batch.req_id_to_index,
-                    sampled_token_ids=valid_sampled_token_ids,
-                    spec_token_ids=spec_token_ids,
-                    logprobs=logprobs_lists,
-                    prompt_logprobs_dict=prompt_logprobs_dict,
-                )
-
+    
+        return ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=spec_token_ids,
+            logprobs=logprobs_lists,
+            prompt_logprobs_dict=prompt_logprobs_dict,
+        )
     def generate_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],

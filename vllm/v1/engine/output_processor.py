@@ -86,7 +86,7 @@ class RequestState:
         detokenizer: IncrementalDetokenizer,
         max_tokens_param: Optional[int],
         arrival_time: float,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ):
         self.request_id = request_id
@@ -113,7 +113,7 @@ class RequestState:
         request: EngineCoreRequest,
         parent_req: Optional[ParentRequest],
         request_index: int,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ) -> "RequestState":
         if not request.sampling_params.detokenize:
@@ -155,7 +155,7 @@ class RequestState:
 
         # In follow up, we will switch to invariant where EngineCore
         # does not stream partial prefills.
-        if not finished and (self.is_prefilling or final_only):
+        if not finished and final_only:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
@@ -281,7 +281,7 @@ class OutputProcessor:
         request: EngineCoreRequest,
         parent_req: Optional[ParentRequest] = None,
         request_index: int = 0,
-        queue: Optional[asyncio.Queue[RequestOutput]] = None,
+        queue: Optional[RequestOutputCollector] = None,
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
@@ -361,7 +361,7 @@ class OutputProcessor:
             #
             # Follow up will aggregate partial prompt logprobs
             # in the EngineCore.
-            req_state.is_prefilling = not new_token_ids
+            req_state.is_prefilling = False
 
             # 2) Detokenize the token ids into text and perform stop checks.
             stop_string = req_state.detokenizer.update(
@@ -379,7 +379,7 @@ class OutputProcessor:
                     new_token_ids, finish_reason, stop_reason, hidden_states):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
-                    req_state.queue.put_nowait(request_output)
+                    req_state.queue.put(request_output)
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
