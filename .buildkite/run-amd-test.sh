@@ -134,9 +134,10 @@ if [[ $commands == *"--shard-id="* ]]; then
     # assign shard-id for each shard
     commands_gpu=${commands//"--shard-id= "/"--shard-id=${GPU} "}
     echo "Shard ${GPU} commands:$commands_gpu"
+    echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
     docker run \
-        --device /dev/kfd --device /dev/dri \
-        --network host \
+        --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+        --network=host \
         --shm-size=16gb \
         --rm \
         -e HIP_VISIBLE_DEVICES="${GPU}" \
@@ -163,9 +164,10 @@ if [[ $commands == *"--shard-id="* ]]; then
     fi
   done
 else
+  echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
-          --device /dev/kfd --device /dev/dri \
-          --network host \
+          --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+          --network=host \
           --shm-size=16gb \
           --rm \
           -e HIP_VISIBLE_DEVICES=0 \
