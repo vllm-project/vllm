@@ -697,7 +697,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                                                    seq_group_meta_with_hidden)
                 self.previous_hidden_states.prune(seq_group_meta_with_hidden)
 
-
         if not skip_proposer:
             # We prepare the prefill hidden states here so that there no
             # additional complexity in worker for spec_decode vs non_spec_decode
