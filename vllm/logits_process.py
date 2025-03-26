@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, Union, Any
+from typing import Any, Callable, Union
 
 import torch
 
