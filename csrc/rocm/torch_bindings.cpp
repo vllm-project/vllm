@@ -14,6 +14,18 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // vLLM custom ops for rocm
 
+  // Custom gemm op for matrix-vector multiplication
+  rocm_ops.def(
+      "LLMM1(Tensor in_a, Tensor in_b, Tensor! out_c, int rows_per_block) -> "
+      "()");
+  rocm_ops.impl("LLMM1", torch::kCUDA, &LLMM1);
+
+  // Custom gemm op for skinny matrix-matrix multiplication
+  rocm_ops.def(
+      "wvSpltK(Tensor in_a, Tensor in_b, Tensor! out_c, int N_in,"
+      "        int CuCount) -> ()");
+  rocm_ops.impl("wvSpltK", torch::kCUDA, &wvSpltK);
+
   // Custom attention op
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.

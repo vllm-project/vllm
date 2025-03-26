@@ -4,6 +4,9 @@ from typing import Optional, Tuple
 
 import torch
 
+from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
+
 
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
@@ -61,4 +64,26 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
 def apply_gemm_rocm(x: torch.Tensor,
                     weight: torch.Tensor,
                     bias: Optional[torch.Tensor] = None):
-    pass
+    x_view = x.view(-1, x.size(-1))
+    m = weight.shape[0]
+    k = weight.shape[1]
+    n = x_view.shape[0]
+    cu_count = current_platform.get_cu_count()
+
+    if bias is not None or x.dtype != torch.float16 or k % 8 != 0:
+        return torch.nn.functional.linear(x, weight, bias)
+    if m > 8 and n <= 4:
+        out = torch.empty(x_view.shape[0],
+                          weight.shape[0],
+                          dtype=x.dtype,
+                          device=x.device)
+        ops.wvSpltK(weight, x_view, out, n, cu_count)
+        return out.view(*x.shape[:-1], weight.shape[0])
+    elif m % 4 == 0 and n == 1 and k <= 8192:
+        out = torch.empty(x_view.shape[0],
+                          weight.shape[0],
+                          dtype=x.dtype,
+                          device=x.device)
+        ops.LLMM1(weight, x_view, out, 4)
+        return out.view(*x.shape[:-1], weight.shape[0])
+    return torch.nn.functional.linear(x, weight, bias)

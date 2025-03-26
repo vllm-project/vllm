@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from functools import lru_cache, wraps
+from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
@@ -249,3 +249,9 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fnuz
         else:
             return torch.float8_e4m3fn
+
+    @classmethod
+    @cache
+    def get_cu_count(cls, device_id: int = 0) -> int:
+        return torch.cuda.get_device_properties(
+            device_id).multi_processor_count

@@ -1127,6 +1127,17 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
                                     ssm_states, pad_slot_id)
 
 
+# ROCm skinny gemms
+def LLMM1(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
+          rows_per_block: int) -> None:
+    torch.ops._rocm_C.LLMM1(a, b, out, rows_per_block)
+
+
+def wvSpltK(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor, N: int,
+            cu_count: int) -> None:
+    torch.ops._rocm_C.wvSpltK(a, b, out, N, cu_count)
+
+
 # moe
 def moe_sum(input: torch.Tensor, output: torch.Tensor):
     torch.ops._moe_C.moe_sum(input, output)
