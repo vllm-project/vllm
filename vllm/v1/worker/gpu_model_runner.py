@@ -1048,7 +1048,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
         else:
-            # TODO(woosuk): Optimize the memory usage.
+            # When indexing with a tensor (bonus_logits_indices), PyTorch
+            # creates a new tensor with separate storage from the original
+            # logits tensor. This means any in-place operations on bonus_logits
+            # won't affect the original logits tensor.
             bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
             sampler_output = self.model.sample(
                 logits=bonus_logits,
@@ -1056,7 +1059,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             bonus_token_ids = sampler_output.sampled_token_ids
 
-            # TODO(woosuk): Optimize the memory usage.
+            # Just like `bonus_logits`, `target_logits` is a new tensor with
+            # separate storage from the original `logits` tensor. Therefore,
+            # it is safe to update `target_logits` in place.
             target_logits = logits[spec_decode_metadata.target_logits_indices]
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
@@ -1144,6 +1149,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not num_prompt_logprobs_dict:
             return {}
 
+        in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
@@ -1159,16 +1165,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
                 self.device, non_blocking=True)
 
+            # Set up target LogprobsTensors object.
+            logprobs_tensors = in_progress_dict.get(req_id)
+            if not logprobs_tensors:
+                # Create empty logprobs CPU tensors for the entire prompt.
+                # If chunked, we'll copy in slice by slice.
+                logprobs_tensors = LogprobsTensors.empty_cpu(
+                    num_prompt_tokens - 1, num_prompt_logprobs + 1)
+                in_progress_dict[req_id] = logprobs_tensors
+
             # Determine number of logits to retrieve.
-            start_tok = request.num_computed_tokens + 1
+            start_idx = request.num_computed_tokens
+            start_tok = start_idx + 1
             num_remaining_tokens = num_prompt_tokens - start_tok
-            if num_tokens < num_remaining_tokens:
+            if num_tokens <= num_remaining_tokens:
                 # This is a chunk, more tokens remain.
+                # In the == case, there are no more prompt logprobs to produce
+                # but we want to defer returning them to the next step where we
+                # have new generated tokens to return.
                 num_logits = num_tokens
             else:
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
+                prompt_logprobs_dict[req_id] = logprobs_tensors
+
+            if num_logits <= 0:
+                # This can happen for the final chunk if we prefilled exactly
+                # (num_prompt_tokens - 1) tokens for this request in the prior
+                # step. There are no more prompt logprobs to produce.
+                continue
 
             # Get the logits corresponding to this req's prompt tokens.
             # If this is a partial request (i.e. chunked prefill),
@@ -1189,19 +1215,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logprobs, num_prompt_logprobs, tgt_token_ids)
 
             # Transfer GPU->CPU async.
-            prompt_logprobs_dict[req_id] = LogprobsTensors(
-                token_ids.to("cpu", non_blocking=True),
-                logprobs.to("cpu", non_blocking=True),
-                ranks.to("cpu", non_blocking=True),
-            )
+            chunk_slice = slice(start_idx, start_idx + num_logits)
+            logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
+                token_ids, non_blocking=True)
+            logprobs_tensors.logprobs[chunk_slice].copy_(logprobs,
+                                                         non_blocking=True)
+            logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
+                ranks, non_blocking=True)
 
         # Remove requests that have completed prefill from the batch
         # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
             del num_prompt_logprobs_dict[req_id]
+            del in_progress_dict[req_id]
 
         # Must synchronize the non-blocking GPU->CPU transfers.
-        torch.cuda.synchronize()
+        if prompt_logprobs_dict:
+            torch.cuda.synchronize()
 
         return prompt_logprobs_dict
 
@@ -1464,34 +1494,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        if len(kv_cache_config.groups) > 1:
+        if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
         kv_caches: dict[str, torch.Tensor] = {}
 
-        for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
-            tensor_config = kv_cache_config.tensors[layer_name]
-            assert tensor_config.size % layer_spec.page_size_bytes == 0
-            num_blocks = tensor_config.size // layer_spec.page_size_bytes
-            if isinstance(layer_spec, FullAttentionSpec):
-                kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
-                    layer_spec.head_size)
-                dtype = layer_spec.dtype
-                kv_caches[layer_name] = torch.zeros(kv_cache_shape,
-                                                    dtype=dtype,
-                                                    device=self.device)
-            else:
-                raise NotImplementedError
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            for layer_name in kv_cache_group.layer_names:
+                tensor_config = kv_cache_config.tensors[layer_name]
+                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                # `num_blocks` is the number of blocks the model runner can use.
+                # `kv_cache_config.num_blocks` is the number of blocks that
+                # KVCacheManager may allocate.
+                # Since different GPUs may have different number of layers and
+                # different memory capacities, `num_blocks` can be different on
+                # different GPUs, and `kv_cache_config.num_blocks` is set to
+                # the min of all `num_blocks`. Verify it here.
+                assert num_blocks >= kv_cache_config.num_blocks
+                if isinstance(kv_cache_spec, FullAttentionSpec):
+                    kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
+                    kv_caches[layer_name] = torch.zeros(kv_cache_shape,
+                                                        dtype=dtype,
+                                                        device=self.device)
+                else:
+                    # TODO: add new branches when introducing more types of
+                    # KV cache specs.
+                    raise ValueError("Unknown KV cache spec type.")
 
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
@@ -1503,7 +1545,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
-        kv_cache_spec: KVCacheSpec = {}
+        kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
                 continue

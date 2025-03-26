@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import bisect
 import time
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
@@ -11,6 +12,7 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
@@ -73,6 +75,10 @@ class TPUModelRunner:
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
         self.device = device
+        self.check_recompilation = envs.VLLM_XLA_CHECK_RECOMPILATION
+        if self.check_recompilation:
+            self.num_xla_graphs = xr.get_num_cached_compilation_graph()
+        self.enforce_eager = model_config.enforce_eager
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
 
@@ -165,6 +171,10 @@ class TPUModelRunner:
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
+        self.num_tokens_paddings = _get_paddings(
+            min_token_size=16,
+            max_token_size=self.max_num_tokens,
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
@@ -274,9 +284,6 @@ class TPUModelRunner:
                 req_data.num_computed_tokens)
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
-        # Check if the batch has changed. If not, we can skip copying the
-        # sampling metadata from CPU to GPU.
-        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -295,16 +302,13 @@ class TPUModelRunner:
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        # TODO This slices tensors to copy to device, triggering recompilation.
-        if batch_changed:
-            self.input_batch.refresh_sampling_metadata()
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     def get_model(self) -> nn.Module:
         assert self.model is not None
         return self.model
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
@@ -315,7 +319,7 @@ class TPUModelRunner:
 
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
-        kv_cache_spec: KVCacheSpec = {}
+        kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in forward_ctx.items():
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention, MLA.
@@ -423,7 +427,7 @@ class TPUModelRunner:
 
         # Do the padding and copy the tensors to the TPU.
         padded_total_num_scheduled_tokens = _get_padded_token_len(
-            total_num_scheduled_tokens)
+            self.num_tokens_paddings, total_num_scheduled_tokens)
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
@@ -574,7 +578,6 @@ class TPUModelRunner:
 
         # Prepare inputs
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
-
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -592,14 +595,12 @@ class TPUModelRunner:
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids
             inputs_embeds = None
-        sampling_metadata = self.input_batch.sampling_metadata
         num_reqs = self.input_batch.num_reqs
-        # NOTE (NickLucche) here we sync with TPU: if there's any shape
-        # mismatch in pre-processing, it will trigger a small recompilation
-        # of the code thus far. Forward graph remains untouched.
+        # NOTE (NickLucche) here we sync with TPU: sampling params tensors
+        # are copied to device in chunks of pre-compiled padded shape to
+        # avoid recompilations.
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_sampling_metadata(sampling_metadata, logits_indices,
-                                    num_reqs, self.device)
+            from_input_batch(self.input_batch, logits_indices)
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
@@ -671,6 +672,12 @@ class TPUModelRunner:
             logprobs=None,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
+        # Check there is no new graph compilation, all the graphs should be
+        # captured and compiled during warming up.
+        if self.check_recompilation and not self.enforce_eager:
+            curr_cached_graph = xr.get_num_cached_compilation_graph()
+            assert self.num_xla_graphs == curr_cached_graph, (
+                "Recompilation after warm up is detected.")
         return model_runner_output
 
     def load_model(self) -> None:
@@ -761,55 +768,53 @@ class TPUModelRunner:
         logger.info("Compiling the model with different input shapes.")
 
         start = time.perf_counter()
-        num_tokens = 16
-        while True:
+        for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(self.kv_caches, num_tokens)
             xm.mark_step()
-            if num_tokens >= self.max_num_tokens:
-                break
-            num_tokens *= 2
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
 
         logger.info("Compiling sampling with different input shapes.")
         start = time.perf_counter()
-        num_tokens = 16
         hsize = self.model_config.get_hidden_size()
         device = self.device
         # Compile sampling step for different model+sampler outputs in bucketed
         # n_tokens x max_num_reqs. Graph is really small so this is fine.
-        while True:
+        for num_tokens in self.num_tokens_paddings:
             num_reqs_to_sample = MIN_NUM_SEQS
             dummy_hidden = torch.randn((num_tokens, hsize),
                                        device=device,
                                        dtype=torch.bfloat16)
             while True:
-                # Default metadata is an all_greedy setup. But since the
-                # `do_argmax` flag is a tensor, we still compile the full graph
-                meta = self.input_batch.sampling_metadata
                 indices = torch.zeros(
                     num_reqs_to_sample,
                     dtype=torch.int32,
                     device=device,
                 )
+                xm.mark_step()
                 sampling_meta = TPUSupportedSamplingMetadata.\
-                    from_sampling_metadata(meta, indices,
-                                           num_reqs_to_sample, device)
+                    from_input_batch(self.input_batch, indices)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
-                self.model.sample_from_hidden(dummy_hidden, sampling_meta)
-                xm.mark_step()
+                out = self.model.sample_from_hidden(dummy_hidden,
+                                                    sampling_meta)
+                out = out.cpu()
                 if num_reqs_to_sample >= self.max_num_reqs:
                     break
                 num_reqs_to_sample *= 2
-            if num_tokens >= self.max_num_tokens:
-                break
-            num_tokens *= 2
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
+        # Record the number cached XLA graph after warming up, this will be
+        # used for checking there is no additional graph compilation during
+        # runtime execution.
+        if self.check_recompilation:
+            total_cached_graphs = xr.get_num_cached_compilation_graph()
+            num_compiled_graphs = total_cached_graphs - self.num_xla_graphs
+            logger.info("Compiled %d XLA graphs.", num_compiled_graphs)
+            self.num_xla_graphs += num_compiled_graphs
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -818,31 +823,33 @@ class TPUModelRunner:
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        if len(kv_cache_config.groups) > 1:
+        if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
         kv_caches: dict[str, torch.Tensor] = {}
 
-        for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
-            tensor_config = kv_cache_config.tensors[layer_name]
-            assert tensor_config.size % layer_spec.page_size_bytes == 0
-            num_blocks = tensor_config.size // layer_spec.page_size_bytes
-            if isinstance(layer_spec, FullAttentionSpec):
-                kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
-                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
-                    layer_spec.head_size)
-                dtype = layer_spec.dtype
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            for layer_name in kv_cache_group.layer_names:
+                tensor_config = kv_cache_config.tensors[layer_name]
+                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                if isinstance(kv_cache_spec, FullAttentionSpec):
+                    kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
 
-                tpu_k_cache = torch.zeros(kv_cache_shape,
-                                          dtype=dtype,
-                                          device=self.device)
-                tpu_v_cache = torch.zeros_like(tpu_k_cache)
+                    tpu_k_cache = torch.zeros(kv_cache_shape,
+                                              dtype=dtype,
+                                              device=self.device)
+                    tpu_v_cache = torch.zeros_like(tpu_k_cache)
 
-                kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
-            else:
-                raise NotImplementedError
+                    kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                else:
+                    raise NotImplementedError
 
         bind_kv_cache(
             kv_caches,
@@ -889,6 +896,7 @@ class ModelWrapperV1(nn.Module):
 
         return hidden_states
 
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_hidden(
         self,
         hidden_states: torch.Tensor,
@@ -902,10 +910,9 @@ class ModelWrapperV1(nn.Module):
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
         logits = self.compute_logits(sample_hidden_states)
-        # Greedy sampling can't be run without branching the graph on Sampler.
-        # Therefore do_argmax/all_greedy is checked here in a xla-friendly way.
-        # NOTE do_argmax is a scalar, this is just an optimized if/else.
-        out_tokens = torch.where(sampling_metadata.do_argmax,
+        # Optimized greedy sampling branch, tracing both paths in a single pass
+        # NOTE all_greedy is a scalar, this is just an optimized if/else.
+        out_tokens = torch.where(sampling_metadata.all_greedy,
                         torch.argmax(logits, dim=-1, keepdim=True),
                         self.sample(logits, sampling_metadata)\
                                             .sampled_token_ids)
@@ -928,12 +935,33 @@ def _get_padded_number(n: int, multiple: int) -> int:
     return ((n + multiple - 1) // multiple) * multiple
 
 
-def _get_padded_token_len(x: int) -> int:
-    if x <= 16:
-        return 16
-    return 1 << (x - 1).bit_length()
-
-
 def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
     res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
     return min(res, upper_limit)
+
+
+def _get_paddings(min_token_size: int, max_token_size: int,
+                  padding_gap: int) -> list[int]:
+    """Generate a list of padding size, starting from min_token_size, 
+    ending with a number that can cover max_token_size
+    first increase the size to twice, 
+    then increase the padding size by padding_gap.
+    """
+    paddings = []
+    num = min_token_size
+    while num <= padding_gap:
+        paddings.append(num)
+        num *= 2
+    num //= 2
+    while num < max_token_size:
+        num += padding_gap
+        paddings.append(num)
+    return paddings
+
+
+def _get_padded_token_len(paddings: list[int], x: int) -> int:
+    """Return the first element in paddings list greater or equal to x.
+    """
+    index = bisect.bisect_left(paddings, x)
+    assert index < len(paddings)
+    return paddings[index]

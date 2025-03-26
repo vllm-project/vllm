@@ -37,11 +37,12 @@ def create_proposer(
 ) -> Union[NgramProposer, EagleProposer]:
     """Factory function for creating proposer instances."""
 
-    if speculative_config.type == "ngram":
-        return NgramProposer(n=speculative_config.ngram_n,
-                             k=speculative_config.ngram_k)
+    if speculative_config.method == "ngram":
+        return NgramProposer(min_n=speculative_config.prompt_lookup_min,
+                             max_n=speculative_config.prompt_lookup_max,
+                             k=speculative_config.num_speculative_tokens)
 
-    elif speculative_config.type == "eagle":
+    elif speculative_config.method == "eagle":
         return EagleProposer()
 
     else:

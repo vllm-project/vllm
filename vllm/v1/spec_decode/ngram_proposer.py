@@ -12,14 +12,16 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 class NgramProposer(ProposerInterface):
 
-    def __init__(self, n, k):
-        self.n = n
+    def __init__(self, min_n, max_n, k):
+        self.min_n = min_n
+        self.max_n = max_n
         self.k = k
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
         self.propose(
             np.zeros(1024, dtype=np.int32),
-            self.n,
+            self.min_n,
+            self.max_n,
             self.k,
         )
 
@@ -51,7 +53,8 @@ class NgramProposer(ProposerInterface):
             input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             drafter_output = self.propose(
                 input_batch.token_ids_cpu[i, :end_idx],
-                self.n,
+                self.min_n,
+                self.max_n,
                 self.k,
             )
             if drafter_output is None or len(drafter_output) == 0:
@@ -63,7 +66,8 @@ class NgramProposer(ProposerInterface):
     def propose(
         self,
         context_token_ids: np.ndarray,
-        n: int,
+        min_n: int,
+        max_n: int,
         k: int,
     ) -> Optional[np.ndarray]:
         """Proposes the next sequence of tokens based on n-gram pattern 
@@ -74,7 +78,8 @@ class NgramProposer(ProposerInterface):
         Args:
             context_token_ids: Numpy array of token IDs representing the 
                                context sequence.
-            n: Length of the n-gram to match.
+            min_n: Minimum length of the n-gram to match.
+            max_n: Maximum length of the n-gram to match.
             k: Number of tokens follow the match. If there are less 
                than k tokens follow the match, we will return 
                the maximum amount of tokens until the end.
@@ -85,14 +90,21 @@ class NgramProposer(ProposerInterface):
             None: If no matching n-gram pattern is found.
         
         Example:
-            If context_token_ids = [1,2,3,4,2,3], n = 2, and k = 4:
+            If context_token_ids = [1,2,3,4,2,3], min_n = 2, max_n = 3, and
+            k = 4:
+            - The last 3 (= max_n) tokens [4,2,3] cannot find a match.
             - The last 2 tokens [2,3] will be matched against the previous 
               4 tokens [1,2,3,4].
             - Finding a match of [2,3] would return the tokens that 
               followed that pattern. Here we will return [4,2,3] because 
               we only have three tokens after the match.
         """
-        return _find_subarray_kmp(context_token_ids, n, k)
+        # TODO(woosuk): Optimize this.
+        for n in range(max_n, min_n - 1, -1):
+            result = _find_subarray_kmp(context_token_ids, n, k)
+            if result is not None:
+                return result
+        return None
 
 
 @jit(nopython=True)

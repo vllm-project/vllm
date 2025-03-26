@@ -783,7 +783,6 @@ class LLMEngine:
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
-            request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
@@ -1250,7 +1249,7 @@ class LLMEngine:
         return None
 
     def _advance_to_next_step(
-            self, output: List[SamplerOutput],
+            self, output: SamplerOutput,
             seq_group_metadata_list: List[SequenceGroupMetadata],
             scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
         """Given model output from a single run, append the tokens to the
