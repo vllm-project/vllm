@@ -95,7 +95,7 @@ class MiniCPMVImagePixelInputs(TypedDict):
     A boolean mask indicating which image embeddings correspond
     to patch tokens.
 
-    Shape: `(batch_size, num_images, num_embeds)`
+    Shape: `(batch_size * num_images, num_embeds)`
     """
 
 
@@ -114,7 +114,7 @@ class MiniCPMVImageEmbeddingInputs(TypedDict):
     A boolean mask indicating which image embeddings correspond
     to patch tokens.
 
-    Shape: `(batch_size, num_images, num_embeds)`
+    Shape: `(batch_size * num_images, num_embeds)`
     """
 
 
@@ -816,6 +816,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             raise ValueError(
                 f"Incorrect type of embed_is_patch for {modality=}. "
                 f"Got type: {type(embed_is_patch)}")
+
+        embed_is_patch = flatten_bn(embed_is_patch)
 
         if image_embeds is not None:
             if not isinstance(image_embeds, (torch.Tensor, list)):
