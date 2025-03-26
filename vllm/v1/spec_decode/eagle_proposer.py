@@ -74,11 +74,14 @@ class EagleProposer:
 
         Args:
             target_model_input_ids: Input token IDs used by the target model.
-            target_model_positions: Corresponding positional indices.
+            target_model_positions: The token positions used by the target
+                model.
             target_model_hidden_states: Hidden states from the target model.
             target_model_seq_lens: Sequence lengths in the target model.
-            sampled_token_ids: Previously sampled tokens from the target model.
-            next_prompt_token_ids: Next prompt tokens, if available.
+            sampled_token_ids: Previously sampled/accepted tokens from the
+                target model.
+            next_prompt_token_ids: The next prompt token for a sequence if it
+                is a partial prefill sequence and empty otherwise.
             is_prefill: Boolean flags indicating prefill sequences.
             num_draft_tokens_to_propose: Number of speculative tokens to
                 generate per sequence.
