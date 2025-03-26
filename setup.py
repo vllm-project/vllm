@@ -486,10 +486,9 @@ def get_rocm_version():
 
 
 def get_neuronxcc_version():
-    import sysconfig
-    site_dir = sysconfig.get_paths()["purelib"]
-    version_file = os.path.join(site_dir, "neuronxcc", "version",
-                                "__init__.py")
+    version_file = (
+        importlib.util.find_spec(".version", package="neuronxcc").origin
+    )
 
     # Check if the command was executed successfully
     with open(version_file) as fp:
