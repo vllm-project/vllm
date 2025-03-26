@@ -189,16 +189,9 @@ class MultiModalProfiler(Generic[_I]):
         mm_inputs, _ = self.get_and_validate_mm_inputs(seq_len)
         mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
 
-        # For encoder-decoder models, use encoder prompt token ids instead of
-        # decoder prompt to construct dummy seq_data for encoder profiling.
-        encoder_prompt_token_ids = mm_inputs["encoder_prompt_token_ids"]
-
-        total_len = len(encoder_prompt_token_ids)
-        num_tokens_to_pad = max(total_len, seq_len) - total_len
-        encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
-
         return DummyData(
-            seq_data=SequenceData.from_seqs(encoder_prompt_token_ids),
+            seq_data=SequenceData.from_seqs(
+                mm_inputs["encoder_prompt_token_ids"]),
             multi_modal_data=None,
             multi_modal_placeholders=None,
         )
