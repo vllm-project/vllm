@@ -1,8 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
-# usage:
-# VLLM_USE_V1=1 python examples/offline_inference/data_parallel.py
-# we need to have a launcher to create multiple data parallel
-# ranks. And each rank will create a vLLM instance to process its own prompts.
+"""
+Usage:
+Single node:
+    python examples/offline_inference/data_parallel.py \
+            --model="ibm-research/PowerMoE-3b" \
+            --dp-size=2 \
+            --tp-size=2
+
+Multi-node:
+    Node 0 (assume the node has ip of 10.99.48.128):
+            python examples/offline_inference/data_parallel.py \
+                    --model="ibm-research/PowerMoE-3b" \
+                    --dp-size=2 \
+                    --tp-size=2 \
+                    --node-size=2 \
+                    --node-rank=0 \
+                    --master-addr=10.99.48.128 \
+                    --master-port=13345
+    Node 1:
+            python examples/offline_inference/data_parallel.py \
+                    --model="ibm-research/PowerMoE-3b" \
+                    --dp-size=2 \
+                    --tp-size=2 \
+                    --node-size=2 \
+                    --node-rank=1 \
+                    --master-addr=10.99.48.128 \
+                    --master-port=13345
+"""
 import os
 
 from vllm import LLM, SamplingParams
