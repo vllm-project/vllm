@@ -43,7 +43,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
-from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
+                    is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, maybe_prefix)
 
 logger = init_logger(__name__)
@@ -137,6 +138,9 @@ class TransformersModel(nn.Module):
 
         # Use meta device to delay allocating GPU tensors
         with torch.device("meta"):
+            # FIXME(Isotr0py): We need to refactor this part in the future to
+            # avoid registering an extra model layer, otherwise we will need a
+            # weights mapper to rename weights.
             self.model: PreTrainedModel = AutoModel.from_config(
                 config,
                 attn_implementation="vllm",
@@ -356,7 +360,7 @@ class TransformersModel(nn.Module):
 class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
                               SupportsPP):
     embedding_padding_modules = ["lm_head"]
-    embedding_modules = ["embed_tokens"
+    embedding_modules = ["model.embed_tokens"
                          ]  # TODO transformers will have a util to get it
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -392,6 +396,20 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
+    # FIXME(Isotr0py): Don't use any weights mapper for Transformers fallback,
+    # this makes thing complicated. We need to remove this mapper after refactor
+    # `TransformersModel` in the future.
+    @property
+    def hf_to_vllm_mapper(self):
+        prefix_mapper = {
+            name: "model." + name
+            for name, _ in self.model.model.named_children()
+        }
+        return WeightsMapper(
+            orig_to_new_substr={"model.": "model.model."},
+            orig_to_new_prefix=prefix_mapper,
+        )
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
@@ -420,14 +438,9 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-
-        def maybe_add_model_prefix(name: str):
-            return name if name.startswith("lm_head.") else "model." + name
-
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(
-            (maybe_add_model_prefix(name), weight) for name, weight in weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
