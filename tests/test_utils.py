@@ -112,23 +112,6 @@ def test_deprecate_kwargs_additional_message():
         dummy(old_arg=1)
 
 
-def is_rocm62():
-    import torch
-    return isinstance(torch.version.hip,
-                      str) and torch.version.hip.startswith("6.2")
-
-
-def xfail_if_rocm62(function=None,
-                    reason: str = "Tests are not yet ready for ROCm 6.2",
-                    strict: bool = False):
-    if function:
-        return pytest.mark.xfail(is_rocm62(), reason=reason,
-                                 strict=strict)(function)
-    else:
-        assert callable(function)
-        return pytest.mark.xfail(is_rocm62(), reason=reason, strict=strict)
-
-
 def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_PORT", "5678")
