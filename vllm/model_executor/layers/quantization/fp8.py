@@ -110,7 +110,8 @@ class Fp8Config(QuantizationConfig):
         from vllm.attention.layer import Attention  # Avoid circular import
 
         if isinstance(layer, LinearBase):
-            if is_layer_skipped(prefix, self.ignored_layers):
+            if is_layer_skipped(prefix, self.ignored_layers,
+                                self.packed_modules_mapping):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
