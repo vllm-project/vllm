@@ -73,6 +73,8 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -97,6 +99,7 @@ if TYPE_CHECKING:
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
+    VLLM_TPU_BUCKET_PADDING_GAP: int = 64
 
 
 def get_default_cache_root():
@@ -512,6 +515,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1")),
 
+    # Whether to use aiter moe ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_MOE":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
+             ("true", "1")),
+
+    # Whether to use aiter block scaled moe kernel.
+    # By default this is disabled.
+    "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE":
+    lambda:
+    (os.getenv("VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE", "false").lower() in
+     ("true", "1")),
+
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
@@ -627,6 +643,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
     if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
+
+    # Gap between padding buckets for the forward pass. So we have
+    # 8, we will run forward pass with [16, 24, 32, ...].
+    "VLLM_TPU_BUCKET_PADDING_GAP":
+    lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
+    if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 64,
 }
 
 # end-env-vars-definition
