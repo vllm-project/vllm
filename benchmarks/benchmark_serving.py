@@ -692,6 +692,8 @@ def main(args: argparse.Namespace):
             ]:
                 if field in result_json:
                     del result_json[field]
+                if field in benchmark_result:
+                    del benchmark_result[field]
 
         # Traffic
         result_json["request_rate"] = (args.request_rate if args.request_rate
@@ -711,7 +713,10 @@ def main(args: argparse.Namespace):
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, "w", encoding='utf-8') as outfile:
+        with open(file_name, mode="a+", encoding='utf-8') as outfile:
+            # Append a newline.
+            if outfile.tell() != 0:
+                outfile.write("\n")
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
 
