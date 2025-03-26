@@ -342,9 +342,9 @@ class TransformersModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params = set[str]()
         for name, loaded_weight in weights:
-            # Necessary for some models which use remote code
-            if not name.startswith(prefix := self.model.base_model_prefix):
-                name = maybe_prefix(prefix, name)
+            # Use "model" instead of base_model_prefix because
+            # the base model attribute in vLLM is always `model`
+            name = maybe_prefix("model", name)
             if is_pp_missing_parameter(name, self):
                 continue
             if name in params_dict:
