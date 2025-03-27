@@ -212,8 +212,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 value_cache,
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+                layer._k_scale_float,
+                layer._v_scale_float,
             )
 
         if attn_metadata.is_prompt:
@@ -298,8 +298,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._k_scale_float,
+                    layer._v_scale_float,
                 )
             else:
                 # Run PagedAttention V2.
@@ -331,8 +331,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._k_scale_float,
+                    layer._v_scale_float,
                 )
 
             # Reshape the output tensor.
