@@ -1615,6 +1615,13 @@ class EngineArgs:
         if self.enable_lora and _warn_or_fallback("LORA"):
             return False
 
+        # PP is supported on V1 with Ray distributed executor,
+        # but off for MP distributed executor for now.
+        if (self.pipeline_parallel_size > 1
+                and self.distributed_executor_backend == "mp"
+                and _warn_or_fallback("PP (MP distributed executor)")):
+            return False
+
         # ngram is supported on V1, but off by default for now.
         if self.speculative_model == "[ngram]" and _warn_or_fallback("ngram"):
             return False
