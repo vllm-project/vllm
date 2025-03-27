@@ -8,6 +8,7 @@ from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
@@ -60,11 +61,13 @@ class LLMEngine:
         self.cache_config = vllm_config.cache_config
 
         # important: init dp group before init the engine_core
-        self.parallel_config = vllm_config.parallel_config
-        self.dp_enabled = self.parallel_config.data_parallel_size > 1  # noqa
+        # In the decoupled engine case this is handled in EngineCoreProc.
+        parallel_config = vllm_config.parallel_config
+        if not multiprocess_mode and parallel_config.data_parallel_size > 1:
+            self.dp_group = parallel_config.stateless_init_dp_group()
+        else:
+            self.dp_group = None
         self.should_execute_dummy_batch = False
-        if self.dp_enabled:
-            self.dp_group = self.parallel_config.stateless_init_dp_group()
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -148,7 +151,7 @@ class LLMEngine:
 
     def has_unfinished_requests(self) -> bool:
         has_unfinished = self.output_processor.has_unfinished_requests()
-        if not self.dp_enabled:
+        if self.dp_group is None:
             return has_unfinished
         return self.has_unfinished_requests_dp(has_unfinished)
 
@@ -280,3 +283,7 @@ class LLMEngine:
     def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
         return self.engine_core.pin_lora(lora_id)
+
+    def __del__(self):
+        if dp_group := getattr(self, "dp_group", None):
+            stateless_destroy_torch_distributed_process_group(dp_group)
