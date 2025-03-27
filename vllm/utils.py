@@ -255,7 +255,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
 
     @property
     def cache(self) -> Mapping[_K, _V]:
-        """Return the internal cache dictionary in order(read-only)."""
+        """Return the internal cache dictionary in order (read-only)."""
         return _MappingOrderCacheView(
             self._Cache__data,  # type: ignore
             self.order)
