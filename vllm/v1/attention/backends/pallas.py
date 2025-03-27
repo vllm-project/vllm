@@ -41,7 +41,7 @@ class PallasAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[int, ...]:
-        return (num_blocks, block_size, num_kv_heads * head_size)
+        return (num_blocks, block_size, num_kv_heads * 2, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -142,14 +142,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = ([num_blocks, block_size, num_kv_heads * head_size], 
-                        [num_blocks, block_size, num_kv_heads * head_size])
+            kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
         # For determine_available_memory case.
-        if kv_cache[0].numel() == 0:
+        if kv_cache.numel() == 0:
             if output is None:
                 output = torch.ones_like(query)
             return output
@@ -157,16 +156,16 @@ class PallasAttentionBackendImpl(AttentionImpl):
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         num_tokens, hidden_size = query.shape
         query = query.view(num_tokens, self.num_heads, self.head_size)
+        key = key.view(num_tokens, self.num_kv_heads, self.head_size)
+        value = value.view(num_tokens, self.num_kv_heads, self.head_size)
 
-        key_cache, value_cache = kv_cache
-        if kv_cache[0].numel() > 0:
+        if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
-            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
+            write_to_kv_cache(key, value, kv_cache, slot_mapping)
 
         output = torch.ops.xla.ragged_paged_attention(
             query,
-            key_cache,
-            value_cache,
+            kv_cache,
             attn_metadata.context_lens,
             attn_metadata.block_tables,
             attn_metadata.query_start_loc,
@@ -183,17 +182,15 @@ class PallasAttentionBackendImpl(AttentionImpl):
 def write_to_kv_cache(
     key: torch.Tensor,
     value: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
+    kv_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
     """ Write the key and values to the KV cache.
 
     Args:
-        key: shape = [num_tokens, num_kv_heads * head_size]
-        value: shape = [num_tokens, num_kv_heads * head_size]
-        k_cache = [num_blocks, block_size, num_kv_heads * head_size]
-        v_cache = [num_blocks, block_size, num_kv_heads * head_size]
+        key: shape = [num_tokens, num_kv_heads, head_size]
+        value: shape = [num_tokens, num_kv_heads, head_size]
+        kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
 
     """
     torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
@@ -201,5 +198,5 @@ def write_to_kv_cache(
 
     key_cache = key_cache.flatten(0, 1)
     value_cache = value_cache.flatten(0, 1)
-    key_cache.index_copy_(0, slot_mapping, key)
-    value_cache.index_copy_(0, slot_mapping, value)
+    kv_cache[:, 0::2].index_copy_(0, slot_mapping, key)
+    kv_cache[:, 1::2].index_copy_(0, slot_mapping, value)

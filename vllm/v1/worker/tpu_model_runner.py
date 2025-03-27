@@ -115,7 +115,7 @@ class TPUModelRunner:
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: list[torch.Tensor] = []
+        self.kv_caches: torch.Tensor = None
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
@@ -842,12 +842,16 @@ class TPUModelRunner:
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
 
-                    tpu_k_cache = torch.zeros(kv_cache_shape,
-                                              dtype=dtype,
-                                              device=self.device)
-                    tpu_v_cache = torch.zeros_like(tpu_k_cache)
+                    # tpu_k_cache = torch.zeros(kv_cache_shape,
+                    #                           dtype=dtype,
+                    #                           device=self.device)
+                    # tpu_v_cache = torch.zeros_like(tpu_k_cache)
 
-                    kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                    # kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                    tpu_kv_cache = torch.zeros(kv_cache_shape,
+                                               dtype=dtype,
+                                               device=self.device)
+                    kv_caches[layer_name] = tpu_kv_cache
                 else:
                     raise NotImplementedError
 
