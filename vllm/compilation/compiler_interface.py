@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import torch
+import torch._dynamo.metrics_context
+import torch._dynamo.utils
 import torch._inductor.compile_fx
 import torch.fx as fx
 
@@ -285,6 +287,9 @@ class InductorAdaptor(CompilerInterface):
                     "torch._inductor.codecache.FxGraphCache._check_can_cache",
                     _check_can_cache))
 
+            # Dynamo metrics context, see method for more information
+            stack.enter_context(self.metrics_context())
+
             compiled_graph = compile_fx(
                 graph,
                 example_inputs,
@@ -309,8 +314,14 @@ class InductorAdaptor(CompilerInterface):
         hash_str = handle[0]
 
         from torch._inductor.codecache import FxGraphCache
-        with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
-                   lambda *args, **kwargs: AlwaysHitShapeEnv()):
+        with ExitStack() as exit_stack:
+            exit_stack.enter_context(
+                patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
+                      lambda *args, **kwargs: AlwaysHitShapeEnv()))
+
+            # Dynamo metrics context, see method for more details.
+            exit_stack.enter_context(self.metrics_context())
+
             if torch.__version__.startswith("2.5"):
                 inductor_compiled_graph = FxGraphCache._lookup_graph(
                     hash_str, example_inputs, True, False)
@@ -350,6 +361,23 @@ class InductorAdaptor(CompilerInterface):
                 return graph_output[0]
 
         return compiled_graph
+
+    def metrics_context(self) -> torch._dynamo.metrics_context.MetricsContext:
+        """
+        This method returns the Dynamo metrics context, used by various compile
+        components. Specifically, it's used inside FxGraphCache in torch==2.6
+        (but neither before nor after). It might also be used in various other
+        torch.compile internal functions.
+
+        Because it is re-entrant, we always set it (even if entering via Dynamo
+        and the context was already entered). We might want to revisit if it
+        should be set at a different level of compilation.
+
+        This is likely a bug in PyTorch: public APIs should not rely on
+        manually setting up internal contexts. But we also rely on non-public
+        APIs which might not provide these guarantees.
+        """
+        return torch._dynamo.utils.get_metrics_context()
 
 
 class EagerAdaptor(CompilerInterface):
