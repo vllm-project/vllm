@@ -276,7 +276,9 @@ class SiglipMLP(nn.Module):
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
         # Special handling for BNB and torchao quantization
-        if quant_config and quant_config.get_name() in ["bitsandbytes", "torchao"]:
+        if quant_config and quant_config.get_name() in [
+                "bitsandbytes", "torchao"
+        ]:
             quantizable = True
         else:
             # For other quantization, we require the hidden size to be a
