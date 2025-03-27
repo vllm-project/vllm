@@ -143,6 +143,7 @@ the Shrink operation, we can skip both shuffles.
 
 """
 
+
 def _bgmv_shrink_kernel(bT: int, bL: int, n_lora_lanes: int, lane_size: int,
                         max_num_loras: int, idx_ref, inp_ref, lora_ref,
                         out_ref, acc_ref, mask_ref):
@@ -151,36 +152,42 @@ def _bgmv_shrink_kernel(bT: int, bL: int, n_lora_lanes: int, lane_size: int,
     def _():
         acc_ref[...] = jnp.zeros_like(acc_ref[...], dtype=jnp.float32)
 
-    t = pl.program_id(0)
+    if max_num_loras == 1 and n_lora_lanes == 1:
+        acc_ref[...] += jax.lax.dot_general(inp_ref[...],
+                                            lora_ref[0, ...],
+                                            (((1, ), (1, )), ((), ())),
+                                            preferred_element_type=jnp.float32)
+    else:
+        t = pl.program_id(0)
 
-    ones = jnp.ones((lane_size, ), dtype=jnp.float32)
+        ones = jnp.ones((lane_size, ), dtype=jnp.float32)
 
-    base_lora_idx = 0
-    for lane_idx in range(max_num_loras):
-        mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
-        valid = False
-        for j in range(bT):
-            idx = idx_ref[j + bT * t]
-            for k in range(n_lora_lanes):
-                lora_idx = base_lora_idx + k
-                set_mask = idx == lora_idx
-                valid |= set_mask
+        base_lora_idx = 0
+        for lane_idx in range(max_num_loras):
+            mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
+            valid = False
+            for j in range(bT):
+                idx = idx_ref[j + bT * t]
+                for k in range(n_lora_lanes):
+                    lora_idx = base_lora_idx + k
+                    set_mask = idx == lora_idx
+                    valid |= set_mask
 
-                @pl.when(set_mask)
-                def _():
-                    lane_start = k * lane_size
-                    lane_end = lane_start + lane_size
+                    @pl.when(set_mask)
+                    def _():
+                        lane_start = k * lane_size
+                        lane_end = lane_start + lane_size
 
-                    mask_ref.at[j, lane_start:lane_end].set(ones)
+                        mask_ref.at[j, lane_start:lane_end].set(ones)
 
-        base_lora_idx += n_lora_lanes
+            base_lora_idx += n_lora_lanes
 
-        @pl.when(valid)
-        def _():
-            acc_ref[...] += jax.lax.dot_general(
-                inp_ref[...],
-                lora_ref[lane_idx, ...], (((1, ), (1, )), ((), ())),
-                preferred_element_type=jnp.float32) * mask_ref[...]
+            @pl.when(valid)
+            def _():
+                acc_ref[...] += jax.lax.dot_general(
+                    inp_ref[...],
+                    lora_ref[lane_idx, ...], (((1, ), (1, )), ((), ())),
+                    preferred_element_type=jnp.float32) * mask_ref[...]
 
     @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
     def _():
@@ -320,30 +327,35 @@ def _bgmv_expand_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref,
     def _():
         acc_ref[...] = jnp.zeros_like(acc_ref[...], dtype=jnp.float32)
 
-    t = pl.program_id(0)
+    if max_num_loras == 1:
+        acc_ref[...] += jax.lax.dot(inp_ref[...],
+                                    lora_ref[0, ...],
+                                    preferred_element_type=jnp.float32)
+    else:
+        t = pl.program_id(0)
 
-    ones = jnp.ones((bL, ), dtype=jnp.float32)
+        ones = jnp.ones((bL, ), dtype=jnp.float32)
 
-    for i in range(max_num_loras):
-        mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
-        valid = False
-        for j in range(bT):
-            valid |= idx_ref[j + bT * t] == i
+        for i in range(max_num_loras):
+            mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
+            valid = False
+            for j in range(bT):
+                valid |= idx_ref[j + bT * t] == i
 
-            @pl.when(idx_ref[j + bT * t] == i)
+                @pl.when(idx_ref[j + bT * t] == i)
+                def _():
+                    mask_ref.at[j, :].set(ones)
+
+            @pl.when(valid)
             def _():
-                mask_ref.at[j, :].set(ones)
+                acc_ref[...] += jax.lax.dot(
+                    inp_ref[...],
+                    lora_ref[i, ...],
+                    preferred_element_type=jnp.float32) * mask_ref[...]
 
-        @pl.when(valid)
+        @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
         def _():
-            acc_ref[...] += jax.lax.dot(
-                inp_ref[...],
-                lora_ref[i, ...],
-                preferred_element_type=jnp.float32) * mask_ref[...]
-
-    @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
-    def _():
-        out_ref[...] = acc_ref[...].astype(out_ref.dtype)
+            out_ref[...] = acc_ref[...].astype(out_ref.dtype)
 
 
 @functools.partial(jax.jit,
