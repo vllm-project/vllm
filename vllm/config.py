@@ -310,8 +310,8 @@ class ModelConfig:
             raise ValueError(
                 "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
                 "module was not found."
-                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile"
-                " for instructions on how to install it.")
+                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile "
+                "for instructions on how to install it.")
 
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
