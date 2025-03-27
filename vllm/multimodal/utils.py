@@ -441,11 +441,10 @@ def merge_and_sort_multimodal_metadata(
     if len(modalities) == 1:
         modality = modalities[0]
         placeholder_list = list(mm_positions[modality])
-        if mm_hashes is None:
-            return [modality] * len(placeholder_list), placeholder_list, None
-        else:
-            return [modality] * len(placeholder_list), placeholder_list, list(
-                mm_hashes[modality])
+
+        return [modality] * len(
+            placeholder_list
+        ), placeholder_list, None if not mm_hashes else mm_hashes[modality]
 
     # Create a list of (modality, placeholder, hash) tuples for all placeholders
     all_items = []
