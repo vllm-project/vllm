@@ -20,10 +20,12 @@ from http import HTTPStatus
 from typing import Annotated, Optional, Union
 
 import uvloop
-from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
+from fastapi import (APIRouter, Depends, FastAPI, Form, HTTPException, Request,
+                     status)
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import State
 from starlette.routing import Mount
@@ -301,7 +303,26 @@ async def validate_json_request(raw_request: Request):
         )
 
 
+api_key_auth_scheme = HTTPBearer(scheme_name="ApiKeyAuth", auto_error=False)
+
+
+async def validate_api_key(
+    auth_credentials: Annotated[Optional[HTTPAuthorizationCredentials],
+                                Depends(api_key_auth_scheme)],
+    request: Request,
+) -> None:
+    if request.app.state.api_key is not None and (
+            auth_credentials is None
+            or auth_credentials.credentials != request.app.state.api_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "Unauthorized"},
+        )
+
+
 router = APIRouter()
+# keep possibly-authenticated /v1 routes in a separate router
+v1_router = APIRouter(dependencies=[Depends(validate_api_key)])
 
 
 def mount_metrics(app: FastAPI):
@@ -436,7 +457,7 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.get("/v1/models")
+@v1_router.get("/models")
 async def show_available_models(raw_request: Request):
     handler = models(raw_request)
 
@@ -450,8 +471,8 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-@router.post("/v1/chat/completions",
-             dependencies=[Depends(validate_json_request)])
+@v1_router.post("/chat/completions",
+                dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
@@ -473,7 +494,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
+@v1_router.post("/completions", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
@@ -492,7 +513,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/embeddings", dependencies=[Depends(validate_json_request)])
+@v1_router.post("/embeddings", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
@@ -577,7 +598,7 @@ async def create_score(request: ScoreRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/v1/score", dependencies=[Depends(validate_json_request)])
+@v1_router.post("/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
@@ -588,7 +609,7 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
     return await create_score(request, raw_request)
 
 
-@router.post("/v1/audio/transcriptions")
+@v1_router.post("/audio/transcriptions")
 @with_cancellation
 @load_aware_call
 async def create_transcriptions(request: Annotated[TranscriptionRequest,
@@ -631,7 +652,7 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/v1/rerank", dependencies=[Depends(validate_json_request)])
+@v1_router.post("/rerank", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
@@ -764,8 +785,8 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         "LoRA dynamic loading & unloading is enabled in the API server. "
         "This should ONLY be used for local development!")
 
-    @router.post("/v1/load_lora_adapter",
-                 dependencies=[Depends(validate_json_request)])
+    @v1_router.post("/load_lora_adapter",
+                    dependencies=[Depends(validate_json_request)])
     async def load_lora_adapter(request: LoadLoRAAdapterRequest,
                                 raw_request: Request):
         handler = models(raw_request)
@@ -776,8 +797,8 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
 
         return Response(status_code=200, content=response)
 
-    @router.post("/v1/unload_lora_adapter",
-                 dependencies=[Depends(validate_json_request)])
+    @v1_router.post("/unload_lora_adapter",
+                    dependencies=[Depends(validate_json_request)])
     async def unload_lora_adapter(request: UnloadLoRAAdapterRequest,
                                   raw_request: Request):
         handler = models(raw_request)
@@ -800,6 +821,9 @@ def build_app(args: Namespace) -> FastAPI:
     app.include_router(router)
     app.root_path = args.root_path
 
+    app.state.api_key = args.api_key or envs.VLLM_API_KEY
+    app.include_router(v1_router, prefix="/v1")
+
     mount_metrics(app)
 
     app.add_middleware(
@@ -817,22 +841,6 @@ def build_app(args: Namespace) -> FastAPI:
                             code=HTTPStatus.BAD_REQUEST)
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
-
-    if token := envs.VLLM_API_KEY or args.api_key:
-
-        @app.middleware("http")
-        async def authentication(request: Request, call_next):
-            if request.method == "OPTIONS":
-                return await call_next(request)
-            url_path = request.url.path
-            if app.root_path and url_path.startswith(app.root_path):
-                url_path = url_path[len(app.root_path):]
-            if not url_path.startswith("/v1"):
-                return await call_next(request)
-            if request.headers.get("Authorization") != "Bearer " + token:
-                return JSONResponse(content={"error": "Unauthorized"},
-                                    status_code=401)
-            return await call_next(request)
 
     if args.enable_request_id_headers:
         logger.warning(
