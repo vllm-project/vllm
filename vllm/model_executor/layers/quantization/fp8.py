@@ -436,7 +436,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
-        self.allow_deep_gemm = use_deep_gemm
+        self.allow_deep_gemm = allow_deep_gemm
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
