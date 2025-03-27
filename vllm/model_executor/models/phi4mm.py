@@ -1547,6 +1547,12 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
     ) -> BatchFeature:
         if mm_data:
             processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+            num_img_tokens = [
+                self.info.get_num_image_tokens(image_width=img_size[0], image_height=img_size[1])
+                for img_size in processed_outputs["image_sizes"]
+            ]
+            processed_outputs["num_img_tokens"] = num_img_tokens
+            processed_outputs["pixel_values"] = processed_outputs.pop('input_image_embeds')
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -1561,8 +1567,9 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
+            image_attention_mask=MultiModalFieldConfig.batched("image"),
             image_sizes=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
+            num_img_tokens=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_updates(
