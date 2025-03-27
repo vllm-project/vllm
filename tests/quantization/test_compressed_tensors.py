@@ -142,6 +142,8 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
 )
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [10])
+@pytest.mark.parametrize(
+    "use_aiter", [True, False] if current_platform.is_rocm() else [False])
 def test_compressed_tensors_w8a8_logprobs(
     hf_runner,
     vllm_runner,
@@ -149,11 +151,20 @@ def test_compressed_tensors_w8a8_logprobs(
     model_path,
     max_tokens,
     num_logprobs,
+    use_aiter,
+    monkeypatch,
 ):
 
     if current_platform.is_rocm(
     ) and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL:
         pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
+
+    if use_aiter:
+        if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
+            pytest.skip(
+                f"Skip model {model_path} as it is not support by aiter.")
+        # this will enable VLLM_ROCM_USE_AITER_LINEAR
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     dtype = "bfloat16"
 
@@ -204,12 +215,26 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
         ),
     ],
 )
-def test_compressed_tensors_w8a8_dynamic_per_token(vllm_runner, model_args):
+@pytest.mark.parametrize(
+    "use_aiter", [True, False] if current_platform.is_rocm() else [False])
+def test_compressed_tensors_w8a8_dynamic_per_token(
+    vllm_runner,
+    model_args,
+    use_aiter,
+    monkeypatch,
+):
     model_path, strategy = model_args
 
     if current_platform.is_rocm(
     ) and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL:
         pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
+
+    if use_aiter:
+        if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
+            pytest.skip(
+                f"Skip model {model_path} as it is not support by aiter.")
+        # this will enable VLLM_ROCM_USE_AITER_LINEAR
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     with vllm_runner(model_path, dtype=torch.float16) as llm:
 
@@ -307,9 +332,7 @@ def test_compressed_tensors_fp8(vllm_runner):
 
             if isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8):
                 assert len(qkv_proj.input_scale.shape) == 0
-                assert qkv_proj.weight.dtype is (torch.float8_e4m3fnuz
-                                                 if current_platform.is_rocm()
-                                                 else torch.float8_e4m3fn)
+                assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
                 assert qkv_proj.weight_scale.dtype is torch.float32
                 assert len(qkv_proj.weight_scale.shape) == 0
 
@@ -612,91 +635,4 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         print(output)
-        assert output
-
-
-@pytest.mark.parametrize(
-    "model_path",
-    [
-        "neuralmagic/Llama-3.2-1B-quantized.w8a8",
-    ],
-)
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [10])
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="This tests is skipped on non-ROCm platform.")
-def test_compressed_tensors_w8a8_logprobs_rocm_aiter(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model_path,
-    max_tokens,
-    num_logprobs,
-    monkeypatch,
-):
-    # this will enable VLLM_ROCM_USE_AITER_LINEAR
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
-    dtype = "bfloat16"
-
-    # skip language translation prompt for the static per tensor asym model
-    if (model_path ==
-            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym"
-        ):  # noqa: E501
-        example_prompts = example_prompts[0:-1]
-
-    with hf_runner(model_path, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs)
-
-    with vllm_runner(model_path, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
-
-    check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
-
-
-@pytest.mark.parametrize(
-    "model_args",
-    [
-        (
-            "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
-            "channel",
-        ),
-    ],
-)
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="This tests is skipped on non-ROCm platform.")
-def test_compressed_tensors_w8a8_dynamic_per_token_rocm_aiter(
-    vllm_runner,
-    model_args,
-    monkeypatch,
-):
-
-    # this will enable VLLM_ROCM_USE_AITER_LINEAR
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
-    model_path, strategy = model_args
-    with vllm_runner(model_path, dtype=torch.float16) as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-
-            assert isinstance(qkv_proj.quant_method,
-                              CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
-            assert not qkv_proj.scheme.is_static_input_scheme
-            assert qkv_proj.scheme.strategy == strategy
-            assert qkv_proj.weight.dtype is torch.int8
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy(["Hello my name is"], max_tokens=20)
         assert output

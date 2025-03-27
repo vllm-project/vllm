@@ -36,12 +36,6 @@ else:
         from torch.library import impl_abstract as register_fake
 
 
-def is_rocm_aiter_gemm_w8a8_scaled_mm_enabled() -> bool:
-    return current_platform.is_rocm() \
-        and envs.VLLM_ROCM_USE_AITER_LINEAR \
-        and envs.VLLM_ROCM_USE_AITER
-
-
 # page attention ops
 def paged_attention_v1(
     out: torch.Tensor,
@@ -547,34 +541,11 @@ def cutlass_scaled_mm(a: torch.Tensor,
     n = b.shape[1]
 
     if current_platform.is_rocm():
-        if is_rocm_aiter_gemm_w8a8_scaled_mm_enabled():
-            per_tensor_scale_a = (scale_a.numel() == 1)
-            per_tensor_scale_b = (scale_b.numel() == 1)
-            per_channel_tensor_scale_a = (scale_a.numel() == m)
-            per_channel_tensor_scale_b = (scale_b.numel() == n)
-
-            # @TODO:
-            # Maybe broadcast the per-tensor-scale into per-channel-scale
-            # if one of the scale is a per-channel-scale.
-            # For now, it only supports
-            # per-tensor-per-tensor a8w8 scaled GEMM and
-            # per-channel-per-channel a8w8 scacled GEMM
-            assert (
-                (per_tensor_scale_a and per_tensor_scale_b) or
-                (per_channel_tensor_scale_a and per_channel_tensor_scale_b)), (
-                    "Currently only support per-tensor-per-tensor GEMM " +
-                    " and per-channel-per-channel GEMM through AITER"
-                    " w8a8 scaled gemm. `cutlass_scaled_mm` does not support" +
-                    " ATIER block scaled GEMM yet.")
-
-            from aiter import gemm_a8w8_CK
-            return gemm_a8w8_CK(a, b.t(), scale_a, scale_b, bias).to(out_dtype)
-        else:
-            triton_scaled_mm_module = importlib.import_module(
-                "vllm.model_executor.layers.quantization.compressed_tensors."
-                "triton_scaled_mm")
-            triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
-            return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+        triton_scaled_mm_module = importlib.import_module(
+            "vllm.model_executor.layers.quantization.compressed_tensors."
+            "triton_scaled_mm")
+        triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
+        return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
