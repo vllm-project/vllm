@@ -354,6 +354,7 @@ class AsyncLLM(EngineClient):
         await self.engine_core.abort_requests_async(request_ids)
         # At this point, the abort message has already been sent to EngineCore,
         # so the request status in the Frontend can be removed.
+        # For more details, please see: PR #15326
         self.output_processor.handle_abort_reqs(request_ids)
 
         if self.log_requests:

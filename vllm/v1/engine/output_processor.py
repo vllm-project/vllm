@@ -253,21 +253,25 @@ class OutputProcessor:
                 ret.extend(parent.child_requests)
         return ret
 
-    # "Aborted request", meaning the frontend first detects that
-    # the request has ended, such as when the client disconnects
-    # or the detokenizer detects a stop string.
     def handle_abort_reqs(self, req_ids: Iterable[str]):
+        """
+        Handles aborted requests. This method is triggered when the frontend
+        detects that a request has ended, such as when the client disconnects
+        or the detokenizer detects a stop string.
+        """
         for req_id in req_ids:
             req_state = self.request_states.pop(req_id, None)
             if req_state is not None:
                 self.lora_states.abort_request(req_state)
         return
 
-    # "Finished request", meaning EngineCore first detects that
-    # the request has ended, and the resources related to the request
-    # maintained by EngineCore have been released.
-    def _handle_finished_reqs(self, req_id):
-        req_state = self.request_states.pop(req_id)
+    def finish_request(self, request_id: str) -> None:
+        """
+        Handle a finished request. This method is called when EngineCore detects
+        that the request has ended, and the resources related to the request
+        maintained by EngineCore have been released.
+        """
+        req_state = self.request_states.pop(request_id)
         self.lora_states.finish_request(req_state)
         return
 
@@ -322,6 +326,12 @@ class OutputProcessor:
         within the loop below.
 
         **********************************************************
+
+        NOTE: Stop string requests are finished externally to this function
+        because we must first send EngineCoreRequestType.ABORT to EngineCore
+        before cleaning up the request states in the Frontend. This prevents
+        the Frontend from adding two requests with duplicate RequestIds to
+        EngineCore simultaneously.
         """
 
         request_outputs: list[RequestOutput] = []
@@ -375,7 +385,7 @@ class OutputProcessor:
                     # detected stop string, abort needed in EngineCore.
                     reqs_to_abort.append(req_id)
                 else:
-                    self._handle_finished_reqs(req_id)
+                    self.finish_request(req_id)
 
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,
