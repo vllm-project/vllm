@@ -847,7 +847,7 @@ def build_app(args: Namespace) -> FastAPI:
             response.headers["X-Request-Id"] = request_id
             return response
 
-    if envs.LOG_API_SERVER_RESPONSE:
+    if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning("CAUTION: Enabling log response in the API Server. "
                        "This can include sensitive information and should be "
                        "avoided in production.")
