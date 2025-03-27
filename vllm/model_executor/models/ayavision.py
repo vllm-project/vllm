@@ -35,7 +35,6 @@ from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
-from vllm.utils import flatten_2d_lists
 from .vision import scatter_patch_features, select_patch_features
 
 
@@ -56,7 +55,7 @@ class AyaVisionImagePixelInputs(TypedDict):
     """
     A boolean mask indicating which image embeddings correspond to patch tokens.
 
-    Shape: `(batch_size, num_images, num_embeds)`
+    Shape: `(batch_size * num_images, num_embeds)`
     """
 
 
@@ -421,6 +420,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         pixel_values = flatten_bn(pixel_values, concat=True)
         num_patches = flatten_bn(num_patches, concat=True)
+        embed_is_patch = flatten_bn(embed_is_patch)
         return AyaVisionImagePixelInputs(
             type="pixel_values",
             pixel_values=self._validate_pixel_values(pixel_values),
@@ -434,13 +434,10 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         if image_input is None:
             return None
         image_features = self._process_image_input(image_input, **kwargs)
-        if kwargs.get("v0_path", False):
-            return image_features
-        return flatten_2d_lists(
-            scatter_patch_features(*args) for args in zip(
-                image_features,
-                image_input["embed_is_patch"],
-            ))
+        return scatter_patch_features(
+            image_features,
+            image_input["embed_is_patch"],
+        )
 
     def get_input_embeddings(
         self,
