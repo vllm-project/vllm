@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-
+from enum import Enum
 from typing import NamedTuple
-from pydantic import BaseModel, ValidationError
 import openai  # use the official client for correctness check
 import pytest
-from enum import Enum
 import pytest_asyncio
 
 from ...utils import RemoteOpenAIServer
-
+from pydantic import BaseModel, ValidationError
 # # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
+
 
 @pytest.fixture(scope="module")
 def server():
