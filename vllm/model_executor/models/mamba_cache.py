@@ -66,12 +66,6 @@ class MambaCacheManager(ConstantSizeCache):
         return MambaCacheParams(cache_tensors[0], cache_tensors[1],
                                 state_indices_tensor)
 
-    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        """
-        Copy the relevant state_indices into the CUDA graph input buffer 
-        """
-        super().copy_inputs_before_cuda_graphs(input_buffers, **kwargs)
-
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         """
         Provide the CUDA graph capture runs with a buffer in adjusted size.
