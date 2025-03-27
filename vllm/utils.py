@@ -33,7 +33,7 @@ import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
-                             Iterable, Iterator, Mapping)
+                             Iterable, Iterator, KeysView, Mapping)
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
@@ -206,6 +206,20 @@ class Counter:
         self.counter = 0
 
 
+class _MappingOrderCacheView(UserDict[_K, _V]):
+
+    def __init__(self, data: Mapping[_K, _V], ordered_keys: OrderedDict[_K,
+                                                                        None]):
+        super().__init__(data)
+        self.ordered_keys = ordered_keys
+
+    def __iter__(self) -> Iterator[_K]:
+        return iter(self.ordered_keys)
+
+    def keys(self) -> KeysView[_K]:
+        return KeysView(self.ordered_keys)
+
+
 class CacheInfo(NamedTuple):
     hits: int
     total: int
@@ -219,7 +233,6 @@ class CacheInfo(NamedTuple):
 
 
 class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
-    """LRU Cache"""
 
     def __init__(self,
                  capacity: float,
@@ -243,13 +256,17 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
 
     @property
     def cache(self) -> OrderedDict[_K, _V]:
-        """Return the internal cache dictionary (read-only)."""
-        return cast(OrderedDict[_K, _V], self._Cache__data)  # type: ignore
+        """Return the internal cache dictionary in order(read-only)."""
+        return cast(
+            OrderedDict[_K, _V],
+            _MappingOrderCacheView(
+                self._Cache__data,  # type: ignore
+                self.order))
 
     @property
-    def order(self) -> OrderedDict:
+    def order(self) -> OrderedDict[_K, None]:
         """Return the internal order dictionary (read-only)."""
-        return cast(OrderedDict, self._LRUCache__order)  # type: ignore
+        return self._LRUCache__order  # type: ignore
 
     def stat(self) -> CacheInfo:
         return CacheInfo(hits=self._hits, total=self._total)
@@ -294,11 +311,11 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
             default: Optional[Union[_V,
                                     _T]] = None) -> Optional[Union[_V, _T]]:
         value: Optional[Union[_V, _T]]
-        if key in self:
-            value = self[key]
-            del self[key]
-        else:
-            value = default
+        if key not in self:
+            return default
+
+        value = self[key]
+        del self[key]
         return value
 
     def put(self, key: _K, value: _V) -> None:
@@ -330,7 +347,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         self.popitem(remove_pinned=remove_pinned)
 
     def _remove_old_if_needed(self) -> None:
-        if len(self) > self.capacity:
+        while self.currsize > self.capacity:
             self.remove_oldest()
 
     def clear(self) -> None:
