@@ -213,17 +213,22 @@ class AyaVisionMultiModalProcessor(
         )
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         image_processor = hf_processor.image_processor
-        output_kwargs = hf_processor._merge_kwargs(
-            AyaVisionProcessorKwargs,
-            tokenizer_init_kwargs=hf_processor.tokenizer.init_kwargs,
-            **mm_kwargs,
-        )
+
         hf_config = self.info.get_hf_config()
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None and '<image>' in prompt:
             assert isinstance(images, list)
-            image_inputs = image_processor(images=images, **output_kwargs["images_kwargs"])
-            num_patches = image_inputs.get("num_patches") # TODO: update the get_num_patches to match with this
+            parsed_images = (self._get_data_parser().parse_mm_data({
+                "image":
+                images
+            }).get_items("image", ImageProcessorItems))
+            image_sizes = [
+                parsed_images.get_image_size(i)
+                for i in range(len(parsed_images))
+            ]
+            num_patches = [self.info.get_num_patches(image_width=image_size.width, image_height=image_size.height, size=image_processor.size,
+                    min_patches=image_processor.min_patches,
+                    max_patches=image_processor.max_patches) for image_size in image_sizes] 
             image_tokens_list = [hf_processor._prompt_split_image(num_patch) for num_patch in num_patches]
             tokenizer = self.info.get_tokenizer()
             image_token_ids = [tokenizer.encode(image_tokens, add_special_tokens=False) for image_tokens in image_tokens_list]
@@ -231,7 +236,6 @@ class AyaVisionMultiModalProcessor(
                 torch.tensor(image_repl_tokens) == hf_config.image_token_index
                 for image_repl_tokens in image_token_ids
             ]
-            
             processed_outputs["embed_is_patch"] = embed_is_patch
             processed_outputs["num_patches"] = torch.tensor(num_patches)
 
