@@ -9,11 +9,11 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (_resolve_hf_chat_template,
-                                         _try_extract_ast, load_chat_template,
+from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
                                          parse_chat_messages,
                                          parse_chat_messages_futures,
-                                         resolve_chat_template_content_format)
+                                         resolve_chat_template_content_format,
+                                         resolve_hf_chat_template)
 from vllm.entrypoints.llm import apply_hf_chat_template
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import encode_image_base64
@@ -747,7 +747,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
     }] if use_tools else None
 
     # Test detecting the tokenizer's chat_template
-    chat_template = _resolve_hf_chat_template(
+    chat_template = resolve_hf_chat_template(
         tokenizer,
         chat_template=None,
         tools=tools,
@@ -781,7 +781,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     tokenizer = tokenizer_group.tokenizer
 
     # Test detecting the tokenizer's chat_template
-    chat_template = _resolve_hf_chat_template(
+    chat_template = resolve_hf_chat_template(
         tokenizer,
         chat_template=None,
         tools=None,
