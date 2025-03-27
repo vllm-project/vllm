@@ -393,7 +393,7 @@ class KVCacheManager:
         Args:
             req_blocks: The KV cache blocks of one request.
             num_computed_tokens: The number of computed tokens.
-            allocated: Whether the blocks are allocated.
+            touched: Whether the blocks are touched.
         """
         # The first call always comes from `get_computed_blocks` which
         # passes `touched=False`.
