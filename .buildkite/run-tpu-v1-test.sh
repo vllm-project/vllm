@@ -22,7 +22,7 @@ docker run --privileged --net host --shm-size=16G -it \
     && export VLLM_USE_V1=1 \
     && export VLLM_XLA_CHECK_RECOMPILATION=1 \
     && echo TEST_1 \
-    && pytest /workspace/vllm/tests/tpu/test_compilation.py \
+    && pytest -v -s /workspace/vllm/tests/tpu/test_compilation.py \
     && echo TEST_2 \
     && pytest -v -s /workspace/vllm/tests/v1/tpu/test_basic.py \
     && echo TEST_3 \
@@ -30,7 +30,9 @@ docker run --privileged --net host --shm-size=16G -it \
     && echo TEST_4 \
     && pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py \
     && echo TEST_5 \
-    && python3 /workspace/vllm/examples/offline_inference/tpu.py" \
+    && python3 /workspace/vllm/examples/offline_inference/tpu.py \
+    && echo TEST_6 \
+    && pytest -s -v /workspace/vllm/tests/tpu/worker/test_tpu_model_runner.py" \
 
 
 # TODO: This test fails because it uses RANDOM_SEED sampling
