@@ -53,12 +53,11 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         if self.model_config.seed is None:
             self.model_config.seed = 0
-            
+
         if vllm_config.lora_config is not None:
             raise NotImplementedError(
                 """The V0 TPU backend doesn't support LoRA serving, please try \
-                    V1 by setting VLLM_USE_V1=1"""
-            )
+                    V1 by setting VLLM_USE_V1=1""")
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
