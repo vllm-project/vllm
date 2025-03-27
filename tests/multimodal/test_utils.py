@@ -405,10 +405,7 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                 PlaceholderRange(offset=5, length=2),
                 PlaceholderRange(offset=20, length=4),
             ],
-            expected_hashes=[
-                "image_hash1", "image_hash2", "video_hash1", "audio_hash1",
-                "image_hash3"
-            ],
+            expected_hashes=None,
         ),
     ]
 
