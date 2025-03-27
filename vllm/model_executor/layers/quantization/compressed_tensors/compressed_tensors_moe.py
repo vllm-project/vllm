@@ -275,8 +275,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             from vllm.model_executor.layers.fused_moe import fused_experts
             self.fused_experts_func = fused_experts
 
-        # TODO: do we need to do deep gemm alignment here?
-
     def apply(
         self,
         layer: torch.nn.Module,
