@@ -33,6 +33,7 @@ TENSOR_PARALLEL_SIZES = [1]
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("tensor_parallel_size", TENSOR_PARALLEL_SIZES)
+@pytest.mark.parametrize("max_num_batched_tokens", [512])
 def test_models(
     vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
@@ -40,6 +41,7 @@ def test_models(
     max_tokens: int,
     enforce_eager: bool,
     tensor_parallel_size: int,
+    max_num_batched_tokens: int
 ) -> None:
     prompt = "The next numbers of the sequence " + ", ".join(
         str(i) for i in range(1024)) + " are:"
@@ -54,7 +56,8 @@ def test_models(
                 enforce_eager=enforce_eager,
                 gpu_memory_utilization=0.7,
                 max_num_seqs=16,
-                tensor_parallel_size=tensor_parallel_size) as vllm_model:
+                tensor_parallel_size=tensor_parallel_size,
+                max_num_batched_tokens=max_num_batched_tokens) as vllm_model:
             vllm_outputs = vllm_model.generate_greedy(example_prompts,
                                                       max_tokens)
         output = vllm_outputs[0][1]

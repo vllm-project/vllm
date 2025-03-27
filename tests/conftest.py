@@ -720,6 +720,7 @@ class VllmRunner:
         enable_chunked_prefill: Optional[bool] = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
+        max_num_batched_tokens: int =  1024,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -737,6 +738,7 @@ class VllmRunner:
             max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
+            max_num_batched_tokens=max_num_batched_tokens,
             **kwargs,
         )
 
