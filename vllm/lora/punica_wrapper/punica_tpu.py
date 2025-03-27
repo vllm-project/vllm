@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
 from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+from vllm.lora.punica_wrapper.utils import convert_mapping
+
+if TYPE_CHECKING:
+    # avoid circuit import
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.models import LongContextLoRAContext
 
 from .punica_base import PunicaWrapperBase
 
@@ -284,6 +290,52 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                         self.sampler_indices,
                         add_inputs=True)
         return y.view_as(y_org)
+    
+    # This performs the same tensor ops as the base method, except it does them 
+    # on the CPU then transfers the results to the TPU
+    def _update_base_metadata(
+        self,
+        mapping: "LoRAMapping",
+        lora_index_to_id: List[Optional[int]],
+        max_loras: int,
+        vocab_size: int,
+        extra_vocab_size: int,
+        long_lora_context: Optional["LongContextLoRAContext"] = None,
+    ):
+        # Pad the prompt mapping to avoid running into recompiles on the TPU
+        pad_len = len(mapping.index_mapping) - len(mapping.prompt_mapping)
+        padding = [-1] * pad_len
+        mapping.prompt_mapping = tuple(list(mapping.prompt_mapping) + padding)
+        
+        (
+            base_indices,
+            sampler_indices,
+            sampler_indices_padded,
+            embeddings_indices,
+            long_lora_offsets_tensor,
+            indices_len,
+        ) = convert_mapping(
+            mapping,
+            lora_index_to_id,
+            max_loras,
+            vocab_size,
+            extra_vocab_size,
+            "cpu",
+            long_lora_context,
+        )
+        self._token_lora_indices[:base_indices.shape[0]].copy_(base_indices.to(self.device))
+        self._sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices.to(self.device))
+        self._sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
+            sampler_indices_padded.to(self.device))
+        self._embeddings_indices[:embeddings_indices.
+                                 shape[0], :embeddings_indices.shape[1]].copy_(
+                                     embeddings_indices.to(self.device))
+        if long_lora_offsets_tensor is not None:
+            self._long_lora_indices[:long_lora_offsets_tensor.shape[0]].copy_(
+                long_lora_offsets_tensor.to(self.device))
+        else:
+            self._long_lora_indices.zero_()
+        self.indices_len[:] = indices_len
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
         self.batch_size = 1
