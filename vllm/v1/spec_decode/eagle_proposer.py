@@ -23,7 +23,7 @@ class EagleProposer:
         self._sampling_metadata = sampling_metadata
 
     def generate_draft_token_ids(
-            self, target_model_input_ids: Tensor,
+            self, *, target_model_input_ids: Tensor,
             target_model_positions: Tensor, target_model_hidden_states: Tensor,
             target_model_seq_lens: list[int],
             sampled_token_ids: list[list[int]],
@@ -211,6 +211,8 @@ class EagleProposer:
             eagle_seq_lens_tensor.max().item()
         eagle_attention_metadata.slot_mapping = eagle_slot_mappings
 
+        # Compute the logit indices to use for sampling. These are the
+        # last indices for each sequence.
         logits_indices = eagle_start_locs_tensor + eagle_seq_lens_tensor - 1
 
         result: list[SamplerOutput] = []
