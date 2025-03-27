@@ -36,7 +36,6 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.layer import Attention
-from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
@@ -83,7 +82,8 @@ class FlashInferBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: torch.Tensor,
     ) -> None:
-        # Directly swap an entire KV Cache block, instead of splitting into K and V at the first dim
+        # Directly swap an entire KV Cache block
+        # Instead of splitting into K and V at the first dim
         ops.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
@@ -91,10 +91,10 @@ class FlashInferBackend(AttentionBackend):
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
-        # K and V are seperated in the second dim, not the first dim
+        # K and V are separated in the second dim, not the first dim
         key_caches = [kv_cache[:, 0] for kv_cache in kv_caches]
         value_caches = [kv_cache[:, 1] for kv_cache in kv_caches]
-        
+
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
     @staticmethod
@@ -642,7 +642,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # [0, 3, 6, 8]
         self.paged_kv_indices: List[int] = []
         # 0 at the beginning of paged_kv_indptr indicates the start of the
-        # first request’s page indices in the paged_kv_indices list.
+        # first request's page indices in the paged_kv_indices list.
         self.paged_kv_indptr: List[int] = [0]
         # paged_kv_last_page_len is the length of the last page of each request
         self.paged_kv_last_page_len: List[int] = []
