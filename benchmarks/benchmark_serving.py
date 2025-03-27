@@ -591,7 +591,7 @@ def main(args: argparse.Namespace):
         # and HuggingFaceDataset based on provided parameters.
         dataset_class = HuggingFaceDataset
         if args.dataset_path == VisionArenaDataset.VISION_ARENA_DATASET_PATH:
-            assert args.hf_subset is None, "VisionArenaDataset needs hf_subset to be None."
+            assert args.hf_subset is None, "VisionArenaDataset needs hf_subset to be None."  #noqa: E501
             dataset_class = VisionArenaDataset
         elif args.dataset_path == "likaixin/InstructCoder":
             dataset_class = InstructCoderDataset
