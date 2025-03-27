@@ -1583,12 +1583,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     cache3_view: Tuple[int, ...] = ()
 
     if use_dg:
-        # If M is not divisible by the block size we run the largest
-        # chunk we can using DeepGemm, the remainder is handed off to
-        # the Triton kernels.
-        if M % block_m != 0:
-            CHUNK_SIZE = min((M // block_m) * block_m, CHUNK_SIZE)
-
         assert w1_scale is not None
         assert w2_scale is not None
 
@@ -1634,10 +1628,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         if tokens_in_chunk == 0:
             break
 
-        # If we are using DeepGemm, only operate on chunks that are
-        # blocked, otherwise defer to Triton.
-        use_dg_for_chunk = use_dg and tokens_in_chunk % block_m == 0
-
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
@@ -1653,14 +1643,13 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         (qcurr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
          num_tokens_post_padded, inv_perm) = _moe_permute(
              qcurr_hidden_states, a1q_scale, curr_topk_ids, global_num_experts,
-             expert_map, top_k_num, block_m, use_dg_for_chunk)
+             expert_map, top_k_num, block_m, use_dg)
 
-        # Adjust the intermediate cache size and config for the last chunk or
-        # when switching from DeepGemm to Triton. Note that in most cases we
-        # only have one chunk so the cache size and config are already set
-        # correctly and do not need to be adjusted.
-        if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or use_dg_for_chunk:
-            if use_dg_for_chunk:
+        # Adjust the intermediate cache size and config for the last chunk.
+        # Note that in most cases we only have one chunk so the cache size
+        # and config are already set correctly and do not need to be adjusted.
+        if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or use_dg:
+            if use_dg:
                 curr_M = sorted_token_ids.numel()
                 cache1_view = (curr_M, N)
                 cache2_view = (curr_M, N // 2)
@@ -1697,7 +1686,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_fp8_w8a8=use_fp8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
-                                use_dg=use_dg_for_chunk,
+                                use_dg=use_dg,
                                 block_shape=block_shape)
 
         if activation == "silu":
@@ -1736,14 +1725,14 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_fp8_w8a8=use_fp8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
-                                use_dg=use_dg_for_chunk,
+                                use_dg=use_dg,
                                 block_shape=block_shape)
 
         _moe_unpermute_and_reduce(
             out_hidden_states[begin_chunk_idx:end_chunk_idx],
             intermediate_cache3.view(*intermediate_cache3.shape), inv_perm,
             expert_ids, top_k_num, global_num_experts, K, curr_topk_weights,
-            curr_topk_ids, use_dg_for_chunk)
+            curr_topk_ids, use_dg)
 
     return out_hidden_states
 
