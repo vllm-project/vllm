@@ -46,6 +46,12 @@ DEVICE_OPTIONS = [
 ]
 
 
+def str_or_bool(val: Optional[str]) -> Union[bool, str]:
+    if val is None:
+        return True
+    return val
+
+
 def nullable_str(val: str):
     if not val or val == "None":
         return None
@@ -136,7 +142,7 @@ class EngineArgs:
     code_revision: Optional[str] = None
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
-    hf_token: Optional[Union[str, List[str]]] = None
+    hf_token: Optional[Union[bool, str]] = None
     hf_overrides: Optional[HfOverrides] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
@@ -616,13 +622,12 @@ class EngineArgs:
                             help='RoPE theta. Use with `rope_scaling`. In '
                             'some cases, changing the RoPE theta improves the '
                             'performance of the scaled model.')
-        parser.add_argument(
-            '--hf-token',
-            type=str,
-            nargs="+",
-            default=None,
-            help='Hugging Face token (can be a string or a list'
-            ' of strings)')
+        parser.add_argument('--hf-token',
+                            type=str_or_bool,
+                            nargs='?',
+                            default=None,
+                            help='Hugging Face token (can be a boolean flag'
+                            ' or a string).')
         parser.add_argument('--hf-overrides',
                             type=json.loads,
                             default=EngineArgs.hf_overrides,
