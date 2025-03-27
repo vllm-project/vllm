@@ -29,7 +29,7 @@ def test_processor_override(
     num_imgs: int,
     kwargs_on_init: bool,
 ):
-    """Ensure input_processor_for_idefics3 handles num_crops properly."""
+    """Ensure Idefics3MultiModalProcessor handles num_crops properly."""
     # Same as the previous test - don't initialize mm_processor_kwargs
     # in this test and assume that the kwargs will be correctly expanded by
     # the partial when calling the custom input processor.
