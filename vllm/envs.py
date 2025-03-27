@@ -99,7 +99,7 @@ if TYPE_CHECKING:
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
-    VLLM_TPU_BUCKET_PADDING_GAP: int = 64
+    VLLM_TPU_BUCKET_PADDING_GAP: int = 0
 
 
 def get_default_cache_root():
@@ -648,7 +648,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # 8, we will run forward pass with [16, 24, 32, ...].
     "VLLM_TPU_BUCKET_PADDING_GAP":
     lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
-    if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 64,
+    if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
 }
 
 # end-env-vars-definition
@@ -687,7 +687,7 @@ def compute_hash() -> str:
     variables, ensure that it is included in the factors list if
     it affects the computation graph. For example, different values
     of VLLM_PP_LAYER_PARTITION will generate different computation
-    graphs, so it is included in the factors list. The env vars that 
+    graphs, so it is included in the factors list. The env vars that
     affect the choice of different kernels or attention backends should
     also be included in the factors list.
     """

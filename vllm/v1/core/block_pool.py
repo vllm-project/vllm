@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Optional
+from typing import Callable, Optional
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
@@ -15,10 +15,10 @@ logger = init_logger(__name__)
 
 class BlockPool:
     """BlockPool that manages KVCacheBlocks.
-    It provides methods to allocate, free and cache the kv cache blocks. The 
-    free_block_queue stores the free blocks in eviction order to enable 
-    allocation, free, and cache eviction. The cached_block_hash_to_block 
-    maps between block hash and cached block to support finding cached blocks 
+    It provides methods to allocate, free and cache the kv cache blocks. The
+    free_block_queue stores the free blocks in eviction order to enable
+    allocation, free, and cache eviction. The cached_block_hash_to_block
+    maps between block hash and cached block to support finding cached blocks
     by their block hash.
 
     Args:
@@ -75,11 +75,12 @@ class BlockPool:
         num_cached_blocks: int,
         num_full_blocks: int,
         block_size: int,
+        hash_fn: Callable,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
         metadata to be updated and cached. Given a request, it computes the
-        block hashes for the blocks starting from `num_cached_blocks` to 
+        block hashes for the blocks starting from `num_cached_blocks` to
         `num_full_blocks`, updating the metadata for each block
         and caching them in the `cached_block_hash_to_block`.
 
@@ -87,12 +88,13 @@ class BlockPool:
             request: The request to cache the blocks.
             blocks: All blocks in the request.
             block_hashes: Block hashes of the blocks in the request. Note that
-            this list may be shorter than the blocks list. In this case the 
+            this list may be shorter than the blocks list. In this case the
             missed block hash will be computed in this function.
             num_cached_blocks: The number of blocks that are already cached.
-            num_full_blocks: The number of blocks that are full and should 
+            num_full_blocks: The number of blocks that are full and should
                 be cached after this function.
             block_size: Number of tokens in each block.
+            hash_fn: The hash function to use for block hashes.
         """
         if num_cached_blocks == num_full_blocks:
             return
@@ -138,7 +140,7 @@ class BlockPool:
                     request, start_token_idx, end_token_idx, -1)
 
                 # Compute the hash of the current block.
-                block_hash = hash_block_tokens(prev_block_hash_value,
+                block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
                                                block_tokens, extra_keys)
                 block_hashes.append(block_hash)
 
