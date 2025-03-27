@@ -137,7 +137,6 @@ def validate_generated_texts(hf_runner,
     # when using distributed inference
     with vllm_runner(model_name,
                      quantization='bitsandbytes',
-                     load_format='bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
                      enforce_eager=False) as llm:
         vllm_outputs = llm.generate_greedy(prompts, 8)
