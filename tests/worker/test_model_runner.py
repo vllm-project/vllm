@@ -53,7 +53,7 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio):
         seq_lens.append(seq_len)
         if random.random() < prompt_embeds_ratio:
             seq_data = SequenceData.from_seqs(
-                range(seq_len),
+                [],
                 prompt_embeds=torch.rand(seq_len, 10),
             )
             input_embeds_len += seq_len
