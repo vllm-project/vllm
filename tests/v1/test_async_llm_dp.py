@@ -15,7 +15,16 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
 
-if not current_platform.supports_v1():
+
+engine_args = AsyncEngineArgs(
+    model="ibm-research/PowerMoE-3b",
+    enforce_eager=True,
+    disable_log_requests=True,
+    tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
+    data_parallel_size=int(os.getenv("DP_SIZE", 2)),
+)
+
+if not current_platform.supports_v1(engine_args.create_model_config()):
     pytest.skip(reason="Requires V1-supporting platform.",
                 allow_module_level=True)
 
@@ -56,13 +65,6 @@ async def generate(engine: AsyncLLM,
 async def test_load(output_kind: RequestOutputKind):
 
     with ExitStack() as after:
-        engine_args = AsyncEngineArgs(
-            model="ibm-research/PowerMoE-3b",
-            enforce_eager=True,
-            disable_log_requests=True,
-            tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
-            data_parallel_size=int(os.getenv("DP_SIZE", 2)),
-        )
 
         prompt = "This is a test of data parallel"
 
