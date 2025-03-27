@@ -274,37 +274,174 @@ if triton.__version__ >= "2.1.0":
     #  "mma -> mma layout conversion is only supported on Ampere"' failed.
     # is observed
     if triton.__version__ >= "3.2.0":
+
+        def my_bench(kernel, quantiles):
+            timings = triton.testing.do_bench(kernel, quantiles=quantiles, \
+                                              warmup=100, rep=10000)
+            # print(f"{timings=}")
+            return timings
+
         @triton.autotune(
             configs=[
-                triton.Config({'BLOCK_M': block_m, 'BLOCK_N': block_n, \
-                                "num_unroll_cache": num_unroll_cache, \
-                                "num_unroll_request": num_unroll_request } | \
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, \
+                                "num_unroll_cache": 1, \
+                                "num_unroll_request": 2 } | \
                                 ({"kpack": 2} \
                                     if current_platform.is_rocm() else {}), \
-                                num_warps=num_warps) \
-                for block_m in [32, 64, 128] for block_n in [32, 64, 128] \
-                for num_warps in [4, 8] for num_unroll_cache in [1, 2] \
-                for num_unroll_request in [1, 2]
+                                num_warps=4, \
+                                num_stages=1),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 16, \
+                                "num_unroll_cache": 1, \
+                                "num_unroll_request": 2 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=8, \
+                                num_stages=1),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
+                                "num_unroll_cache": 1, \
+                                "num_unroll_request": 1 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=2),
+                triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, \
+                                "num_unroll_cache": 2, \
+                                "num_unroll_request": 1 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=1),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, \
+                                "num_unroll_cache": 2, \
+                                "num_unroll_request": 1 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=1),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
+                                "num_unroll_cache": 1, \
+                                "num_unroll_request": 1 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=2),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
+                                "num_unroll_cache": 1, \
+                                "num_unroll_request": 1 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=2),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
+                                "num_unroll_cache": 2, \
+                                "num_unroll_request": 1 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=2),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
+                                "num_unroll_cache": 1, \
+                                "num_unroll_request": 1 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=1),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 16, \
+                                "num_unroll_cache": 1, \
+                                "num_unroll_request": 2 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=1),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
+                                "num_unroll_cache": 2, \
+                                "num_unroll_request": 2 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=1),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
+                                "num_unroll_cache": 1, \
+                                "num_unroll_request": 2 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=1),
+                triton.Config({'BLOCK_M': 16, 'BLOCK_N': 64, \
+                                "num_unroll_cache": 1, \
+                                "num_unroll_request": 1 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=4, \
+                                num_stages=1),
+                triton.Config({'BLOCK_M': 16, 'BLOCK_N': 32, \
+                                "num_unroll_cache": 2, \
+                                "num_unroll_request": 4 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=8, \
+                                num_stages=1),
+                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
+                                "num_unroll_cache": 4, \
+                                "num_unroll_request": 1 } | \
+                                ({"kpack": 2} \
+                                    if current_platform.is_rocm() else {}), \
+                                num_warps=8, \
+                                num_stages=1),
             ],
-            key=["BLOCK_M", "BLOCK_N", "BLOCK_SIZE", \
-                "BLOCK_DMODEL_PADDED", "BLOCK_DMODEL"]
+            do_bench=lambda kernel, quantiles: my_bench(kernel, quantiles),
+            key=["BLOCK_SIZE", "MAX_Q_LEN", "MAX_CTX_LEN"]
         )
         @triton.jit
-        def _fwd_kernel(
-                Q, K, V, K_cache, V_cache, B_Loc, sm_scale, k_scale, v_scale,
-                B_Start_Loc, B_Seqlen, x: tl.constexpr, Out, stride_b_loc_b,
-                stride_b_loc_s, stride_qbs, stride_qh, stride_qd, stride_kbs,
-                stride_kh, stride_kd, stride_vbs, stride_vh, stride_vd,
-                stride_obs, stride_oh, stride_od, stride_k_cache_bs,
-                stride_k_cache_h, stride_k_cache_d,
-                stride_k_cache_bl: tl.constexpr, stride_k_cache_x,
-                stride_v_cache_bs, stride_v_cache_h, stride_v_cache_d,
-                stride_v_cache_bl, num_queries_per_kv: tl.constexpr,
-                IN_PRECISION: tl.constexpr, BLOCK_M: tl.constexpr,
-                BLOCK_DMODEL: tl.constexpr, BLOCK_DMODEL_PADDED: tl.constexpr,
-                BLOCK_SIZE: tl.constexpr, BLOCK_N: tl.constexpr,
-                SLIDING_WINDOW: tl.constexpr, num_unroll_cache: tl.constexpr,
-                num_unroll_request: tl.constexpr, SKIP_DECODE: tl.constexpr):
+        def _my_fwd_kernel(Q,
+                           K,
+                           V,
+                           K_cache,
+                           V_cache,
+                           B_Loc,
+                           sm_scale,
+                           k_scale,
+                           v_scale,
+                           B_Start_Loc,
+                           B_Seqlen,
+                           x: tl.constexpr,
+                           Out,
+                           stride_b_loc_b,
+                           stride_b_loc_s,
+                           stride_qbs,
+                           stride_qh,
+                           stride_qd,
+                           stride_kbs,
+                           stride_kh,
+                           stride_kd,
+                           stride_vbs,
+                           stride_vh,
+                           stride_vd,
+                           stride_obs,
+                           stride_oh,
+                           stride_od,
+                           stride_k_cache_bs,
+                           stride_k_cache_h,
+                           stride_k_cache_d,
+                           stride_k_cache_bl: tl.constexpr,
+                           stride_k_cache_x,
+                           stride_v_cache_bs,
+                           stride_v_cache_h,
+                           stride_v_cache_d,
+                           stride_v_cache_bl,
+                           num_queries_per_kv: tl.constexpr,
+                           IN_PRECISION: tl.constexpr,
+                           BLOCK_M: tl.constexpr,
+                           BLOCK_DMODEL: tl.constexpr,
+                           BLOCK_DMODEL_PADDED: tl.constexpr,
+                           BLOCK_SIZE: tl.constexpr,
+                           BLOCK_N: tl.constexpr,
+                           SLIDING_WINDOW: tl.constexpr,
+                           num_unroll_cache: tl.constexpr,
+                           num_unroll_request: tl.constexpr,
+                           SKIP_DECODE: tl.constexpr,
+                           MAX_Q_LEN: tl.constexpr = 0,
+                           MAX_CTX_LEN: tl.constexpr = 0):
 
             cur_batch = tl.program_id(0)
             cur_head = tl.program_id(1)
@@ -375,7 +512,15 @@ if triton.__version__ >= "2.1.0":
                          cur_kv_head * stride_v_cache_h +
                          offs_d[None, :] * stride_v_cache_d +
                          offs_bs_n[:, None] * stride_v_cache_bl)
-                k_load = tl.load(K_cache + off_k)
+
+                if start_n + BLOCK_SIZE > cur_batch_ctx_len:
+                    k_load = tl.load(
+                        K_cache + off_k,
+                        mask=dim_mask[:, None] &
+                        ((start_n + offs_bs_n[None, :]) < cur_batch_ctx_len),
+                        other=0.0)  # [D,N]
+                else:
+                    k_load = tl.load(K_cache + off_k)
 
                 if k_load.dtype.is_fp8():
                     k = (k_load.to(tl.float32) * tl.load(k_scale)).to(q.dtype)
@@ -411,7 +556,15 @@ if triton.__version__ >= "2.1.0":
                 acc = acc * alpha[:, None]
 
                 # update acc
-                v_load = tl.load(V_cache + off_v)
+                if start_n + BLOCK_SIZE > cur_batch_ctx_len:
+                    v_load = tl.load(
+                        V_cache + off_v,
+                        mask=dim_mask[None, :] &
+                        ((start_n + offs_bs_n[:, None]) < cur_batch_ctx_len),
+                        other=0.0)  # [N,D]
+                else:
+                    v_load = tl.load(V_cache + off_v)
+
                 if v_load.dtype.is_fp8():
                     v = (v_load.to(tl.float32) * tl.load(v_scale)).to(q.dtype)
                 else:
@@ -1065,7 +1218,7 @@ if triton.__version__ >= "2.1.0":
         if triton.__version__ >= "3.2.0":
             grid = lambda META: (batch, head,
                                  triton.cdiv(max_input_len, META["BLOCK_M"]))
-            _fwd_kernel[grid](
+            _my_fwd_kernel[grid](
                 q,
                 k,
                 v,
@@ -1112,6 +1265,7 @@ if triton.__version__ >= "2.1.0":
                 BLOCK_DMODEL_PADDED=Lk_padded,
                 SLIDING_WINDOW=sliding_window,
                 SKIP_DECODE=skip_decode,
+                MAX_Q_LEN=triton.next_power_of_2(max_input_len),
             )
             return
 
