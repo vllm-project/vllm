@@ -1308,7 +1308,8 @@ class MRotaryEmbedding(RotaryEmbedding):
     @staticmethod
     def _split_list_into_ranges(lst: torch.Tensor,
                                 interval: int) -> List[List[int]]:
-        ranges = [[] for _ in range((max(lst) // interval) + 1)]
+        ranges: List[List[int]] = [[]
+                                   for _ in range((max(lst) // interval) + 1)]
         for num in lst:
             index = num // interval
             ranges[index].append(num)
