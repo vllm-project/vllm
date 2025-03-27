@@ -15,8 +15,8 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.",
+if not current_platform.supports_v1():
+    pytest.skip(reason="Requires V1-supporting platform.",
                 allow_module_level=True)
 
 
@@ -53,10 +53,9 @@ async def generate(engine: AsyncLLM,
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
 @pytest.mark.asyncio
-async def test_load(monkeypatch, output_kind: RequestOutputKind):
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
+async def test_load(output_kind: RequestOutputKind):
 
+    with ExitStack() as after:
         engine_args = AsyncEngineArgs(
             model="ibm-research/PowerMoE-3b",
             enforce_eager=True,
@@ -104,5 +103,6 @@ async def test_load(monkeypatch, output_kind: RequestOutputKind):
             if core_client.num_engines_running == 0:
                 break
             await asyncio.sleep(0.5)
+
         assert core_client.num_engines_running == 0
         assert not core_client.reqs_in_flight
