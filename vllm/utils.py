@@ -36,6 +36,7 @@ from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
                              Iterable, Iterator, KeysView, Mapping)
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
+from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
                     Optional, Type, TypeVar, Union, cast, overload)
 from uuid import uuid4
@@ -263,7 +264,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
     @property
     def order(self) -> Mapping[_K, None]:
         """Return the internal order dictionary (read-only)."""
-        return self._LRUCache__order  # type: ignore
+        return MappingProxyType(self._LRUCache__order)  # type: ignore
 
     def stat(self) -> CacheInfo:
         return CacheInfo(hits=self._hits, total=self._total)
