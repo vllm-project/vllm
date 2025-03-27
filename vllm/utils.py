@@ -10,6 +10,7 @@ import datetime
 import enum
 import gc
 import getpass
+import hashlib
 import importlib
 import importlib.metadata
 import importlib.util
@@ -17,6 +18,7 @@ import inspect
 import ipaddress
 import multiprocessing
 import os
+import pickle
 import re
 import signal
 import socket
@@ -37,7 +39,7 @@ from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TypeVar, Union)
+                    Optional, Type, TypeVar, Union)
 from uuid import uuid4
 
 import cloudpickle
@@ -1544,9 +1546,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[type[T], _V]):
+class ClassRegistry(UserDict[Type[T], _V]):
 
-    def __getitem__(self, key: type[T]) -> _V:
+    def __getitem__(self, key: Type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
@@ -2173,6 +2175,11 @@ def _maybe_force_spawn():
     if cuda_is_initialized():
         reason = "CUDA is initialized"
     elif is_in_ray_actor():
+        # even if we choose to spawn, we need to pass the ray address
+        # to the subprocess so that it knows how to connect to the ray cluster.
+        # env vars are inherited by subprocesses, even if we use spawn.
+        import ray
+        os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reason = "In a Ray actor and can only be spawned"
 
     if reason is not None:
@@ -2440,3 +2447,21 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
         return wrapper
 
     return decorator
+
+
+def sha256(input) -> int:
+    """Hash any picklable Python object using SHA-256.
+
+    The input is serialized using pickle before hashing, which allows
+    arbitrary Python objects to be used. Note that this function does
+    not use a hash seed—if you need one, prepend it explicitly to the input.
+
+    Args:
+        input: Any picklable Python object.
+
+    Returns:
+        An integer representing the SHA-256 hash of the serialized input.
+    """
+    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
+                          byteorder="big")

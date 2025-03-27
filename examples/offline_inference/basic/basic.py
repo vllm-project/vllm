@@ -18,7 +18,10 @@ llm = LLM(model="facebook/opt-125m")
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
 # Print the outputs.
+print("\nGenerated Outputs:\n" + "-" * 60)
 for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    print(f"Prompt:    {prompt!r}")
+    print(f"Output:    {generated_text!r}")
+    print("-" * 60)

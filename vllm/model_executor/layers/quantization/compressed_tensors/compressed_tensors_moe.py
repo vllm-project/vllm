@@ -32,6 +32,7 @@ class GPTQMarlinState(Enum):
 __all__ = [
     "CompressedTensorsMoEMethod", "CompressedTensorsW8A8Fp8MoEMethod",
     "CompressedTensorsW8A8Fp8MoECutlassMethod",
+    "CompressedTensorsW8A8Fp8MoECutlassMethod",
     "CompressedTensorsWNA16MoEMethod"
 ]
 
