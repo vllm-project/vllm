@@ -63,7 +63,8 @@ class LlamaConfig:
             factors.append((k, v))
         factors.sort()
         import hashlib
-        return hashlib.md5(str(factors).encode()).hexdigest()
+        return hashlib.md5(str(factors).encode(),
+                           usedforsecurity=False).hexdigest()
 
     def __post_init__(self):
         assert self.mlp_size >= self.hidden_size
