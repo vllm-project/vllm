@@ -118,26 +118,10 @@ class TopKTopPSampler(nn.Module):
         # If only top-k is specified, use pytorch's builtin topk op. This leads
         # to significant speed up on TPU compared to using apply_top_k_top_p.
         if k is not None and p is None:
-            logits = top_k_only(logits, k)
+            logits = apply_top_k_only(logits, k)
         # TODO Add TPU optimized topp kernel and topk+topp
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators)
-
-
-def top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-    # Avoid sorting vocab for top-k only case.
-    no_top_k_mask = k == logits.shape[1]
-    # Set non-top-k rows to 1 so that we can gather.
-    k = k.masked_fill(no_top_k_mask, 1)
-    max_top_k = k.max()
-    # topk.values tensor has shape [batch_size, max_top_k].
-    # Convert top k to 0-based index in range [0, max_top_k).
-    k_index = k.sub_(1).unsqueeze(1)
-    top_k_mask = logits.topk(max_top_k, dim=1).values.gather(1, k_index)
-    # Handle non-topk rows.
-    top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
-    logits.masked_fill_(logits < top_k_mask, -float("inf"))
-    return logits
 
 
 def apply_top_k_top_p(
