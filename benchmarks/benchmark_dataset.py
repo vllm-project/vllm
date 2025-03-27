@@ -698,9 +698,6 @@ class VisionArenaDataset(HuggingFaceDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["turns"][0][0]["content"]
-            # TODO: fix later
-            if item["question_id"] in {'18a1f90a77674125b4751bafd8a5383c','ffe3930a8ec24655ac1fb36a32187975'}:
-                continue
             mm_content = process_image(item["images"][0])
             prompt_len = len(tokenizer(prompt).input_ids)
             if enable_multimodal_chat:

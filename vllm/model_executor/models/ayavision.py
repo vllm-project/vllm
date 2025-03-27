@@ -213,7 +213,6 @@ class AyaVisionMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
@@ -228,16 +227,18 @@ class AyaVisionMultiModalProcessor(
         )
         hf_config = self.info.get_hf_config()
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
-        if (images := mm_data.get("images")) is not None:
+        if (images := mm_data.get("images")) is not None and '<image>' in prompt:
             assert isinstance(images, list)
             image_inputs = image_processor(images=images, **output_kwargs["images_kwargs"])
             num_patches = image_inputs.get("num_patches") # TODO: update the get_num_patches to match with this
             image_tokens_list = [hf_processor._prompt_split_image(num_patch) for num_patch in num_patches]
-            image_token_ids = hf_processor.tokenizer(image_tokens_list, **output_kwargs["text_kwargs"]).input_ids
+            tokenizer = self.info.get_tokenizer()
+            image_token_ids = [tokenizer.encode(image_tokens, add_special_tokens=False) for image_tokens in image_tokens_list]
             embed_is_patch = [
                 torch.tensor(image_repl_tokens) == hf_config.image_token_index
                 for image_repl_tokens in image_token_ids
             ]
+            
             processed_outputs["embed_is_patch"] = embed_is_patch
             processed_outputs["num_patches"] = torch.tensor(num_patches)
 
