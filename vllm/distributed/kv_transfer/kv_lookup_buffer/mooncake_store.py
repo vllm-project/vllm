@@ -19,6 +19,9 @@ from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
     KVStoreBufferBase)
 from vllm.logger import init_logger
 
+DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
+DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
+
 logger = init_logger(__name__)
 
 
@@ -40,8 +43,10 @@ class MooncakeStoreConfig:
         return MooncakeStoreConfig(
             local_hostname=config.get("local_hostname"),
             metadata_server=config.get("metadata_server"),
-            global_segment_size=config.get("global_segment_size", 3355443200),
-            local_buffer_size=config.get("local_buffer_size", 1073741824),
+            global_segment_size=config.get("global_segment_size",
+                                           DEFAULT_GLOBAL_SEGMENT_SIZE),
+            local_buffer_size=config.get("local_buffer_size",
+                                         DEFAULT_LOCAL_BUFFER_SIZE),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
