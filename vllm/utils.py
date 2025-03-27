@@ -61,7 +61,7 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -2496,6 +2496,18 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
         return wrapper
 
     return decorator
+
+
+# Only relevant for models using ALiBi (e.g, MPT)
+def check_use_alibi(model_config: ModelConfig) -> bool:
+    return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
+            or ("BloomForCausalLM" in getattr(model_config.hf_config,
+                                              "architectures", []))  # Bloom
+            or getattr(model_config.hf_text_config, "position_encoding_type",
+                       "") == "alibi"  # codellm_1b_alibi
+            or
+            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
+             and model_config.hf_text_config.attn_config.get("alibi", False)))
 
 
 def sha256(input) -> int:
