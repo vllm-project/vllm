@@ -665,7 +665,7 @@ class EngineArgs:
             type=nullable_kvs,
             default=EngineArgs.limit_mm_per_prompt,
             # The default value is given in
-            # MultiModalRegistry.init_mm_limits_per_prompt
+            # MultiModalConfig.get_limit_per_prompt
             help=('For each multimodal plugin, limit how many '
                   'input instances to allow for each prompt. '
                   'Expects a comma-separated list of items, '
