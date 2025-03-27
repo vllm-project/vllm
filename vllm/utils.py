@@ -2446,7 +2446,6 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
     return decorator
 
 
-
 # Only relevant for models using ALiBi (e.g, MPT)
 def check_use_alibi(model_config: ModelConfig) -> bool:
     return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
@@ -2458,7 +2457,7 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
             (hasattr(model_config.hf_text_config, "attn_config")  # MPT
              and model_config.hf_text_config.attn_config.get("alibi", False)))
 
-  
+
 def sha256(input) -> int:
     """Hash any picklable Python object using SHA-256.
 
@@ -2475,4 +2474,3 @@ def sha256(input) -> int:
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
     return int.from_bytes(hashlib.sha256(input_bytes).digest(),
                           byteorder="big")
-
