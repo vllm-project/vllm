@@ -382,14 +382,11 @@ def main(args: argparse.Namespace):
         # we have request_outputs, which we use to count tokens.
         total_prompt_tokens = 0
         total_output_tokens = 0
-        prompt_tokens = []
         for ro in request_outputs:
             if not isinstance(ro, RequestOutput):
                 continue
             total_prompt_tokens += len(
                 ro.prompt_token_ids) if ro.prompt_token_ids else 0
-            prompt_tokens.append(len(
-                ro.prompt_token_ids) if ro.prompt_token_ids else 0)
             total_output_tokens += sum(
                 len(o.token_ids) for o in ro.outputs if o)
         total_num_tokens = total_prompt_tokens + total_output_tokens
@@ -398,7 +395,6 @@ def main(args: argparse.Namespace):
                                for r in requests)
         total_output_tokens = sum(r.expected_output_len for r in requests)
         total_prompt_tokens = total_num_tokens - total_output_tokens
-        prompt_tokens = [r.prompt_len for r in requests]
 
     if is_multi_modal and args.backend != "vllm-chat":
         print("\033[91mWARNING\033[0m: Multi-modal request with "
@@ -413,10 +409,6 @@ def main(args: argparse.Namespace):
           f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
     print(f"Total num prompt tokens:  {total_prompt_tokens}")
     print(f"Total num output tokens:  {total_output_tokens}")
-    print(f"Max num prompt tokens:  {max(prompt_tokens)}")
-    print(f"Max num prompt tokens:  {min(prompt_tokens)}")
-    print(f"Total successful request: {len(prompt_tokens)}/{len(requests)}")
-
 
     # Output JSON results if specified
     if args.output_json:

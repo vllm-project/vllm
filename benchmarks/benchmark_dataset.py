@@ -706,9 +706,6 @@ class VisionArenaDataset(HuggingFaceDataset):
                 # actual prompt len
                 prompt = self.apply_multimodal_chat_transformation(
                     prompt, mm_content)
-                assert isinstance(output_len, int) and output_len > 0
-                if output_len is not None and not is_valid_sequence(prompt_len, output_len):
-                    continue
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,

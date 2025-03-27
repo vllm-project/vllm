@@ -217,8 +217,8 @@ Total num output tokens:  1500
 ### VisionArena Benchmark for Vision Language Models
 
 ``` bash
-MODEL_NAME="CohereForAI/aya-vision-8b"
-NUM_PROMPTS=500
+MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
+NUM_PROMPTS=10
 DATASET_NAME="hf"
 DATASET_PATH="lmarena-ai/vision-arena-bench-v0.1"
 DATASET_SPLIT="train"
@@ -229,9 +229,7 @@ python3 vllm/benchmarks/benchmark_throughput.py \
   --dataset-name "${DATASET_NAME}" \
   --dataset-path "${DATASET_PATH}" \
   --num-prompts "${NUM_PROMPTS}" \
-  --hf-split "${DATASET_SPLIT}" \
-  --output-len 5
-  --enforce-eager
+  --hf-split "${DATASET_SPLIT}"
 ```
 
 The `num prompt tokens` now includes image token counts
