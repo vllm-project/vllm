@@ -34,7 +34,8 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
-from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
+                                   MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
@@ -42,7 +43,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .blip2 import Blip2QFormerModel
-from .interfaces import SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsV0Only
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 ###########################################################
@@ -51,7 +52,7 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 class GraniteSpeechEncoderProjectorQFormer(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, quant_config, cache_config):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.ds_rate = config.downsample_rate
@@ -63,9 +64,9 @@ class GraniteSpeechEncoderProjectorQFormer(nn.Module):
         # It would be nice if we could do this generically...
         self.qformer = Blip2QFormerModel(
             config,
-            quant_config=None,
-            cache_config=None,
-        )  #### HACK HACK HACK - TODO need to add configs
+            quant_config=quant_config,
+            cache_config=cache_config,
+        )
         self.linear = nn.Linear(config.hidden_size, config.llm_dim)
 
     def forward(self, x, atts):
@@ -383,21 +384,30 @@ class GraniteSpeechAudioInputs(TypedDict):
 class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        # TODO - check if multi-audio is supported.
-        return {"audio": None}
+        # For now, we only allow one audio per input for granite speech models.
+        return {"audio": 1}
 
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        # hf_config = self.get_hf_config()
-        max_num_audio_tokens = 1000  # TODO calculate me
-        return {"audio": max_num_audio_tokens}
+        return {"audio": self.get_max_audio_tokens()}
+
+    def get_max_audio_tokens(self):
+        return 10000
 
 
 class GraniteSpeechMultiModalProcessor(
         BaseMultiModalProcessor[GraniteSpeechMultiModalProcessingInfo]):
+
+    def _get_data_parser(self) -> MultiModalDataParser:
+        # TODO - may need to clean this up / need to make sure override is
+        # handled correctly. This can also probably be handled more cleanly
+        # on the HF side of things...
+        feature_extractor = self.info.get_hf_processor().feature_extractor
+        sampling_rate = feature_extractor.melspec_kwargs["sample_rate"]
+        return MultiModalDataParser(target_sr=sampling_rate)
 
     def _get_mm_fields_config(
         self,
@@ -412,17 +422,45 @@ class GraniteSpeechMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptUpdate]:
-        # TODO - implement this properly, need to add feature calc
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        feature_extractor = processor.feature_extractor
+        vocab = tokenizer.get_vocab()
+
+        # Use getattr with default to be compatible with transformers<4.48
+        audio_token = getattr(processor, "audio_token", "<|audio|>")
+        audio_token_id = vocab[audio_token]
+
         def get_replacement(item_idx: int):
-            return [49155] * 1
+            audios = mm_items.get_items("audio", AudioProcessorItems)
+            audio = audios.get(item_idx)
+            # HACK - this is actually calculating the features and passing the
+            # variable length feature shapes; we should add a helper to calc
+            # this instead of computing the potentially expensive features
+            num_features = feature_extractor(
+                torch.from_numpy(audio).view(1, -1)).shape[1]
+            return [audio_token_id] * num_features
 
         return [
             PromptReplacement(
                 modality="audio",
-                target=[49155],
+                target=[audio_token_id],
                 replacement=get_replacement,
-            ),
+            )
         ]
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        res = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+        return res
 
 
 class GraniteSpeechDummyInputsBuilder(
@@ -433,18 +471,21 @@ class GraniteSpeechDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        # TODO - calculate this correctly off the feature extractor
-        audio_len = 1
+        max_audio_len = self.info.get_max_audio_tokens()
         num_audios = mm_counts.get("audio", 0)
-
         mm_data = {
             "audio":
-            self._get_dummy_audios(length=audio_len, num_audios=num_audios)
+            self._get_dummy_audios(
+                length=max_audio_len,
+                num_audios=num_audios,
+            )
         }
 
+        hf_processor = self.info.get_hf_processor()
+        audio_token = getattr(hf_processor, "audio_token", "<|audio|>")
+
         return ProcessorInputs(
-            # TODO - can we pull this from tokenizer?
-            prompt_text="<|audio|>" * num_audios,
+            prompt_text=audio_token * num_audios,
             mm_data=mm_data,
         )
 
@@ -457,17 +498,31 @@ class GraniteSpeechForConditionalGeneration(
         nn.Module,
         #SupportsMultiModal,
         SupportsPP,
+        SupportsLoRA,
+        SupportsV0Only,
 ):
+
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
+        cache_config = vllm_config.cache_config
 
         self.config = config
-        self.lora_config = lora_config
         self.quant_config = quant_config
+        self.cache_config = cache_config
         self.sampler = get_sampler()
 
         # this should be a granite causal LM, but written generically for now
@@ -479,7 +534,10 @@ class GraniteSpeechForConditionalGeneration(
         hf_config = vllm_config.model_config.hf_config
         self.encoder = GraniteSpeechCTCModel(config=hf_config.encoder_config)
         self.projector = GraniteSpeechEncoderProjectorQFormer(
-            config=hf_config.projector_config)
+            config=hf_config.projector_config,
+            quant_config=quant_config,
+            cache_config=cache_config,
+        )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
@@ -495,6 +553,7 @@ class GraniteSpeechForConditionalGeneration(
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        input_features=None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.language_model(input_ids, positions,
                                            intermediate_tensors, inputs_embeds)
@@ -537,7 +596,7 @@ class GraniteSpeechForConditionalGeneration(
                 for suffix in ignore_suffixes:
                     ignore_layers.append(
                         f"encoder.rnn_tr.{idx1}.conv.net.{idx2}.{suffix}")
-        return {"ignore_unexpected_prefixes": ignore_layers}
+        return {"ignore_unexpected_prefixes": ignore_layers}  # FIXME
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
