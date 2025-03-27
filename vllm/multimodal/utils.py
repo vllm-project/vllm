@@ -440,7 +440,7 @@ def merge_and_sort_multimodal_metadata(
     # so we can return the list directly.
     if len(modalities) == 1:
         modality = modalities[0]
-        placeholder_list = list(mm_positions[modality])
+        placeholder_list = mm_positions[modality]
         if mm_hashes is None:
             return [modality] * len(placeholder_list), placeholder_list, None
         else:
@@ -451,7 +451,7 @@ def merge_and_sort_multimodal_metadata(
     all_items = []
     for modality in modalities:
         placeholder_list = mm_positions[modality]
-        hash_list = mm_hashes[
+        hash_list: list[Optional[str]] = mm_hashes[
             modality] if mm_hashes and modality in mm_hashes else [None] * len(
                 placeholder_list)
 
