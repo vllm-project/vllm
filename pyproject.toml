@@ -6,7 +6,7 @@ requires = [
     "packaging",
     "setuptools>=61",
     "setuptools-scm>=8.0",
-    "torch == 2.5.1",
+    "torch == 2.6.0",
     "wheel",
     "jinja2",
 ]
@@ -86,6 +86,7 @@ exclude = [
 "vllm/triton_utils/**/*.py" = ["UP006", "UP035"]
 "vllm/vllm_flash_attn/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
+"vllm/utils.py" = ["UP006", "UP035"]
 
 [tool.ruff.lint]
 select = [

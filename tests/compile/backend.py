@@ -6,6 +6,7 @@ from typing import Callable, Union
 from torch import fx
 
 from vllm.compilation.inductor_pass import InductorPass
+from vllm.config import get_current_vllm_config
 
 
 class TestBackend:
@@ -17,13 +18,14 @@ class TestBackend:
     Inductor config can be modified directly by editing the inductor_config
     property. This can be helpful for adding passes like the
     'pre_grad_custom_pass' and the 'post_grad_custom_pre_pass'.
+    Inductor config is default-initialized from VllmConfig.CompilationConfig.
     """
 
     def __init__(self, *passes: Union[InductorPass, Callable[[fx.Graph],
                                                              None]]):
         self.custom_passes = list(passes)
-        from torch._inductor import config
-        self.inductor_config = config.shallow_copy_dict()
+        compile_config = get_current_vllm_config().compilation_config
+        self.inductor_config = compile_config.inductor_compile_config
         self.inductor_config['force_disable_caches'] = True
         self.inductor_config['post_grad_custom_post_pass'] = self.post_pass
 
