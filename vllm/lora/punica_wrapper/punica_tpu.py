@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
@@ -290,8 +291,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                         self.sampler_indices,
                         add_inputs=True)
         return y.view_as(y_org)
-    
-    # This performs the same tensor ops as the base method, except it does them 
+
+    # This performs the same tensor ops as the base method, except it does them
     # on the CPU then transfers the results to the TPU
     def _update_base_metadata(
         self,
@@ -303,10 +304,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         long_lora_context: Optional["LongContextLoRAContext"] = None,
     ):
         # Pad the prompt mapping to avoid running into recompiles on the TPU
-        pad_len = len(mapping.index_mapping) - len(mapping.prompt_mapping)
-        padding = [-1] * pad_len
-        mapping.prompt_mapping = tuple(list(mapping.prompt_mapping) + padding)
-        
+        # TODO: Should this happen inside mapping internally? If so how can we
+        # avoid having backend specific LoRAMapping classes?
+        mapping.prompt_mapping = self._pad_prompt_mapping(
+            mapping.prompt_mapping)
+
         (
             base_indices,
             sampler_indices,
@@ -323,8 +325,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             "cpu",
             long_lora_context,
         )
-        self._token_lora_indices[:base_indices.shape[0]].copy_(base_indices.to(self.device))
-        self._sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices.to(self.device))
+        self._token_lora_indices[:base_indices.shape[0]].copy_(
+            base_indices.to(self.device))
+        self._sampler_indices[:sampler_indices.shape[0]].copy_(
+            sampler_indices.to(self.device))
         self._sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
             sampler_indices_padded.to(self.device))
         self._embeddings_indices[:embeddings_indices.
@@ -341,3 +345,16 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self.batch_size = 1
         self._lora_indices_per_batch[:self.batch_size].copy_(
             token_lora_tensor[:self.batch_size])
+
+    def _pad_prompt_mapping(
+            self, prompt_mapping: Tuple[int, ...]) -> Tuple[int, ...]:
+        num_reqs = len(prompt_mapping)
+
+        # From vllm/v1/worker/tppu_model_runner:52, but need to avoid a circular import
+        MIN_NUM_SEQS = 8
+
+        padded_num_reqs = max(2**math.ceil(math.log2(num_reqs)), MIN_NUM_SEQS)
+        pad_len = padded_num_reqs - num_reqs
+
+        padding = [-1] * pad_len
+        return tuple(list(prompt_mapping) + padding)

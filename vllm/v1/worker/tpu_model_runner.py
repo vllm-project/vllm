@@ -777,12 +777,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
         with self.maybe_dummy_run_with_lora(
-                self.lora_config, np.array([num_tokens], dtype=np.int32)):
-            with set_forward_context(attn_metadata, self.vllm_config, 0):
-                self.model(input_ids=input_ids,
-                           positions=position_ids,
-                           kv_caches=kv_caches,
-                           inputs_embeds=inputs_embeds)
+                self.lora_config,
+                np.array([num_tokens], dtype=np.int32)), set_forward_context(
+                    attn_metadata, self.vllm_config, 0):
+            self.model(input_ids=input_ids,
+                       positions=position_ids,
+                       kv_caches=kv_caches,
+                       inputs_embeds=inputs_embeds)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -810,7 +811,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             dummy_hidden = torch.randn((num_tokens, hsize),
                                        device=device,
                                        dtype=torch.bfloat16)
-            while True:
+            while num_reqs_to_sample <= self.max_num_reqs and \
+                  num_reqs_to_sample <= num_tokens:
                 indices = torch.zeros(
                     num_reqs_to_sample,
                     dtype=torch.int32,
@@ -822,13 +824,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
 
-                with self.maybe_dummy_run_with_lora(self.lora_config, np.array([num_tokens], dtype=np.int32)):
-                    out = self.model.sample_from_hidden(dummy_hidden,
-                                                    sampling_meta)
+                with self.maybe_dummy_run_with_lora(
+                        self.lora_config,
+                        _create_dummy_scheduled_tokens(num_tokens,
+                                                       num_reqs_to_sample)):
+                    out = self.model.sample_from_hidden(
+                        dummy_hidden, sampling_meta)
 
                 out = out.cpu()
-                if num_reqs_to_sample >= self.max_num_reqs:
-                    break
                 num_reqs_to_sample *= 2
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -1008,3 +1011,15 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
+
+
+def _create_dummy_scheduled_tokens(total_tokens: int,
+                                   num_prompts: int) -> np.ndarray:
+    assert num_prompts <= total_tokens, "Expected num_prompts < total_tokens"
+    base_tokens = total_tokens // num_prompts
+    leftover_tokens = total_tokens % num_prompts
+
+    tokens = np.full((num_prompts, ), base_tokens, dtype=np.int32)
+    tokens[-1] += leftover_tokens
+
+    return tokens
