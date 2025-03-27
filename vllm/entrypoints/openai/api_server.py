@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import State
 from starlette.routing import Mount
 from typing_extensions import assert_never
@@ -844,6 +845,21 @@ def build_app(args: Namespace) -> FastAPI:
                 "X-Request-Id") or uuid.uuid4().hex
             response = await call_next(request)
             response.headers["X-Request-Id"] = request_id
+            return response
+
+    if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
+        logger.warning("CAUTION: Enabling log response in the API Server. "
+                       "This can include sensitive information and should be "
+                       "avoided in production.")
+
+        @app.middleware("http")
+        async def log_response(request: Request, call_next):
+            response = await call_next(request)
+            response_body = [
+                section async for section in response.body_iterator
+            ]
+            response.body_iterator = iterate_in_threadpool(iter(response_body))
+            logger.info("response_body={%s}", response_body[0].decode())
             return response
 
     for middleware in args.middleware:
