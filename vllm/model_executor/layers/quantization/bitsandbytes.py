@@ -377,7 +377,7 @@ def _apply_bnb_4bit(
 def _apply_bnb_4bit_fake(
     x: torch.Tensor,
     weight: torch.Tensor,
-    offsets: tuple,
+    offsets: torch.Tensor,
     out: torch.Tensor,
 ) -> None:
     return

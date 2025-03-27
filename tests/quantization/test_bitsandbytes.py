@@ -101,8 +101,6 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
         "--enable-prefix-caching",
         "--quantization",
         "bitsandbytes",
-        "--load-format",
-        "bitsandbytes",
         "--gpu-memory-utilization",
         "0.7",
     ]
