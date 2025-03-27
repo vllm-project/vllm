@@ -56,7 +56,7 @@ from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 import logging
 import os
 logger = logging.getLogger(__name__)
-logger.setLevel(os.environ["VLLM_LOGGING_LEVEL"])
+logger.setLevel(os.getenv("VLLM_LOGGING_LEVEL", "INFO"))
 
 try:
     from xformers import ops as xops
