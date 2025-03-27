@@ -118,6 +118,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
+    prefix_caching_hash_algo: str = "builtin"
     disable_sliding_window: bool = False
     disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
@@ -474,6 +475,16 @@ class EngineArgs:
             default=EngineArgs.enable_prefix_caching,
             help="Enables automatic prefix caching. "
             "Use ``--no-enable-prefix-caching`` to disable explicitly.",
+        )
+        parser.add_argument(
+            "--prefix-caching-hash-algo",
+            type=str,
+            choices=["builtin", "sha256"],
+            default=EngineArgs.prefix_caching_hash_algo,
+            help="Set the hash algorithm for prefix caching. "
+            "Options are 'builtin' (Python's built-in hash) or 'sha256' "
+            "(collision resistant but with certain overheads). Defaults "
+            "to 'builtin'.",
         )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
@@ -1099,7 +1110,7 @@ class EngineArgs:
         parser.add_argument(
             "--reasoning-parser",
             type=str,
-            choices=["deepseek_r1"],
+            choices=["deepseek_r1", "granite"],
             default=None,
             help=
             "Select the reasoning parser depending on the model that you're "
@@ -1329,6 +1340,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
+            prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
         )
@@ -1674,8 +1686,11 @@ class EngineArgs:
         if self.enable_lora and _warn_or_fallback("LORA"):
             return False
 
-        # PP is supported on V1, but off by default for now.
-        if self.pipeline_parallel_size > 1 and _warn_or_fallback("PP"):
+        # PP is supported on V1 with Ray distributed executor,
+        # but off for MP distributed executor for now.
+        if (self.pipeline_parallel_size > 1
+                and self.distributed_executor_backend == "mp"
+                and _warn_or_fallback("PP (MP distributed executor)")):
             return False
 
         # ngram is supported on V1, but off by default for now.
@@ -1737,12 +1752,22 @@ class EngineArgs:
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
-        # Disable prefix caching for multimodal models for VLLM_V0.
-        if (model_config.is_multimodal_model and self.enable_prefix_caching):
-            logger.warning(
-                "--enable-prefix-caching is not supported for multimodal "
-                "models in V0 and has been disabled.")
-            self.enable_prefix_caching = False
+        # if using prefix caching, we must set a hash algo
+        if self.enable_prefix_caching:
+            # Disable prefix caching for multimodal models for VLLM_V0.
+            if model_config.is_multimodal_model:
+                logger.warning(
+                    "--enable-prefix-caching is not supported for multimodal "
+                    "models in V0 and has been disabled.")
+                self.enable_prefix_caching = False
+
+            # VLLM_V0 only supports builtin hash algo for prefix caching.
+            if self.prefix_caching_hash_algo is None:
+                self.prefix_caching_hash_algo = "builtin"
+            elif self.prefix_caching_hash_algo == "sha256":
+                raise ValueError(
+                    "sha256 is not supported for prefix caching in V0 engine. "
+                    "Please use 'builtin'.")
 
         # Set max_num_seqs to 256 for VLLM_V0.
         if self.max_num_seqs is None:
@@ -1757,6 +1782,10 @@ class EngineArgs:
         # V1 enables prefix caching by default.
         if self.enable_prefix_caching is None:
             self.enable_prefix_caching = True
+
+        # if using prefix caching, we must set a hash algo
+        if self.enable_prefix_caching and self.prefix_caching_hash_algo is None:
+            self.prefix_caching_hash_algo = "builtin"
 
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default

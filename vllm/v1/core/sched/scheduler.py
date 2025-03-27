@@ -61,6 +61,7 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching,
+            caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 
@@ -152,9 +153,9 @@ class Scheduler(SchedulerInterface):
 
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
-            if self.scheduler_config.long_prefill_token_threshold > 0:
-                num_new_tokens = min(
-                    num_new_tokens,
+            if (0 < self.scheduler_config.long_prefill_token_threshold <
+                    num_new_tokens):
+                num_new_tokens = (
                     self.scheduler_config.long_prefill_token_threshold)
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
@@ -302,9 +303,9 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens -= self.block_size
                     num_new_tokens = self.block_size
                     computed_blocks.pop()
-                if self.scheduler_config.long_prefill_token_threshold > 0:
-                    num_new_tokens = min(
-                        num_new_tokens,
+                if (0 < self.scheduler_config.long_prefill_token_threshold <
+                        num_new_tokens):
+                    num_new_tokens = (
                         self.scheduler_config.long_prefill_token_threshold)
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
@@ -431,6 +432,18 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
+
+        # Advance the number of computed tokens for the request AFTER
+        # the request is scheduled.
+        # 1. The scheduler_output of the current step has to include the
+        #    original number of scheduled tokens to determine input IDs.
+        # 2. Advance the number of computed tokens here allowing us to
+        #    schedule the prefill request again immediately in the next
+        #    scheduling step.
+        # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
+        #    computed tokens will be adjusted in update_from_output.
+        for req_id, num_scheduled_token in num_scheduled_tokens.items():
+            self.requests[req_id].num_computed_tokens += num_scheduled_token
 
         self.finished_req_ids = set()
         return scheduler_output
@@ -560,28 +573,19 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
-            if req_id not in scheduler_output.scheduled_spec_decode_tokens:
-                # When the request's num_computed_tokens catches up
-                # its num_tokens, the request generates output tokens.
-                # Otherwise, we ignore the sampler output for the request.
-                request.num_computed_tokens += num_tokens_scheduled
-                assert request.num_computed_tokens <= request.num_tokens
-            else:
-                # num_computed_tokens_step represents the number of tokens
-                # processed in the current step, considering scheduled
-                # tokens and rejections.
-                # It is calculated as:
-                # num_computed_tokens_step = num_scheduled_tokens -
-                #                            num_tokens_rejected,
-                # where num_tokens_rejected is given by:
-                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
-                scheduled_spec_token_ids = (
-                    scheduler_output.scheduled_spec_decode_tokens[req_id])
 
-                num_computed_tokens_step = num_scheduled_tokens[req_id] - (
-                    len(scheduled_spec_token_ids) + 1 -
-                    len(generated_token_ids))
-                request.num_computed_tokens += num_computed_tokens_step
+            scheduled_spec_token_ids = (
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id))
+            if scheduled_spec_token_ids:
+                # num_computed_tokens represents the number of tokens
+                # processed in the current step, considering scheduled
+                # tokens and rejections. If some tokens are rejected,
+                # num_computed_tokens is decreased by the number of rejected
+                # tokens, where is given by:
+                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
+                num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
+                                       len(generated_token_ids))
+                request.num_computed_tokens -= num_tokens_rejected
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
@@ -604,24 +608,26 @@ class Scheduler(SchedulerInterface):
             new_logprobs = None
             new_token_ids: list[int] = []
 
-            if request.num_computed_tokens >= request.num_tokens:
-                for output_token_id in generated_token_ids:
-                    request.append_output_token_ids(output_token_id)
-                    new_token_ids.append(output_token_id)
+            # Append generated tokens and check for stop. Note that if
+            # a request is still being prefilled, we expect the model runner
+            # to return empty token ids for the request.
+            for output_token_id in generated_token_ids:
+                request.append_output_token_ids(output_token_id)
+                new_token_ids.append(output_token_id)
 
-                    # Check for stop and update request state.
-                    # This must be called before we make the EngineCoreOutput.
-                    stopped = check_stop(request, self.max_model_len)
-                    if stopped:
-                        self._free_request(request)
-                        break
+                # Check for stop and update request state.
+                # This must be called before we make the EngineCoreOutput.
+                stopped = check_stop(request, self.max_model_len)
+                if stopped:
+                    self._free_request(request)
+                    break
 
-                # Extract sample logprobs if needed.
-                if request.sampling_params.logprobs is not None:
-                    assert logprobs is not None
-                    # NOTE: once we support N tokens per step (spec decode),
-                    # the outer lists can be of length > 1.
-                    new_logprobs = logprobs.slice(req_index, req_index + 1)
+            # Extract sample logprobs if needed.
+            if (request.sampling_params.logprobs is not None
+                    and logprobs is not None):
+                # NOTE: once we support N tokens per step (spec decode),
+                # the outer lists can be of length > 1.
+                new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             if new_token_ids and request.use_structured_output:
                 # NOTE: structured_output_request
