@@ -287,7 +287,6 @@ class ModelConfig:
         self.rope_theta = rope_theta
         self.model_impl = model_impl
 
-        self.hf_token = hf_token
         if hf_overrides is None:
             hf_overrides = {}
 
@@ -360,7 +359,7 @@ class ModelConfig:
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
-            self.model, token=self.hf_token, revision=revision)
+            self.model, token=hf_token, revision=revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
