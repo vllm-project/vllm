@@ -205,7 +205,7 @@ class ExecutorBase(ABC):
         time_before_sleep = time.perf_counter()
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
-        self.sleeping_tags = set(["weights", "kv_cache"])
+        self.sleeping_tags = {"weights", "kv_cache"}
         self.is_sleeping = True
         logger.info("It took %.6f seconds to fall asleep.",
                     time_after_sleep - time_before_sleep)
@@ -231,7 +231,7 @@ class ExecutorBase(ABC):
                 self.sleeping_tags.remove(tag)
         else:
             self.sleeping_tags.clear()
-        if len(self.sleeping_tags) == 0:
+        if not self.sleeping_tags:
             self.is_sleeping = False
 
     def save_sharded_state(
