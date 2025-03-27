@@ -42,7 +42,6 @@ from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.profiling import ProcessorInputs
-from vllm.utils import flatten_2d_lists
 
 from .minicpmv import (MiniCPMV2_6, MiniCPMVDummyInputsBuilder,
                        MiniCPMVMultiModalDataParser,
@@ -779,10 +778,9 @@ class MiniCPMO(MiniCPMV2_6):
                 audio_input = modalities["audios"]
                 audio_features = self._process_audio_input(audio_input)
                 multimodal_embeddings += tuple(
-                    flatten_2d_lists(
-                        scatter_patch_features(*args) for args in zip(
-                            audio_features,
-                            audio_input["embed_is_patch"],
-                        )))
+                    scatter_patch_features(
+                        audio_features,
+                        audio_input["embed_is_patch"],
+                    ))
 
         return multimodal_embeddings

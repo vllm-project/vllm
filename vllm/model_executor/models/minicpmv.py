@@ -921,20 +921,18 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                 image_input = modalities["images"]
                 image_features = self._process_vision_input(image_input)
                 multimodal_embeddings += tuple(
-                    flatten_2d_lists(
-                        scatter_patch_features(*args) for args in zip(
-                            image_features,
-                            image_input["embed_is_patch"],
-                        )))
+                    scatter_patch_features(
+                        image_features,
+                        image_input["embed_is_patch"],
+                    ))
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_features = self._process_vision_input(video_input)
                 multimodal_embeddings += tuple(
-                    flatten_2d_lists(
-                        scatter_patch_features(*args) for args in zip(
-                            video_features,
-                            video_input["embed_is_patch"],
-                        )))
+                    scatter_patch_features(
+                        video_features,
+                        video_input["embed_is_patch"],
+                    ))
 
         return multimodal_embeddings
 
