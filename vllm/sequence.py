@@ -111,15 +111,13 @@ class RequestMetrics:
         model_execute_time: The time spent in the model execute function. This
                             will include model forward, block/sync across
                             workers, cpu-gpu sync time and sampling time.
-        num_evicted_tokens: The number of tokens that were evicted 
-                            from KV cache.
         spec_token_acceptance_counts: number of accepted speculative tokens at
                                       each position; the first token is from 
                                       the target model and is always accepted;
                                       e.g., when it's [10, 8, 4, 2] for a req, 
                                       it means there were 10 forward passes in
                                       total, and there were 8, 4, 2 accepted 
-                                      tokens at 1st, 2nd, 3rd speculation step. 
+                                      tokens at 1st, 2nd, 3rd speculation step.
     """
     arrival_time: float
     last_token_time: float
@@ -130,7 +128,6 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
-    num_evicted_tokens: int = 0
     spec_token_acceptance_counts: Optional[list[int]] = None
 
 
@@ -619,17 +616,6 @@ class Sequence:
 
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL
-
-    def get_num_evicted_tokens(self) -> int:
-        """Returns the number of tokens that were evicted from KV cache."""
-        return self.metrics.num_evicted_tokens
-
-    def increment_evicted_tokens(self, num_tokens: int = 1) -> None:
-        """Increments the count of evicted tokens.
-        Args:
-            num_tokens: Number of tokens that were evicted from KV cache.
-        """
-        self.metrics.num_evicted_tokens += num_tokens
 
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "

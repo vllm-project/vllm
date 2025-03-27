@@ -1878,12 +1878,9 @@ class LLMEngine:
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
                     ])
-                    # Track if this request had any token evictions
-                    if self.device_config.device_type == "cuda":
-                        total_evicted = seq_group.metrics.num_evicted_tokens
-                    else:
-                        total_evicted = 0
-                    total_evicted_tokens_requests.append(total_evicted)
+                    if scheduler_outputs is not None:
+                        total_evicted_tokens_requests.append(
+                            scheduler_outputs.num_evicted_tokens)
 
             # Number of generation tokens.
             #   num_batched_tokens equals the number of prompt_tokens plus the
