@@ -589,7 +589,8 @@ def moe_align_block_size(
     topk_ids: torch.Tensor,
     block_size: int,
     num_experts: int,
-    expert_map: Optional[torch.Tensor] = None
+    expert_map: Optional[torch.Tensor] = None,
+    pad_sorted_ids: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -604,6 +605,8 @@ def moe_align_block_size(
         from the global space to the local index space of the current
         expert parallel shard. If the expert is not in the current expert
         parallel shard, the mapping is set to -1.
+    - pad_sorted_ids: A flag indicating whether the sorted_token_ids length
+      should be padded to a multiple of block_size,
 
     Returns:
     - sorted_token_ids: A tensor containing the sorted token indices according
@@ -633,6 +636,8 @@ def moe_align_block_size(
         by block_size for proper block matrix operations.
     """
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    if pad_sorted_ids:
+        max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
     sorted_ids = torch.empty((max_num_tokens_padded, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
@@ -1430,7 +1435,7 @@ def _moe_permute(
     curr_hidden_states: torch.Tensor, a1q_scale: Optional[torch.Tensor],
     curr_topk_ids: torch.Tensor, global_num_experts: int,
     expert_map: Optional[torch.Tensor], top_k_num: int, block_m: int,
-    use_dg: bool
+    needs_permute: bool
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
            torch.Tensor, Optional[torch.Tensor]]:
     """
@@ -1442,20 +1447,12 @@ def _moe_permute(
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = (
         moe_align_block_size(curr_topk_ids, block_m, global_num_experts,
-                             expert_map))
+                             expert_map, pad_sorted_ids=needs_permute))
 
     inv_perm: Optional[torch.Tensor] = None
 
-    if use_dg:
+    if needs_permute:
         max_token_id = top_k_num * tokens_in_chunk
-        pad_size = round_up(sorted_token_ids.numel(),
-                            block_m) - sorted_token_ids.numel()
-        if pad_size > 0:
-            sorted_token_ids = torch.nn.functional.pad(sorted_token_ids,
-                                                       (0, pad_size),
-                                                       "constant",
-                                                       max_token_id)
-
         sorted_token_ids = sorted_token_ids.clamp(max=max_token_id - 1)
         expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
         inv_perm = torch.argsort(sorted_token_ids)[:max_token_id]
@@ -1476,12 +1473,13 @@ def _moe_unpermute_and_reduce(out: torch.Tensor, curr_hidden: torch.Tensor,
                               m_indices: torch.Tensor, topk: int,
                               num_groups: int, K: int,
                               topk_weight: torch.Tensor,
-                              topk_ids: torch.Tensor, use_dg: bool) -> None:
+                              topk_ids: torch.Tensor,
+                              needs_unpermute: bool) -> None:
     """
     If needed (for DeepGemm), unpermute the final result and apply topk_weights.
     Then perform the final reduction on the hidden states.
     """
-    if use_dg:
+    if needs_unpermute:
         M = topk_weight.shape[0]
         curr_hidden = curr_hidden[inv_perm, ...]
         curr_hidden = curr_hidden.view(-1, topk, K)
@@ -1612,8 +1610,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
-    # We can reuse the memory between these because by the time we need
-    # cache3, we're done with cache1
+    # We can reuse the memory between cache1 and cache3 because by the time
+    # we need cache3, we're done with cache1
     cache13 = torch.empty(M_sum * max(N, K),
                           device=hidden_states.device,
                           dtype=hidden_states.dtype)
@@ -1623,6 +1621,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
     intermediate_cache3 = cache13[:M_sum * K].view(*cache3_view)
+
+    needs_fp8_quantization = use_fp8_w8a8 or use_dg
 
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
@@ -1634,16 +1634,16 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         if tokens_in_chunk == 0:
             break
 
-        # Even if we are using DeepGemm, we must defer any chunks
-        # that are not blocked to Triton.
-        skip_dg = use_dg and tokens_in_chunk % block_m != 0
+        # If we are using DeepGemm, only operate on chunks that are
+        # blocked, otherwise defer to Triton.
+        use_dg_for_chunk = use_dg and tokens_in_chunk % block_m == 0
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
         a1q_scale: Optional[torch.Tensor] = None
 
-        if use_fp8_w8a8 or use_dg:
+        if needs_fp8_quantization:
             qcurr_hidden_states, a1q_scale = _fp8_quantize(
                 curr_hidden_states, a1_scale, block_shape)
         else:
@@ -1653,15 +1653,14 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         (qcurr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
          num_tokens_post_padded, inv_perm) = _moe_permute(
              qcurr_hidden_states, a1q_scale, curr_topk_ids, global_num_experts,
-             expert_map, top_k_num, block_m, use_dg and not skip_dg)
+             expert_map, top_k_num, block_m, use_dg_for_chunk)
 
         # Adjust the intermediate cache size and config for the last chunk or
         # when switching from DeepGemm to Triton. Note that in most cases we
         # only have one chunk so the cache size and config are already set
         # correctly and do not need to be adjusted.
-        if (tokens_in_chunk < CHUNK_SIZE
-                and chunk > 0) or (use_dg and num_chunks > 1):
-            if use_dg and num_chunks > 1 and not skip_dg:
+        if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or use_dg_for_chunk:
+            if use_dg_for_chunk:
                 curr_M = sorted_token_ids.numel()
                 cache1_view = (curr_M, N)
                 cache2_view = (curr_M, N // 2)
@@ -1698,7 +1697,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_fp8_w8a8=use_fp8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
-                                use_dg=use_dg and not skip_dg,
+                                use_dg=use_dg_for_chunk,
                                 block_shape=block_shape)
 
         if activation == "silu":
@@ -1712,7 +1711,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         a2q_scale: Optional[torch.Tensor] = None
 
-        if use_fp8_w8a8 or use_dg:
+        if needs_fp8_quantization:
             qintermediate_cache2, a2q_scale = _fp8_quantize(
                 intermediate_cache2, a2_scale, block_shape)
         else:
@@ -1737,14 +1736,14 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_fp8_w8a8=use_fp8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
-                                use_dg=use_dg and not skip_dg,
+                                use_dg=use_dg_for_chunk,
                                 block_shape=block_shape)
 
         _moe_unpermute_and_reduce(
             out_hidden_states[begin_chunk_idx:end_chunk_idx],
             intermediate_cache3.view(*intermediate_cache3.shape), inv_perm,
             expert_ids, top_k_num, global_num_experts, K, curr_topk_weights,
-            curr_topk_ids, use_dg and not skip_dg)
+            curr_topk_ids, use_dg_for_chunk)
 
     return out_hidden_states
 

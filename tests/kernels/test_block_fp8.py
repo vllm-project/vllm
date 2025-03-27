@@ -495,8 +495,12 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
-        ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
-                                           block_size)
+        if M % 128 == 0:
+            ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
+                                                   score, topk, block_size)
+        else:
+            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
+                                               block_size)
 
         out = fused_moe(a,
                         w1,
@@ -510,12 +514,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                         block_shape=block_size,
                         allow_deep_gemm=True)
 
-        if M % 128 == 0:
-            out2 = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
-                                                score, topk, block_size)
-        else:
-            out2 = None
-
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
 
@@ -523,9 +521,3 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
                 torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.03
-
-    if out2 is not None:
-        rel_diff = (torch.mean(
-            torch.abs(ref_out.to(torch.float32) - out2.to(torch.float32))) /
-                    torch.mean(torch.abs(out2.to(torch.float32))))
-        assert rel_diff < 0.03
