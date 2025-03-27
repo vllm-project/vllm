@@ -665,7 +665,7 @@ class EngineArgs:
             type=nullable_kvs,
             default=EngineArgs.limit_mm_per_prompt,
             # The default value is given in
-            # MultiModalRegistry.init_mm_limits_per_prompt
+            # MultiModalConfig.get_limit_per_prompt
             help=('For each multimodal plugin, limit how many '
                   'input instances to allow for each prompt. '
                   'Expects a comma-separated list of items, '
@@ -1686,8 +1686,11 @@ class EngineArgs:
         if self.enable_lora and _warn_or_fallback("LORA"):
             return False
 
-        # PP is supported on V1, but off by default for now.
-        if self.pipeline_parallel_size > 1 and _warn_or_fallback("PP"):
+        # PP is supported on V1 with Ray distributed executor,
+        # but off for MP distributed executor for now.
+        if (self.pipeline_parallel_size > 1
+                and self.distributed_executor_backend == "mp"
+                and _warn_or_fallback("PP (MP distributed executor)")):
             return False
 
         # ngram is supported on V1, but off by default for now.
