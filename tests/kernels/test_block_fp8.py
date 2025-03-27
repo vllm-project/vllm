@@ -288,9 +288,6 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, 
             e_map = expert_map[ep_rank]
             e_ids[ep_rank] = e_map[e_map >= 0]
 
-    out: Optional[torch.Tensor] = None
-    ref_out: Optional[torch.Tensor] = None
-
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         for ep_rank in range(ep_size):
@@ -302,8 +299,8 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, 
                 topk,
                 renormalize=False,
                 use_fp8_w8a8=True,
-                w1_scale=w1_s[e_ids[ep_rank]],
-                w2_scale=w2_s[e_ids[ep_rank]],
+                w1_scale=fp8_perm(w1_s, e_ids[ep_rank]),
+                w2_scale=fp8_perm(w2_s, e_ids[ep_rank]),
                 block_shape=block_size,
                 global_num_experts = E,
                 expert_map=expert_map[ep_rank]
@@ -312,8 +309,8 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, 
             ref_out = torch_w8a8_block_fp8_moe(a,
                                                fp8_perm(w1, e_ids[ep_rank]),
                                                fp8_perm(w2, e_ids[ep_rank]),
-                                               w1_s[e_ids[ep_rank]],
-                                               w2_s[e_ids[ep_rank]],
+                                               fp8_perm(w1_s, e_ids[ep_rank]),
+                                               fp8_perm(w2_s, e_ids[ep_rank]),
                                                score,
                                                topk,
                                                expert_map[ep_rank],
