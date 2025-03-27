@@ -253,6 +253,19 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
     ),
+    "ayavision": VLMTestInfo(
+        models=["CohereForAI/aya-vision-8b"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<BOS_TOKEN><|START_OF_TURN_TOKEN|><|USER_TOKEN|>\n{img_prompt}<|END_OF_TURN_TOKEN|>\n<|START_OF_TURN_TOKEN|>model\n", # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<image>What's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "<image>What is the season?",  # noqa: E501
+        }),
+        multi_image_prompt="<image><image>Describe the two images in detail.",  # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+    ),
     "glm4v": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
