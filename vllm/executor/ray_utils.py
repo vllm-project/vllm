@@ -11,7 +11,6 @@ import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -109,7 +108,7 @@ try:
             # We can remove this API after it is fixed in compiled graph.
             assert self.worker is not None, "Worker is not initialized"
             if not self.compiled_dag_cuda_device_set:
-                if current_platform.is_tpu():
+                if vllm.platforms.current_platform.is_tpu():
                     # Not needed
                     pass
                 else:
