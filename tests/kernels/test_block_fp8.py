@@ -367,9 +367,10 @@ def test_moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
 
     sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
     m_indices = torch.repeat_interleave(m_indices, block_m, dim=0)
-    inv_perm = torch.argsort(sorted_token_ids)[:M * topk]
+    inv_perm = torch.argsort(sorted_token_ids)[:num_tokens]
 
     a = fp8_perm(a, sorted_token_ids // topk)
+
     if a_s is not None:
         a_s = a_s[sorted_token_ids // topk]
 
@@ -400,6 +401,8 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
     a_q, a_s, m_indices, inv_perm = test_moe_permute(a_q, a_s, topk_ids,
                                                      num_groups, topk, block_m)
+
+    assert a_q.dim() == 2 and a_q.shape[0] % 128 == 0
 
     inter_out = torch.zeros((a_q.shape[0], N * 2),
                             dtype=torch.bfloat16,
