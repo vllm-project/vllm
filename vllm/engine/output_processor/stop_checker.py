@@ -15,11 +15,14 @@ class StopChecker:
     emitted, or if we have exceeded the max model len.
     """
 
-    def __init__(self, max_model_len: int,
-                 get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer]):
+    def __init__(self,
+                 max_model_len: int,
+                 get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
+                 num_lookahead_slots: int = 0):
         # Do not use it directly, but use `self._get_max_model_len`.
         self._max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
+        self.num_lookahead_slots = num_lookahead_slots
 
     def _get_max_model_len(self, lora_req: Optional[LoRARequest]):
         if lora_req and lora_req.long_lora_max_len:
@@ -81,7 +84,8 @@ class StopChecker:
             return
 
         # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self._get_max_model_len(lora_req):
+        if (seq.get_len() + self.num_lookahead_slots
+                > self._get_max_model_len(lora_req)):
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
