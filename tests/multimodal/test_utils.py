@@ -407,6 +407,37 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
             ],
             expected_hashes=None,
         ),
+
+        # <image> <audio> <video> <image> with hashes
+        TestCase(
+            mm_positions={
+                "image": [
+                    PlaceholderRange(offset=0, length=2),
+                    PlaceholderRange(offset=18, length=4),
+                ],
+                "audio": [
+                    PlaceholderRange(offset=6, length=2),
+                ],
+                "video": [
+                    PlaceholderRange(offset=10, length=5),
+                ]
+            },
+            mm_hashes={
+                "image": ["image_hash1", "image_hash2"],
+                "audio": ["audio_hash1"],
+                "video": ["video_hash1"],
+            },
+            expected_modalities=["image", "audio", "video", "image"],
+            expected_ranges=[
+                PlaceholderRange(offset=0, length=2),
+                PlaceholderRange(offset=6, length=2),
+                PlaceholderRange(offset=10, length=5),
+                PlaceholderRange(offset=18, length=4),
+            ],
+            expected_hashes=[
+                "image_hash1", "audio_hash1", "video_hash1", "image_hash2"
+            ],
+        ),
     ]
 
     for (mm_positions, mm_hashes, expected_modalities, expected_ranges,
