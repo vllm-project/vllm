@@ -12,6 +12,7 @@ from transformers.models.aya_vision.processing_aya_vision import (
     AyaVisionProcessor, AyaVisionProcessorKwargs)
 from transformers.models.got_ocr2.image_processing_got_ocr2 import (
     get_optimal_tiled_canvas)
+from PIL import Image
 
 from vllm.config import VllmConfig
 from vllm.jsontree import json_map_leaves
@@ -34,6 +35,8 @@ from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
+from vllm.utils import flatten_2d_lists
+from .vision import scatter_patch_features, select_patch_features
 
 
 class AyaVisionImagePixelInputs(TypedDict):
@@ -132,30 +135,14 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
     ) -> Mapping[str, int]:
         return {"image": self.get_max_image_tokens()}
 
-    def _prompt_split_image(self, num_patches, processor: AyaVisionProcessor):
-
-        img_patches_per_tile = (processor.img_size // processor.patch_size)**2
-        img_string = f"{processor.start_of_img_token}"
-        if num_patches > 1:
-            for idx in range(1, num_patches):
-                img_string += f"{processor.tile_token}_{idx}" + f"{processor.img_patch_token}" * img_patches_per_tile
-
-        img_string += f"{processor.tile_global_token}" + f"{processor.img_patch_token}" * img_patches_per_tile
-        img_string += f"{processor.end_of_img_token}"
-        return img_string
-
     def get_max_image_tokens(self) -> int:
         hf_processor: AyaVisionProcessor = self.get_hf_processor()
-        image_processor = hf_processor.image_processor
+        image_size = self.get_image_size_with_most_features()
         tokenizer = hf_processor.tokenizer
         num_patches = self.get_num_patches(
-            image_width=image_processor.size['width'],
-            image_height=image_processor.size['height'],
-            patch_size=hf_processor.patch_size,
-            min_patches=image_processor.min_patches,
-            max_patches=image_processor.max_patches)
-        image_string = self._prompt_split_image(num_patches,
-                                                processor=hf_processor)
+            image_width=image_size.width,
+            image_height=image_size.height, crop_to_patches=True)
+        image_string = hf_processor._prompt_split_image(num_patches)
         x = encode_tokens(
             tokenizer,
             image_string,
@@ -179,25 +166,15 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
                         *,
                         image_width: int,
                         image_height: int,
-                        patch_size: int,
-                        min_patches: int,
-                        max_patches: int,
-                        use_thumbnail: bool = True) -> int:
+                        **kwargs
+                        ) -> int:
         """
-        reference:
-        https://github.com/huggingface/transformers/blob/main/src/transformers/models/ayavision/processing_ayavision.py#L100
+        TODO: update this without using image_processor
         """
-        num_columns, num_rows = get_optimal_tiled_canvas(
-            (image_height, image_width), (patch_size, patch_size), min_patches,
-            max_patches)
-        num_blocks = num_columns * num_rows
-
-        if use_thumbnail and num_blocks != 1:
-            num_patches = num_blocks + 1
-        else:
-            num_patches = num_blocks
-
-        return num_patches
+        image_processor = self.get_image_processor()
+        dummy_image = Image.new("RGB", (image_width, image_height), color=255)
+        image_input = image_processor(images=dummy_image, **kwargs)
+        return image_input['num_patches'][0]
 
 
 class AyaVisionDummyInputsBuilder(
@@ -236,6 +213,7 @@ class AyaVisionMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
@@ -248,16 +226,16 @@ class AyaVisionMultiModalProcessor(
             tokenizer_init_kwargs=hf_processor.tokenizer.init_kwargs,
             **mm_kwargs,
         )
-        image_patch_token_id = hf_processor.tokenizer.encode(hf_processor.img_patch_token)
+        hf_config = self.info.get_hf_config()
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
             assert isinstance(images, list)
             image_inputs = image_processor(images=images, **output_kwargs["images_kwargs"])
-            num_patches = image_inputs.get("num_patches")
+            num_patches = image_inputs.get("num_patches") # TODO: update the get_num_patches to match with this
             image_tokens_list = [hf_processor._prompt_split_image(num_patch) for num_patch in num_patches]
             image_token_ids = hf_processor.tokenizer(image_tokens_list, **output_kwargs["text_kwargs"]).input_ids
             embed_is_patch = [
-                torch.tensor(image_repl_tokens) != image_patch_token_id
+                torch.tensor(image_repl_tokens) == hf_config.image_token_index
                 for image_repl_tokens in image_token_ids
             ]
             processed_outputs["embed_is_patch"] = embed_is_patch
@@ -286,21 +264,18 @@ class AyaVisionMultiModalProcessor(
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = hf_processor.image_processor
         image_token = hf_processor.image_token
-
+        output_kwargs = hf_processor._merge_kwargs(
+            AyaVisionProcessorKwargs,
+            tokenizer_init_kwargs=hf_processor.tokenizer.init_kwargs,
+            **hf_processor_mm_kwargs,
+        )
         def get_replacement(item_idx: int):
             images: ImageProcessorItems = mm_items.get("image",
                                                        ImageProcessorItems)
             image_size: ImageSize = images.get_image_size(item_idx)
-            num_patches = self.info.get_num_patches(
-                image_width=image_size.width,
-                image_height=image_size.height,
-                patch_size=hf_processor.patch_size,
-                min_patches=image_processor.min_patches,
-                max_patches=image_processor.max_patches)
-            return self.info._prompt_split_image(num_patches=num_patches,
-                                                 processor=hf_processor)
+            num_patches = self.info.get_num_patches(image_width=image_size.width, image_height=image_size.height, **output_kwargs['images_kwargs'])
+            return hf_processor._prompt_split_image(num_patches=num_patches)
 
         return [
             PromptReplacement(
@@ -460,7 +435,11 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         image_features = self._process_image_input(image_input, **kwargs)
         if kwargs.get("v0_path", False):
             return image_features
-        return image_features
+        return flatten_2d_lists(
+            scatter_patch_features(*args) for args in zip(
+                image_features,
+                image_input["embed_is_patch"],
+            ))
 
     def get_input_embeddings(
         self,
@@ -468,12 +447,11 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
-                multimodal_embeddings=multimodal_embeddings,
+                multimodal_embeddings=select_patch_features(multimodal_embeddings),
                 placeholder_token_id=self.config.image_token_index)
 
         return inputs_embeds
