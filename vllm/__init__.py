@@ -11,6 +11,7 @@ import torch
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
+from vllm.entrypoints.fast_sync_llm import FastSyncLLM
 from vllm.entrypoints.llm import LLM
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptType, TextPrompt, TokensPrompt
@@ -40,6 +41,7 @@ __all__ = [
     "__version__",
     "__version_tuple__",
     "LLM",
+    "FastSyncLLM",
     "ModelRegistry",
     "PromptType",
     "TextPrompt",

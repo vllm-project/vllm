@@ -91,6 +91,8 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = False
+    VLLM_SYNC_SERVER_ACCUM_REQUESTS: int = 1
+    VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS: int = 1
     VLLM_MOE_PADDING: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
@@ -337,11 +339,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # use aiter MLA op if ater ops are enabled
     "VLLM_USE_AITER_MLA":
-    lambda: (os.getenv("VLLM_USE_AITER_MLA", "False").lower() in ("true", "1")),
+    lambda: (os.getenv("VLLM_USE_AITER_MLA", "False").lower() in
+             ("true", "1")),
 
     # use aiter MLA op if ater ops are enabled
     "VLLM_USE_AITER_BLOCK_GEMM":
-    lambda: (os.getenv("VLLM_USE_AITER_BLOCK_GEMM", "False").lower() in ("true", "1")),
+    lambda: (os.getenv("VLLM_USE_AITER_BLOCK_GEMM", "False").lower() in
+             ("true", "1")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -619,6 +623,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, use the V1 code path.
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
+
+    # Try to accumulate this many requests before proceeding
+    "VLLM_SYNC_SERVER_ACCUM_REQUESTS":
+    lambda: int(os.getenv("VLLM_SYNC_SERVER_ACCUM_REQUESTS", "1")),
+    "VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS":
+    lambda: int(os.getenv("VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
