@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from functools import cache
 from os import PathLike
 from pathlib import Path
 from typing import List, Optional, Union
+
+from vllm.envs import VLLM_MODEL_REDIRECT_PATH
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def is_s3(model_or_path: str) -> bool:
@@ -38,3 +44,35 @@ def modelscope_list_repo_files(
         if file['Type'] == 'blob'
     ]
     return files
+
+
+@cache
+def maybe_model_redirect(model: str) -> str:
+    """
+    Use model_redirect to redirect the model name to a local folder.
+
+    :param model: hf model name
+    :return: maybe redirect to a local folder
+    """
+
+    model_redirect_path = VLLM_MODEL_REDIRECT_PATH
+
+    if not model_redirect_path:
+        return model
+
+    if not Path(model_redirect_path).exists():
+        return model
+
+    with open(model_redirect_path) as f:
+        for line in f.readlines():
+            try:
+                model_name, redirect_name = line.split("\t")
+                if model == model_name:
+                    redirect_name = redirect_name.strip()
+                    logger.info("model redirect: [ %s ] -> [ %s ]", model,
+                                redirect_name)
+                    return redirect_name
+            except Exception:
+                pass
+
+    return model
