@@ -672,6 +672,7 @@ def moe_align_block_size(
                                  expert_ids, num_tokens_post_pad)
     if expert_map is not None:
         expert_ids = expert_map[expert_ids]
+        #print(f"EXPERT MAP {expert_ids}")
 
     return sorted_ids, expert_ids, num_tokens_post_pad
 
@@ -685,6 +686,7 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     aligned by `dg.get_m_alignment_for_contiguous_layout()`.
     """
     if not has_deep_gemm:
+        logger.debug("DeepGemm disabled: deep_gemm not available.")
         return False
 
     # Lazy import to avoid CUDA initialization problems.
@@ -692,6 +694,7 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
 
     # Expert maps not supported yet.
     if expert_map is not None:
+        logger.debug("DeepGemm disabled: non-null expert_map.")
         return False
 
     align = dg.get_m_alignment_for_contiguous_layout()
@@ -701,13 +704,20 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     # For now, disable DeepGemm for small N until better permute/unpermute
     # ops are available.
     if N <= 512:
+        logger.debug("DeepGemm disabled: N <= 512.")
         return False
 
     if align > M or N % align != 0 or K % align != 0:
+        logger.debug("DeepGemm disabled: unalinged problem size.")
         return False
 
-    return (hidden_states.is_contiguous() and w1.is_contiguous()
-            and w2.is_contiguous())
+    if (not hidden_states.is_contiguous() or
+        not w1.is_contiguous() or
+        not w2.is_contiguous()):
+        logger.debug("DeepGemm disabled: weights or activations not contiguous.")
+        return False
+
+    return True
 
 
 def _fp8_quantize(

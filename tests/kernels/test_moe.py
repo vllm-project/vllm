@@ -14,6 +14,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import (compute_max_diff, opcheck, stack_and_dev,
                                  torch_moe, torch_moe_single)
 from vllm import _custom_ops as ops
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, moe_align_block_size)
@@ -69,31 +70,34 @@ def test_fused_moe(
     else:
         e_map = None
 
-    torch_output = torch_moe(a, w1, w2, score, topk, e_map)
-    iterative_output = iterative_moe(a,
-                                     w1,
-                                     w2,
-                                     score,
-                                     topk,
-                                     global_num_experts=e,
-                                     expert_map=e_map,
-                                     renormalize=False)
+    vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config):
+        torch_output = torch_moe(a, w1, w2, score, topk, e_map)
+        iterative_output = iterative_moe(a,
+                                         w1,
+                                         w2,
+                                         score,
+                                         topk,
+                                         global_num_experts=e,
+                                         expert_map=e_map,
+                                         renormalize=False)
 
-    # Pad the weight if moe padding is enabled
-    if padding:
-        w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
-        torch.cuda.empty_cache()
-        w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
-        torch.cuda.empty_cache()
+        # Pad the weight if moe padding is enabled
+        if padding:
+            w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
+            torch.cuda.empty_cache()
+            w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
+            torch.cuda.empty_cache()
 
-    triton_output = fused_moe(a,
-                              w1,
-                              w2,
-                              score,
-                              topk,
-                              global_num_experts=e,
-                              expert_map=e_map,
-                              renormalize=False)
+        triton_output = fused_moe(a,
+                                  w1,
+                                  w2,
+                                  score,
+                                  topk,
+                                  global_num_experts=e,
+                                  expert_map=e_map,
+                                  renormalize=False)
+
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
     torch.testing.assert_close(iterative_output,
                                torch_output,
