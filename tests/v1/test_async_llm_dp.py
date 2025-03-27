@@ -15,7 +15,6 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
 
-
 engine_args = AsyncEngineArgs(
     model="ibm-research/PowerMoE-3b",
     enforce_eager=True,
