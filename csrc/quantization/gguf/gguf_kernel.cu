@@ -62,9 +62,9 @@ static void quantize_row_q8_1_cuda(const scalar_t* x, void* vy, const int kx,
       (kx_padded + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
   constexpr int MAX_BLOCK_SIZE = 65535;
   for (int off = 0; off < ky; off += MAX_BLOCK_SIZE) {
-      const int num_blocks_y = std::min(ky, off + MAX_BLOCK_SIZE) - off;
-      const dim3 num_blocks(block_num_x, num_blocks_y, 1);
-      const dim3 block_size(CUDA_DEQUANTIZE_BLOCK_SIZE, 1, 1);
+    const int num_blocks_y = std::min(ky, off + MAX_BLOCK_SIZE) - off;
+    const dim3 num_blocks(block_num_x, num_blocks_y, 1);
+    const dim3 block_size(CUDA_DEQUANTIZE_BLOCK_SIZE, 1, 1);
     quantize_q8_1<<<num_blocks, block_size, 0, stream>>>(
         &x[off * kx], (int32_t*)vy + off * (kx_padded / 32 * 9), kx, kx_padded);
   }
@@ -73,11 +73,9 @@ static void quantize_row_q8_1_cuda(const scalar_t* x, void* vy, const int kx,
 torch::Tensor ggml_dequantize(torch::Tensor W,  // quant weight
                               int64_t type, int64_t m, int64_t n,
                               std::optional<at::ScalarType> const& dtype) {
-                              //at::ScalarType dtype = at::ScalarType::Half) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(W));
   auto dtype_ = dtype.value_or(torch::kFloat16);
-  auto options =
-      torch::TensorOptions().dtype(dtype_).device(W.device());
+  auto options = torch::TensorOptions().dtype(dtype_).device(W.device());
   at::Tensor DW = torch::empty({m, n}, options);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
