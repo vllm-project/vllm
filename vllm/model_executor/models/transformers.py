@@ -204,9 +204,10 @@ class MultiModalProcessor(BaseMultiModalProcessor):
     ):
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
             mm_token_type_ids=MultiModalFieldConfig.batched("image"),
             pixel_values_videos=MultiModalFieldConfig.batched("video"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
             video_embeds=MultiModalFieldConfig.batched("video"),
         )
     
@@ -282,6 +283,7 @@ class MultiModalProcessor(BaseMultiModalProcessor):
                 ]
                 mm_placeholders = {modality: ranges}
 
+        print(mm_placeholders)
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,

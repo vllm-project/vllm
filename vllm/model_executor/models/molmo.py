@@ -1626,8 +1626,9 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
             return None
 
         image_features = self._process_image_input(image_input)
+        print(image_features.shape)
 
-        return [
+        out = [
             self._get_mm_embeds(*args) for args in zip(
                 image_features,
                 image_input["feat_is_patch"],
@@ -1635,6 +1636,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
                 image_input["embed_is_patch"],
             )
         ]
+        print(len(out[0]), [o.shape for o in out[0]])
+        return out
 
     def get_input_embeddings(
         self,
@@ -1646,6 +1649,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
             assert self.img_patch_id is not None
 
             # Extract the patch tokens scattered in _get_mm_embeds
+            print(len(multimodal_embeddings), multimodal_embeddings[0][0].shape)
             patch_embeddings = json_map_leaves(
                 lambda x: x[~x.isnan()].view(-1, *x.shape[1:]),
                 cast(JSONTree[torch.Tensor], multimodal_embeddings),
