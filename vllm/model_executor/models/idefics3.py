@@ -232,7 +232,7 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
         )
 
 
-class Idefics3MultimodalProcessor(
+class Idefics3MultiModalProcessor(
         BaseMultiModalProcessor[Idefics3ProcessingInfo]):
 
     def _call_hf_processor(
@@ -575,7 +575,7 @@ class Idefics3Model(nn.Module):
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    Idefics3MultimodalProcessor,
+    Idefics3MultiModalProcessor,
     info=Idefics3ProcessingInfo,
     dummy_inputs=Idefics3DummyInputsBuilder)
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,

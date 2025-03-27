@@ -30,7 +30,7 @@ def test_processor_override(
     num_imgs: int,
     kwargs_on_init: bool,
 ):
-    """Ensure input_processor_for_phi3v handles num_crops properly."""
+    """Ensure Phi3VMultiModalProcessor handles num_crops properly."""
     # Avoid initializing CUDA early
     from vllm.model_executor.models.phi3v import _IMAGE_TOKEN_ID
 
