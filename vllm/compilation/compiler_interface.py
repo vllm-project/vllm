@@ -139,7 +139,8 @@ class InductorAdaptor(CompilerInterface):
         from torch._inductor.codecache import torch_key
         torch_factors = torch_key()
         factors.append(torch_factors)
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()[:10]
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()[:10]
         return hash_str
 
     def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
