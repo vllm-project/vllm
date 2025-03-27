@@ -270,6 +270,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_API_KEY":
     lambda: os.environ.get("VLLM_API_KEY", None),
 
+    # Whether to log responses from API Server for debugging
+    "VLLM_DEBUG_LOG_API_SERVER_RESPONSE":
+    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").
+    lower() == "true",
+
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
     lambda: os.environ.get("S3_ACCESS_KEY_ID", None),
