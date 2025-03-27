@@ -33,9 +33,8 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
                 "AiterScaledMMLinearKernel requires `aiter` which is not " +
                 "currently supported on CPU and non-ROCm platform.")
 
-        # try import aiter
         try:
-            pass
+            import aiter  # noqa: F401 # deliberately attempt to import aiter
         except Exception:
             return (
                 False,
