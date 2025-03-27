@@ -2530,6 +2530,15 @@ def sha256(input) -> int:
 
 @lru_cache
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
+    """Get a hash function by name, or raise an error if
+    the function is not found.
+
+    Args:
+        hash_fn_name: Name of the hash function.
+
+    Returns:
+        A hash function.
+    """
     if hash_fn_name == "sha256":
         return sha256
     if hash_fn_name == "builtin":
