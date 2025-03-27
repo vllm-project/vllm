@@ -95,7 +95,7 @@ class TTCacheEngine:
                                       device=device)
                 kv_cache.append([cache_k, cache_v])
         else:
-            kv_cache = self.cache_config.tt_allocate_kv_cache(kv_cache_shape, self.dtype, num_layers, self.device_config.device)
+            kv_cache = self.cache_config.tt_allocate_kv_cache(kv_cache_shape, self.dtype, num_layers)
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
@@ -440,7 +440,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     ## Destructor (used to close devices)
     
     def __del__(self):
-        del self.model_runner  # Delete model runner first in case there are model arifacts (e.g ttnn trace)
+        del self.model_runner  # Delete model runner first in case there are model arifacts
         
         if self.mesh_device:
             devices = self.mesh_device.get_devices()
