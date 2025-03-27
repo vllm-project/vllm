@@ -31,7 +31,7 @@ import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
-from collections import OrderedDict, UserDict, defaultdict
+from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
                              Iterable, Iterator, KeysView, Mapping)
 from dataclasses import dataclass, field
@@ -208,8 +208,7 @@ class Counter:
 
 class _MappingOrderCacheView(UserDict[_K, _V]):
 
-    def __init__(self, data: Mapping[_K, _V], ordered_keys: OrderedDict[_K,
-                                                                        None]):
+    def __init__(self, data: Mapping[_K, _V], ordered_keys: Mapping[_K, None]):
         super().__init__(data)
         self.ordered_keys = ordered_keys
 
@@ -255,16 +254,14 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
             self._on_remove(key, value)
 
     @property
-    def cache(self) -> OrderedDict[_K, _V]:
+    def cache(self) -> Mapping[_K, _V]:
         """Return the internal cache dictionary in order(read-only)."""
-        return cast(
-            OrderedDict[_K, _V],
-            _MappingOrderCacheView(
-                self._Cache__data,  # type: ignore
-                self.order))
+        return _MappingOrderCacheView(
+            self._Cache__data,  # type: ignore
+            self.order)
 
     @property
-    def order(self) -> OrderedDict[_K, None]:
+    def order(self) -> Mapping[_K, None]:
         """Return the internal order dictionary (read-only)."""
         return self._LRUCache__order  # type: ignore
 
