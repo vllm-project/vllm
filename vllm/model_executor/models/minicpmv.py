@@ -532,7 +532,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         input_ids: list[int],
     ) -> torch.Tensor:
         tokenizer = self.info.get_tokenizer()
-        unk_token_id = torch.tensor(tokenizer.get_vocab()["<unk>"])
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
         return torch.tensor(input_ids) == unk_token_id
 
     def process_images(
