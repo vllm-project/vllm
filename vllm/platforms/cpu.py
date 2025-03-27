@@ -153,12 +153,8 @@ class CpuPlatform(Platform):
                 envs.VLLM_WORKER_MULTIPROC_METHOD == "fork":
             if os.environ.get('VLLM_WORKER_MULTIPROC_METHOD', None) is None:
                 logger.warning(
-                    "On macOS, setting VLLM_WORKER_MULTIPROC_METHOD to fork "
-                    "may cause issues. If it triggers a crash, set "
-                    "VLLM_WORKER_MULTIPROC_METHOD to 'spawn' automatically "
-                    "to resolve the issue. "
-                    "To override that behavior, please set "
-                    "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
+                    "Default to spawn method on MacOS. If this is not desired,"
+                    " set VLLM_WORKER_MULTIPROC_METHOD to fork explicitly.")
                 os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
 
     @classmethod
