@@ -126,10 +126,6 @@ class IPEXAttentionImpl(AttentionImpl):
             # Profiling run.
             return output
 
-        # NOTE(woosuk): IPEXAttention does not support FP8 KV cache.
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0, (
-            "key/v_scale is not supported in IPEXAttention.")
-
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_heads = self.num_heads
         head_size = self.head_size
@@ -148,8 +144,8 @@ class IPEXAttentionImpl(AttentionImpl):
             value_cache,
             attn_metadata.slot_mapping,
             self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
+            layer._k_scale_float,
+            layer._v_scale_float,
         )
 
         ipex_ops.chunked_prefill(
