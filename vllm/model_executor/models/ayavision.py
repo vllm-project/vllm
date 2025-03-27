@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 from functools import cached_property
-from typing import (Any, Iterable, Literal, Mapping, Optional, Sequence, Set,
-                    Tuple, TypedDict, Union, cast)
+from typing import (Iterable, Literal, Mapping, Optional, Sequence, Set, Tuple,
+                    TypedDict, Union, cast)
 
 import torch
 from torch import nn
 from transformers import BatchFeature, GotOcr2ImageProcessor
 from transformers.activations import ACT2FN
+from transformers.image_processing_utils import get_size_dict
 from transformers.models.aya_vision import AyaVisionConfig
 from transformers.models.aya_vision.processing_aya_vision import (
-    AyaVisionProcessor, AyaVisionProcessorKwargs)
+    AyaVisionProcessor)
 from transformers.models.got_ocr2.image_processing_got_ocr2 import (
     get_optimal_tiled_canvas)
-from transformers.image_processing_utils import get_size_dict
 
 from vllm.config import VllmConfig
 from vllm.jsontree import json_map_leaves
@@ -34,8 +34,8 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import get_vision_encoder_info
-from .vision import scatter_patch_features, select_patch_features
+from .vision import (get_vision_encoder_info, scatter_patch_features,
+                     select_patch_features)
 
 
 class AyaVisionImagePixelInputs(TypedDict):
@@ -141,8 +141,10 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
         tokenizer = hf_processor.tokenizer
         num_patches = self.get_num_patches(
             image_width=image_size.width,
-            image_height=image_size.height, size=image_processor.size, min_patches=image_processor.min_patches,
-                    max_patches=image_processor.max_patches)
+            image_height=image_size.height,
+            size=image_processor.size,
+            min_patches=image_processor.min_patches,
+            max_patches=image_processor.max_patches)
         image_string = hf_processor._prompt_split_image(num_patches)
         x = encode_tokens(
             tokenizer,
@@ -162,13 +164,15 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
         return ImageSize(height=height * max_patches,
                          width=width * max_patches)
 
-    def get_num_patches(self, *, image_width: int, image_height: int, size: dict,
-                        min_patches: int, max_patches: int) -> int:
+    def get_num_patches(self, *, image_width: int, image_height: int,
+                        size: dict, min_patches: int, max_patches: int) -> int:
         size = get_size_dict(size, default_to_square=False)
         num_columns, num_rows = get_optimal_tiled_canvas(
-            (image_height, image_width), (size["height"], size["width"]), min_patches, max_patches)
+            (image_height, image_width), (size["height"], size["width"]),
+            min_patches, max_patches)
         num_blocks = num_columns * num_rows
         return num_blocks if num_blocks == 1 else num_blocks + 1
+
 
 class AyaVisionDummyInputsBuilder(
         BaseDummyInputsBuilder[AyaVisionProcessingInfo]):
@@ -199,7 +203,7 @@ class AyaVisionDummyInputsBuilder(
 
 class AyaVisionMultiModalProcessor(
         BaseMultiModalProcessor[AyaVisionProcessingInfo]):
-    
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -216,7 +220,8 @@ class AyaVisionMultiModalProcessor(
 
         hf_config = self.info.get_hf_config()
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
-        if (images := mm_data.get("images")) is not None and '<image>' in prompt:
+        if (images :=
+                mm_data.get("images")) is not None and '<image>' in prompt:
             assert isinstance(images, list)
             parsed_images = (self._get_data_parser().parse_mm_data({
                 "image":
@@ -226,12 +231,24 @@ class AyaVisionMultiModalProcessor(
                 parsed_images.get_image_size(i)
                 for i in range(len(parsed_images))
             ]
-            num_patches = [self.info.get_num_patches(image_width=image_size.width, image_height=image_size.height, size=image_processor.size,
+            num_patches = [
+                self.info.get_num_patches(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                    size=image_processor.size,
                     min_patches=image_processor.min_patches,
-                    max_patches=image_processor.max_patches) for image_size in image_sizes] 
-            image_tokens_list = [hf_processor._prompt_split_image(num_patch) for num_patch in num_patches]
+                    max_patches=image_processor.max_patches)
+                for image_size in image_sizes
+            ]
+            image_tokens_list = [
+                hf_processor._prompt_split_image(num_patch)
+                for num_patch in num_patches
+            ]
             tokenizer = self.info.get_tokenizer()
-            image_token_ids = [tokenizer.encode(image_tokens, add_special_tokens=False) for image_tokens in image_tokens_list]
+            image_token_ids = [
+                tokenizer.encode(image_tokens, add_special_tokens=False)
+                for image_tokens in image_tokens_list
+            ]
             embed_is_patch = [
                 torch.tensor(image_repl_tokens) == hf_config.image_token_index
                 for image_repl_tokens in image_token_ids
@@ -264,13 +281,17 @@ class AyaVisionMultiModalProcessor(
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
         image_processor = hf_processor.image_processor
+
         def get_replacement(item_idx: int):
             images: ImageProcessorItems = mm_items.get("image",
                                                        ImageProcessorItems)
             image_size: ImageSize = images.get_image_size(item_idx)
-            num_patches = self.info.get_num_patches(image_width=image_size.width, image_height=image_size.height, size=image_processor.size,
-                    min_patches=image_processor.min_patches,
-                    max_patches=image_processor.max_patches)
+            num_patches = self.info.get_num_patches(
+                image_width=image_size.width,
+                image_height=image_size.height,
+                size=image_processor.size,
+                min_patches=image_processor.min_patches,
+                max_patches=image_processor.max_patches)
             return hf_processor._prompt_split_image(num_patches=num_patches)
 
         return [
@@ -337,10 +358,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(['lm_head', 'rotary_emb']
-                           if self.config.tie_word_embeddings else None))
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
     def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
@@ -377,7 +395,9 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         num_patches = image_input["num_patches"]
         image_features = self._image_pixels_to_features(
             self.vision_tower, pixel_values=pixel_values)
-        image_embeds = self.multi_modal_projector(torch.concat(image_features) if isinstance(image_features, tuple) else image_features)
+        image_embeds = self.multi_modal_projector(
+            torch.concat(image_features) if isinstance(image_features, tuple
+                                                       ) else image_features)
         return image_embeds.split(num_patches.tolist())
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
@@ -406,7 +426,8 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         if not isinstance(pixel_values, (torch.Tensor, list)):
             raise ValueError("Incorrect type of pixel values. "
                              f"Got type: {type(pixel_values)}")
-        if num_patches is not None and not isinstance(num_patches, (torch.Tensor, list)):
+        if num_patches is not None and not isinstance(num_patches,
+                                                      (torch.Tensor, list)):
             raise ValueError("Incorrect type of num_patches. "
                              f"Got type: {type(num_patches)}")
 
@@ -445,7 +466,8 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
-                multimodal_embeddings=select_patch_features(multimodal_embeddings),
+                multimodal_embeddings=select_patch_features(
+                    multimodal_embeddings),
                 placeholder_token_id=self.config.image_token_index)
 
         return inputs_embeds
