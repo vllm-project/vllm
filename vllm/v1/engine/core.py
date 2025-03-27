@@ -26,6 +26,7 @@ from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
                         zmq_socket_ctx)
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
+from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -87,7 +88,7 @@ class EngineCore:
                 "compatibility may not be maintained.",
                 vllm_config.scheduler_config.scheduler_cls)
 
-        self.scheduler = Scheduler(
+        self.scheduler: SchedulerInterface = Scheduler(
             scheduler_config=vllm_config.scheduler_config,
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
@@ -315,7 +316,11 @@ class EngineCoreProc(EngineCore):
                         self.step_with_batch_queue)
 
     @staticmethod
-    def run_engine_core(*args, dp_rank: int = 0, ready_pipe, **kwargs):
+    def run_engine_core(*args,
+                        dp_rank: int = 0,
+                        local_dp_rank: int = 0,
+                        ready_pipe,
+                        **kwargs):
         """Launch EngineCore busy loop in background process."""
 
         # Signal handler used for graceful termination.
@@ -344,6 +349,7 @@ class EngineCoreProc(EngineCore):
             if parallel_config.data_parallel_size > 1:
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
+                parallel_config.data_parallel_rank_local = local_dp_rank
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
                 engine_core = EngineCoreProc(*args, **kwargs)
@@ -509,9 +515,11 @@ class DPEngineCoreProc(EngineCoreProc):
         _add_prefix(sys.stderr, process_name, pid)
 
         dp_size = vllm_config.parallel_config.data_parallel_size
-        assert dp_size > 1
-
         dp_rank = vllm_config.parallel_config.data_parallel_rank
+        local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+
+        assert dp_size > 1
+        assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
@@ -519,7 +527,8 @@ class DPEngineCoreProc(EngineCoreProc):
             tp_size = vllm_config.parallel_config.tensor_parallel_size
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
                 str(device_id_to_physical_device_id(i))
-                for i in range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
+                for i in range(local_dp_rank * tp_size, (local_dp_rank + 1) *
+                               tp_size))
 
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 

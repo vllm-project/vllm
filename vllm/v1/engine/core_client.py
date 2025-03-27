@@ -222,6 +222,7 @@ class CoreEngine:
         ctx: Union[zmq.Context, zmq.asyncio.Context],
         output_path: str,
         index: int = 0,
+        local_dp_rank: int = 0,
     ):
         # Paths and sockets for IPC.
         input_path = get_open_zmq_ipc_path()
@@ -237,6 +238,7 @@ class CoreEngine:
                 process_kwargs={
                     "vllm_config": vllm_config,
                     "dp_rank": index,
+                    "local_dp_rank": local_dp_rank,
                     "executor_class": executor_class,
                     "log_stats": log_stats,
                 })
@@ -344,9 +346,9 @@ class MPClient(EngineCoreClient):
         # Paths and sockets for IPC.
         self.output_path = get_open_zmq_ipc_path()
 
-        new_core_engine = lambda index: CoreEngine(
+        new_core_engine = lambda index, local_dp_rank=None: CoreEngine(
             vllm_config, executor_class, log_stats, self.ctx, self.output_path,
-            index)
+            index, local_dp_rank)
 
         # Start engine core process(es).
         self._init_core_engines(vllm_config, new_core_engine,
@@ -361,13 +363,15 @@ class MPClient(EngineCoreClient):
     def _init_core_engines(
         self,
         vllm_config: VllmConfig,
-        new_core_engine: Callable[[int], CoreEngine],
+        new_core_engine: Callable[[int, Optional[int]], CoreEngine],
         core_engines: list[CoreEngine],
     ) -> None:
 
         # Default case - single core engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
-        core_engine = new_core_engine(dp_rank)
+        local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        core_engine = new_core_engine(
+            dp_rank, local_dp_rank if local_dp_rank is not None else dp_rank)
         core_engines.append(core_engine)
         self.core_engine = core_engine
 
@@ -655,14 +659,15 @@ class DPAsyncMPClient(AsyncMPClient):
     def _init_core_engines(
         self,
         vllm_config: VllmConfig,
-        new_core_engine: Callable[[int], CoreEngine],
+        new_core_engine: Callable[[int, Optional[int]], CoreEngine],
         core_engines: list[CoreEngine],
     ) -> None:
 
         # Launch a core engine for each data parallel rank.
         dp_size = vllm_config.parallel_config.data_parallel_size
         for i in range(dp_size):
-            core_engines.append(new_core_engine(i))
+            # Multi-node not yet supported so local_dp_rank == dp_rank.
+            core_engines.append(new_core_engine(i, i))
 
         self.core_engines = core_engines
 
