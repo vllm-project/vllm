@@ -849,16 +849,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
     lambda: int(os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")),
-
-    ## Enable Share Expert Fusion
-    "VLLM_ENABLE_SHARE_EXPERT_FUSION":
-    lambda: bool(int(os.environ["VLLM_ENABLE_SHARE_EXPERT_FUSION"]))
-    if "VLLM_ENABLE_SHARE_EXPERT_FUSION" in os.environ else False
     
     # Reduce CPU usage when vLLM is idle. Enabling this will incur small
     # latency penalty when a request eventually comes.
     "VLLM_SLEEP_WHEN_IDLE":
     lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
+
+    lambda: int(os.environ["VLLM_ENABLE_SHARE_EXPERT_FUSION"])
+    if "VLLM_ENABLE_SHARE_EXPERT_FUSION" in os.environ else 0
 }
 
 # --8<-- [end:env-vars-definition]

@@ -836,6 +836,20 @@ class FusedMoE(torch.nn.Module):
 
         # Determine expert maps
         if self.use_ep:
+            # Set TP size to 1 to adjust for EP and adjust EP size and rank
+            # for DP attention.
+            self.ep_rank = tp_rank + self.tp_size * self.dp_rank
+            self.tp_rank = 0
+            self.ep_size = self.tp_size * self.dp_size
+            self.tp_size = 1
+            if (envs.VLLM_ENABLE_SHARE_EXPERT_FUSION > 0
+                    and self.ep_size != envs.VLLM_ENABLE_SHARE_EXPERT_FUSION):
+                logger.warning(
+                    "With EP enabled and share expert fusion enabled"
+                    ", share expert replica should be same as ep_size"
+                    "got share expert replica = %d"
+                    "and ep_size = %d", envs.VLLM_ENABLE_SHARE_EXPERT_FUSION,
+                    ep_size)
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
@@ -1250,9 +1264,9 @@ class FusedMoE(torch.nn.Module):
                        custom_routing_function: Optional[Callable] = None,
                        scoring_func: str = "softmax",
                        e_score_correction_bias: Optional[torch.Tensor] = None,
-                       indices_type: Optional[torch.dtype] = None):
+                       indices_type: Optional[torch.dtype] = None,
+                       share_fusion: int = 0):
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-
         # DeekSeekv2 uses grouped_top_k
         if use_grouped_topk:
             assert topk_group is not None

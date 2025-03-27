@@ -448,7 +448,7 @@ void sgl_moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                               torch::Tensor experts_ids,
                               torch::Tensor num_tokens_post_pad) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  TORCH_CHECK((num_experts == 256 || num_experts == 264),
+  TORCH_CHECK((num_experts >= 256),
               "sgl_moe_align_block_size kernel only supports deepseek v3.");
 
   VLLM_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(
@@ -458,7 +458,7 @@ void sgl_moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
             torch::TensorOptions().dtype(torch::kInt).device(topk_ids.device());
         torch::Tensor cumsum_buffer =
             torch::zeros({num_experts + 1}, options_int);
-        const int block_threads = (num_experts == 256) ? 256 : 264;
+        const int block_threads = num_experts;
         if (num_experts == 256) {
           auto align_kernel =
               vllm::moe::sgl_moe_align_block_size_kernel<scalar_t>;
@@ -469,7 +469,7 @@ void sgl_moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
               num_tokens_post_pad.data_ptr<int32_t>(), num_experts, block_size,
               topk_ids.numel(), cumsum_buffer.data_ptr<int32_t>());
         } else {
-          // num_experts == 264
+          // num_experts > 256
           auto align_kernel =
               vllm::moe::sgl_moe_align_block_size_fuse_share_kernel<scalar_t>;
           align_kernel<<<1, 1024, 0, stream>>>(
