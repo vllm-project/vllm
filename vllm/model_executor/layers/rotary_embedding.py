@@ -1146,7 +1146,7 @@ class MRotaryEmbedding(RotaryEmbedding):
 
         src_item = input_tokens
         audio_seqlens = audio_feature_lengths
-        if not second_per_grid_ts and video_grid_thw is not None:
+        if not second_per_grid_ts:
             second_per_grid_ts = [1] * video_grid_thw.shape[0]
         audio_idx = 0
         video_idx = 0
@@ -1206,6 +1206,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                 video_idx += 1
             else:
                 # read audio from video
+                assert audio_seqlens is not None
                 audio_seqlen = audio_seqlens[audio_idx]
                 vision_seqlen = video_grid_thw[video_idx].prod() // (
                     spatial_merge_size**2)
@@ -1228,7 +1229,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                 place_num = (((audio_seqlen - 1) // 2 + 1 - 2) // 2 + 1) + 2
                 pure_audio_len = place_num - 2
                 added_audio_len = 0
-                audio_llm_pos_ids_list = []
+                audio_llm_pos_ids_list: List[torch.Tensor] = []
                 for t_chunk in t_index_split_chunk:
                     vision_ntoken_per_chunk = len(
                         t_chunk) * grid_h * grid_w // (spatial_merge_size**2)
@@ -1287,9 +1288,9 @@ class MRotaryEmbedding(RotaryEmbedding):
         vision_idx: int,
         spatial_merge_size: int,
         t_index: List[int],
-        grid_hs: List[int],
-        grid_ws: List[int],
-    ):
+        grid_hs: torch.Tensor,
+        grid_ws: torch.Tensor,
+    ) -> torch.Tensor:
         llm_pos_ids_list = []
         llm_grid_h = grid_hs[vision_idx] // spatial_merge_size
         llm_grid_w = grid_ws[vision_idx] // spatial_merge_size
@@ -1297,15 +1298,16 @@ class MRotaryEmbedding(RotaryEmbedding):
             len(t_index), -1, llm_grid_w).flatten())
         w_index = (torch.arange(llm_grid_w).view(1, 1, -1).expand(
             len(t_index), llm_grid_h, -1).flatten())
-        t_index = torch.Tensor(t_index).to(llm_grid_h.device).view(
+        t_index_tensor = torch.Tensor(t_index).to(llm_grid_h.device).view(
             -1, 1).expand(-1, llm_grid_h * llm_grid_w).long().flatten()
-        _llm_pos_ids = torch.stack([t_index, h_index, w_index])
+        _llm_pos_ids = torch.stack([t_index_tensor, h_index, w_index])
         llm_pos_ids_list.append(_llm_pos_ids + start_idx)
         llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
         return llm_pos_ids
 
     @staticmethod
-    def _split_list_into_ranges(lst, interval):
+    def _split_list_into_ranges(lst: torch.Tensor,
+                                interval: int) -> List[List[int]]:
         ranges = [[] for _ in range((max(lst) // interval) + 1)]
         for num in lst:
             index = num // interval
