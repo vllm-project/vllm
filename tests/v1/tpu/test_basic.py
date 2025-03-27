@@ -31,14 +31,12 @@ TENSOR_PARALLEL_SIZES = [1]
                     reason="This is a basic test for TPU only")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("tensor_parallel_size", TENSOR_PARALLEL_SIZES)
 def test_models(
     vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
     model: str,
     max_tokens: int,
-    enforce_eager: bool,
     tensor_parallel_size: int,
 ) -> None:
     prompt = "The next numbers of the sequence " + ", ".join(
@@ -51,7 +49,6 @@ def test_models(
         with vllm_runner(
                 model,
                 max_model_len=8192,
-                enforce_eager=enforce_eager,
                 gpu_memory_utilization=0.7,
                 max_num_seqs=16,
                 tensor_parallel_size=tensor_parallel_size) as vllm_model:
