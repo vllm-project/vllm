@@ -815,8 +815,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                        device=device,
                                        dtype=torch.bfloat16)
             # Compile for [8, 16, .., 128,.., `self.max_num_reqs`]
-            while num_reqs_to_sample <= self.max_num_reqs and \
-                  num_reqs_to_sample <= num_tokens:
+            while num_reqs_to_sample <= num_tokens:
                 indices = torch.zeros(
                     num_reqs_to_sample,
                     dtype=torch.int32,
@@ -836,6 +835,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         dummy_hidden, sampling_meta)
 
                 out = out.cpu()
+                if num_reqs_to_sample >= self.max_num_reqs:
+                    break
                 # Make sure to compile the `max_num_reqs` upper-limit case
                 num_reqs_to_sample = _get_padded_num_reqs_with_upper_limit(
                     num_reqs_to_sample + 1, self.max_num_reqs)
