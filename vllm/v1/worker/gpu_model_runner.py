@@ -1085,7 +1085,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
-        should_not_sampled_req_idxs = []
+        discard_sampled_tokens_req_indices = []
         for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
@@ -1099,7 +1099,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     generator.set_offset(generator.get_offset() - 4)
                 # Record the index of the request that should not be sampled,
                 # so that we could clear the sampled tokens before returning.
-                should_not_sampled_req_idxs.append(i)
+                discard_sampled_tokens_req_indices.append(i)
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -1120,13 +1120,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # No spec decode tokens.
             valid_sampled_token_ids = sampled_token_ids.tolist()
             # Mask out the sampled tokens that should not be sampled.
-            for i in should_not_sampled_req_idxs:
+            for i in discard_sampled_tokens_req_indices:
                 valid_sampled_token_ids[i].clear()
         else:
             # Includes spec decode tokens.
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 sampled_token_ids,
-                should_not_sampled_req_idxs,
+                discard_sampled_tokens_req_indices,
                 self.input_batch.vocab_size,
             )
 
