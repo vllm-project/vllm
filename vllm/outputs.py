@@ -137,9 +137,7 @@ class RequestOutput:
         self.num_cached_tokens = num_cached_tokens
         if hidden_states is not None:
             self.hidden_states = hidden_states
-        
-    
-    
+
     def add(self, next_output: "RequestOutput") -> None:
         """Merge subsequent RequestOutput into this one"""
 
@@ -185,8 +183,6 @@ class RequestOutput:
             return cls.from_seq_group(assembled_seq_group, use_cache,
                                       seq_id_to_seq_group)
 
-
-            
         sampling_params = seq_group.sampling_params
         if sampling_params is None:
             raise ValueError(
@@ -209,7 +205,7 @@ class RequestOutput:
         top_n_seqs = seq_group.get_seqs()
 
         # Create the outputs.
-        
+
         # NOTE: We need omit logprobs here explicitly because the sequence
         # always has the logprobs of the sampled tokens even if the
         # logprobs are not requested.

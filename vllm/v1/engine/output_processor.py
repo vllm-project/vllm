@@ -19,11 +19,6 @@ from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
 
 
-
-
-
-
-
 class RequestOutputCollector:
     """
     Collects streamed RequestOutputs per individual request,
@@ -169,7 +164,7 @@ class RequestState:
             request_id, outputs, finished = self.parent_req.get_outputs(
                 request_id, completion_output)
             if not outputs:
-                return None        
+                return None
         if hidden_states is not None:
             return self._new_request_output(request_id, outputs, finished,
                                             hidden_states)
@@ -331,7 +326,7 @@ class OutputProcessor:
 
         request_outputs: list[RequestOutput] = []
         reqs_to_abort: list[str] = []
-        
+
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)

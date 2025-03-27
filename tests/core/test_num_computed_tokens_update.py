@@ -2,8 +2,6 @@
 
 import pytest
 
-
-
 from tests.conftest import VllmRunner
 from tests.core.utils import create_dummy_prompt
 from vllm.engine.llm_engine import LLMEngine

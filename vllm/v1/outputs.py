@@ -39,9 +39,6 @@ class LogprobsTensors(NamedTuple):
             self.selected_token_ranks.tolist(),
         )
 
-
-
-
     @staticmethod
     def empty_cpu(num_positions: int,
                   num_tokens_per_position: int) -> "LogprobsTensors":
@@ -61,7 +58,7 @@ class LogprobsTensors(NamedTuple):
             selected_token_ranks=selected_token_ranks,
         )
 
-        
+
 @dataclass
 class SamplerOutput:
 

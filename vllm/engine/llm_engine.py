@@ -782,7 +782,7 @@ class LLMEngine:
                 tokenizer=self.get_tokenizer(lora_request=lora_request))
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
-            prompt,      
+            prompt,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
@@ -962,9 +962,6 @@ class LLMEngine:
             success = success and scheduler.reset_prefix_cache(device)
         return success
 
-
-
-
     @staticmethod
     def _process_sequence_group_outputs(
         seq_group: SequenceGroup,
@@ -1112,13 +1109,17 @@ class LLMEngine:
 
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
-                if self.model_config.task == "generate":
+                if self.model_config.task == "generate" and hasattr(
+                        outputs_by_sequence_group[0][0], 'hidden_states'):
                     for k in range(len(outputs_by_sequence_group[i])):
-                        output[k].hidden_states = outputs_by_sequence_group[i][k].hidden_states
-            else:         
+                        output[k].hidden_states = outputs_by_sequence_group[i][
+                            k].hidden_states
+            else:
                 output = [outputs_by_sequence_group[0][i]]
-                if self.model_config.task == "generate":
-                    output[0].hidden_states = outputs_by_sequence_group[0].hidden_states
+                if self.model_config.task == "generate" and hasattr(
+                        outputs_by_sequence_group[0], 'hidden_states'):
+                    output[0].hidden_states = outputs_by_sequence_group[
+                        0].hidden_states
 
             if not is_async:
                 if self.scheduler_config.is_multi_step:

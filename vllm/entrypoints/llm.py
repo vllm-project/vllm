@@ -452,7 +452,7 @@ class LLM:
 
         if sampling_params is None:
             # Use default sampling params.
-            sampling_params = self.get_default_sampling_params()  
+            sampling_params = self.get_default_sampling_params()
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=sampling_params,
@@ -460,7 +460,7 @@ class LLM:
             prompt_adapter_request=prompt_adapter_request,
             guided_options=guided_options_request,
             priority=priority)
-     
+
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
@@ -1069,14 +1069,14 @@ class LLM:
                 prompt_token_ids=prompt_inputs["input_ids"],
                 token_type_ids=prompt_inputs.get("token_type_ids"))
             parsed_prompts.append(engine_prompt)
-      
+
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=pooling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-       
+
         outputs = self._run_engine(use_tqdm=use_tqdm)
         items = self.engine_class.validate_outputs(outputs,
                                                    PoolingRequestOutput)
@@ -1371,7 +1371,7 @@ class LLM:
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
-            step_outputs = self.llm_engine.step()         
+            step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
