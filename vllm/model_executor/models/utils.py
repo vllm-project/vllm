@@ -358,7 +358,6 @@ def _merge_multimodal_embeddings(
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
     positions in ``inputs_embeds`` corresponding to placeholder tokens in
     ``input_ids``.
-    TTTTT SIIIBIIIBIIIE TTT
 
     Note:
         This updates ``inputs_embeds`` in place.
@@ -429,7 +428,7 @@ def merge_multimodal_embeddings(
     the order of these tokens in the ``input_ids`` MUST MATCH the order of 
     their embeddings in ``multimodal_embeddings`` since we need to 
     slice-merge instead of individually scattering.
-    TTTTT SIIIBIIIBIIIE TTT
+
     For example, if input_ids is "TTTTTSIIIBIIIBIIIETTT", where
     - T is text token
     - S is image start token
