@@ -736,10 +736,22 @@ class InstructCoderDataset(HuggingFaceDataset):
     DEFAULT_NUM_REQUESTS = 1000
     INSTRUCT_CODER_DATASET_PATH = "likaixin/InstructCoder"
 
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        if self.dataset_path != self.INSTRUCT_CODER_DATASET_PATH:
+            raise ValueError(f"Only support likaixin/InstructCoder dataset.\
+                    This data path {self.dataset_path} is not valid.")
+        if self.dataset_subset is None and self.dataset_split != "train":
+            raise ValueError("Dataset split must be 'train'.")
+
     def load_data(self) -> None:
         dataset = load_dataset(
-            self.INSTRUCT_CODER_DATASET_PATH,
-            split="train",
+            self.dataset_path,
+            name=self.dataset_subset,
+            split=self.dataset_split,
             streaming=True,
         )
         self.data = dataset.shuffle(seed=self.random_seed)
@@ -764,4 +776,5 @@ class InstructCoderDataset(HuggingFaceDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                 ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests

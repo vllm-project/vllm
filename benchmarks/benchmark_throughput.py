@@ -318,21 +318,21 @@ def get_requests(args, tokenizer):
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
     elif args.dataset_name == "hf":
-        if args.backend != "vllm-chat":
-            raise ValueError(
-                "hf datasets only are supported by vllm-chat backend")
-        # Choose between VisionArenaDataset and HuggingFaceDataset based on
-        # provided parameters.
-        dataset_cls = (VisionArenaDataset if args.dataset_path
-                       == VisionArenaDataset.VISION_ARENA_DATASET_PATH
-                       and args.hf_subset is None else HuggingFaceDataset)
-        common_kwargs['dataset_subset'] = args.hf_subset
-        common_kwargs['dataset_split'] = args.hf_split
-        sample_kwargs["enable_multimodal_chat"] = True
-    elif args.dataset_name == "instructcoder":
-        dataset_cls = InstructCoderDataset
-        common_kwargs['dataset_subset'] = "unused"
-        common_kwargs['dataset_split'] = "unused"
+        if args.dataset_path == VisionArenaDataset.VISION_ARENA_DATASET_PATH:
+            if args.args.backend == "vllm-chat":
+                raise ValueError(
+                    "hf datasets only are supported by vllm-chat backend")
+            # Choose between VisionArenaDataset and HuggingFaceDataset based on
+            # provided parameters.
+            dataset_cls = (VisionArenaDataset if args.dataset_path
+                        == VisionArenaDataset.VISION_ARENA_DATASET_PATH
+                        and args.hf_subset is None else HuggingFaceDataset)
+            common_kwargs['dataset_subset'] = args.hf_subset
+            common_kwargs['dataset_split'] = args.hf_split
+            sample_kwargs["enable_multimodal_chat"] = True
+        elif args.dataset_path == "likaixin/InstructCoder":
+            dataset_cls = InstructCoderDataset
+            common_kwargs['dataset_split'] = "train"
 
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
@@ -451,10 +451,6 @@ def validate_args(args):
         raise ValueError(f"Unsupported backend: {args.backend}")
 
     # === Dataset Configuration ===
-    if args.dataset_name == "instructcoder":
-        args.dataset = "unused"
-        args.dataset_path = "unused"
-
     if not args.dataset and not args.dataset_path:
         print(
             "When dataset path is not set, it will default to random dataset")
@@ -471,9 +467,14 @@ def validate_args(args):
         warnings.warn("--hf-subset and --hf-split will be ignored \
                 since --dataset-name is not 'hf'.",
                       stacklevel=2)
-    elif args.dataset_name == "hf" and args.backend != "vllm-chat":
-        raise ValueError(
-            "When --dataset-name is 'hf', backend must be 'vllm-chat'")
+    elif args.dataset_name == "hf":
+        if args.dataset_path == VisionArenaDataset.VISION_ARENA_DATASET_PATH:
+            assert args.backend == "vllm-chat", "VisionArenaDataset needs to use vllm-chat as the backend."
+        elif args.dataset_path == "likaixin/InstructCoder":
+            assert args.backend == "vllm", "InstructCoder dataset needs to use vllm as the backend."
+        else:
+            raise ValueError(
+                f"{args.dataset_path} is not supported by hf dataset.")
 
     # --random-range-ratio: only used when dataset_name is 'random'
     if args.dataset_name != 'random' and args.random_range_ratio is not None:
@@ -524,7 +525,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset-name",
         type=str,
-        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf", "instructcoder"],
+        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
         help="Name of the dataset to benchmark on.",
         default="sharegpt")
     parser.add_argument(
