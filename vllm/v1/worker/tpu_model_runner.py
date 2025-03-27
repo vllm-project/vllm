@@ -88,7 +88,7 @@ class TPUModelRunner:
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
-        self.max_num_reqs = scheduler_config.max_num_seqs
+        self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(

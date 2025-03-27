@@ -38,7 +38,7 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
     try_get_generation_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
-from vllm.transformers_utils.utils import is_s3
+from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         get_cpu_memory, get_open_port, random_uuid,
                         resolve_obj_by_qualname)
@@ -267,9 +267,13 @@ class ModelConfig:
         override_generation_config: Optional[dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
-        self.model = model
+        self.model = maybe_model_redirect(model)
+        self.tokenizer = maybe_model_redirect(tokenizer)
+
         self.hf_config_path = hf_config_path
-        self.tokenizer = tokenizer
+        if isinstance(hf_config_path, str):
+            self.hf_config_path = maybe_model_redirect(hf_config_path)
+
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
         self.allowed_local_media_path = allowed_local_media_path
@@ -314,7 +318,7 @@ class ModelConfig:
             raise ValueError(
                 "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
                 "module was not found."
-                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile"
+                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile "
                 "for instructions on how to install it.")
 
         # The tokenizer version is consistent with the model version by default.
