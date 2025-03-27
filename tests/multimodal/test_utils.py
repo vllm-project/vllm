@@ -381,7 +381,7 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
             ],
         ),
 
-        # <image> <image> <video> <audio> <image>
+        # <image> <image> <audio> <video> <image>
         TestCase(
             mm_positions={
                 "image": [
@@ -397,7 +397,7 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                 ]
             },
             mm_hashes=None,
-            expected_modalities=["image", "image", "video", "audio", "image"],
+            expected_modalities=["image", "image", "audio", "video", "image"],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=2, length=3),
