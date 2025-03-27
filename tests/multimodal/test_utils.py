@@ -322,7 +322,7 @@ def test_merge_and_sort_multimodal_metadata():
                 "video": ["video_hash1", "video_hash2", "video_hash3"]
             },
             expected_modalities=[
-                "audio", "audio", "video", "video", "video", "image", "image"
+                "audio", "video", "video", "video", "image", "image"
             ],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
@@ -401,8 +401,8 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=2, length=3),
-                PlaceholderRange(offset=8, length=5),
                 PlaceholderRange(offset=5, length=2),
+                PlaceholderRange(offset=8, length=5),
                 PlaceholderRange(offset=20, length=4),
             ],
             expected_hashes=None,
