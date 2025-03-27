@@ -167,11 +167,11 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
 
             core_client: SyncMPClient = client
 
-            result = core_client._call_utility("echo", "testarg")
+            result = core_client.call_utility("echo", "testarg")
             assert result == "testarg"
 
             with pytest.raises(Exception) as e_info:
-                core_client._call_utility("echo", None, "help!")
+                core_client.call_utility("echo", None, "help!")
 
             assert str(e_info.value) == "Call to echo method failed: help!"
 
@@ -238,10 +238,10 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
 
         core_client: AsyncMPClient = client
 
-        result = await core_client._call_utility_async("echo", "testarg")
+        result = await core_client.call_utility_async("echo", "testarg")
         assert result == "testarg"
 
         with pytest.raises(Exception) as e_info:
-            await core_client._call_utility_async("echo", None, "help!")
+            await core_client.call_utility_async("echo", None, "help!")
 
         assert str(e_info.value) == "Call to echo method failed: help!"
