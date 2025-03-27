@@ -112,6 +112,10 @@ def split_enc_dec_inputs(
     inputs: ProcessorInputs,
 ) -> tuple[Optional[SingletonInputs], SingletonInputs]:
     if "encoder" in inputs and "decoder" in inputs:
-        return inputs["encoder"], inputs["decoder"]
+        # NOTE: This passes pyright but not mypy
+        return (
+            inputs["encoder"],  # type: ignore[typeddict-item]
+            inputs["decoder"],  # type: ignore[typeddict-item]
+        )
 
     return None, inputs
