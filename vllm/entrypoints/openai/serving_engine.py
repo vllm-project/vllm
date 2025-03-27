@@ -39,6 +39,7 @@ from vllm.inputs import TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.lora.resolver import LoRAResolverRegistry
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -131,6 +132,12 @@ class OpenAIServing:
                 lora.lora_name for lora in self.models.lora_requests
         ]:
             return None
+        if LoRAResolverRegistry.get_resolvers():
+            for resolver_name in LoRAResolverRegistry.get_resolvers():
+                lora_resolver = LoRAResolverRegistry.get_resolver(resolver_name)
+                if (lora_adapter_request := await lora_resolver.resolve_lora(request.model)) is not None:
+                    await self.models.load_lora_adapter(lora_adapter_request)
+                    return None
         if request.model in [
                 prompt_adapter.prompt_adapter_name
                 for prompt_adapter in self.models.prompt_adapter_requests
