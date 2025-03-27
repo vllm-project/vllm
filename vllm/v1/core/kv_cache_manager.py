@@ -146,7 +146,9 @@ class KVCacheManager:
             computed_blocks = computed_blocks[:num_computed_tokens //
                                               self.block_size]
             # E.g., computed_blocks = [NULL, NULL, NULL, NULL, 9, 7, 3]
-            self._free_useless_blocks(computed_blocks, num_computed_tokens)
+            self._free_useless_blocks(computed_blocks,
+                                      num_computed_tokens,
+                                      is_first_call=True)
 
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)
@@ -202,7 +204,9 @@ class KVCacheManager:
         # schedule this request due to the limit of free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
-        self._free_useless_blocks(req_blocks, request.num_computed_tokens)
+        self._free_useless_blocks(req_blocks,
+                                  request.num_computed_tokens,
+                                  is_first_call=False)
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
 
@@ -366,7 +370,8 @@ class KVCacheManager:
         self.req_to_block_hashes.pop(request.request_id, None)
 
     def _free_useless_blocks(self, req_blocks: list[KVCacheBlock],
-                             num_computed_tokens: int) -> None:
+                             num_computed_tokens: int,
+                             is_first_call: bool) -> None:
         """
         Frees memory blocks that are not needed. E.g., the blocks that are 
         outside of the sliding window. The freed blocks will be replaced with
@@ -381,5 +386,5 @@ class KVCacheManager:
             num_computed_tokens: The number of computed tokens.
         """
         removed_blocks = self.specialized_manager.remove_useless_blocks(
-            req_blocks, num_computed_tokens)
+            req_blocks, num_computed_tokens, is_first_call)
         self.block_pool.free_blocks(removed_blocks)

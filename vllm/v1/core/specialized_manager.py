@@ -54,7 +54,8 @@ class SpecializedManager(ABC):
 
     @abstractmethod
     def remove_useless_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int) -> list[KVCacheBlock]:
+                              num_computed_tokens: int,
+                              is_first_call: bool) -> list[KVCacheBlock]:
         """
         Remove the blocks that are no longer needed from. The removed blocks 
         should be replaced by null_blocks. Return the removed blocks in eviction
@@ -63,6 +64,9 @@ class SpecializedManager(ABC):
         Args:
             blocks: The list of blocks to be updated.
             num_computed_tokens: The number of tokens that have been computed.
+            is_first_call: Whether this is the first call to this function
+            for the `blocks`. Some managers like SlidingWindowManager need
+            it to accelerate this function.
         Returns:
             The removed blocks in eviction order.
         """
@@ -88,7 +92,8 @@ class FullAttentionManager(SpecializedManager):
                 ], computed_blocks
 
     def remove_useless_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int) -> list[KVCacheBlock]:
+                              num_computed_tokens: int,
+                              is_first_call: bool) -> list[KVCacheBlock]:
         # No need to remove blocks for full attention.
         return []
 
@@ -99,7 +104,6 @@ class SlidingWindowManager(SpecializedManager):
                  block_pool: BlockPool):
         super().__init__(kv_cache_spec, block_pool)
         self.sliding_window = kv_cache_spec.sliding_window
-        self.block_pool.init_real_null_block()
         self._null_block = block_pool.get_null_block()
 
     def get_possible_cached_prefix(
@@ -144,18 +148,18 @@ class SlidingWindowManager(SpecializedManager):
         return ranges, computed_blocks
 
     def remove_useless_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int) -> list[KVCacheBlock]:
+                              num_computed_tokens: int,
+                              is_first_call: bool) -> list[KVCacheBlock]:
         # Remove the blocks that are no longer be in the sliding window.
         last_useful_token = num_computed_tokens - self.sliding_window
         last_useful_block = last_useful_token // self.block_size
 
         removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
-            if blocks[i] == self._null_block:
+            if blocks[i] == self._null_block and not is_first_call:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
-                # FIXME: not true in prefix caching.
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block

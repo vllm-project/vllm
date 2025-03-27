@@ -218,7 +218,7 @@ class BlockPool:
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
-            if block.ref_cnt == 0:
+            if block.ref_cnt == 0 and block != self._null_block:
                 self.free_block_queue.remove(block)
             block.incr_ref()
 
@@ -285,17 +285,3 @@ class BlockPool:
             The null block.
         """
         return self._null_block
-
-    def init_real_null_block(self):
-        """
-        Initialize the null_block with a real block. This function should be
-        called before any other blocks are allocated.
-        """
-        if self._null_block.block_id == -1:
-            logger.debug("Initializing the real null block")
-            assert self.free_block_queue.num_free_blocks ==  \
-                self.num_gpu_blocks, (
-                "The real null block should be initialized before any other "
-                "blocks are allocated")
-            self._null_block = self.free_block_queue.popleft()
-        assert self._null_block.block_id == 0
