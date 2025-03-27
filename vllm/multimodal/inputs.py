@@ -295,7 +295,7 @@ class MultiModalFlatField(BaseMultiModalField):
         :func:`MultiModalFieldConfig.flat_from_sizes`
     """
     slices: Union[Sequence[slice], Sequence[Sequence[slice]]]
-    dim: Optional[int] = 0
+    dim: int = 0
 
     def build_elems(
         self,
@@ -384,7 +384,7 @@ class MultiModalFieldConfig:
     @staticmethod
     def flat(modality: str,
              slices: Union[Sequence[slice], Sequence[Sequence[slice]]],
-             dim: Optional[int] = 0):
+             dim: int = 0):
         """
         Defines a field where an element in the batch is obtained by
         slicing along the first dimension of the underlying data.

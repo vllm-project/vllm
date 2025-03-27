@@ -85,9 +85,33 @@ def get_use_audio_in_video_query() -> QueryResult:
     )
 
 
+def get_multi_audios_query() -> QueryResult:
+    question = "Are these two audio clips the same?"
+    prompt = (f"<|im_start|>system\n{default_system}<|im_end|>\n"
+              "<|im_start|>user\n<|audio_bos|><|AUDIO|><|audio_eos|>"
+              "<|audio_bos|><|AUDIO|><|audio_eos|>"
+              f"{question}<|im_end|>\n"
+              f"<|im_start|>assistant\n")
+    return QueryResult(
+        inputs={
+            "prompt": prompt,
+            "multi_modal_data": {
+                "audio": [
+                    AudioAsset("winning_call").audio_and_sample_rate,
+                    AudioAsset("mary_had_lamb").audio_and_sample_rate,
+                ],
+            },
+        },
+        limit_mm_per_prompt={
+            "audio": 2,
+        },
+    )
+
+
 query_map = {
     "mixed_modalities": get_mixed_modalities_query,
     "use_audio_in_video": get_use_audio_in_video_query,
+    "multi_audios": get_multi_audios_query,
 }
 
 
