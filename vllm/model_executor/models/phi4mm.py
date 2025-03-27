@@ -41,9 +41,9 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsV0Only
+from .interfaces import SupportsLoRA, SupportsMultiModal, MultiModalEmbeddings
 from .phi4mm_audio import AudioEmbedding
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix, merge_multimodal_embeddings
 
 # <|endoftext10|> (see vocab.json in hf model)
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
@@ -1649,8 +1649,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
     info=Phi4MMProcessingInfo,
     dummy_inputs=Phi4MMDummyInputsBuilder,
 )
-class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
-                        SupportsV0Only):
+class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     """
     Implements the Phi-4-multimodal-instruct model in vLLM.
     """
@@ -1929,6 +1928,63 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
             accumulate=False,
         )
         return merged_embeds
+
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        modalities = {}
+
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if input_key in ("pixel_values",
+                             "image_embeds") and "images" not in modalities:
+                modalities["images"] = self._parse_and_validate_image_input(
+                    **kwargs)
+            if input_key in ("audio_features",
+                             "audio_embeds") and "audios" not in modalities:
+                modalities["audios"] = self._parse_and_validate_audio_input(
+                    **kwargs)
+
+        return modalities
+    
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+
+        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not modalities:
+            return None
+
+        # The result multimodal_embeddings is tuple of tensors, with each
+        # tensor correspoending to a multimodal data item (image or video).
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+
+        # NOTE: It is important to iterate over the keys in this dictionary
+        # to preserve the order of the modalities.
+        audio_projection_mode = 'speech'
+        for modality in modalities:
+            # make sure process images first
+            if modality == "images":
+                audio_projection_mode = "vision"
+                image_input = modalities["images"]
+                vision_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += vision_embeddings
+            # if modality == "audios":
+            #     audio_input = modalities["audios"]
+            #     audio_embeddings = self._process_audio_input(audio_input)
+            #     multimodal_embeddings += audio_embeddings
+
+        return multimodal_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.embed_tokens(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                [_IMAGE_PLACEHOLDER_TOKEN_ID, _AUDIO_PLACEHOLDER_TOKEN_ID])
+        return inputs_embeds
 
     def forward(
         self,
