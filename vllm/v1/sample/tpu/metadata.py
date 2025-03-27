@@ -88,6 +88,7 @@ class TPUSupportedSamplingMetadata:
             # Copy slice from CPU to corresponding TPU pre-allocated tensor.
             # Pad value is the default one.
             cpu_tensor[num_reqs:padded_num_reqs] = fill_val
+            # Subtle compilation: len(tpu_tensor) must be >= `padded_num_reqs`
             tpu_tensor[:padded_num_reqs] = cpu_tensor[:padded_num_reqs]
 
         # NOTE NickLucche The sync CPU-TPU graph we produce here must be
@@ -100,13 +101,6 @@ class TPUSupportedSamplingMetadata:
         # copy_slice(input_batch.top_k_cpu_tensor, input_batch.top_k)
         copy_slice(input_batch.min_p_cpu_tensor, input_batch.min_p,
                    DEFAULT_SAMPLING_PARAMS["min_p"])
-
-        # copy_slice(input_batch.frequency_penalties_cpu_tensor,
-        #             input_batch.frequency_penalties)
-        # copy_slice(input_batch.presence_penalties_cpu_tensor,
-        #             input_batch.presence_penalties)
-        # copy_slice(input_batch.repetition_penalties_cpu_tensor,
-        #             input_batch.repetition_penalties)
 
         xm.mark_step()
         xm.wait_device_ops()
