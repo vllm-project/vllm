@@ -25,7 +25,7 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, LazyLoader, cdiv,
+                        LayerBlockType, LazyLoader, cdiv, check_use_alibi,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
@@ -137,6 +137,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
             scheduler_config=scheduler_config,
+            mm_registry=self.mm_registry,
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
@@ -222,6 +223,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=torch.int64,
                 device="cpu",
                 pin_memory=self.pin_memory)
+
+        # Only relevant for models using ALiBi (e.g, MPT)
+        self.use_alibi = check_use_alibi(model_config)
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -689,7 +693,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_lens=num_scheduled_tokens,
             num_query_heads=self.num_query_heads,
             num_kv_heads=self.num_kv_heads,
-            use_alibi=False,  # FIXME
+            use_alibi=self.use_alibi,
             use_sliding_window=self.window_size is not None,
             num_sms=self.num_sms,
         )
@@ -1436,9 +1440,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when
             # it supports multiple.
-            max_tokens_by_modality_dict = (
-                MULTIMODAL_REGISTRY.
-                get_max_tokens_per_item_by_nonzero_modality(self.model_config))
+            max_tokens_by_modality_dict = self.mm_registry \
+                .get_max_tokens_per_item_by_nonzero_modality(self.model_config)
             dummy_data_modality, max_tokens_per_mm_item = max(
                 max_tokens_by_modality_dict.items(), key=lambda item: item[1])
 

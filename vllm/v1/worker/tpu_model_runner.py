@@ -88,6 +88,8 @@ class TPUModelRunner:
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        # InputBatch needs to work with sampling tensors greater than padding
+        # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
 
         # Model-related.
@@ -109,6 +111,7 @@ class TPUModelRunner:
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
             scheduler_config=scheduler_config,
+            mm_registry=self.mm_registry,
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
@@ -787,6 +790,7 @@ class TPUModelRunner:
             dummy_hidden = torch.randn((num_tokens, hsize),
                                        device=device,
                                        dtype=torch.bfloat16)
+            # Compile for [8, 16, .., 128,.., `self.max_num_reqs`]
             while True:
                 indices = torch.zeros(
                     num_reqs_to_sample,
@@ -803,7 +807,9 @@ class TPUModelRunner:
                 out = out.cpu()
                 if num_reqs_to_sample >= self.max_num_reqs:
                     break
-                num_reqs_to_sample *= 2
+                # Make sure to compile the `max_num_reqs` upper-limit case
+                num_reqs_to_sample = _get_padded_num_reqs_with_upper_limit(
+                    num_reqs_to_sample + 1, self.max_num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
@@ -896,7 +902,6 @@ class ModelWrapperV1(nn.Module):
 
         return hidden_states
 
-    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_hidden(
         self,
         hidden_states: torch.Tensor,
