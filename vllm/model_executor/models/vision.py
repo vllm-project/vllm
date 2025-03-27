@@ -166,8 +166,8 @@ def scatter_patch_features(
     can be filtered out by :func`select_patch_features`.
 
     Args:
-        patches: The patch features, concatenated across each image.
-          Shape: `(num_images, num_patch, feature_depth)`
+        patches: The patch features for each image.
+          Shape: `(num_images, <patch_dims>, feature_depth)`
         embed_is_patch: A boolean mask indicating which image embeddings
           correspond to patch tokens for each image.
           Shape: `(num_images, num_embeds)`
@@ -204,7 +204,7 @@ def scatter_patch_features(
             (e_is_patch.shape[0], patches_one.shape[-1]),
             fill_value=torch.nan,
         )
-        embed_one[e_is_patch] = patches_one
+        embed_one[e_is_patch] = patches_one.flatten(0, -2)
         return embed_one
 
     return tuple(
