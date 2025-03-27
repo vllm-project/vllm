@@ -100,7 +100,7 @@ def test_guided_json_object(
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
             allowed_types: tuple[type, ...] = (dict, )
-            if guided_decoding_backend == "xgrammar":
+            if guided_decoding_backend.startswith("xgrammar"):
                 # TODO - we are currently too permissive with xgrammar and
                 # allow # any valid json (typically comes back as a list or
                 # object).  We can fix this by specifying a jsonschema of
@@ -128,7 +128,7 @@ def test_guided_json_unsupported_schema(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=unsupported_json_schema))
-    if guided_decoding_backend == "xgrammar":
+    if guided_decoding_backend.startswith("xgrammar"):
         with pytest.raises(ValueError,
                            match="The provided JSON schema contains features "
                            "not supported by xgrammar."):
