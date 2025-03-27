@@ -4,9 +4,10 @@ from typing import NamedTuple
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+from pydantic import BaseModel, ValidationError
 
 from ...utils import RemoteOpenAIServer
-from pydantic import BaseModel, ValidationError
+
 # # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 
