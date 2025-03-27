@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import sys
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -621,9 +622,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_RANK":
     lambda: int(os.getenv("VLLM_DP_RANK", "0")),
 
-    # Rank of the process in the data parallel setting
+    # Rank of the process in the data parallel setting.
+    # Defaults to VLLM_DP_RANK when not set.
     "VLLM_DP_RANK_LOCAL":
-    lambda: int(os.getenv("VLLM_DP_RANK_LOCAL", str(VLLM_DP_RANK))),
+    lambda: int(
+        os.getenv("VLLM_DP_RANK_LOCAL", sys.modules[__name__].VLLM_DP_RANK)),
 
     # World size of the data parallel setting
     "VLLM_DP_SIZE":
