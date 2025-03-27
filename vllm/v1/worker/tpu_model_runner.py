@@ -897,7 +897,6 @@ class ModelWrapperV1(nn.Module):
 
         return hidden_states
 
-    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_hidden(
         self,
         hidden_states: torch.Tensor,

@@ -72,14 +72,7 @@ class TopKTopPSampler(nn.Module):
                     "best performance, please install FlashInfer.")
                 self.forward = self.forward_native
         elif current_platform.is_tpu():
-            if envs.VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION:
-                logger.warning(
-                    "TPU-specific optimization for top-k & top-p sampling are "
-                    "disabled, falling back to PyTorch-native implementation "
-                    "which could be very slow.")
-                self.forward = self.forward_native
-            else:
-                self.forward = self.forward_tpu
+            self.forward = self.forward_tpu
         else:
             self.forward = self.forward_native
 
@@ -125,16 +118,8 @@ class TopKTopPSampler(nn.Module):
         # If only top-k is specified, use pytorch's builtin topk op. This leads
         # to significant speed up on TPU compared to using apply_top_k_top_p.
         if k is not None and p is None:
-            topk_values, topk_indices = torch.topk(logits, k, dim=-1)
-
-            mask = torch.ones_like(logits, dtype=torch.bool)
-            mask.scatter_(-1, topk_indices, False)
-            logits.masked_fill_(mask, float('-inf'))
-        else:
-            # TODO Placeholder for TPU optimized topp kernel
-            # logits = apply_top_k_top_p(logits, k, p)
-            pass
-
+            logits = apply_top_k_only(logits, k)
+        # TODO Add TPU optimized topp kernel and topk+topp
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators)
 
