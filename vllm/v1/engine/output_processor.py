@@ -240,7 +240,7 @@ class OutputProcessor:
         request_ids: Iterable[str],
     ) -> list[str]:
         request_ids_to_abort = self.flatten_req_to_abort(request_ids)
-        self.handle_abort_reqs(request_ids_to_abort)
+        self.free_aborted_reqs(request_ids_to_abort)
         return request_ids_to_abort
 
     def flatten_req_to_abort(self, req_ids: Iterable[str]) -> list[str]:
@@ -253,7 +253,7 @@ class OutputProcessor:
                 ret.extend(parent.child_requests)
         return ret
 
-    def handle_abort_reqs(self, req_ids: Iterable[str]):
+    def free_aborted_reqs(self, req_ids: Iterable[str]):
         """
         Handles aborted requests. This method is triggered when the frontend
         detects that a request has ended, such as when the client disconnects
@@ -263,16 +263,21 @@ class OutputProcessor:
             req_state = self.request_states.pop(req_id, None)
             if req_state is not None:
                 self.lora_states.abort_request(req_state)
+        # TODO: handle _update_stats_from_finished here
+        # may need to add some parameters, such as iteration_stats and
+        # finished_reason.
         return
 
-    def finish_request(self, request_id: str) -> None:
+    def free_finised_reqs(self, req_ids: Iterable[str]):
         """
         Handle a finished request. This method is called when EngineCore detects
         that the request has ended, and the resources related to the request
         maintained by EngineCore have been released.
         """
-        req_state = self.request_states.pop(request_id)
-        self.lora_states.finish_request(req_state)
+        for req_id in req_ids:
+            req_state = self.request_states.pop(req_id)
+            self.lora_states.finish_request(req_state)
+        # TODO: handle _update_stats_from_finished here
         return
 
     def add_request(
@@ -385,7 +390,7 @@ class OutputProcessor:
                     # detected stop string, abort needed in EngineCore.
                     reqs_to_abort.append(req_id)
                 else:
-                    self.finish_request(req_id)
+                    self.free_finised_reqs((req_id, ))
 
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,
