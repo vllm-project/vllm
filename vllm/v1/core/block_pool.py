@@ -248,7 +248,7 @@ class BlockPool:
             False otherwise.
         """
         num_used_blocks = (self.num_gpu_blocks - self.get_num_free_blocks())
-        if num_used_blocks > 0:
+        if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(
                 "Failed to reset prefix cache because some "
                 "blocks (%d) are not freed yet", num_used_blocks)
