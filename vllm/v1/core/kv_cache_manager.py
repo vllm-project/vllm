@@ -5,12 +5,11 @@ from collections.abc import Iterable
 from typing import Optional
 
 from vllm.logger import init_logger
-from vllm.utils import cdiv, sha256
+from vllm.utils import cdiv, get_hash_fn_by_name
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
-                                         hash_request_tokens)
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, hash_request_tokens
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import BlockHashType, Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -34,7 +33,7 @@ class KVCacheManager:
         self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
         self.sliding_window = sliding_window
         self.enable_caching = enable_caching
-        self.caching_hash_fn = sha256 if caching_hash_algo == "sha256" else hash
+        self.caching_hash_fn = get_hash_fn_by_name(caching_hash_algo)
         # FIXME: make prefix cache stats conditional on log_stats
         self.log_stats = log_stats
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
@@ -111,8 +110,15 @@ class KVCacheManager:
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
-            block_hashes = hash_request_tokens(self.caching_hash_fn,
-                                               self.block_size, request)
+            if request.prompt_kv_block_hashes is not None:
+                block_hashes = request.prompt_kv_block_hashes
+            else:
+                block_hashes = hash_request_tokens(self.caching_hash_fn,
+                                                   self.block_size,
+                                                   request.prompt_token_ids,
+                                                   request.mm_positions,
+                                                   request.mm_hashes,
+                                                   request.lora_request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         self.prefix_cache_stats.requests += 1

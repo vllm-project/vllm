@@ -4,11 +4,10 @@ from collections.abc import Iterable
 from typing import Callable, Optional
 
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (FreeKVCacheBlockQueue, KVCacheBlock,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
-from vllm.v1.request import Request
+from vllm.v1.request import BlockHashType, Request
 
 logger = init_logger(__name__)
 
@@ -137,7 +136,8 @@ class BlockPool:
                 # we reach to this branch only when the block is completed with
                 # generated tokens, we only need to consider the last mm input.
                 extra_keys, _ = generate_block_hash_extra_keys(
-                    request, start_token_idx, end_token_idx, -1)
+                    request.mm_positions, request.mm_hashes,
+                    request.lora_request, start_token_idx, end_token_idx, -1)
 
                 # Compute the hash of the current block.
                 block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,

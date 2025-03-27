@@ -7,7 +7,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
-from vllm.v1.utils import ConstantList
+from vllm.v1.utils import BlockHashType, ConstantList
 
 if TYPE_CHECKING:
 
@@ -23,6 +23,7 @@ class Request:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: list[int],
+        prompt_kv_block_hashes: Optional[list[BlockHashType]],
         multi_modal_inputs: Optional[list["MultiModalKwargs"]],
         multi_modal_hashes: Optional[list[str]],
         multi_modal_placeholders: Optional[list["PlaceholderRange"]],
@@ -49,6 +50,7 @@ class Request:
 
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
+        self.prompt_kv_block_hashes = prompt_kv_block_hashes
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
@@ -77,6 +79,7 @@ class Request:
             request_id=request.request_id,
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
+            prompt_kv_block_hashes=request.prompt_kv_block_hashes,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,

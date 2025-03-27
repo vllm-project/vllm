@@ -18,6 +18,8 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.utils import get_hash_fn_by_name
+from vllm.v1.core.kv_cache_utils import hash_request_tokens
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
@@ -285,10 +287,21 @@ class Processor:
             else:
                 sorted_mm_inputs = individual_mm_inputs
 
+        # Generate prompt kv block hashes
+        prompt_kv_block_hashes = hash_request_tokens(
+            get_hash_fn_by_name(self.cache_config.prefix_caching_hash_algo),
+            self.cache_config.block_size,
+            decoder_inputs.prompt_token_ids,
+            sorted_mm_positions,
+            sorted_mm_hashes,
+            lora_request,
+        )
+
         return EngineCoreRequest(
             request_id=request_id,
             prompt=decoder_inputs.prompt,
             prompt_token_ids=decoder_inputs.prompt_token_ids,
+            prompt_kv_block_hashes=prompt_kv_block_hashes,
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
             mm_placeholders=sorted_mm_positions,
