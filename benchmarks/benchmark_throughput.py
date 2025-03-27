@@ -12,8 +12,9 @@ from typing import Any, Optional, Union
 import torch
 import uvloop
 from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
-                               RandomDataset, SampleRequest, ShareGPTDataset,
-                               SonnetDataset, VisionArenaDataset, InstructCoderDataset)
+                               InstructCoderDataset, RandomDataset,
+                               SampleRequest, ShareGPTDataset, SonnetDataset,
+                               VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -325,8 +326,8 @@ def get_requests(args, tokenizer):
             # Choose between VisionArenaDataset and HuggingFaceDataset based on
             # provided parameters.
             dataset_cls = (VisionArenaDataset if args.dataset_path
-                        == VisionArenaDataset.VISION_ARENA_DATASET_PATH
-                        and args.hf_subset is None else HuggingFaceDataset)
+                           == VisionArenaDataset.VISION_ARENA_DATASET_PATH
+                           and args.hf_subset is None else HuggingFaceDataset)
             common_kwargs['dataset_subset'] = args.hf_subset
             common_kwargs['dataset_split'] = args.hf_split
             sample_kwargs["enable_multimodal_chat"] = True
@@ -469,9 +470,9 @@ def validate_args(args):
                       stacklevel=2)
     elif args.dataset_name == "hf":
         if args.dataset_path == VisionArenaDataset.VISION_ARENA_DATASET_PATH:
-            assert args.backend == "vllm-chat", "VisionArenaDataset needs to use vllm-chat as the backend."
+            assert args.backend == "vllm-chat", "VisionArenaDataset needs to use vllm-chat as the backend."  #noqa: E501
         elif args.dataset_path == "likaixin/InstructCoder":
-            assert args.backend == "vllm", "InstructCoder dataset needs to use vllm as the backend."
+            assert args.backend == "vllm", "InstructCoder dataset needs to use vllm as the backend."  #noqa: E501
         else:
             raise ValueError(
                 f"{args.dataset_path} is not supported by hf dataset.")
