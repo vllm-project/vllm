@@ -241,39 +241,6 @@ def long_context_lora_files_16k_1():
     return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1")
 
 
-@pytest.fixture(scope="session")
-def long_context_lora_files_16k_2():
-    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_2")
-
-
-@pytest.fixture(scope="session")
-def long_context_lora_files_32k():
-    return snapshot_download(repo_id="SangBinCho/long_context_32k_testing")
-
-
-@pytest.fixture(scope="session")
-def long_context_infos(long_context_lora_files_16k_1,
-                       long_context_lora_files_16k_2,
-                       long_context_lora_files_32k):
-    cleanup_dist_env_and_memory(shutdown_ray=True)
-    infos: dict[int, ContextInfo] = {}
-    for lora_checkpoint_info in LONG_LORA_INFOS:
-        lora_id = lora_checkpoint_info["lora_id"]
-        if lora_id == 1:
-            lora = long_context_lora_files_16k_1
-        elif lora_id == 2:
-            lora = long_context_lora_files_16k_2
-        elif lora_id == 3:
-            lora = long_context_lora_files_32k
-        else:
-            raise AssertionError("Unknown lora id")
-        infos[lora_id] = {
-            "context_length": lora_checkpoint_info["context_length"],
-            "lora": lora,
-        }
-    return infos
-
-
 @pytest.fixture
 def llama_2_7b_engine_extra_embeddings():
     cleanup_dist_env_and_memory(shutdown_ray=True)
