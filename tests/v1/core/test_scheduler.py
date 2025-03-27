@@ -244,7 +244,9 @@ def test_schedule_partial_requests():
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[0] for _ in range(len(requests))],
+        # Only the first request has a sampled token id because
+        # the rest requests are still being prefilled.
+        sampled_token_ids=[[0], [], []],
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -266,7 +268,7 @@ def test_schedule_partial_requests():
 
 
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
-def test_schedule_concurrent_partial_requestse(enable_prefix_caching: bool):
+def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     """Test scheduling behavior with concurrent partial requests.
 
     This test verifies that: there are multiple long prefill requests in the
@@ -304,7 +306,7 @@ def test_schedule_concurrent_partial_requestse(enable_prefix_caching: bool):
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[0] for _ in range(len(requests))],
+        sampled_token_ids=[[] for _ in range(len(requests))],
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -325,6 +327,14 @@ def test_schedule_concurrent_partial_requestse(enable_prefix_caching: bool):
     # Schedule the third step. All three requests are running.
     # First and second requests are in the decode stage.
     # All the remaining tokens in the third request are processed.
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0], [0]] + [[] for _ in range(len(requests) - 2)],
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
     scheduler.update_from_output(output1, model_runner_output)
     output2 = scheduler.schedule()
     assert len(scheduler.running) == 3
