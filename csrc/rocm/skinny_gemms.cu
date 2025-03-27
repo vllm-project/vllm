@@ -1,10 +1,14 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+
 #include <stdexcept>
 #include <algorithm>
+
 #include "cuda_compat.h"
 
 #if defined(__HIPCC__) && (defined(__gfx90a__) || defined(__gfx942__))
@@ -25,6 +29,45 @@
 #endif
 
 template <typename T>
+struct scalar2 {};
+
+template <typename T>
+C10_DEVICE C10_ALWAYS_INLINE float2 __s22float2(T v);
+
+template <typename T>
+C10_DEVICE C10_ALWAYS_INLINE T __float22s2_rn(float2 v);
+
+template <>
+struct scalar2<c10::Half> {
+  using type = __half2;
+};
+
+template <>
+C10_DEVICE C10_ALWAYS_INLINE float2 __s22float2(__half2 v) {
+  return __half22float2(v);
+}
+
+template <>
+C10_DEVICE C10_ALWAYS_INLINE __half2 __float22s2_rn(float2 v) {
+  return __float22half2_rn(v);
+}
+
+template <>
+struct scalar2<c10::BFloat16> {
+  using type = __hip_bfloat162;
+};
+
+template <>
+C10_DEVICE C10_ALWAYS_INLINE float2 __s22float2(__hip_bfloat162 v) {
+  return __bfloat1622float2(v);
+}
+
+template <>
+C10_DEVICE C10_ALWAYS_INLINE __hip_bfloat162 __float22s2_rn(float2 v) {
+  return __float22bfloat162_rn(v);
+}
+
+template <typename T>
 __device__ __forceinline__ T loadnt(T* addr) {
   return __builtin_nontemporal_load(addr);
 }
@@ -40,9 +83,13 @@ __device__ __forceinline__ float4 load_ntmprl(const float4* addr) {
 
 // TBlock fetches entire rows of A, and entire col of B (K dimension); assume
 // N=1 for time being grid is M/A_NUM_ROWS blocks
-template <int NUM_A_ROWS_PER_BLOCK>
-__global__ void LLGemm1_kernel(float4* af4, __half2* bf4, __half2* c,
-                               const int K) {
+template <typename scalar_t, int NUM_A_ROWS_PER_BLOCK>
+__global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
+                               scalar_t* out_c, const int K) {
+  using scalar2_t = typename scalar2<scalar_t>::type;
+  auto af4 = reinterpret_cast<const float4*>(in_a);
+  auto bf4 = reinterpret_cast<const scalar2_t*>(in_b);
+  auto c = reinterpret_cast<scalar2_t*>(out_c);
   __shared__ float red_smem[NUM_A_ROWS_PER_BLOCK][WARP_SIZE];
   const int row_addr = blockIdx.x * NUM_A_ROWS_PER_BLOCK * K / 8;
   const int threadid = threadIdx.x;
@@ -52,11 +99,11 @@ __global__ void LLGemm1_kernel(float4* af4, __half2* bf4, __half2* c,
   const int qwarpid = threadid / 16;
   const int qthreadid = threadid % 16;
   float4 rowA_elem4[NUM_A_ROWS_PER_BLOCK];
-  __half2 colB_elem4x, colB_elem4y, colB_elem4z, colB_elem4w;
+  scalar2_t colB_elem4x, colB_elem4y, colB_elem4z, colB_elem4w;
   float4 sum4;  //[NUM_A_ROWS_PER_BLOCK];
   float acc[NUM_A_ROWS_PER_BLOCK] = {0.0};
-  __half2 acch2;
-  __half2 oval;
+  scalar2_t acch2;
+  scalar2_t oval;
 
   // As we later use warp shuffle operations, we may have more threads in the
   // block than the actual available data, hence the if guard here.
@@ -73,12 +120,12 @@ __global__ void LLGemm1_kernel(float4* af4, __half2* bf4, __half2* c,
   colB_elem4z = bf4[threadid * 4 + 2];
   colB_elem4w = bf4[threadid * 4 + 3];
 
-  __half2 Af2;
-  __half2 Bf2;
+  scalar2_t Af2;
+  scalar2_t Bf2;
   float2 S;
 
-  auto Ah2ptr = reinterpret_cast<__half2*>(&rowA_elem4);
-  __half2* ah2lptr;
+  auto Ah2ptr = reinterpret_cast<scalar2_t*>(&rowA_elem4);
+  scalar2_t* ah2lptr;
 
 #pragma unroll
   for (int i = 0; i < NUM_A_ROWS_PER_BLOCK; i++) {
@@ -92,7 +139,7 @@ __global__ void LLGemm1_kernel(float4* af4, __half2* bf4, __half2* c,
     acch2 = __hfma2(Af2, colB_elem4z, acch2);
     Af2 = *(ah2lptr + 3);
     acch2 = __hfma2(Af2, colB_elem4w, acch2);
-    S = __half22float2(acch2);
+    S = __s22float2(acch2);
 
     // See comment above concerning the if guard.
     if (threadid * 8 < K) {
@@ -126,18 +173,22 @@ __global__ void LLGemm1_kernel(float4* af4, __half2* bf4, __half2* c,
     float oval2 = __shfl_xor(acc[qwarpid], 16);
 
     if (threadid % WARP_SIZE == 0 or threadid % WARP_SIZE == 32) {
-      oval = __float22half2_rn(make_float2(acc[qwarpid], oval2));
+      oval = __float22s2_rn<scalar2_t>(make_float2(acc[qwarpid], oval2));
       c[blockIdx.x * NUM_A_ROWS_PER_BLOCK / 2 + qwarpid / 2] = oval;
     }
   }
 }
 
-// define the kernel calling code:
-void LLGemm1(void* in_a, void* in_b, void* out_c, const int M, const int K,
-             cudaStream_t stream, const int rows_per_block = 4) {
-  float4* af4 = reinterpret_cast<float4*>(in_a);
-  auto* bf4 = reinterpret_cast<__half2*>(in_b);
-  auto* c = reinterpret_cast<__half2*>(out_c);
+void LLMM1(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
+           const int64_t rows_per_block) {
+  auto M = in_a.size(0);
+  auto K = in_a.size(1);
+  auto N = in_b.size(0);
+
+  TORCH_CHECK(N == 1, "Row number of activation tensor must be 1.");
+  TORCH_CHECK(in_a.dtype() == in_b.dtype());
+  TORCH_CHECK(in_b.dtype() == torch::kFloat16 ||
+              in_b.dtype() == torch::kBFloat16);
 
   // NUM_TREADS need to be a multiple of WARP_SIZE, as we are using warp shuffle
   // operations.
@@ -148,32 +199,32 @@ void LLGemm1(void* in_a, void* in_b, void* out_c, const int M, const int K,
 
   int NUM_BLOCKS = M / rows_per_block;
 
-  if (rows_per_block == 2) {
-    LLGemm1_kernel<2><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(af4, bf4, c, K);
-  } else if (rows_per_block == 4) {
-    LLGemm1_kernel<4><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(af4, bf4, c, K);
-  } else if (rows_per_block == 8) {
-    LLGemm1_kernel<8><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(af4, bf4, c, K);
-  } else if (rows_per_block == 16) {
-    LLGemm1_kernel<16><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(af4, bf4, c, K);
-  } else {
-    NUM_BLOCKS = M / 4;
-    LLGemm1_kernel<4><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(af4, bf4, c, K);
-  }
-
-  cudaError_t err = cudaGetLastError();
-  if (cudaSuccess != err)
-    throw std::runtime_error("CUDA kernel failed : " + std::to_string(err));
-}
-
-void LLMM1(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
-           const int64_t rows_per_block) {
-  auto M = in_a.size(0);
-  auto K = in_a.size(1);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_b));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // call the kernel function...
-  LLGemm1(in_a.data_ptr(), in_b.data_ptr(), out_c.data_ptr(), M, K,
-          at::cuda::getCurrentCUDAStream(), rows_per_block);
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "LLGemm1", [&] {
+    auto a_ptr = in_a.data_ptr<scalar_t>();
+    auto b_ptr = in_b.data_ptr<scalar_t>();
+    auto c_ptr = out_c.data_ptr<scalar_t>();
+    if (rows_per_block == 2) {
+      LLGemm1_kernel<scalar_t, 2>
+          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
+    } else if (rows_per_block == 4) {
+      LLGemm1_kernel<scalar_t, 4>
+          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
+    } else if (rows_per_block == 8) {
+      LLGemm1_kernel<scalar_t, 8>
+          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
+    } else if (rows_per_block == 16) {
+      LLGemm1_kernel<scalar_t, 16>
+          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
+    } else {
+      NUM_BLOCKS = M / 4;
+      LLGemm1_kernel<scalar_t, 4>
+          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
+    }
+  });
 }
 
 #define DTYPE half
