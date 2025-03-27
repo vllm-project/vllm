@@ -8,9 +8,7 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from packaging.version import Version
 from transformers import AutoModelForImageTextToText, AutoModelForVision2Seq
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
@@ -199,12 +197,6 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],  # noqa: E501
         image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
-        marks=[
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_VERSION) >= Version("4.48"),
-                reason="HF model is not compatible with transformers>=4.48",
-            )
-        ],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
@@ -347,12 +339,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
         patch_hf_runner=model_utils.mantis_patch_hf_runner,
-        marks=[
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_VERSION) >= Version("4.48"),
-                reason="HF model is not compatible with transformers>=4.48",
-            )
-        ],
     ),
     "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
