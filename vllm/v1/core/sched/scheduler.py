@@ -10,6 +10,7 @@ from typing import Optional, Union
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.logger import init_logger
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -38,6 +39,7 @@ class Scheduler(SchedulerInterface):
         speculative_config: Optional[SpeculativeConfig],
         log_stats: bool,
         structured_output_manager: StructuredOutputManager,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -93,6 +95,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
             scheduler_config=scheduler_config,
+            mm_registry=mm_registry,
         )
 
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
