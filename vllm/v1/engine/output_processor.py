@@ -5,6 +5,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Optional, Union
 
+import torch
+
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -140,11 +142,14 @@ class RequestState:
         new_token_ids: list[int],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
+        hidden_states: Optional[torch.Tensor] = None,
     ) -> Optional[RequestOutput]:
 
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
 
+        # In follow up, we will switch to invariant where EngineCore
+        # does not stream partial prefills.
         if not finished and final_only:
             # Only the final output is required in FINAL_ONLY mode.
             return None
@@ -160,14 +165,18 @@ class RequestState:
                 request_id, completion_output)
             if not outputs:
                 return None
-
-        return self._new_request_output(request_id, outputs, finished)
+        if hidden_states is not None:
+            return self._new_request_output(request_id, outputs, finished,
+                                            hidden_states)
+        else:
+            return self._new_request_output(request_id, outputs, finished)
 
     def _new_request_output(
         self,
         request_id: str,
         outputs: list[CompletionOutput],
         finished: bool,
+        hidden_states: Optional[torch.Tensor] = None,
     ) -> RequestOutput:
 
         if self.output_kind == RequestOutputKind.DELTA:
@@ -175,15 +184,25 @@ class RequestState:
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
-
-        return RequestOutput(
-            request_id=request_id,
-            prompt=self.prompt,
-            prompt_token_ids=self.prompt_token_ids,
-            prompt_logprobs=prompt_logprobs,
-            outputs=outputs,
-            finished=finished,
-        )
+        if hidden_states is not None:
+            return RequestOutput(
+                request_id=request_id,
+                prompt=self.prompt,
+                prompt_token_ids=self.prompt_token_ids,
+                prompt_logprobs=prompt_logprobs,
+                outputs=outputs,
+                finished=finished,
+                hidden_states=hidden_states,
+            )
+        else:
+            return RequestOutput(
+                request_id=request_id,
+                prompt=self.prompt,
+                prompt_token_ids=self.prompt_token_ids,
+                prompt_logprobs=prompt_logprobs,
+                outputs=outputs,
+                finished=finished,
+            )
 
     def _new_completion_output(
         self,
@@ -307,6 +326,7 @@ class OutputProcessor:
 
         request_outputs: list[RequestOutput] = []
         reqs_to_abort: list[str] = []
+
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
@@ -321,8 +341,21 @@ class OutputProcessor:
 
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
+            hidden_states = engine_core_output.hidden_states
             stop_reason = engine_core_output.stop_reason
 
+            # TODO(andy): prompt logprobs + chunked prefill can
+            # result in engine core returning an output for a
+            # partial prefill (in order to send back partial
+            # prompt logprobs.) This breaks the invariant that
+            # process_outputs is only operating on engine core
+            # outputs associated with non-partial completions.
+            # Currently this is handled by having `is_prefilling`
+            # check for new decoded tokens, indicating that
+            # the completion is not partial.
+            #
+            # Follow up will aggregate partial prompt logprobs
+            # in the EngineCore.
             req_state.is_prefilling = False
 
             # 2) Detokenize the token ids into text and perform stop checks.
@@ -332,12 +365,13 @@ class OutputProcessor:
                 finish_reason = FinishReason.STOP
                 stop_reason = stop_string
 
-            # 3) Compute sample and prompt logprobs for request, if required.
+            # 3) Compute sample and prompt logprobs for request,
+            #    if required.
             req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
-                    new_token_ids, finish_reason, stop_reason):
+                    new_token_ids, finish_reason, stop_reason, hidden_states):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)

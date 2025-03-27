@@ -150,6 +150,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Set up speculative decoding.
         self.use_spec_decode = False
+        self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
             assert self.speculative_config.method == "ngram", \
@@ -570,14 +571,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.positions_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
 
-        # Prepare for cascade attention if enabled & beneficial.
+        # Prepare for cascade attention if needed.
         common_prefix_len = 0
         if self.cascade_attn_enabled:
             common_prefix_len = self._compute_cascade_attn_prefix_len(
                 num_scheduled_tokens,
                 scheduler_output.num_common_prefix_blocks,
             )
-
         attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
@@ -1139,6 +1139,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids, sampling_metadata)
+
+        if self.requests is not None:
+            m = list(self.requests.keys())[0]
+            if self.requests[m].sampling_params.return_hidden_states:
+                return ModelRunnerOutput(
+                    req_ids=self.input_batch.req_ids,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    spec_token_ids=spec_token_ids,
+                    logprobs=logprobs_lists,
+                    prompt_logprobs_dict=prompt_logprobs_dict,
+                    hidden_states=hidden_states)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,

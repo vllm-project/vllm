@@ -99,6 +99,7 @@ class ModelRunnerOutput:
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
+    hidden_states: Optional[torch.Tensor] = None
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(

@@ -1093,6 +1093,7 @@ class CompletionSequenceGroupOutput(
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
     step_index: Optional[int] = 0
+    hidden_states: Optional[torch.Tensor] = None
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "
@@ -1115,6 +1116,7 @@ class PoolingSequenceGroupOutput(
     # Annotated as Any to be compatible with msgspec
     # The actual type is in SequenceGroup.pooled_data
     data: Any
+    hidden_states: Optional[torch.Tensor] = None
 
     def __repr__(self) -> str:
         return f"PoolingSequenceGroupOutput(data={self.data}"
@@ -1458,7 +1460,6 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             prompt_adapter_request=seq_group.prompt_adapter_request,
             priority=seq_group.priority,
         )
-
         group.streaming = params.output_kind == RequestOutputKind.DELTA
         group.output_produced = False
 

@@ -453,7 +453,6 @@ class LLM:
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
-
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=sampling_params,
