@@ -677,7 +677,7 @@ class ModelConfig:
 
     def _verify_bnb_config(self) -> None:
         """
-        The current version of bitsandbytes (0.45.4) with 8-bit models does not
+        The current version of bitsandbytes (0.45.3) with 8-bit models does not
         yet support CUDA graph.
         # TODO Remove this when bitsandbytes supports.
         """
