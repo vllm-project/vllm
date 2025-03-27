@@ -209,8 +209,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                     requires_grad=False)
 
-        # TODO: do we need to do deep gemm alignment here?
-
     def apply(
         self,
         layer: torch.nn.Module,

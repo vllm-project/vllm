@@ -37,12 +37,12 @@ ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
 
-use_deep_gemm = False
+allow_deep_gemm = False
 if envs.VLLM_USE_DEEP_GEMM:
     try:
         import deep_gemm as dg
         logger.info("Using DeepGemm for fused MoE.")
-        use_deep_gemm = True
+        allow_deep_gemm = True
     except ImportError:
         logger.warning("Failed to import DeepGemm kernels.")
 
@@ -438,7 +438,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
-        self.allow_deep_gemm = use_deep_gemm
+        self.allow_deep_gemm = allow_deep_gemm
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
