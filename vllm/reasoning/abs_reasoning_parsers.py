@@ -48,7 +48,6 @@ class ReasoningParser:
         bool
             True if the reasoning content ends in the input_ids.
         """
-        pass
 
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
@@ -61,7 +60,6 @@ class ReasoningParser:
         list[int]
             The extracted content from the input_ids.
         """
-        pass
 
     @abstractmethod
     def extract_reasoning_content(
@@ -84,7 +82,6 @@ class ReasoningParser:
         tuple[Optional[str], Optional[str]]
             A tuple containing the reasoning content and the content.
         """
-        pass
 
     @abstractmethod
     def extract_reasoning_content_streaming(
@@ -103,7 +100,6 @@ class ReasoningParser:
         the current tokens/diffs, but also the information about what has
         previously been parsed and extracted (see constructor)
         """
-        pass
 
 
 class ReasoningParserManager:
