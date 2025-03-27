@@ -622,10 +622,10 @@ class EngineArgs:
             nargs='?',
             const=True,
             default=None,
-            help='Hugging Face token. If a string is provided, '
-            'it is used as the token. If the flag is set '
-            'without a value, it evaluates to True. If omitted,'
-            ' it defaults to None.')
+            help='The token to use as HTTP bearer authorization'
+            ' for remote files. If `True`, will use the token '
+            'generated when running `huggingface-cli login` '
+            '(stored in `~/.huggingface`).')
         parser.add_argument('--hf-overrides',
                             type=json.loads,
                             default=EngineArgs.hf_overrides,
