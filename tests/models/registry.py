@@ -305,7 +305,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b", # noqa: E501
-                                                      min_transformers_version="4.51.0"),
+                                                      min_transformers_version="4.50.0"),
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
