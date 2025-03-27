@@ -123,7 +123,8 @@ class Processor:
             return
 
         supported_backends = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance", "auto"
+            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
+            "guidance:disable-any-whitespace", "auto"
         ]
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
