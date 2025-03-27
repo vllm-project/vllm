@@ -172,6 +172,9 @@ class ModelConfig:
             Defaults to True.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
+        hf_token: If a string, represents the Hugging Face authentication token
+            . If set to True, authentication is enabled but the token is not 
+            explicitly provided. If None, no authentication is used.
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
