@@ -38,6 +38,10 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
 
+    # Some Backends support direct calls and do not need to be wrapped
+    # into a custom op
+    use_direct_call: bool = False
+
     @staticmethod
     @abstractmethod
     def get_name() -> str:
