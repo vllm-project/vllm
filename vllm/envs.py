@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_TPU_DISABLE_SAMPLER_DEBUG: bool = False
 
 
 def get_default_cache_root():
@@ -694,9 +695,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
     if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
 
+<<<<<<< HEAD
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+=======
+    # Disable sampler path for debugging performance.
+    "VLLM_TPU_DISABLE_SAMPLER_DEBUG":
+    lambda: os.environ.get("VLLM_TPU_DISABLE_SAMPLER_DEBUG", "0") == "1",
+>>>>>>> fdc71ec1a (updates)
 }
 
 # end-env-vars-definition

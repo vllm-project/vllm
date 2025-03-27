@@ -682,22 +682,35 @@ class TPUModelRunner:
             input_ids = self.input_ids
             inputs_embeds = None
         num_reqs = self.input_batch.num_reqs
-        # NOTE (NickLucche) here we sync with TPU: sampling params tensors
-        # are copied to device in chunks of pre-compiled padded shape to
-        # avoid recompilations.
-        tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_input_batch(self.input_batch, logits_indices)
-        # Run the decoder
-        with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=self.position_ids,
-                inputs_embeds=inputs_embeds,
-            )
-        selected_token_ids = self.sample_from_hidden(hidden_states,
-                                                     tpu_sampling_metadata)
-        # Remove padding on cpu and keep dynamic op outside of xla graph.
-        selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+
+        # Temporary debug pathway.
+        if envs.VLLM_TPU_DISABLE_SAMPLER_DEBUG:
+            with set_forward_context(attn_metadata, self.vllm_config):
+                hidden_states = self.model(
+                    input_ids=input_ids,
+                    positions=self.position_ids,
+                    kv_caches=self.kv_caches,
+                    inputs_embeds=inputs_embeds,
+                )
+            selected_token_ids = self.model.compute_logits_no_sampler(
+                hidden_states, logits_indices, None)
+            selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+        else:
+            # NOTE (NickLucche) here we sync with TPU: sampling params tensors
+            # are copied to device in chunks of pre-compiled padded shape to
+            # avoid recompilations.
+            tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
+                from_input_batch(self.input_batch, logits_indices)
+            with set_forward_context(attn_metadata, self.vllm_config):
+                hidden_states = self.model(
+                    input_ids=input_ids,
+                    positions=self.position_ids,
+                    kv_caches=self.kv_caches,
+                    inputs_embeds=inputs_embeds,
+                )
+                selected_token_ids = self.model.sample_from_hidden(
+                    hidden_states, tpu_sampling_metadata)
+                selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
