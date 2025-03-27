@@ -71,15 +71,11 @@ class Scheduler(SchedulerInterface):
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
 
-        # req_id -> a queue of computed tokens when the request is scheduled.
-        # With PP, when an input prompt is split into chunks, we can schedule
-        # a new chunk even before the previous chunk has completed the full
-        # pipeline stages. This helps reduce TTFT.
-        # In this case, the deque will have multiple elements with the
-        # computed tokens before each chunk was scheduled. This is used by
-        # update_from_output() to determine the request status.
-        self.orig_num_computed_tokens: dict[str,
-                                            deque[int]] = defaultdict(deque)
+        # req_id -> Number of times the request has been scheduled.
+        # With PP, when the input prompt is divided into chunks, we can
+        # schedule a new chunk even before the previous chunk has completed
+        # the full pipeline stages. This helps reduce TTFT.
+        self.scheduled_req_ids: dict[str, int] = defaultdict(int)
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -212,8 +208,7 @@ class Scheduler(SchedulerInterface):
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            self.orig_num_computed_tokens[request.request_id].append(
-                request.num_computed_tokens)
+            self.scheduled_req_ids[request.request_id] += 1
             if request.use_structured_output:
                 # PERF: in case of chunked prefill,
                 # request might not include any new tokens.
@@ -339,6 +334,7 @@ class Scheduler(SchedulerInterface):
                         request.request_id] = req_index
                 req_index += 1
                 self.running.append(request)
+                self.scheduled_req_ids[request.request_id] += 1
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
@@ -359,8 +355,6 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                self.orig_num_computed_tokens[request.request_id].append(
-                    request.num_computed_tokens)
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
@@ -583,11 +577,6 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
                 continue
 
-            num_computed_tokens_with_output = (
-                self.orig_num_computed_tokens[req_id].popleft())
-            if not self.orig_num_computed_tokens[req_id]:
-                del self.orig_num_computed_tokens[req_id]
-
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
 
@@ -611,8 +600,7 @@ class Scheduler(SchedulerInterface):
                 for input_id in list(cached_encoder_input_ids):
                     start_pos = request.mm_positions[input_id]["offset"]
                     num_tokens = request.mm_positions[input_id]["length"]
-                    if (start_pos + num_tokens
-                            <= num_computed_tokens_with_output):
+                    if start_pos + num_tokens <= request.num_computed_tokens:
                         # The encoder output is already processed and stored
                         # in the decoder's KV cache.
                         self.encoder_cache_manager.free_encoder_input(
@@ -673,6 +661,9 @@ class Scheduler(SchedulerInterface):
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
+            self.scheduled_req_ids[request.request_id] -= 1
+            if self.scheduled_req_ids[request.request_id] == 0:
+                del self.scheduled_req_ids[request.request_id]
             if not stopped:
                 new_running.append(request)
 
@@ -716,8 +707,8 @@ class Scheduler(SchedulerInterface):
 
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
-                if request.request_id in self.orig_num_computed_tokens:
-                    del self.orig_num_computed_tokens[request.request_id]
+                if request.request_id in self.scheduled_req_ids:
+                    del self.scheduled_req_ids[request.request_id]
             else:
                 self.waiting.remove(request)
             request.status = finished_status
