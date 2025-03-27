@@ -14,12 +14,138 @@ from torch_xla.experimental.custom_kernel import (XLA_LIB, jax_import_guard,
 
 XLA_LIB.define(
     "bgmv_shrink(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor")
+
+# bgmv_expand needs a flag to enable LoRA laning since it expects its inputs to
+# be the outputs of a LoRA laned bgmv_shrink. This is not always the case when
+# we use bgmv_expand
 XLA_LIB.define(
-    "bgmv_expand(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor")
+    "bgmv_expand(Tensor inputs, Tensor loras, Tensor idxs, bool enable_laning) -> Tensor"
+)
+"""
+LoRA Laning Optimization for TPU Matrix Multiplication
+
+When we run with the TPU we need to keep its MXU (matrix multiplication unit)
+well fed to achieve maximum utilisation.
+The MXU can perform an (8x128) by (128x128) matmul once every 8 cycles.
+
+LoRA computations typically take a series of T (1xD) vectors and matmul them
+with a (DxL) matrix (shrinking) followed by another matmul with a (LxD) matrix
+(expanding). Grouping the vectors we get a (TxD) matrix, so our computations
+become matmul((TxD), (DxL)) and matmul((TxL), (LxD)).
+
+The number of tokens (T) and the hidden dimension (D) are usually greater than
+8 and 128 respectively, however the LoRA rank (L) is usually a smaller value,
+around 8-64, which means we need to pad L to allow it to fit in a TPU register.
+
+                              +------------------+
+                              | Shrink Operation |
+                              +------------------+
+
+                                       L
+                              +------------------+
+            D                 | 1111000000000000 |              L
+   +------------------+       | 1111000000000000 |     +------------------+
+   | 1111111111111111 |       | 1111000000000000 |     | 1111000000000000 |
+ T | 2222222222222222 |  x  D | 1111000000000000 | = T | 1111000000000000 |
+   +------------------+       | 1111000000000000 |     +------------------+
+                              | 1111000000000000 |
+                              | 1111000000000000 |
+                              | 1111000000000000 |
+                              +------------------+
+
+Here we have 4 tokens each needing a different LoRA adapter, and 1 LoRA adapter
+loaded into the MXU. After the matmul we end up with the result of applying
+LoRA 1 to all T tokens, but since only one token needs LoRA 1, we mask out
+everything we don't need to get:
+
+                                       D
+                              +------------------+
+                              | 1111000000000000 |
+                              | 0000000000000000 |
+                              +------------------+
+
+However, we need:
+
+                                       L
+                              +------------------+
+                              | 1111000000000000 |
+                              | 2222000000000000 |
+                              +------------------+
+
+So we'll have to perform another matmul.
+Overall this shrink wastes time and memory padding the LoRA adapters and running
+extra matmuls.
+
+We can get both reduce the number of matmuls used and the amount of applied
+padding by grouping the LoRA adapters into multiple "lanes".
+
+                                       L
+                              +------------------+
+            D                 | 1111222200000000 |              L
+   +------------------+       | 1111222200000000 |     +------------------+
+   | 1111111111111111 |       | 1111222200000000 |     | 1111222200000000 |
+ T | 2222222222222222 |  x  D | 1111222200000000 | = T | 1111222200000000 |
+   +------------------+       | 1111222200000000 |     +------------------+
+                              | 1111222200000000 |
+                              | 1111222200000000 |
+                              | 1111222200000000 |
+                              +------------------+
 
 
-def _bgmv_shrink_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref,
-                        lora_ref, out_ref, acc_ref, mask_ref):
+Now we're able to compute the outputs of 4 different LoRA adapters in the same
+8 cycles. However we don't need all these results so we'll again mask out
+everything we don't need to get:
+
+                                       L
+                              +------------------+
+                              | 1111000000000000 |
+                              | 0000222200000000 |
+                              +------------------+
+
+But now our outputs aren't aligned properly, so we would need to apply an extra
+shuffle operation.
+
+                              +------------------+
+                              | Expand Operation |
+                              +------------------+
+
+When expanding we end up wasting space in both matrix registers.
+
+                                       D
+                              +------------------+
+            L                 | 1111111111111111 |              D
+   +------------------+       | 1111111111111111 |     +------------------+
+   | 1111000000000000 |       | 1111111111111111 |     | 1111111111111111 |
+ T | 2222000000000000 |  x  L | 1111111111111111 | = T | 1111111111111111 |
+   +------------------+       | 0000000000000000 |     +------------------+
+                              | 0000000000000000 |
+                              | 0000000000000000 |
+                              | 0000000000000000 |
+                              +------------------+
+
+But, if we use LoRA Laning like before, we can waste less space. We would also 
+have to shuffle the input so it applies to the right adapter.
+
+                                       D
+                              +------------------+
+            L                 | 1111111111111111 |              D
+   +------------------+       | 1111111111111111 |     +------------------+
+   | 1111000000000000 |       | 1111111111111111 |     | 1111111111111111 |
+ T | 0000222200000000 |  x  L | 1111111111111111 | = T | 2222222222222222 |
+   +------------------+       | 2222222222222222 |     +------------------+
+                              | 2222222222222222 |
+                              | 2222222222222222 |
+                              | 2222222222222222 |
+                              +------------------+
+
+Since this shuffling is the exact opposite of the operation we do at the end of
+the Shrink operation, we can skip both shuffles.
+
+"""
+
+def _bgmv_shrink_kernel(bT: int, bL: int, n_lora_lanes: int, lane_size: int,
+                        max_num_loras: int, idx_ref, inp_ref, lora_ref,
+                        out_ref, acc_ref, mask_ref):
 
     @pl.when(pl.program_id(2) == 0)
     def _():
@@ -27,23 +153,33 @@ def _bgmv_shrink_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref,
 
     t = pl.program_id(0)
 
-    ones = jnp.ones((bL, ), dtype=jnp.float32)
+    ones = jnp.ones((lane_size, ), dtype=jnp.float32)
 
-    for i in range(max_num_loras):
+    base_lora_idx = 0
+    for lane_idx in range(max_num_loras):
         mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
         valid = False
         for j in range(bT):
-            valid |= idx_ref[j + bT * t] == i
+            idx = idx_ref[j + bT * t]
+            for k in range(n_lora_lanes):
+                lora_idx = base_lora_idx + k
+                set_mask = idx == lora_idx
+                valid |= set_mask
 
-            @pl.when(idx_ref[j + bT * t] == i)
-            def _():
-                mask_ref.at[j, :].set(ones)
+                @pl.when(set_mask)
+                def _():
+                    lane_start = k * lane_size
+                    lane_end = lane_start + lane_size
+
+                    mask_ref.at[j, lane_start:lane_end].set(ones)
+
+        base_lora_idx += n_lora_lanes
 
         @pl.when(valid)
         def _():
             acc_ref[...] += jax.lax.dot_general(
                 inp_ref[...],
-                lora_ref[i, ...], (((1, ), (1, )), ((), ())),
+                lora_ref[lane_idx, ...], (((1, ), (1, )), ((), ())),
                 preferred_element_type=jnp.float32) * mask_ref[...]
 
     @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
@@ -52,7 +188,10 @@ def _bgmv_shrink_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref,
 
 
 @functools.partial(jax.jit,
-                   static_argnames=["TOKEN_BLOCK", "LORA_BLOCK", "DIM_BLOCK"])
+                   static_argnames=[
+                       "TOKEN_BLOCK", "LORA_BLOCK", "DIM_BLOCK",
+                       "N_LORA_LANES", "LANE_SIZE"
+                   ])
 def _bgmv_shrink(
         idxs: jax.Array,  # (T, ) int32
         inputs: jax.Array,  # (T, D) model dtype
@@ -60,13 +199,15 @@ def _bgmv_shrink(
         *,
         TOKEN_BLOCK: int,
         LORA_BLOCK: int,
-        DIM_BLOCK: int) -> jax.Array:  # (T, L) model dtype
+        DIM_BLOCK: int,
+        N_LORA_LANES: int,
+        LANE_SIZE: int) -> jax.Array:  # (T, L) model dtype
     T, D = inputs.shape
     N, L, _ = loras.shape
 
     return pl.pallas_call(
         kernel=functools.partial(_bgmv_shrink_kernel, TOKEN_BLOCK, LORA_BLOCK,
-                                 N),
+                                 N_LORA_LANES, LANE_SIZE, N),
         out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=1,
@@ -104,27 +245,29 @@ def bgmv_shrink_xla(inputs: torch.Tensor, loras: torch.Tensor,
         loras = loras.squeeze(axis=1)
 
     T, _ = inputs.shape
-    _, L, D = loras.shape
-    is_expand = L > D
-
-    jax_import_guard()
+    N, L, D = loras.shape
 
     TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
     LORA_BLOCK = 256
     DIM_BLOCK = min(1024, next_multiple_of(D, 256))
 
-    kernel = make_kernel_from_pallas(
-        functools.partial(_bgmv_shrink,
-                          TOKEN_BLOCK=TOKEN_BLOCK,
-                          LORA_BLOCK=LORA_BLOCK,
-                          DIM_BLOCK=DIM_BLOCK), bgmv_shrink_shape_function)
+    # See if we can fit multiple LoRAs in a register. This would activate LoRA
+    # laning
+    N_LORA_LANES = math.ceil(LORA_BLOCK / L)
+    LANE_SIZE = min(L, LORA_BLOCK)
+    if N_LORA_LANES > 1 and N > 1:
+        pad_N = next_multiple_of(N, N_LORA_LANES) - N
+        new_N = N + pad_N
+
+        loras = torch.nn.functional.pad(loras, (0, 0, 0, 0, 0, pad_N))
+        loras = loras.reshape((new_N // N_LORA_LANES, LORA_BLOCK, D))
+        N, L, D = loras.shape
 
     # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
     # register. This has to happen in pytorch, doing it in Jax will lead to NaNs
     pad_L = 0
     if LORA_BLOCK > L or L % LORA_BLOCK != 0:
         pad_L = next_multiple_of(L, LORA_BLOCK) - L
-
     pad_D = 0
     if DIM_BLOCK > D or D % DIM_BLOCK != 0:
         pad_D = next_multiple_of(D, DIM_BLOCK) - D
@@ -139,6 +282,15 @@ def bgmv_shrink_xla(inputs: torch.Tensor, loras: torch.Tensor,
         inputs = torch.nn.functional.pad(inputs, (0, pad_D, 0, pad_T))
         if pad_T != T:
             idxs = torch.nn.functional.pad(idxs, ((0, pad_T)))
+
+    jax_import_guard()
+    kernel = make_kernel_from_pallas(
+        functools.partial(_bgmv_shrink,
+                          TOKEN_BLOCK=TOKEN_BLOCK,
+                          LORA_BLOCK=LORA_BLOCK,
+                          DIM_BLOCK=DIM_BLOCK,
+                          N_LORA_LANES=N_LORA_LANES,
+                          LANE_SIZE=LANE_SIZE), bgmv_shrink_shape_function)
 
     return kernel(idxs, inputs, loras)[:T, :L]
 
@@ -240,26 +392,30 @@ def bgmv_expand_shape_function(idxs, inputs, loras):
 
 @impl(XLA_LIB, "bgmv_expand", "XLA")
 def bgmv_expand_xla(inputs: torch.Tensor, loras: torch.Tensor,
-                    idxs: torch.IntTensor):
+                    idxs: torch.IntTensor, enable_laning: bool):
     inputs = inputs.to(dtype=loras.dtype)
 
     if len(loras.shape) == 4:
         loras = loras.squeeze(axis=1)
 
     T, _ = inputs.shape
-    _, D, L = loras.shape
-
-    jax_import_guard()
+    N, D, L = loras.shape
 
     TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
     LORA_BLOCK = min(1024, next_multiple_of(L, 256))
     DIM_BLOCK = 256
 
-    kernel = make_kernel_from_pallas(
-        functools.partial(_bgmv_expand,
-                          TOKEN_BLOCK=TOKEN_BLOCK,
-                          LORA_BLOCK=LORA_BLOCK,
-                          DIM_BLOCK=DIM_BLOCK), bgmv_expand_shape_function)
+    # See if we can fit multiple LoRAs in a register. This would activate LoRA
+    # laning
+    N_LORA_LANES = math.ceil(DIM_BLOCK / D)
+    if enable_laning and N_LORA_LANES > 1 and N > 1:
+        pad_N = next_multiple_of(N, N_LORA_LANES) - N
+        new_N = N + pad_N
+
+        loras = torch.nn.functional.pad(loras, (0, 0, 0, 0, 0, pad_N))
+        loras = loras.reshape((new_N // N_LORA_LANES, DIM_BLOCK, L))
+        idxs = idxs // N_LORA_LANES
+        N, D, L = loras.shape
 
     # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
     # register. This has to happen in pytorch, doing it in Jax will lead to NaNs
@@ -282,12 +438,20 @@ def bgmv_expand_xla(inputs: torch.Tensor, loras: torch.Tensor,
         if pad_T != T:
             idxs = torch.nn.functional.pad(idxs, ((0, pad_T)))
 
+    jax_import_guard()
+
+    kernel = make_kernel_from_pallas(
+        functools.partial(_bgmv_expand,
+                          TOKEN_BLOCK=TOKEN_BLOCK,
+                          LORA_BLOCK=LORA_BLOCK,
+                          DIM_BLOCK=DIM_BLOCK), bgmv_expand_shape_function)
+
     return kernel(idxs, inputs, loras)[:T, :L]
 
 
 @impl(XLA_LIB, "bgmv_expand", "CompositeExplicitAutograd")
 def bgmv_expand_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
-                        idxs: torch.IntTensor):
+                        idxs: torch.IntTensor, enable_laning: bool):
     T, _ = inputs.shape
 
     if len(loras.shape) == 4:

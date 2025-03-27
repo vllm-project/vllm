@@ -30,12 +30,12 @@ def generate_test_data(T, D, L, N, seed, dtype=torch.float32):
         D: Input dim
         L: LoRA Dim
         N: N LoRAs
-    
+
     Outputs:
         inputs:     torch.Tensor - shape (T, D)
         loras:      torch.Tensor - shape (N, 1, L, D)
         idxs:       torch.Tensor - shape (T, ) - all values must be in [0, N)
-        
+
         ref_output: torch.Tensor - shape (T, L) - inputs @ loras[idxs].T
     """
     torch.manual_seed(seed)
@@ -84,3 +84,28 @@ def test_bgmv_correctness(T, D, L, N, dtype, op_type, seed):
 
     # Compare with reference output
     assert torch.allclose(output, ref_output, rtol=1e-2, atol=1e-2)
+
+# Parameterize tests with various shapes and dtypes
+@pytest.mark.parametrize("T", N_TOKENS)
+@pytest.mark.parametrize("D", HIDDEN_SIZES)
+@pytest.mark.parametrize("L", RANKS)
+@pytest.mark.parametrize("N", NUM_LORA)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", [0])
+def test_lora_laning_correctness(T, D, L, N, dtype, seed):
+    inputs, loras_a, idxs, _ = generate_test_data(T, D, L, N, seed, dtype)
+    _, loras_b, _, _ = generate_test_data(T, L, D, N, seed, dtype)
+
+    r1 = ref_bgmv(inputs, loras_a, idxs)
+    r2 = ref_bgmv(r1, loras_b, idxs)
+
+    o1 = torch.ops.xla.bgmv_shrink(inputs, loras_a, idxs)
+    o2 = torch.ops.xla.bgmv_expand(
+        o1,
+        loras_b.transpose(2, 3),
+        idxs,
+        True
+    )
+
+    # Compare with reference output
+    assert torch.allclose(o2, r2, rtol=1e-2, atol=1e-2)
