@@ -699,7 +699,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
 def get_hf_image_processor_config(
     model: Union[str, Path],
-    token: Optional[Union[bool, str]] = None,
+    hf_token: Optional[Union[bool, str]] = None,
     revision: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
@@ -710,7 +710,7 @@ def get_hf_image_processor_config(
     if check_gguf_file(model):
         model = Path(model).parent
     return get_image_processor_config(model,
-                                      token=token,
+                                      token=hf_token,
                                       revision=revision,
                                       **kwargs)
 
