@@ -222,7 +222,7 @@ def test_merge_and_sort_multimodal_metadata():
                 ]
             },
             mm_hashes={"image": ["hash1", "hash2"]},
-            expected_modalities=["image"],
+            expected_modalities=["image", "image"],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=3, length=2),
@@ -239,7 +239,7 @@ def test_merge_and_sort_multimodal_metadata():
                 ]
             },
             mm_hashes=None,
-            expected_modalities=["image"],
+            expected_modalities=["image", "image"],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=2, length=2),
@@ -264,7 +264,7 @@ def test_merge_and_sort_multimodal_metadata():
                 "image": ["image_hash1", "image_hash2"],
                 "audio": ["audio_hash1", "audio_hash2"],
             },
-            expected_modalities=["audio", "image"],
+            expected_modalities=["audio", "audio", "image", "image"],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=2, length=3),
@@ -290,7 +290,7 @@ def test_merge_and_sort_multimodal_metadata():
                 ]
             },
             mm_hashes=None,
-            expected_modalities=["audio", "image"],
+            expected_modalities=["audio", "audio", "image", "image"],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=2, length=3),
@@ -321,7 +321,9 @@ def test_merge_and_sort_multimodal_metadata():
                 "audio": ["audio_hash1"],
                 "video": ["video_hash1", "video_hash2", "video_hash3"]
             },
-            expected_modalities=["audio", "video", "image"],
+            expected_modalities=[
+                "audio", "audio", "video", "video", "video", "image", "image"
+            ],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=3, length=4),
@@ -367,9 +369,16 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                 "image": ["image_hash1", "image_hash2"],
                 "audio": ["audio_hash1", "audio_hash2"],
             },
-            expected_modalities=[],
-            expected_ranges=[],
-            expected_hashes=None,
+            expected_modalities=["image", "audio", "image", "audio"],
+            expected_ranges=[
+                PlaceholderRange(offset=0, length=4),
+                PlaceholderRange(offset=5, length=2),
+                PlaceholderRange(offset=8, length=2),
+                PlaceholderRange(offset=11, length=4),
+            ],
+            expected_hashes=[
+                "image_hash1", "audio_hash1", "image_hash2", "audio_hash2"
+            ],
         ),
 
         # <image> <image> <video> <audio> <image>
@@ -388,15 +397,26 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                 ]
             },
             mm_hashes=None,
-            expected_modalities=[],
-            expected_ranges=[],
-            expected_hashes=None,
+            expected_modalities=["image", "image", "video", "audio", "image"],
+            expected_ranges=[
+                PlaceholderRange(offset=0, length=2),
+                PlaceholderRange(offset=2, length=3),
+                PlaceholderRange(offset=8, length=5),
+                PlaceholderRange(offset=5, length=2),
+                PlaceholderRange(offset=20, length=4),
+            ],
+            expected_hashes=[
+                "image_hash1", "image_hash2", "video_hash1", "audio_hash1",
+                "image_hash3"
+            ],
         ),
     ]
 
-    for case in test_cases:
-        with pytest.raises(ValueError) as ex_info:
-            merge_and_sort_multimodal_metadata(case.mm_positions,
-                                               case.mm_hashes)
+    for (mm_positions, mm_hashes, expected_modalities, expected_ranges,
+         expected_hashes) in test_cases:
+        modalities, ranges, hashes = merge_and_sort_multimodal_metadata(
+            mm_positions, mm_hashes)
 
-        assert "Interleaved mixed-modality" in str(ex_info.value)
+        assert modalities == expected_modalities
+        assert ranges == expected_ranges
+        assert hashes == expected_hashes
