@@ -13,6 +13,7 @@ import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
@@ -864,7 +865,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # depending on the input multimodal items.
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
-
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
 
@@ -1034,9 +1034,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
+        # only do sequence parallelism when num of tokens
+        # is divisible by parallel size.
+        # sequence parallelism uses torch.distributed.reduce_scatter which only
+        # supports the case when size is divisible by parallel size
+        enable_sequence_parallel = (
+            self.vllm_config.parallel_config.enable_sequence_parallel
+            and num_input_tokens %
+            self.vllm_config.parallel_config.tensor_parallel_size == 0)
+
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                enable_sequence_parallel=enable_sequence_parallel,
+        ):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1047,6 +1060,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
 
+        if enable_sequence_parallel:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states,
+                                                             dim=0)
         hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
@@ -1264,6 +1280,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc_np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
+
             logits = self.model.compute_logits(prompt_hidden_states, None)
 
             # Get the "target" tokens for each index. For prompt at index i,
@@ -1345,15 +1362,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            with set_forward_context(None,
-                                     self.vllm_config,
-                                     num_tokens=num_tokens):
+            enable_sequence_parallel = (
+                self.vllm_config.parallel_config.enable_sequence_parallel
+                and num_tokens %
+                self.vllm_config.parallel_config.tensor_parallel_size == 0)
+
+            with set_forward_context(
+                    None,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    enable_sequence_parallel=enable_sequence_parallel,
+            ):
                 hidden_states = model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+            if get_pp_group().is_last_rank and enable_sequence_parallel:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states,
+                                                                 dim=0)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]

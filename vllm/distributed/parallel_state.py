@@ -118,12 +118,35 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     return torch.empty_like(tensor)
 
 
+def reduce_scatter(tensor: torch.Tensor, dim: int, world_size: int,
+                   group_name: str) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group.reduce_scatter(tensor, dim)
+
+
+def reduce_scatter_fake(tensor: torch.Tensor, dim: int, world_size: int,
+                        group_name: str) -> torch.Tensor:
+    new_shape = list(tensor.shape)
+    new_shape[dim] = tensor.shape[dim] // world_size
+    return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
+
+
 if supports_custom_op():
     direct_register_custom_op(
         op_name="all_reduce",
         op_func=all_reduce,
         mutates_args=[],
         fake_impl=all_reduce_fake,
+    )
+
+    direct_register_custom_op(
+        op_name="reduce_scatter",
+        op_func=reduce_scatter,
+        mutates_args=[],
+        fake_impl=reduce_scatter_fake,
     )
 
 
@@ -311,6 +334,18 @@ class GroupCoordinator:
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
         return self.device_communicator.all_reduce(input_)
+
+    def reduce_scatter(self,
+                       input_: torch.Tensor,
+                       dim: int = -1) -> torch.Tensor:
+        world_size = self.world_size
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return input_
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
+
+        return self.device_communicator.reduce_scatter(input_, dim)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size

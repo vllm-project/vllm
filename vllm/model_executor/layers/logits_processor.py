@@ -10,6 +10,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_gather)
+from vllm.forward_context import try_get_forward_context
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -59,6 +60,11 @@ class LogitsProcessor(nn.Module):
         sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
+        forward_context = try_get_forward_context()
+        if (forward_context is not None
+                and forward_context.enable_sequence_parallel):
+            hidden_states = tensor_model_parallel_all_gather(hidden_states,
+                                                             dim=0)
         if self.logits_as_input:
             logits = hidden_states
         else:
@@ -105,6 +111,7 @@ class LogitsProcessor(nn.Module):
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
+
         logits = lm_head.quant_method.apply(lm_head,
                                             hidden_states,
                                             bias=embedding_bias)

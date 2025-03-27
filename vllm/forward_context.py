@@ -38,6 +38,7 @@ class ForwardContext:
     attn_metadata: "AttentionMetadata"  # set dynamically for each forward pass
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
+    enable_sequence_parallel: bool  # If enable sequence_parallelism
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
 
@@ -53,11 +54,16 @@ def get_forward_context() -> ForwardContext:
     return _forward_context
 
 
+def try_get_forward_context() -> Optional[ForwardContext]:
+    return _forward_context
+
+
 @contextmanager
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
                         virtual_engine: int = 0,
-                        num_tokens: int = 0):
+                        num_tokens: int = 0,
+                        enable_sequence_parallel: bool = False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -90,6 +96,12 @@ def set_forward_context(attn_metadata: Any,
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
         dp_metadata = DPMetadata(cu_tokens_across_dp_cpu)
 
+    # TODO: support pipeline parallel
+    if vllm_config.parallel_config.enable_sequence_parallel:
+        assert vllm_config.parallel_config.pipeline_parallel_size == 1, (
+            "sequence parallel doesn't work correctly when "
+            "combined with pipeline parallel")
+
     global _forward_context
     prev_context = _forward_context
     _forward_context = ForwardContext(
@@ -97,6 +109,7 @@ def set_forward_context(attn_metadata: Any,
         static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
+        enable_sequence_parallel=enable_sequence_parallel,
         dp_metadata=dp_metadata)
     try:
         yield
