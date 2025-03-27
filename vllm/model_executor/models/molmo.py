@@ -1520,13 +1520,12 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
         image_features_flat = self.vision_backbone(
             images=images_flat.unsqueeze(0),
             image_masks=(None if image_masks_flat is None else
-                            image_masks_flat.unsqueeze(0)),
+                         image_masks_flat.unsqueeze(0)),
         ).squeeze(0)
 
         # Only the features corresponding to patch tokens are relevant
         return [
-            feats[f_is_patch]
-            for feats, f_is_patch in zip(
+            feats[f_is_patch] for feats, f_is_patch in zip(
                 image_features_flat.split(num_crops.tolist()),
                 feat_is_patch_flat.split(num_crops.tolist()),
             )
