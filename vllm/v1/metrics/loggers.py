@@ -2,6 +2,7 @@
 
 import time
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import Optional
 
 import numpy as np
@@ -18,7 +19,24 @@ logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5.0
 
 
+class BuiltinLoggerName(str, Enum):
+    """Internal names for built-in metric loggers
+
+    These values are intended for internal use only. Accessing to
+    these built-in loggers is not considered to be part of the
+    public API.
+    """
+    LOGGING = "logging"
+    PROMETHEUS = "prometheus"
+
+
 class StatLoggerBase(ABC):
+    """Interface for logging metrics.
+
+    API users may define custom loggers that implement this interface.
+    However, note that the `SchedulerStats` and `IterationStats` classes
+    are not considered stable interfaces and may change in future versions.
+    """
 
     @abstractmethod
     def record(self, scheduler_stats: SchedulerStats,
@@ -428,3 +446,22 @@ def build_cudagraph_buckets(vllm_config: VllmConfig) -> list[int]:
         return buckets
     else:
         return [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
+
+
+def setup_default_loggers(
+    vllm_config: VllmConfig, log_stats: bool, enable_logging: bool,
+    custom_stat_loggers: Optional[dict[str, StatLoggerBase]]
+) -> dict[str, StatLoggerBase]:
+    """Setup logging and prometheus metrics."""
+    if not log_stats:
+        return {}
+
+    if custom_stat_loggers is not None:
+        return custom_stat_loggers
+
+    stat_loggers: dict[str, StatLoggerBase] = {}
+    stat_loggers[BuiltinLoggerName.PROMETHEUS] = \
+        PrometheusStatLogger(vllm_config)
+    if enable_logging:
+        stat_loggers[BuiltinLoggerName.LOGGING] = LoggingStatLogger()
+    return stat_loggers
