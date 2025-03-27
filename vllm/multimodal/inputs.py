@@ -316,8 +316,13 @@ class MultiModalFlatField(BaseMultiModalField):
                 # - produce exactly same result as `torch.concat(batch)`
                 # - will achieve zero-copy if the tensor is contiguous
                 return batch[0].contiguous()
-            first_shape = batch[0].shape
-            if all(elem.shape[1:] == first_shape[1:] for elem in batch):
+
+            def _expect_same_shape(tensor: torch.Tensor):
+                return tensor.shape[:self.dim] + tensor.shape[self.dim + 1:]
+
+            first_shape = _expect_same_shape(batch[0])
+
+            if all(_expect_same_shape(elem) == first_shape for elem in batch):
                 return torch.concat(batch, dim=self.dim)
 
         assert self.dim == 0, "dim == 0 is required for nested list"
