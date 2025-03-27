@@ -304,7 +304,10 @@ class MultiModalFlatField(BaseMultiModalField):
         data: NestedTensors,
     ) -> Sequence[MultiModalFieldElem]:
         field_factory = self._field_factory(modality=modality, key=key)
-        return [field_factory(data[s]) for s in self.slices]
+        if not is_list_of(self.slices, slice, check="all"):
+            assert isinstance(data, torch.Tensor), \
+                "torch.Tensor is required for multiple slices"
+        return [field_factory(data[cast(slice, s)]) for s in self.slices]
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
