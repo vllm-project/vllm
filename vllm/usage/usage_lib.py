@@ -137,6 +137,9 @@ class UsageMessage:
         self.gpu_type: Optional[str] = None
         self.gpu_memory_per_device: Optional[int] = None
         self.env_var_json: Optional[str] = None
+        self.tpu_count: Optional[int] = None
+        self.tpu_type: Optional[str] = None
+        self.tpu_memory_per_device: Optional[int] = None
 
         # vLLM Information
         self.model_architecture: Optional[str] = None
@@ -174,6 +177,11 @@ class UsageMessage:
             self.gpu_memory_per_device = device_property.total_memory
         if current_platform.is_cuda():
             self.cuda_runtime = torch.version.cuda
+        if current_platform.is_tpu():
+            from torch_xla.core import xla_model as xm
+            self.tpu_count = xm.xrt_world_size()
+            self.tpu_type = xm.get_device_attributes(xm.xla_device()).get("type")
+            self.tpu_memory_per_device = xm.get_device_attributes(xm.xla_device()).get("memory")
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
