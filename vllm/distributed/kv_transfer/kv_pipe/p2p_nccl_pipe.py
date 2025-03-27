@@ -4,11 +4,13 @@ import pickle
 import socket
 import threading
 import typing
-from typing import Any, Dict, Optional
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional
 
 import torch
 import zmq
 
+from vllm.config import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
 from vllm.utils import current_stream
@@ -20,15 +22,18 @@ class P2pNcclPipe:
 
     def __init__(self,
                  local_rank: int,
+                 config: KVTransferConfig,
                  hostname: str = "",
-                 port: int = 0,
+                 port_offset: int = 0,
                  library_path: Optional[str] = None) -> None:
+        self.config = config
         self.local_rank = local_rank
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.nccl = NCCLLibrary(library_path)
 
         if not hostname:
             hostname = socket.gethostname()
+        port = self.config.kv_port + port_offset
         if port == 0:
             raise ValueError("Port cannot be 0")
         self._hostname = hostname
@@ -42,13 +47,26 @@ class P2pNcclPipe:
         self.poller = zmq.Poller()
         self.poller.register(self.router_socket, zmq.POLLIN)
 
-        self.store: Dict[str, torch.Tensor] = {}  # tensor_id: torch.Tensor
+        self.send_store: Deque[List[Any]] = deque()  # tensor_id: torch.Tensor
+        self.recv_store: Dict[str,
+                              torch.Tensor] = {}  # tensor_id: torch.Tensor
         self.socks: Dict[str, Any] = {}  # remote_address: client socket
         self.comms: Dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
+
+        # self.buffer_size = 0
+        # self.buffer_size_threshold =  self.config.kv_buffer_size
+
+        self.send_store_cv = threading.Condition()
+        self.recv_store_cv = threading.Condition()
+        self.comm_cv = threading.Condition()
 
         self._listener_thread = threading.Thread(
             target=self._listen_for_requests, daemon=True)
         self._listener_thread.start()
+
+        self._send_thread = threading.Thread(target=self._send_sync,
+                                             daemon=True)
+        self._send_thread.start()
 
     def _create_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
@@ -77,34 +95,18 @@ class P2pNcclPipe:
 
     def send_tensor(
         self,
-        tensor: torch.Tensor,
         tensor_id: str,
+        tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
     ):
         if remote_address is None:
-            self.store[tensor_id] = tensor
+            with self.recv_store_cv:
+                self.recv_store[tensor_id] = tensor
+                self.recv_store_cv.notify()
         else:
-            if remote_address not in self.socks:
-                self._create_connect(remote_address)
-
-            sock = self.socks[remote_address]
-            comm, rank = self.comms[remote_address]
-            data = {
-                "cmd": "PUT",
-                "tensor_id": tensor_id,
-                "shape": tensor.shape,
-                "dtype": tensor.dtype
-            }
-            sock.send(pickle.dumps(data))
-
-            response = sock.recv()
-            if response != b"0" or tensor is None:
-                return
-
-            self._send(comm, tensor.to(self.device), rank ^ 1)
-            logger.info(
-                "Send Tensor, %s 👉 %s, MyRank: %s, data: %s, tensor: %s",
-                self.local_address, remote_address, rank, data, tensor)
+            with self.send_store_cv:
+                self.send_store.append([tensor_id, remote_address, tensor])
+                self.send_store_cv.notify()
 
     def recv_tensor(
         self,
@@ -113,11 +115,11 @@ class P2pNcclPipe:
     ) -> torch.Tensor:
         logger.info("Recv From %s, tensor_id: %s", remote_address, tensor_id)
 
-        if tensor_id in self.store:
-            return self.store.pop(tensor_id)
-
         if remote_address is None:
-            return None
+            with self.recv_store_cv:
+                while tensor_id not in self.recv_store:
+                    self.recv_store_cv.wait()
+                return self.recv_store.pop(tensor_id)
 
         if remote_address not in self.socks:
             self._create_connect(remote_address)
@@ -165,29 +167,67 @@ class P2pNcclPipe:
                                          device=self.device)
                     comm, rank = self.comms[remote_address]
                     self._recv(comm, tensor, rank ^ 1)
-                    self.store[tensor_id] = tensor
+                    with self.recv_store_cv:
+                        self.recv_store[tensor_id] = tensor
+                        self.recv_store_cv.notify()
                     logger.info(
                         "Recv Tensor, %s 👈 %s, rank: %s, data: %s, tensor: %s",
                         self.local_address, remote_address.decode(), rank,
                         data, tensor)
                 elif data["cmd"] == "GET":
                     tensor_id = data["tensor_id"]
-                    if tensor_id in self.store:
-                        data = {
-                            "ret": 0,
-                            "shape": self.store[tensor_id].shape,
-                            "dtype": self.store[tensor_id].dtype
-                        }
-                    else:
-                        data = {"ret": 1}
-                    self.router_socket.send_multipart(
-                        [remote_address, pickle.dumps(data)])
-                    if data["ret"] == 0:
-                        self._send(comm, self.store[tensor_id].to(self.device),
-                                   rank ^ 1)
+                    with self.send_store_cv:
+                        for item in self.send_store:
+                            _tensor_id, _remote_address, tensor = item
+                            if tensor_id == _tensor_id:
+                                data = {
+                                    "ret": 0,
+                                    "shape": tensor.shape,
+                                    "dtype": tensor.dtype
+                                }
+                            else:
+                                data = {"ret": 1}
+                            self.router_socket.send_multipart(
+                                [remote_address,
+                                 pickle.dumps(data)])
+                            if data["ret"] == 0:
+                                self._send(comm, tensor.to(self.device),
+                                           rank ^ 1)
+                            break
                 else:
-                    logger.info("Bug, Received message from %s, data: %s",
-                                remote_address, data)
+                    logger.info(
+                        "Unexpected, Received message from %s, data: %s",
+                        remote_address, data)
+
+    def _send_sync(self):
+        while True:
+            with self.send_store_cv:
+                while not self.send_store:
+                    self.send_store_cv.wait()
+
+                tensor_id, remote_address, tensor = self.send_store.popleft()
+
+                if remote_address not in self.socks:
+                    self._create_connect(remote_address)
+
+                sock = self.socks[remote_address]
+                comm, rank = self.comms[remote_address]
+                data = {
+                    "cmd": "PUT",
+                    "tensor_id": tensor_id,
+                    "shape": tensor.shape,
+                    "dtype": tensor.dtype
+                }
+                sock.send(pickle.dumps(data))
+
+                response = sock.recv()
+                if response != b"0" or tensor is None:
+                    return
+
+                self._send(comm, tensor.to(self.device), rank ^ 1)
+                logger.info(
+                    "Send Tensor, %s 👉 %s, MyRank: %s, data: %s, tensor: %s",
+                    self.local_address, remote_address, rank, data, tensor)
 
     def _send(self, comm, tensor: torch.Tensor, dst: int, stream=None):
         assert tensor.device == self.device, (
@@ -195,9 +235,11 @@ class P2pNcclPipe:
             f"but the input tensor is on {tensor.device}")
         if stream is None:
             stream = current_stream()
-        self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
-                           ncclDataTypeEnum.from_torch(tensor.dtype), dst,
-                           comm, cudaStream_t(stream.cuda_stream))
+
+        with self.comm_cv:
+            self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
+                               ncclDataTypeEnum.from_torch(tensor.dtype), dst,
+                               comm, cudaStream_t(stream.cuda_stream))
 
     def _recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
         assert tensor.device == self.device, (
@@ -205,6 +247,11 @@ class P2pNcclPipe:
             f"but the input tensor is on {tensor.device}")
         if stream is None:
             stream = current_stream()
-        self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
-                           ncclDataTypeEnum.from_torch(tensor.dtype), src,
-                           comm, cudaStream_t(stream.cuda_stream))
+
+        with self.comm_cv:
+            self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
+                               ncclDataTypeEnum.from_torch(tensor.dtype), src,
+                               comm, cudaStream_t(stream.cuda_stream))
+
+    def close(self) -> None:
+        pass
