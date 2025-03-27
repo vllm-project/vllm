@@ -31,7 +31,8 @@ class StatLoggerBase(ABC):
 
 class LoggingStatLogger(StatLoggerBase):
 
-    def __init__(self):
+    def __init__(self, engine_index: int = 0):
+        self.engine_index = engine_index
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
         # Prefix cache metrics. This cannot be reset.
@@ -78,11 +79,13 @@ class LoggingStatLogger(StatLoggerBase):
 
         # Format and print output.
         logger.info(
+            "Engine %03d: "
             "Avg prompt throughput: %.1f tokens/s, "
             "Avg generation throughput: %.1f tokens/s, "
             "Running: %d reqs, Waiting: %d reqs, "
             "GPU KV cache usage: %.1f%%, "
             "Prefix cache hit rate: %.1f%%",
+            self.engine_index,
             prompt_throughput,
             generation_throughput,
             scheduler_stats.num_running_reqs,
@@ -94,7 +97,7 @@ class LoggingStatLogger(StatLoggerBase):
 
 class PrometheusStatLogger(StatLoggerBase):
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self._unregister_vllm_metrics()
 
         # Use this flag to hide metrics that were deprecated in
@@ -102,8 +105,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self.show_hidden_metrics = \
             vllm_config.observability_config.show_hidden_metrics
 
-        labelnames = ["model_name"]
-        labelvalues = [vllm_config.model_config.served_model_name]
+        labelnames = ["model_name", "engine"]
+        labelvalues = [
+            vllm_config.model_config.served_model_name,
+            str(engine_index)
+        ]
 
         max_model_len = vllm_config.model_config.max_model_len
 
