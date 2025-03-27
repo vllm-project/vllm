@@ -1445,6 +1445,11 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
     @property
     def audio_tokens(self) -> list[str]:
         return [f"<|audio_{i+1}|>" for i in range(100)]
+    
+    @property
+    def dynamic_hd(self) -> int:
+        image_processor = self.get_hf_processor().image_processor
+        return image_processor.dynamic_hd
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -1478,10 +1483,11 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         if vision_encoder_name is None:
             vision_encoder_name = SIGLIP_NAME
         prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[vision_encoder_name]
-        dynamic_hd_size = prepro_config['dynamic_hd']
         vit_image_size = prepro_config['vit_image_size']
         vit_patch_size = prepro_config['vit_patch_size']
         token_compression_factor = prepro_config['token_compression_factor']
+
+        dynamic_hd_size = self.dynamic_hd
 
         image_num_tokens = _compute_num_image_tokens(
             image_width, image_height, 
@@ -1499,10 +1505,9 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         if vision_encoder_name is None:
             vision_encoder_name = SIGLIP_NAME
         prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[vision_encoder_name]
-        dynamic_hd_size = prepro_config['dynamic_hd']
         vit_image_size = prepro_config['vit_image_size']
 
-        max_side = vit_image_size * dynamic_hd_size
+        max_side = vit_image_size * self.dynamic_hd
         return ImageSize(height=max_side, width=vit_image_size)
 
 
@@ -1578,7 +1583,6 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
 
