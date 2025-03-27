@@ -28,6 +28,7 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 @dataclass
 class DPMetadata:
     max_tokens_across_dp: torch.Tensor
+    num_tokens_across_dp: torch.Tensor
     cu_tokens_across_dp_cpu: torch.Tensor
     dp_rank_num_tokens: torch.Tensor
 
@@ -99,7 +100,10 @@ def set_forward_context(attn_metadata: Any,
             [num_tokens],
             dtype=torch.uint32,
             device=vllm_config.device_config.device)
-        dp_metadata = DPMetadata(cu_tokens_across_dp_cpu, dp_rank_num_tokens)
+        dp_metadata = DPMetadata(max_tokens_across_dp,
+                                 num_tokens_tensor,
+                                 cu_tokens_across_dp_cpu,
+                                 dp_rank_num_tokens)
 
     global _forward_context
     prev_context = _forward_context
