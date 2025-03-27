@@ -362,10 +362,14 @@ def _merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
+    # print("DEBUG inputs_embeds.shape", inputs_embeds.shape)
+    # print("DEBUG is_multimodal.shape", is_multimodal.shape)
     num_expected_tokens = is_multimodal.sum().item()
+    # print("DEBUG num_expected_tokens", num_expected_tokens)
     assert isinstance(num_expected_tokens, int)
 
     flattened = _flatten_embeddings(multimodal_embeddings)
+    # print("DEBUG flattened.shape", flattened.shape)
     if flattened.shape[0] != num_expected_tokens:
         expr = _embedding_count_expression(multimodal_embeddings)
         raise ValueError(
@@ -443,6 +447,9 @@ def merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
+    # print("DEBUG input_ids", input_ids)
+    # print("DEBUG input_ids.shape", input_ids.shape)
+    # print("DEBUG placeholder_token_id", placeholder_token_id)
     if isinstance(placeholder_token_id, list):
         placeholder_token_id = torch.tensor(placeholder_token_id,
                                             device=input_ids.device)
@@ -451,6 +458,8 @@ def merge_multimodal_embeddings(
             torch.isin(input_ids, placeholder_token_id),
             multimodal_embeddings,
         )
+    # matches = (input_ids == placeholder_token_id).sum().item()
+    # print("DEBUG num matches", matches)
 
     return _merge_multimodal_embeddings(
         inputs_embeds,

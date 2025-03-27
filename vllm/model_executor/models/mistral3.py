@@ -4,19 +4,16 @@ from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
-                    TypeVar, Union, cast)
+                    TypeVar, Union)
 
 import torch
 import torch.nn as nn
-from packaging.version import Version
 from transformers import (BatchFeature, Mistral3Config, PixtralVisionConfig,
                           PretrainedConfig)
-from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext
-from vllm.jsontree import json_map_leaves
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -34,10 +31,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
-from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info, select_patch_features
@@ -252,37 +247,28 @@ class Mistral3MultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        # print("DEBUG prompt", prompt)
+        # print("DEBUG mm_data", mm_data)
+        # print("DEBUG mm_kwargs", mm_kwargs)
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
+        # print("DEBUG processed_outputs", processed_outputs)
 
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
-            # Before/after https://github.com/huggingface/transformers/pull/35122
-            if Version(TRANSFORMERS_VERSION) <= Version("4.48.3"):
-                images = mm_data["images"]
-                assert isinstance(images, list)
+            # print("DEBUG pixel_values.shape", pixel_values.shape)
 
-                # Original output: (1, num_images, C, H, W)
-                # New output: (num_images, C, H, W)
-                assert (isinstance(pixel_values, list)
-                        and len(pixel_values) == 1)
-                assert (isinstance(pixel_values[0], list)
-                        and len(pixel_values[0]) == len(images))
+            # Avoid padding since we need the output for each image to be
+            # independent of other images for the cache to work correctly
+            image_sizes = processed_outputs["image_sizes"]
+            assert len(pixel_values) == len(image_sizes)
 
-                processed_outputs["pixel_values"] = pixel_values[0]
-            else:
-                # Avoid padding since we need the output for each image to be
-                # independent of other images for the cache to work correctly
-                image_sizes = processed_outputs["image_sizes"]
-                assert len(pixel_values) == len(image_sizes)
-
-                processed_outputs["pixel_values"] = [
-                    p[:, :h, :w]
-                    for p, (h, w) in zip(pixel_values, image_sizes)
-                ]
+            processed_outputs["pixel_values"] = [
+                p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
+            ]
 
             hf_config = self.info.get_hf_config()
             vision_config = hf_config.vision_config
@@ -359,7 +345,6 @@ class Mistral3MultiModalProcessor(
 def _build_mistral3_info(
     ctx: InputProcessingContext, ) -> BaseLlavaProcessingInfo:
     hf_config = ctx.get_hf_config(Mistral3Config)
-
     assert isinstance(hf_config.vision_config, PixtralVisionConfig)
     return Mistral3ProcessingInfo(ctx)
 
@@ -538,34 +523,6 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             embed_is_patch=embed_is_patch,
         )
 
-    def _image_pixels_to_features(
-        self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel,
-                            PixtralHFVisionModel],
-        pixel_values: Union[torch.Tensor, list[torch.Tensor]],
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
-        # NOTE: we skip the step to select the vision feature layer since
-        # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values)
-
-        def select_features(leaf: torch.Tensor):
-            return leaf
-
-        return cast(
-            Union[torch.Tensor, tuple[torch.Tensor, ...]],
-            json_map_leaves(select_features, image_features),
-        )
-
-    def _process_image_pixels(
-        self,
-        inputs: Mistral3ImagePixelInputs,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
-        assert self.vision_tower is not None
-
-        pixel_values = inputs["pixel_values"]
-
-        return self._image_pixels_to_features(self.vision_tower, pixel_values)
-
     def _process_image_input(
         self,
         image_input: Mistral3ImagePixelInputs,
@@ -575,9 +532,10 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         image_sizes = [(img.shape[-2], img.shape[-1])
                        for img in image_input["pixel_values"]]
+        # print("DEBUG image_sizes", image_sizes)
 
-        assert self.vision_tower is not None
-        image_features = self._process_image_pixels(image_input)
+        image_features = self.vision_tower(image_input["pixel_values"])
+        # print("DEBUG image_features[0].shape", image_features[0].shape)
 
         if isinstance(image_features, torch.Tensor):
             return self.multi_modal_projector(image_features, image_sizes)
@@ -586,6 +544,7 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_feature.shape[0] // self.config.spatial_merge_size**2
             for image_feature in image_features
         ]
+        # print("DEBUG feature_sizes", feature_sizes)
 
         image_embeds = self.multi_modal_projector(torch.cat(image_features),
                                                   image_sizes)
@@ -593,6 +552,7 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_embeds = torch.split(image_embeds, feature_sizes)
         else:
             image_embeds = (image_embeds, )
+        # print("DEBUG image_embeds[0].shape", image_embeds[0].shape)
         return image_embeds
 
     def get_multimodal_embeddings(
@@ -628,7 +588,7 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        """Run forward pass for LLaVA-1.5.
+        """Run forward pass for Mistral3.
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted image embeddings.

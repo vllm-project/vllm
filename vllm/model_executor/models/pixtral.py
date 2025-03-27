@@ -14,8 +14,6 @@ from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
 from transformers import PixtralVisionConfig, TensorType
 from transformers.image_utils import ImageInput
-from transformers.models.pixtral.image_processing_pixtral import (
-    _num_image_tokens as _get_pixtral_hf_num_image_tokens)
 from transformers.models.pixtral.modeling_pixtral import (
     PixtralRotaryEmbedding, apply_rotary_pos_emb, position_ids_in_meshgrid)
 from transformers.tokenization_utils_base import TextInput
@@ -1006,15 +1004,11 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         ratio = max(image_width / max_width, image_height / max_height)
 
         if ratio > 1:
-            # Here we use floor to ensure the image is always smaller
-            # than the given "longest_edge"
             image_width = int(math.floor(image_width / ratio))
             image_height = int(math.floor(image_height / ratio))
 
-        nrows, ncols = _get_pixtral_hf_num_image_tokens(
-            (image_height, image_width),
-            (patch_height, patch_width),
-        )  # type: ignore
+        ncols = (image_width - 1) // (patch_width) + 1
+        nrows = (image_height - 1) // (patch_height) + 1
 
         return ncols, nrows
 
