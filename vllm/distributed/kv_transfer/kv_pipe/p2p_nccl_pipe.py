@@ -99,6 +99,7 @@ class P2pNcclPipe:
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
     ):
+        tensor = tensor.clone()
         if remote_address is None:
             with self.recv_store_cv:
                 self.recv_store[tensor_id] = tensor
