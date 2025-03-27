@@ -55,6 +55,7 @@ class _Backend(enum.Enum):
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
+    FLEX_ATTENTION_VLLM = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
