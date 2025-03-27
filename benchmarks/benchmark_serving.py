@@ -596,8 +596,7 @@ def main(args: argparse.Namespace):
         elif args.dataset_path == "likaixin/InstructCoder":
             dataset_class = InstructCoderDataset
             args.hf_split = "train"
-        else:
-            dataset_class = HuggingFaceDataset
+
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
