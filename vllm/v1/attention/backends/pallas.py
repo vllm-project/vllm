@@ -193,10 +193,11 @@ def write_to_kv_cache(
         kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
 
     """
-    torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
-    torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
+    torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
+    _, _, num_combined_kv_heads, head_size = kv_cache.shape
+    num_kv_heads = num_combined_kv_heads // 2
+    kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads, head_size)
+    # each head has: 8*128*2 (8 heads, head_dim=128, dtype=bf16)=2048=2kb, 
+    # but dma do every 4kb.
 
-    key_cache = key_cache.flatten(0, 1)
-    value_cache = value_cache.flatten(0, 1)
-    kv_cache[:, 0::2].index_copy_(0, slot_mapping, key)
-    kv_cache[:, 1::2].index_copy_(0, slot_mapping, value)
+    kv_cache.index_copy_(0, slot_mapping, kv)
