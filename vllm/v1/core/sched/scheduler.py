@@ -16,10 +16,11 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
-from vllm.v1.core.sched.utils import check_stop
+from vllm.v1.core.sched.utils import (check_stop,
+                                      force_recompute_last_token_for_full_hit)
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -288,27 +289,17 @@ class Scheduler(SchedulerInterface):
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 if num_new_tokens == 0:
-                    # This happens when prompt length is divisible by the block
-                    # size and all blocks are cached. Now we force to recompute
-                    # the last block. Note that we have to re-compute an entire
-                    # block because allocate_slots() assumes num_computed_tokens
-                    # is always a multiple of the block size. This limitation
-                    # can potentially be removed in the future to slightly
-                    # improve the performance.
-                    kv_cache_groups = self.kv_cache_config.kv_cache_groups
-                    if len(kv_cache_groups) > 1 or \
-                        not isinstance(kv_cache_groups[0].kv_cache_spec,
-                                    FullAttentionSpec):
-                        # It is difficult to handle the last block problem
-                        # for hybrid models. Ignore all computed tokens as
-                        # a temporary solution.
-                        num_computed_tokens = 0
-                        num_new_tokens = request.num_tokens
-                        computed_blocks = []
-                    else:
-                        num_computed_tokens -= self.block_size
-                        num_new_tokens = self.block_size
-                        computed_blocks.pop()
+                    # When all tokens are cached, we need to recompute the last
+                    # prompt token to generate the first decode token. It
+                    # happens when prompt length is divisible by the block size
+                    # and all blocks are cached. Note that we needs to recompute
+                    # more tokens besides the last token due to some internal
+                    # constraints in the comments of the below function.
+                    num_computed_tokens, num_new_tokens, computed_blocks = (
+                        force_recompute_last_token_for_full_hit(
+                            self.kv_cache_config, num_computed_tokens,
+                            num_new_tokens, computed_blocks))
+
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 

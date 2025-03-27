@@ -96,8 +96,7 @@ class PrefixCachingMetrics:
 @dataclass
 class KVCacheBlock:
     """KV-cache block metadata."""
-    # Block ID, ranging from 0 to num_gpu_blocks - 1, and a special null_block
-    # with block_id = -1.
+    # Block ID, ranging from 0 to num_gpu_blocks - 1
     block_id: int
     # Reference count.
     ref_cnt: int = 0
@@ -474,7 +473,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
     max_model_len = vllm_config.model_config.max_model_len
     needed_memory = 0
     for layer_spec in kv_cache_spec.values():
-        needed_memory += layer_spec.bytes_for_tokens(max_model_len)
+        needed_memory += layer_spec.max_memory_usage_bytes(vllm_config)
 
     if needed_memory > available_memory:
         raise ValueError(
@@ -678,8 +677,7 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
     return kv_cache_configs
 
 
-@dataclass
-class PrefixLengthRange:
+class PrefixLengthRange(NamedTuple):
     """
     A closed interval [start, end] representing a range of valid prefix lengths.
     """

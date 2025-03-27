@@ -125,16 +125,27 @@ class KVCacheManager:
         self.prefix_cache_stats.requests += 1
         if request.sampling_params.prompt_logprobs is None:
             # Check for cache hits
+            # E.g., for a model with sliding window size 32 (2 * block_size)
+            # computed_blocks = [NULL, 5, 2, NULL, 9, 7, 3, NULL]
+            # We can have the first 3 blocks, 5 blocks, or 6 blocks as
+            # the cached prefix, so the prefix_length should be:
+            # prefix_length = [
+            #   PrefixLengthRange(3 * 16, 3 * 16),
+            #   PrefixLengthRange(6 * 16, 7 * 16)
+            # ]
             prefix_length, computed_blocks = \
                 self.specialized_manager.get_possible_cached_prefix(
                     block_hashes)
+            # E.g., num_computed_tokens = 7 * 16
             num_computed_tokens = prefix_length[-1].end
             # NOTE(woosuk): Since incomplete blocks are not eligible for
             # sharing, `num_computed_tokens` should always be a multiple of
             # `block_size`.
             assert num_computed_tokens % self.block_size == 0
+            # E.g., computed_blocks = [NULL, 5, 2, NULL, 9, 7, 3]
             computed_blocks = computed_blocks[:num_computed_tokens //
                                               self.block_size]
+            # E.g., computed_blocks = [NULL, NULL, NULL, NULL, 9, 7, 3]
             self._free_useless_blocks(computed_blocks, num_computed_tokens)
 
             self.prefix_cache_stats.queries += len(block_hashes)

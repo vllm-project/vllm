@@ -51,15 +51,10 @@ class BlockPool:
         self.cached_block_hash_to_block: dict[BlockHashType, dict[
             int, KVCacheBlock]] = defaultdict(dict)
 
-        # To represent a placeholder block with block_id=-1. No need to allocate
-        # a real block in most cases.
-        # If the attention implementation requires a real block for this,
-        # it should call `init_real_null_block` to allocate a real block for
-        # the _null_block. `init_real_null_block` should be called before
-        # allocating any other blocks.
-        # The ref_cnt of null_block is not correctly maintained. It should never
-        # be freed.
-        self._null_block = KVCacheBlock(-1)
+        # To represent a placeholder block with block_id=0.
+        # The ref_cnt of null_block is not maintained, needs special care to
+        # avoid freeing it.
+        self._null_block = self.free_block_queue.popleft()
 
     def get_cached_block(self,
                          block_hash: BlockHashType) -> Optional[KVCacheBlock]:
