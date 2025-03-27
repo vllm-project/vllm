@@ -178,10 +178,16 @@ class UsageMessage:
         if current_platform.is_cuda():
             self.cuda_runtime = torch.version.cuda
         if current_platform.is_tpu():
-            from torch_xla.core import xla_model as xm
-            self.tpu_count = xm.xrt_world_size()
-            self.tpu_type = xm.get_device_attributes(xm.xla_device()).get("type")
-            self.tpu_memory_per_device = xm.get_device_attributes(xm.xla_device()).get("memory")
+            try:
+                from torch_xla.core import xla_model as xm
+                self.tpu_count = xm.xrt_world_size()
+                self.tpu_type = xm.get_device_attributes(xm.xla_device()).get("type")
+                self.tpu_memory_per_device = xm.get_device_attributes(xm.xla_device()).get("memory")
+            except ImportError:
+                logging.warning("torch_xla not found, skipping TPU usage statistics.")
+                self.tpu_count = None
+                self.tpu_type = None
+                self.tpu_memory_per_device = None
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
