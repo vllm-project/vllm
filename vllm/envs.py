@@ -708,8 +708,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     ## Enable Share Expert Fusion
     "VLLM_ENABLE_SHARE_EXPERT_FUSION":
-    lambda: bool(int(os.environ["VLLM_ENABLE_SHARE_EXPERT_FUSION"]))
-    if "VLLM_ENABLE_SHARE_EXPERT_FUSION" in os.environ else False
+    lambda: int(os.environ["VLLM_ENABLE_SHARE_EXPERT_FUSION"])
+    if "VLLM_ENABLE_SHARE_EXPERT_FUSION" in os.environ else 0
 }
 
 # end-env-vars-definition
