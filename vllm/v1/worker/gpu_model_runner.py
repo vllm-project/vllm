@@ -25,7 +25,7 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, LazyLoader, cdiv,
+                        LayerBlockType, LazyLoader, cdiv, check_use_alibi,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
@@ -222,6 +222,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=torch.int64,
                 device="cpu",
                 pin_memory=self.pin_memory)
+
+        # Only relevant for models using ALiBi (e.g, MPT)
+        self.use_alibi = check_use_alibi(model_config)
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -689,7 +692,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_lens=num_scheduled_tokens,
             num_query_heads=self.num_query_heads,
             num_kv_heads=self.num_kv_heads,
-            use_alibi=False,  # FIXME
+            use_alibi=self.use_alibi,
             use_sliding_window=self.window_size is not None,
             num_sms=self.num_sms,
         )
@@ -1085,8 +1088,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
-        for i, generator in self.input_batch.generators.items():
-            req_id = self.input_batch.req_ids[i]
+        discard_sampled_tokens_req_indices = []
+        for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -1094,7 +1097,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Ignore the sampled token for partial prefills.
                 # Rewind the generator state as if the token was not sampled.
                 # This relies on cuda-specific torch-internal impl details
-                generator.set_offset(generator.get_offset() - 4)
+                generator = self.input_batch.generators.get(i)
+                if generator is not None:
+                    generator.set_offset(generator.get_offset() - 4)
+                # Record the index of the request that should not be sampled,
+                # so that we could clear the sampled tokens before returning.
+                discard_sampled_tokens_req_indices.append(i)
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -1114,10 +1122,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if max_gen_len == 1:
             # No spec decode tokens.
             valid_sampled_token_ids = sampled_token_ids.tolist()
+            # Mask out the sampled tokens that should not be sampled.
+            for i in discard_sampled_tokens_req_indices:
+                valid_sampled_token_ids[i].clear()
         else:
             # Includes spec decode tokens.
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
-                sampled_token_ids, self.input_batch.vocab_size)
+                sampled_token_ids,
+                discard_sampled_tokens_req_indices,
+                self.input_batch.vocab_size,
+            )
 
         if not self.use_spec_decode:
             spec_token_ids = None
