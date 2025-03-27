@@ -12,7 +12,7 @@ from transformers.models.aya_vision.processing_aya_vision import (
     AyaVisionProcessor, AyaVisionProcessorKwargs)
 from transformers.models.got_ocr2.image_processing_got_ocr2 import (
     get_optimal_tiled_canvas)
-from PIL import Image
+from transformers.image_processing_utils import get_size_dict
 
 from vllm.config import VllmConfig
 from vllm.jsontree import json_map_leaves
@@ -136,11 +136,13 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
 
     def get_max_image_tokens(self) -> int:
         hf_processor: AyaVisionProcessor = self.get_hf_processor()
+        image_processor = hf_processor.image_processor
         image_size = self.get_image_size_with_most_features()
         tokenizer = hf_processor.tokenizer
         num_patches = self.get_num_patches(
             image_width=image_size.width,
-            image_height=image_size.height, crop_to_patches=True)
+            image_height=image_size.height, size=image_processor.size, min_patches=image_processor.min_patches,
+                    max_patches=image_processor.max_patches)
         image_string = hf_processor._prompt_split_image(num_patches)
         x = encode_tokens(
             tokenizer,
@@ -160,21 +162,13 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
         return ImageSize(height=height * max_patches,
                          width=width * max_patches)
 
-
-    def get_num_patches(self,
-                        *,
-                        image_width: int,
-                        image_height: int,
-                        **kwargs
-                        ) -> int:
-        """
-        TODO: update this without using image_processor
-        """
-        image_processor = self.get_image_processor()
-        dummy_image = Image.new("RGB", (image_width, image_height), color=255)
-        image_input = image_processor(images=dummy_image, **kwargs)
-        return image_input['num_patches'][0]
-
+    def get_num_patches(self, *, image_width: int, image_height: int, size: dict,
+                        min_patches: int, max_patches: int) -> int:
+        size = get_size_dict(size, default_to_square=False)
+        num_columns, num_rows = get_optimal_tiled_canvas(
+            (image_height, image_width), (size["height"], size["width"]), min_patches, max_patches)
+        num_blocks = num_columns * num_rows
+        return num_blocks if num_blocks == 1 else num_blocks + 1
 
 class AyaVisionDummyInputsBuilder(
         BaseDummyInputsBuilder[AyaVisionProcessingInfo]):
@@ -265,16 +259,14 @@ class AyaVisionMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
-        output_kwargs = hf_processor._merge_kwargs(
-            AyaVisionProcessorKwargs,
-            tokenizer_init_kwargs=hf_processor.tokenizer.init_kwargs,
-            **hf_processor_mm_kwargs,
-        )
+        image_processor = hf_processor.image_processor
         def get_replacement(item_idx: int):
             images: ImageProcessorItems = mm_items.get("image",
                                                        ImageProcessorItems)
             image_size: ImageSize = images.get_image_size(item_idx)
-            num_patches = self.info.get_num_patches(image_width=image_size.width, image_height=image_size.height, **output_kwargs['images_kwargs'])
+            num_patches = self.info.get_num_patches(image_width=image_size.width, image_height=image_size.height, size=image_processor.size,
+                    min_patches=image_processor.min_patches,
+                    max_patches=image_processor.max_patches)
             return hf_processor._prompt_split_image(num_patches=num_patches)
 
         return [
