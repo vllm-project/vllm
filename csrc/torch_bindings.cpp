@@ -365,6 +365,35 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
 
+  // Check if cutlass grouped gemm is supported for CUDA devices of the given
+  // capability
+  ops.def("cutlass_group_gemm_supported(int cuda_device_capability) -> bool");
+  ops.impl("cutlass_group_gemm_supported", &cutlass_group_gemm_supported);
+
+  // CUTLASS w8a8 grouped GEMM
+  ops.def(
+      "cutlass_moe_mm(Tensor! out_tensors, Tensor a_tensors, Tensor b_tensors, "
+      "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
+      "               Tensor problem_sizes, Tensor a_strides, "
+      "               Tensor b_strides, Tensor c_strides) -> ()",
+      {stride_tag});
+  ops.impl("cutlass_moe_mm", torch::kCUDA, &cutlass_moe_mm);
+
+  // A function that computes data required to run fused MoE with w8a8 grouped
+  // GEMM. It takes topk_ids as an input, and computes expert_offsets
+  // (token start indices of each expert). In addition to this, it computes
+  // problem sizes for each expert's multiplication used by the two mms called
+  // from fused MoE operation, and arrays with permutations required to shuffle
+  // and de-shuffle the input/output of the fused operation.
+  ops.def(
+      "get_cutlass_moe_mm_data(Tensor topk_ids, Tensor! expert_offsets, "
+      "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
+      "                        Tensor! input_permutation, "
+      "                        Tensor! output_permutation, int num_experts, "
+      "                        int n, int k) -> ()",
+      {stride_tag});
+  ops.impl("get_cutlass_moe_mm_data", torch::kCUDA, &get_cutlass_moe_mm_data);
+
   // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
   ops.def(
       "cutlass_scaled_mm_supports_block_fp8(int cuda_device_capability) -> "
