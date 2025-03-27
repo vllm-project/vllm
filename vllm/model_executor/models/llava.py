@@ -35,7 +35,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import flatten_2d_lists
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -73,7 +72,7 @@ class PixtralHFImagePixelInputs(TypedDict):
     A boolean mask indicating which image embeddings correspond
     to patch tokens.
     
-    Shape: `(batch_size, num_images, num_embeds)`
+    Shape: `(batch_size * num_images, num_embeds)`
     """
 
 
@@ -618,6 +617,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                     raise ValueError("Incorrect type of embed_is_patch. "
                                      f"Got type: {type(embed_is_patch)}")
 
+                embed_is_patch = flatten_bn(embed_is_patch)
+
                 return PixtralHFImagePixelInputs(
                     type="pixel_values_pixtral",
                     pixel_values=flatten_bn(pixel_values),
@@ -713,18 +714,16 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         if image_input is None:
             return None
 
-        vision_embeddings = self._process_image_input(image_input)
+        image_features = self._process_image_input(image_input)
 
-        if (kwargs.get("v0_path", False)
-                or image_input["type"] != "pixel_values_pixtral"):
+        if image_input["type"] != "pixel_values_pixtral":
             # The path is used for pixtral (V0 only) and llava (V0/V1)
-            return vision_embeddings
+            return image_features
 
-        return flatten_2d_lists(
-            scatter_patch_features(*args) for args in zip(
-                vision_embeddings,
-                image_input["embed_is_patch"],
-            ))
+        return scatter_patch_features(
+            image_features,
+            image_input["embed_is_patch"],
+        )
 
     def get_input_embeddings(
         self,
@@ -790,7 +789,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
-            kwargs.update({"v0_path": True})
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
