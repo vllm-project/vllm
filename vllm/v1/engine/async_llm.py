@@ -331,7 +331,7 @@ class AsyncLLM(EngineClient):
                     # 3) Abort any reqs that finished due to stop strings.
                     await self.engine_core.abort_requests_async(
                         processed_outputs.reqs_to_abort)
-                    self.output_processor.handle_abort_reqs(
+                    self.output_processor.free_aborted_reqs(
                         processed_outputs.reqs_to_abort)
 
                 # 4) Logging.
@@ -355,7 +355,7 @@ class AsyncLLM(EngineClient):
         # At this point, the abort message has already been sent to EngineCore,
         # so the request status in the Frontend can be removed.
         # For more details, please see: PR #15326
-        self.output_processor.handle_abort_reqs(request_ids)
+        self.output_processor.free_aborted_reqs(request_ids)
 
         if self.log_requests:
             logger.info("Aborted request %s.", request_id)
