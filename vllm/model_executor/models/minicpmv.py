@@ -87,9 +87,6 @@ class MiniCPMVImagePixelInputs(TypedDict):
     This should be in `(height, width)` format.
     """
 
-    num_slices: list[list[int]]
-    """Shape: `(batch_size, num_images)`"""
-
     embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
     """
     A boolean mask indicating which image embeddings correspond
@@ -97,6 +94,9 @@ class MiniCPMVImagePixelInputs(TypedDict):
 
     Shape: `(batch_size * num_images, num_embeds)`
     """
+
+    num_slices: torch.Tensor
+    """Shape: `(batch_size * num_images)`"""
 
 
 class MiniCPMVImageEmbeddingInputs(TypedDict):
@@ -853,6 +853,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                              f"Got type: {type(tgt_sizes)}")
 
         num_slices = [[len(p) for p in ps] for ps in pixel_values]
+        num_slices_flat = flatten_bn(torch.tensor(num_slices))
+
         pixel_values_flat = flatten_bn(flatten_2d_lists(pixel_values))
         tgt_sizes_flat = flatten_bn(flatten_2d_lists(tgt_sizes), concat=True)
 
@@ -865,8 +867,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             type="pixel_values",
             pixel_values=pixel_values_flat,
             tgt_sizes=tgt_sizes_flat,
-            num_slices=num_slices,
             embed_is_patch=embed_is_patch,
+            num_slices=num_slices_flat,
         )
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
@@ -906,8 +908,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         image_features_flat = self.get_vision_hidden_states(image_input)
 
         # Reconstruct the batch dimension
-        num_slices_per_batch = [sum(ns) for ns in image_input["num_slices"]]
-        return image_features_flat.split(num_slices_per_batch)
+        return image_features_flat.split(image_input["num_slices"].tolist())
 
     def _process_multimodal_inputs(self, modalities: dict):
         # The result multimodal_embeddings is tuple of tensors, with each
