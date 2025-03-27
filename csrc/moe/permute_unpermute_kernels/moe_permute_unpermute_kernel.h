@@ -464,6 +464,8 @@ __global__ void getMIndicesKernel(int64_t* expert_first_token_offset,
   int n_token_in_expert = last_token_offset - first_token_offset;
 
   if constexpr (ALIGN_BLOCK_SIZE) {
+    n_token_in_expert = (n_token_in_expert + align_block_size - 1) /
+                        align_block_size * align_block_size;
     // round up to ALIGN_BLOCK_SIZE
     int64_t accumulate_align_offset = 0;
     for (int i = 1; i <= eidx + 1; i++) {
