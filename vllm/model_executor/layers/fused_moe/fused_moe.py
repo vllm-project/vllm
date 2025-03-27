@@ -1363,8 +1363,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
-    # We can reuse the memory between these because by the time we need
-    # cache3, we're done with cache1
+    # We can reuse the memory between cache1 and cache3 because by the time
+    # we need cache3, we're done with cache1
     cache13 = torch.empty(M_sum * max(N, K),
                           device=hidden_states.device,
                           dtype=hidden_states.dtype)
@@ -1374,6 +1374,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
     intermediate_cache3 = cache13[:M_sum * K].view(*cache3_view)
+
+    needs_fp8_quantization = use_fp8_w8a8 or use_dg
 
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
@@ -1385,9 +1387,9 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         if tokens_in_chunk == 0:
             break
 
-        # Even if we are using DeepGemm, we must defer any chunks
-        # that are not blocked to Triton.
-        skip_dg = use_dg and tokens_in_chunk % block_m != 0
+        # If we are using DeepGemm, only operate on chunks that are
+        # blocked, otherwise defer to Triton.
+        use_dg_for_chunk = use_dg and tokens_in_chunk % block_m == 0
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
@@ -1465,7 +1467,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             out_hidden_states[begin_chunk_idx:end_chunk_idx],
             intermediate_cache3.view(*intermediate_cache3.shape), inv_perm,
             expert_ids, top_k_num, global_num_experts, K, curr_topk_weights,
-            curr_topk_ids, use_dg and not skip_dg)
+            curr_topk_ids, use_dg_for_chunk)
 
     return out_hidden_states
 
