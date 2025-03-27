@@ -505,7 +505,7 @@ class Scheduler(SchedulerInterface):
         limitations, the method adjusts `num_new_tokens` to schedule only the
         decoder tokens up to just before the unschedulable encoder input.
         """
-        if not request.has_encoder_inputs() or num_new_tokens == 0:
+        if num_new_tokens == 0 or not request.has_encoder_inputs():
             return [], num_new_tokens, encoder_budget
 
         encoder_inputs_to_schedule: list[int] = []
@@ -728,11 +728,6 @@ class Scheduler(SchedulerInterface):
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
-
-    def has_requests(self):
-        """Returns True if there are unfinished requests, or finished requests
-        not yet returned in SchedulerOutputs."""
-        return self.has_unfinished_requests() or self.has_finished_requests()
 
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()
