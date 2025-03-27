@@ -105,12 +105,13 @@ class BackgroundProcHandle:
         process_kwargs: dict[Any, Any],
     ):
         context = get_mp_context()
-        reader, writer = context.Pipe(duplex=False)
+        self.reader, self.writer = context.Pipe(duplex=False)
+        self.process_name = process_name
 
         assert ("ready_pipe" not in process_kwargs
                 and "input_path" not in process_kwargs
                 and "output_path" not in process_kwargs)
-        process_kwargs["ready_pipe"] = writer
+        process_kwargs["ready_pipe"] = self.writer
         process_kwargs["input_path"] = input_path
         process_kwargs["output_path"] = output_path
 
@@ -120,13 +121,29 @@ class BackgroundProcHandle:
                                            input_path, output_path)
         self.proc.start()
 
-        # Wait for startup.
-        if reader.recv()["status"] != "READY":
-            raise RuntimeError(f"{process_name} initialization failed. "
-                               "See root cause above.")
-
     def shutdown(self):
         self._finalizer()
+
+    def wait_for_startup(self, shutdown_callback: Callable):
+        """Wait until the background process is ready."""
+
+        e = Exception(f"{self.process_name} initialization failed due to "
+                      "an exception in a background process. See stack trace "
+                      "for root cause.")
+
+        try:
+            if self.reader.recv()["status"] != "READY":
+                raise e
+        except EOFError:
+            e.__suppress_context__ = True
+            shutdown_callback()
+            raise e from None
+        except Exception:
+            shutdown_callback()
+            raise e from None
+        finally:
+            self.reader.close()
+            self.writer.close()
 
 
 # Note(rob): shutdown function cannot be a bound method,
