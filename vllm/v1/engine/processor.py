@@ -137,6 +137,9 @@ class Processor:
                                  f" != {engine_level_backend}")
         else:
             params.guided_decoding.backend = engine_level_backend
+        import vllm.platforms
+        if vllm.platforms.current_platform.is_tpu():
+            raise ValueError("Structured output is not supported on TPU.")
 
         # Request content validation
 
