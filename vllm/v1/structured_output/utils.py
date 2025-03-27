@@ -26,10 +26,6 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if "pattern" in obj:
             return True
 
-        # Check for enum restrictions
-        if "enum" in obj:
-            return True
-
         # Check for numeric ranges
         if obj.get("type") in ("integer", "number") and any(
                 key in obj
