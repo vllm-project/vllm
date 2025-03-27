@@ -61,6 +61,7 @@ class Scheduler(SchedulerInterface):
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             enable_caching=cache_config.enable_prefix_caching,
+            caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 
@@ -152,6 +153,10 @@ class Scheduler(SchedulerInterface):
 
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
+            if (0 < self.scheduler_config.long_prefill_token_threshold <
+                    num_new_tokens):
+                num_new_tokens = (
+                    self.scheduler_config.long_prefill_token_threshold)
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
@@ -235,16 +240,16 @@ class Scheduler(SchedulerInterface):
                 encoder_budget = new_encoder_budget
 
         # Record the LoRAs in scheduled_running_reqs
-        requested_loras: set[int] = set()
+        scheduled_loras: set[int] = set()
         if self.lora_config:
-            requested_loras = set(
+            scheduled_loras = set(
                 req.lora_request.lora_int_id for req in scheduled_running_reqs
                 if req.lora_request and req.lora_request.lora_int_id > 0)
-            assert len(requested_loras) <= self.lora_config.max_loras
+            assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        waiting_for_fsm: deque[Request] = deque()
+        skipped_waiting_requests: deque[Request] = deque()
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -254,31 +259,30 @@ class Scheduler(SchedulerInterface):
 
                 request = self.waiting[0]
 
-                if request.status == RequestStatus.WAITING_FOR_FSM:
+                # Waiting request skipping logic
+                is_skipped = False
+                # Skip request if the structured output request is still waiting
+                # for FSM.
+                if (not is_skipped
+                        and request.status == RequestStatus.WAITING_FOR_FSM):
                     structured_output_req = request.structured_output_request
-                    if structured_output_req and structured_output_req.grammar:
+                    is_skipped = (not structured_output_req
+                                  or not structured_output_req.grammar)
+                    if not is_skipped:
                         request.status = RequestStatus.WAITING
-                    else:
-                        waiting_structured_output_req = self.waiting.popleft()
-                        waiting_for_fsm.appendleft(
-                            waiting_structured_output_req)
-                        continue
 
-                # Check that adding the request still respects the max_loras
-                # constraint.
-                if self.lora_config and request.lora_request:
+                # Skip request if max_loras can't be honored.
+                if (not is_skipped and self.lora_config
+                        and request.lora_request):
                     req_lora_id = request.lora_request.lora_int_id
-                    if len(requested_loras) == self.lora_config.max_loras and (
-                            req_lora_id not in requested_loras):
-                        # Cannot schedule.
-                        # TODO (varun): This means all the other requests in
-                        # the WAITING queue will be blocked by this request,
-                        # even if,
-                        # 1. these other requests do not use LoRA, or,
-                        # 2. these other requests use the already requested
-                        # LoRAs.
-                        # This is too conservative and could be optimized.
-                        break
+                    is_skipped = (len(scheduled_loras)
+                                  == self.lora_config.max_loras
+                                  and (req_lora_id not in scheduled_loras))
+
+                if is_skipped:
+                    skipped_waiting_requests.appendleft(request)
+                    self.waiting.popleft()
+                    continue
 
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
@@ -300,6 +304,10 @@ class Scheduler(SchedulerInterface):
                             self.kv_cache_config, num_computed_tokens,
                             num_new_tokens, computed_blocks))
 
+                if (0 < self.scheduler_config.long_prefill_token_threshold <
+                        num_new_tokens):
+                    num_new_tokens = (
+                        self.scheduler_config.long_prefill_token_threshold)
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
@@ -337,7 +345,7 @@ class Scheduler(SchedulerInterface):
                         f"Invalid request status: {request.status}")
 
                 if self.lora_config and request.lora_request:
-                    requested_loras.add(request.lora_request.lora_int_id)
+                    scheduled_loras.add(request.lora_request.lora_int_id)
                 req_to_new_block_ids[request.request_id] = [
                     b.block_id for b in computed_blocks + new_blocks
                 ]
@@ -356,8 +364,8 @@ class Scheduler(SchedulerInterface):
                     encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
-        if waiting_for_fsm:
-            self.waiting.extendleft(waiting_for_fsm)
+        if skipped_waiting_requests:
+            self.waiting.extendleft(skipped_waiting_requests)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -425,6 +433,18 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
+
+        # Advance the number of computed tokens for the request AFTER
+        # the request is scheduled.
+        # 1. The scheduler_output of the current step has to include the
+        #    original number of scheduled tokens to determine input IDs.
+        # 2. Advance the number of computed tokens here allowing us to
+        #    schedule the prefill request again immediately in the next
+        #    scheduling step.
+        # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
+        #    computed tokens will be adjusted in update_from_output.
+        for req_id, num_scheduled_token in num_scheduled_tokens.items():
+            self.requests[req_id].num_computed_tokens += num_scheduled_token
 
         self.finished_req_ids = set()
         return scheduler_output
@@ -554,28 +574,19 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
-            if req_id not in scheduler_output.scheduled_spec_decode_tokens:
-                # When the request's num_computed_tokens catches up
-                # its num_tokens, the request generates output tokens.
-                # Otherwise, we ignore the sampler output for the request.
-                request.num_computed_tokens += num_tokens_scheduled
-                assert request.num_computed_tokens <= request.num_tokens
-            else:
-                # num_computed_tokens_step represents the number of tokens
-                # processed in the current step, considering scheduled
-                # tokens and rejections.
-                # It is calculated as:
-                # num_computed_tokens_step = num_scheduled_tokens -
-                #                            num_tokens_rejected,
-                # where num_tokens_rejected is given by:
-                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
-                scheduled_spec_token_ids = (
-                    scheduler_output.scheduled_spec_decode_tokens[req_id])
 
-                num_computed_tokens_step = num_scheduled_tokens[req_id] - (
-                    len(scheduled_spec_token_ids) + 1 -
-                    len(generated_token_ids))
-                request.num_computed_tokens += num_computed_tokens_step
+            scheduled_spec_token_ids = (
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id))
+            if scheduled_spec_token_ids:
+                # num_computed_tokens represents the number of tokens
+                # processed in the current step, considering scheduled
+                # tokens and rejections. If some tokens are rejected,
+                # num_computed_tokens is decreased by the number of rejected
+                # tokens, where is given by:
+                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
+                num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
+                                       len(generated_token_ids))
+                request.num_computed_tokens -= num_tokens_rejected
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
@@ -598,24 +609,26 @@ class Scheduler(SchedulerInterface):
             new_logprobs = None
             new_token_ids: list[int] = []
 
-            if request.num_computed_tokens >= request.num_tokens:
-                for output_token_id in generated_token_ids:
-                    request.append_output_token_ids(output_token_id)
-                    new_token_ids.append(output_token_id)
+            # Append generated tokens and check for stop. Note that if
+            # a request is still being prefilled, we expect the model runner
+            # to return empty token ids for the request.
+            for output_token_id in generated_token_ids:
+                request.append_output_token_ids(output_token_id)
+                new_token_ids.append(output_token_id)
 
-                    # Check for stop and update request state.
-                    # This must be called before we make the EngineCoreOutput.
-                    stopped = check_stop(request, self.max_model_len)
-                    if stopped:
-                        self._free_request(request)
-                        break
+                # Check for stop and update request state.
+                # This must be called before we make the EngineCoreOutput.
+                stopped = check_stop(request, self.max_model_len)
+                if stopped:
+                    self._free_request(request)
+                    break
 
-                # Extract sample logprobs if needed.
-                if request.sampling_params.logprobs is not None:
-                    assert logprobs is not None
-                    # NOTE: once we support N tokens per step (spec decode),
-                    # the outer lists can be of length > 1.
-                    new_logprobs = logprobs.slice(req_index, req_index + 1)
+            # Extract sample logprobs if needed.
+            if (request.sampling_params.logprobs is not None
+                    and logprobs is not None):
+                # NOTE: once we support N tokens per step (spec decode),
+                # the outer lists can be of length > 1.
+                new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             if new_token_ids and request.use_structured_output:
                 # NOTE: structured_output_request
@@ -628,8 +641,7 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            # Transmit partial if chunked prefill & prompt logprobs is enabled
-            if new_token_ids or prompt_logprobs_tensors is not None:
+            if new_token_ids:
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
                     EngineCoreOutput(
@@ -640,6 +652,9 @@ class Scheduler(SchedulerInterface):
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
                         events=request.take_events()))
+            else:
+                # Invariant: EngineCore returns no partial prefill outputs.
+                assert not prompt_logprobs_tensors
 
             self.scheduled_req_ids.remove(request.request_id)
             if not stopped:

@@ -10,6 +10,7 @@ import datetime
 import enum
 import gc
 import getpass
+import hashlib
 import importlib
 import importlib.metadata
 import importlib.util
@@ -17,6 +18,7 @@ import inspect
 import ipaddress
 import multiprocessing
 import os
+import pickle
 import re
 import signal
 import socket
@@ -37,7 +39,7 @@ from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TypeVar, Union)
+                    Optional, Type, TypeVar, Union)
 from uuid import uuid4
 
 import cloudpickle
@@ -1265,29 +1267,19 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         config_args = self._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
-        # optionally followed by model_tag (only for serve)
+        # followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
         if args[0] == "serve":
-            model_in_cli = len(args) > 1 and not args[1].startswith('-')
-            model_in_config = any(arg == '--model' for arg in config_args)
-
-            if not model_in_cli and not model_in_config:
+            if index == 1:
                 raise ValueError(
-                    "No model specified! Please specify model either in "
-                    "command-line arguments or in config file.")
-
-            if model_in_cli:
-                # Model specified as positional arg, keep CLI version
-                args = [args[0]] + [
-                    args[1]
-                ] + config_args + args[2:index] + args[index + 2:]
-            else:
-                # No model in CLI, use config if available
-                args = [args[0]
-                        ] + config_args + args[1:index] + args[index + 2:]
+                    "No model_tag specified! Please check your command-line"
+                    " arguments.")
+            args = [args[0]] + [
+                args[1]
+            ] + config_args + args[2:index] + args[index + 2:]
         else:
             args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
@@ -1305,7 +1297,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 '--port': '12323',
                 '--tensor-parallel-size': '4'
             ]
+
         """
+
         extension: str = file_path.split('.')[-1]
         if extension not in ('yaml', 'yml'):
             raise ValueError(
@@ -1330,15 +1324,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             if isinstance(action, StoreBoolean)
         ]
 
-        # Skip model from config if it's provided as positional argument
-        skip_model = (hasattr(self, '_parsed_args') and self._parsed_args
-                      and len(self._parsed_args) > 1
-                      and self._parsed_args[0] == 'serve'
-                      and not self._parsed_args[1].startswith('-'))
-
         for key, value in config.items():
-            if skip_model and key == 'model':
-                continue
             if isinstance(value, bool) and key not in store_boolean_arguments:
                 if value:
                     processed_args.append('--' + key)
@@ -1560,9 +1546,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[type[T], _V]):
+class ClassRegistry(UserDict[Type[T], _V]):
 
-    def __getitem__(self, key: type[T]) -> _V:
+    def __getitem__(self, key: Type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
@@ -1582,18 +1568,21 @@ class ClassRegistry(UserDict[type[T], _V]):
         return any(cls in self.data for cls in key.mro())
 
 
-def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
+def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    return torch.ops._C.weak_ref_tensor(tensor)
+    if isinstance(tensor, torch.Tensor):
+        return torch.ops._C.weak_ref_tensor(tensor)
+    else:
+        return tensor
 
 
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
-) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:
+) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
@@ -2186,6 +2175,11 @@ def _maybe_force_spawn():
     if cuda_is_initialized():
         reason = "CUDA is initialized"
     elif is_in_ray_actor():
+        # even if we choose to spawn, we need to pass the ray address
+        # to the subprocess so that it knows how to connect to the ray cluster.
+        # env vars are inherited by subprocesses, even if we use spawn.
+        import ray
+        os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reason = "In a Ray actor and can only be spawned"
 
     if reason is not None:
@@ -2453,3 +2447,21 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
         return wrapper
 
     return decorator
+
+
+def sha256(input) -> int:
+    """Hash any picklable Python object using SHA-256.
+
+    The input is serialized using pickle before hashing, which allows
+    arbitrary Python objects to be used. Note that this function does
+    not use a hash seed—if you need one, prepend it explicitly to the input.
+
+    Args:
+        input: Any picklable Python object.
+
+    Returns:
+        An integer representing the SHA-256 hash of the serialized input.
+    """
+    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
+                          byteorder="big")
