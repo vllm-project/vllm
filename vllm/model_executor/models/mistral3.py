@@ -31,7 +31,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
+                         SupportsV0Only)
 from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -247,19 +248,14 @@ class Mistral3MultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # print("DEBUG prompt", prompt)
-        # print("DEBUG mm_data", mm_data)
-        # print("DEBUG mm_kwargs", mm_kwargs)
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
-        # print("DEBUG processed_outputs", processed_outputs)
 
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
-            # print("DEBUG pixel_values.shape", pixel_values.shape)
 
             # Avoid padding since we need the output for each image to be
             # independent of other images for the cache to work correctly
@@ -422,12 +418,14 @@ def init_vision_tower_for_llava(
     )
 
 
+# TODO(mgoin): Support V1, there are issues with image batching/chunking
+# that need to be resolved first.
 @MULTIMODAL_REGISTRY.register_processor(
     _build_mistral3_processor,
     info=_build_mistral3_info,
     dummy_inputs=Mistral3DummyInputsBuilder)
 class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                       SupportsPP):
+                                       SupportsPP, SupportsV0Only):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -532,10 +530,8 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         image_sizes = [(img.shape[-2], img.shape[-1])
                        for img in image_input["pixel_values"]]
-        # print("DEBUG image_sizes", image_sizes)
 
         image_features = self.vision_tower(image_input["pixel_values"])
-        # print("DEBUG image_features[0].shape", image_features[0].shape)
 
         if isinstance(image_features, torch.Tensor):
             return self.multi_modal_projector(image_features, image_sizes)
@@ -544,7 +540,6 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_feature.shape[0] // self.config.spatial_merge_size**2
             for image_feature in image_features
         ]
-        # print("DEBUG feature_sizes", feature_sizes)
 
         image_embeds = self.multi_modal_projector(torch.cat(image_features),
                                                   image_sizes)
@@ -552,7 +547,6 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_embeds = torch.split(image_embeds, feature_sizes)
         else:
             image_embeds = (image_embeds, )
-        # print("DEBUG image_embeds[0].shape", image_embeds[0].shape)
         return image_embeds
 
     def get_multimodal_embeddings(
