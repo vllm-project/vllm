@@ -1568,18 +1568,21 @@ class ClassRegistry(UserDict[Type[T], _V]):
         return any(cls in self.data for cls in key.mro())
 
 
-def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
+def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    return torch.ops._C.weak_ref_tensor(tensor)
+    if isinstance(tensor, torch.Tensor):
+        return torch.ops._C.weak_ref_tensor(tensor)
+    else:
+        return tensor
 
 
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
-) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:
+) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
