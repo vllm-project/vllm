@@ -8,14 +8,18 @@ set -ex
 CORE_RANGE=${CORE_RANGE:-48-95}
 NUMA_NODE=${NUMA_NODE:-1}
 
-# Try building the docker image
-numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build -t cpu-test-"$BUILDKITE_BUILD_NUMBER" -f Dockerfile.cpu .
-numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" -t cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2 -f Dockerfile.cpu .
-
 # Setup cleanup
-remove_docker_container() { set -e; docker rm -f cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2-"$NUMA_NODE" || true; }
+remove_docker_container() { 
+    set -e; 
+    docker rm -f cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2-"$NUMA_NODE" || true; 
+    docker image rm cpu-test-"$BUILDKITE_BUILD_NUMBER" cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2 || true; 
+}
 trap remove_docker_container EXIT
 remove_docker_container
+
+# Try building the docker image
+numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --tag cpu-test-"$BUILDKITE_BUILD_NUMBER" --target vllm-test -f Dockerfile.cpu .
+numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" --tag cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2 --target vllm-test -f Dockerfile.cpu .
 
 # Run the image, setting --shm-size=4g for tensor parallel.
 docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --cpuset-cpus="$CORE_RANGE"  \
@@ -36,8 +40,6 @@ function cpu_tests() {
   # Run basic model test
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
     set -e
-    pip install -r vllm/requirements/test.txt
-    pip install -r vllm/requirements/cpu.txt
     pytest -v -s tests/kernels/test_cache.py -m cpu_model
     pytest -v -s tests/kernels/test_mla_decode_cpu.py -m cpu_model
     pytest -v -s tests/models/decoder_only/language -m cpu_model
