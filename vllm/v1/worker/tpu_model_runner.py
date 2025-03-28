@@ -80,7 +80,7 @@ class TPUModelRunner:
         self.enforce_eager = model_config.enforce_eager
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
-        self._output_dtype = self.dtype
+        self._hidden_states_dtype = self.dtype
 
         self.is_multimodal_model = model_config.is_multimodal_model
         self.sliding_window = model_config.get_sliding_window()
@@ -763,7 +763,7 @@ class TPUModelRunner:
                              positions=position_ids,
                              kv_caches=kv_caches,
                              inputs_embeds=inputs_embeds)
-        self._output_dtype = out.dtype
+        self._hidden_states_dtype = out.dtype
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -789,7 +789,7 @@ class TPUModelRunner:
             num_reqs_to_sample = MIN_NUM_SEQS
             dummy_hidden = torch.randn((num_tokens, hsize),
                                        device=device,
-                                       dtype=self._output_dtype)
+                                       dtype=self._hidden_states_dtype)
             # Compile for [8, 16, .., 128,.., `self.max_num_reqs`]
             while True:
                 indices = torch.zeros(
