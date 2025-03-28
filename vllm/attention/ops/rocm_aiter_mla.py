@@ -19,26 +19,21 @@ def get_aiter_mla_metadata(max_batch_size: int, block_size: int,
 
 def aiter_mla_decode_fwd(
     q,
-    k_buffer,
+    kv_buffer,
     o,
-    attn_logits,
-    num_kv_splits,
     sm_scale,
     kv_indptr: Optional[torch.Tensor] = None,
     kv_indices: Optional[torch.Tensor] = None,
     kv_last_page_lens: Optional[torch.Tensor] = None,
     logit_cap: float = 0.0,
 ):
-    assert num_kv_splits == attn_logits.shape[2]
-
     from aiter.mla import mla_decode_fwd
 
     mla_decode_fwd(q,
-                   k_buffer.view(-1, 1, 1, q.shape[-1]),
+                   kv_buffer.view(-1, 1, 1, q.shape[-1]),
                    o,
                    kv_indptr,
                    kv_indices,
                    kv_last_page_lens,
                    sm_scale=sm_scale,
-                   logit_cap=logit_cap,
-                   num_kv_splits=num_kv_splits)
+                   logit_cap=logit_cap)

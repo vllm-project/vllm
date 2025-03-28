@@ -552,27 +552,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                         dtype=q.dtype,
                         device=q.device)
 
-        num_kv_splits = 4  # TODO: heuristic
+        kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
-        # TODO(lucas) Allocate ahead of time
-        attn_logits = torch.empty(
-            (
-                B,
-                self.num_heads,
-                num_kv_splits,
-                # NOTE(lucas) idk why the +1 is here but sglang has it so we
-                # just mirror that
-                self.kv_lora_rank + 1,
-            ),
-            dtype=torch.float32,
-            device=q.device,
-        )
-
-        # Add a head dim of 1
-        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
-
-        aiter_mla_decode_fwd(q, kv_c_and_k_pe_cache, o, attn_logits,
-                             num_kv_splits, self.scale,
+        aiter_mla_decode_fwd(q, kv_buffer, o, self.scale,
                              attn_metadata.paged_kv_indptr,
                              attn_metadata.paged_kv_indices,
                              attn_metadata.paged_kv_last_page_lens)
