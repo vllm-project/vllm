@@ -110,11 +110,12 @@ class EagleProposer:
             )
 
             # Run the model.
-            hidden_states = self.model(
-                input_ids=input_ids,
-                hidden_states=hidden_states,
-                positions=positions,
-            )
+            with set_forward_context(attn_metadata, self.vllm_config):
+                hidden_states = self.model(
+                    input_ids=input_ids,
+                    hidden_states=hidden_states,
+                    positions=positions,
+                )
             logits = self.model.compute_logits(hidden_states, None)
             draft_token_ids = sample_token_ids(logits, sampling_metadata)
             draft_token_ids_list.append(draft_token_ids)
