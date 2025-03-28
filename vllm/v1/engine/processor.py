@@ -5,9 +5,8 @@ from collections.abc import Mapping
 from typing import Optional, Union
 
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
-                         PromptType, SingletonInputsAdapter)
-from vllm.inputs.parse import is_encoder_decoder_inputs
+from vllm.inputs import ProcessorInputs, PromptType
+from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
@@ -31,7 +30,6 @@ class Processor:
         self,
         vllm_config: VllmConfig,
         tokenizer: BaseTokenizerGroup,
-        input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
@@ -209,14 +207,7 @@ class Processor:
 
         self._validate_model_inputs(processed_inputs, lora_request)
 
-        if is_encoder_decoder_inputs(processed_inputs):
-            decoder_inputs = SingletonInputsAdapter(
-                processed_inputs["decoder"])
-            encoder_inputs = SingletonInputsAdapter(
-                processed_inputs["encoder"])
-        else:
-            decoder_inputs = SingletonInputsAdapter(processed_inputs)
-            encoder_inputs = None
+        encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
         # TODO: Impl encoder-decoder
         if encoder_inputs is not None:
@@ -227,8 +218,9 @@ class Processor:
         sampling_params = params.clone()
         # If unset max tokens, then generate up to the max_model_len.
         if sampling_params.max_tokens is None:
-            sampling_params.max_tokens = (self.model_config.max_model_len -
-                                          len(decoder_inputs.prompt_token_ids))
+            sampling_params.max_tokens = (
+                self.model_config.max_model_len -
+                len(decoder_inputs["prompt_token_ids"]))
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
         sampling_params.update_from_tokenizer(
@@ -238,8 +230,8 @@ class Processor:
         sorted_mm_inputs: Optional[list[MultiModalKwargs]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
-        if (decoder_mm_inputs := decoder_inputs.multi_modal_data):
-            assert isinstance(decoder_mm_inputs, MultiModalKwargs)
+        if decoder_inputs["type"] == "multimodal":
+            decoder_mm_inputs = decoder_inputs["mm_kwargs"]
 
             # The output of merged multi-modal processor (`decoder_mm_inputs`)
             # contains the kwargs for all items from all modalities.
@@ -260,8 +252,8 @@ class Processor:
                 sorted_mm_positions,
                 sorted_mm_hashes,
             ) = merge_and_sort_multimodal_metadata(
-                decoder_inputs.multi_modal_placeholders,
-                decoder_inputs.multi_modal_hashes if self.use_hash else None,
+                decoder_inputs["mm_placeholders"],
+                decoder_inputs["mm_hashes"] if self.use_hash else None,
             )
 
             # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
@@ -287,8 +279,8 @@ class Processor:
 
         return EngineCoreRequest(
             request_id=request_id,
-            prompt=decoder_inputs.prompt,
-            prompt_token_ids=decoder_inputs.prompt_token_ids,
+            prompt=decoder_inputs.get("prompt"),
+            prompt_token_ids=decoder_inputs["prompt_token_ids"],
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
             mm_placeholders=sorted_mm_positions,
@@ -301,15 +293,16 @@ class Processor:
     def _validate_model_inputs(self,
                                inputs: ProcessorInputs,
                                lora_request: Optional[LoRARequest] = None):
-        if is_encoder_decoder_inputs(inputs):
-            # For encoder-decoder multimodal models, the max_prompt_len
-            # restricts the decoder prompt length
-            prompt_inputs = inputs["decoder" if self.model_config.
-                                   is_multimodal_model else "encoder"]
-        else:
-            prompt_inputs = inputs
+        encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
-        prompt_ids = SingletonInputsAdapter(prompt_inputs).prompt_token_ids
+        # For encoder-decoder multimodal models, the max_prompt_len
+        # restricts the decoder prompt length
+        if self.model_config.is_multimodal_model:
+            prompt_inputs = decoder_inputs
+        else:
+            prompt_inputs = encoder_inputs or decoder_inputs
+
+        prompt_ids = prompt_inputs["prompt_token_ids"]
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
