@@ -274,7 +274,7 @@ class MQLLMEngine:
                 elif isinstance(request, RPCSleepRequest):
                     self.sleep(request.value)
                 elif isinstance(request, RPCWakeUpRequest):
-                    self.wake_up()
+                    self.wake_up(request.tags)
                 elif isinstance(request, RPCIsSleepingRequest):
                     self._handle_is_sleeping_request(request)
                 else:
@@ -415,8 +415,8 @@ class MQLLMEngine:
     def sleep(self, level: int = 1) -> None:
         self.engine.sleep(level)
 
-    def wake_up(self) -> None:
-        self.engine.wake_up()
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        self.engine.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.engine.is_sleeping()
