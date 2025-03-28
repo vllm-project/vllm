@@ -164,7 +164,7 @@ Currently, there are no pre-build CPU images.
 ### Build image from source
 
 ```console
-$ docker build -f Dockerfile.cpu -t vllm-cpu-env --shm-size=4g .
+$ docker build -f docker/Dockerfile.cpu -t vllm-cpu-env --shm-size=4g .
 $ docker run -it \
              --rm \
              --network=host \
@@ -174,11 +174,11 @@ $ docker run -it \
 ```
 
 ::::{tip}
-For ARM or Apple silicon, use `Dockerfile.arm`
+For ARM or Apple silicon, use `docker/Dockerfile.arm`
 ::::
 
 ::::{tip}
-For IBM Z (s390x), use `Dockerfile.s390x` and in `docker run` use flag `--dtype float`
+For IBM Z (s390x), use `docker/Dockerfile.s390x` and in `docker run` use flag `--dtype float`
 ::::
 
 ## Supported features
