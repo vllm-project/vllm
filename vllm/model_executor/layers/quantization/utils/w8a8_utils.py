@@ -163,6 +163,7 @@ class Fp8LinearOp:
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        out_dtype: Optional[torch.dtype] = None,
         input_scale: Optional[torch.Tensor] = None,
         input_scale_ub: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
@@ -182,8 +183,13 @@ class Fp8LinearOp:
         if use_per_token_if_dynamic is None:
             use_per_token_if_dynamic = self.use_per_token_if_dynamic
 
+        if out_dtype is None:
+            out_dtype = input.dtype
+
         # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
         if self.cutlass_fp8_supported:
+            assert input.dtype != current_platform.fp8_dtype(
+            ), "FP8 input to cutlass is not currently implemented"
             qinput, x_scale = ops.scaled_fp8_quant(
                 input_2d,
                 input_scale,
@@ -193,7 +199,7 @@ class Fp8LinearOp:
             # Fused GEMM_DQ
             output = ops.cutlass_scaled_mm(qinput,
                                            weight,
-                                           out_dtype=input.dtype,
+                                           out_dtype=out_dtype,
                                            scale_a=x_scale,
                                            scale_b=weight_scale,
                                            bias=bias)
@@ -202,12 +208,15 @@ class Fp8LinearOp:
         # torch.scaled_mm supports per tensor weights + activations only
         # so fallback to naive if per channel or per token
         else:
-            # Maybe apply padding to output, see comment in __init__
-            qinput, x_scale = ops.scaled_fp8_quant(
-                input_2d,
-                input_scale,
-                num_token_padding=self.output_padding,
-                use_per_token_if_dynamic=use_per_token_if_dynamic)
+            if input.dtype != current_platform.fp8_dtype():
+                # Maybe apply padding to output, see comment in __init__
+                qinput, x_scale = ops.scaled_fp8_quant(
+                    input_2d,
+                    input_scale,
+                    num_token_padding=self.output_padding,
+                    use_per_token_if_dynamic=use_per_token_if_dynamic)
+            else:
+                qinput, x_scale = input_2d, input_scale
 
             per_tensor_weights = (weight_scale.numel() == 1)
             per_tensor_activations = (x_scale.numel() == 1)
@@ -216,7 +225,7 @@ class Fp8LinearOp:
                 # Fused GEMM_DQ
                 output = torch._scaled_mm(qinput,
                                           weight,
-                                          out_dtype=input.dtype,
+                                          out_dtype=out_dtype,
                                           scale_a=x_scale,
                                           scale_b=weight_scale,
                                           bias=bias)
@@ -240,7 +249,7 @@ class Fp8LinearOp:
                 # Fused GEMM_DQ Rowwise GEMM
                 output = torch._scaled_mm(qinput,
                                           weight,
-                                          out_dtype=input.dtype,
+                                          out_dtype=out_dtype,
                                           scale_a=x_scale,
                                           scale_b=weight_scale.t(),
                                           bias=bias)
