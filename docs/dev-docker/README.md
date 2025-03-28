@@ -21,15 +21,15 @@ Pull the most recent validated docker image with `docker pull rocm/vllm-dev:main
 
 ## What is New
 
-- [Experimental AITER support](#aiter-use-cases)
-- [Experimental DeepSeek-V3 and DeepSeek-R1 support](#running-deepseek-v3-and-deepseek-r1)
-- Performance improvement for custom paged attention
-- Support for FP8 skinny GEMM
-- Bug fixes
+- [Improved DeepSeek-V3 and DeepSeek-R1 support](#running-deepseek-v3-and-deepseek-r1)
+- Initial Gemma-3 enablement
+- Detokenizer disablement
+- Torch.compile support
 
 ## Performance Results
 
 The data in the following tables is a reference point to help users validate observed performance. It should not be considered as the peak performance that can be delivered by AMD Instinct™ MI300X accelerator with vLLM. See the MLPerf section in this document for information about MLPerf 4.1 inference results. The performance numbers above were collected using the steps below.
+*Note Benchmarks were run with benchmark scripts from [v0.6.5](https://github.com/vllm-project/vllm/tree/v0.6.5/benchmarks)*
 
 ### Throughput Measurements
 
@@ -37,14 +37,14 @@ The table below shows performance data where a local inference client is fed req
 
 | Model | Precision | TP Size | Input | Output | Num Prompts | Max Num Seqs | Throughput (tokens/s) |
 |-------|-----------|---------|-------|--------|-------------|--------------|-----------------------|
-| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 3200 | 3200 | 15919.0  |
-|       |           |         | 128   | 4096   | 1500        | 1500         | 12053.3               |
-|       |           |         | 500   | 2000   | 2000        | 2000         | 13089.0               |
-|       |           |         | 2048  | 2048   | 1500        | 1500         | 8352.4                |
-| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 1500 | 1500 | 4219.7 |
-|       |           |         | 128   | 4096   | 1500        | 1500         | 3328.7                |
-|       |           |         | 500   | 2000   | 2000        | 2000         | 3109.3                |
-|       |           |         | 2048  | 2048   | 500         | 500          | 2121.7                |
+| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 3200 | 3200 | 15684.7  |
+|       |           |         | 128   | 4096   | 1500        | 1500         | 11761.5               |
+|       |           |         | 500   | 2000   | 2000        | 2000         | 12895.9               |
+|       |           |         | 2048  | 2048   | 1500        | 1500         | 8380.7                |
+| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 1500 | 1500 | 4218.6 |
+|       |           |         | 128   | 4096   | 1500        | 1500         | 3326.2                |
+|       |           |         | 500   | 2000   | 2000        | 2000         | 3113.4                |
+|       |           |         | 2048  | 2048   | 500         | 500          | 2112.1                |
 
 *TP stands for Tensor Parallelism.*
 
@@ -54,38 +54,38 @@ The table below shows latency measurement, which typically involves assessing th
 
 | Model | Precision | TP Size | Batch Size | Input | Output | MI300X Latency (sec) |
 |-------|-----------|----------|------------|--------|---------|-------------------|
-| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 17.654 |
-| | | | 2 | 128 | 2048 | 18.269 |
-| | | | 4 | 128 | 2048 | 18.561 |
-| | | | 8 | 128 | 2048 | 20.180  |
-| | | | 16 | 128 | 2048 | 22.541 |
-| | | | 32 | 128 | 2048 | 25.454 |
-| | | | 64 | 128 | 2048 | 33.666 |
-| | | | 128 | 128 | 2048 | 48.466 |
-| | | | 1 | 2048 | 2048 | 17.771 |
-| | | | 2 | 2048 | 2048 | 18.304 |
-| | | | 4 | 2048 | 2048 | 19.173 |
-| | | | 8 | 2048 | 2048 | 21.326 |
-| | | | 16 | 2048 | 2048 | 24.375 |
-| | | | 32 | 2048 | 2048 | 29.284 |
-| | | | 64 | 2048 | 2048 | 40.200 |
-| | | | 128 | 2048 | 2048 | 62.420 |
-| Llama 3.1 405B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 46.632 |
-| | | | 2 | 128 | 2048 | 47.370 |
-| | | | 4 | 128 | 2048 | 49.945 |
-| | | | 8 | 128 | 2048 | 53.010 |
-| | | | 16 | 128 | 2048 | 56.348 |
-| | | | 32 | 128 | 2048 | 65.222 |
-| | | | 64 | 128 | 2048 | 82.688 |
-| | | | 128 | 128 | 2048 | 115.980 |
-| | | | 1 | 2048 | 2048 | 46.918 |
-| | | | 2 | 2048 | 2048 | 48.132 |
-| | | | 4 | 2048 | 2048 | 52.281 |
-| | | | 8 | 2048 | 2048 | 55.874 |
-| | | | 16 | 2048 | 2048 | 61.822 |
-| | | | 32 | 2048 | 2048 | 76.925 |
-| | | | 64 | 2048 | 2048 | 105.400 |
-| | | | 128 | 2048 | 2048 | 162.503 |
+| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 17.662 |
+| | | | 2 | 128 | 2048 | 18.768 |
+| | | | 4 | 128 | 2048 | 19.282 |
+| | | | 8 | 128 | 2048 | 20.943  |
+| | | | 16 | 128 | 2048 | 23.388 |
+| | | | 32 | 128 | 2048 | 26.272 |
+| | | | 64 | 128 | 2048 | 34.514 |
+| | | | 128 | 128 | 2048 | 50.134 |
+| | | | 1 | 2048 | 2048 | 17.891 |
+| | | | 2 | 2048 | 2048 | 19.064 |
+| | | | 4 | 2048 | 2048 | 19.819 |
+| | | | 8 | 2048 | 2048 | 21.925 |
+| | | | 16 | 2048 | 2048 | 25.118 |
+| | | | 32 | 2048 | 2048 | 29.640 |
+| | | | 64 | 2048 | 2048 | 41.029 |
+| | | | 128 | 2048 | 2048 | 63.717 |
+| Llama 3.1 405B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 46.779 |
+| | | | 2 | 128 | 2048 | 47.136 |
+| | | | 4 | 128 | 2048 | 49.045 |
+| | | | 8 | 128 | 2048 | 53.145 |
+| | | | 16 | 128 | 2048 | 55.720 |
+| | | | 32 | 128 | 2048 | 64.996 |
+| | | | 64 | 128 | 2048 | 81.950 |
+| | | | 128 | 128 | 2048 | 114.799 |
+| | | | 1 | 2048 | 2048 | 47.448 |
+| | | | 2 | 2048 | 2048 | 47.764 |
+| | | | 4 | 2048 | 2048 | 51.338 |
+| | | | 8 | 2048 | 2048 | 56.915 |
+| | | | 16 | 2048 | 2048 | 61.934 |
+| | | | 32 | 2048 | 2048 | 76.136 |
+| | | | 64 | 2048 | 2048 | 104.868 |
+| | | | 128 | 2048 | 2048 | 159.555 |
 
 *TP stands for Tensor Parallelism.*
 
@@ -352,15 +352,18 @@ docker run -it --rm --ipc=host --network=host --group-add render \
     --privileged --security-opt seccomp=unconfined \
     --cap-add=CAP_SYS_ADMIN --cap-add=SYS_PTRACE \
     --device=/dev/kfd --device=/dev/dri --device=/dev/mem \
-    -e VLLM_USE_TRITON_FLASH_ATTN=0 \
-    -e  VLLM_MLA_DISABLE=1 \
+    -e VLLM_USE_TRITON_FLASH_ATTN=1 \
+    -e VLLM_USE_AITER=1 \
+    -e  VLLM_MLA_DISABLE=0 \
     rocm/vllm-dev:main
+
 # Online serving
 vllm serve deepseek-ai/DeepSeek-V3 \
     --disable-log-requests \
     --tensor-parallel-size 8 \
     --trust-remote-code \
-    --max-model-len 32768 
+    --max-model-len 131072 \
+    --block-size=1 
 
 python3 /app/vllm/benchmarks/benchmark_serving.py \
     --backend vllm \
@@ -375,10 +378,11 @@ python3 /app/vllm/benchmarks/benchmark_serving.py \
 python3 /app/vllm/benchmarks/benchmark_throughput.py --model deepseek-ai/DeepSeek-V3 \
     --input-len <> --output-len <> --tensor-parallel-size 8 \
     --quantization fp8 --kv-cache-dtype fp8 --dtype float16 \
-    --max-model-len 32768 --trust-remote-code
+    --max-model-len 32768 --block-size=1 --trust-remote-code
+
 # Offline Latency
-python benchmarks/benchmark_latency.py --model deepseek-ai/DeepSeek-V3 \
---tensor-parallel-size 8 --trust-remote-code --max-model-len 32768 \
+python /app/vllm/benchmarks/benchmark_latency.py --model deepseek-ai/DeepSeek-V3 \
+--tensor-parallel-size 8 --trust-remote-code --max-model-len 32768 --block-size=1 \
 --batch-size <> --input-len <> --output-len <>
 ```
 
@@ -483,7 +487,7 @@ To reproduce the release docker:
 ```bash
     git clone https://github.com/ROCm/vllm.git
     cd vllm
-    git checkout c0dd5adf68dd997d7d2c3f04da785d7ef9415e36
+    git checkout 51641aaa70d4dfb0ea1f3674b47a7d85f718847c
     docker build -f Dockerfile.rocm -t <your_tag> --build-arg USE_CYTHON=1 .
 ```
 
@@ -499,6 +503,12 @@ Use AITER release candidate branch instead:
 ```
 
 ## Changelog
+
+20250325_aiter:
+- Improved DeepSeek-V3/R1 performance
+- Initial Gemma-3 enablement
+- Detokenizer disablement
+- Torch.compile support
 
 20250305_aiter:
 - AITER improvements
