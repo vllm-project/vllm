@@ -55,14 +55,20 @@ def reference_linear_decode(q, k, v, kv_caches, slope_rate, slot_idx):
         output: Attention output tensor
     """
     B, H, _, D = q.shape
+    # Initialize output with the correct shape directly
     output = torch.zeros(B, H * D, dtype=q.dtype, device=q.device)
 
+    # Process each batch
     for b in range(B):
         slot_id = slot_idx[b].item()
-        if slot_id == -1:  # Skip padding positions
+
+        # Skip padding positions
+        if slot_id == -1:
             continue
 
+        # Process each attention head
         for h in range(H):
+            # Get decay rate
             decay = torch.exp(
                 torch.tensor(-slope_rate[h].item(),
                              device=q.device,
