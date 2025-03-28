@@ -65,6 +65,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.tokenizer import decode_tokens
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper,
@@ -283,14 +284,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             hf_inputs['audio_feature_lengths'] = feature_attention_mask.sum(-1)
         return hf_inputs
 
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -331,7 +324,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         (
             prompt_ids,
             mm_kwargs,
-            _,
+            is_update_applied,
         ) = self._cached_apply_hf_processor(
             prompt,
             mm_items,
@@ -352,19 +345,30 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         use_audio_in_video = hf_processor_mm_kwargs.get(
             "use_audio_in_video", False)
 
-        # Qwen2.5-Omni processor never applies any updates.
-        (
-            prompt_ids,
-            prompt,
-            mm_placeholders,
-        ) = self._apply_prompt_updates(
-            prompt_ids,
-            mm_prompt_updates,
-            mm_item_counts,
-        )
-        self._validate_mm_placeholders(mm_placeholders,
-                                       mm_item_counts,
-                                       use_audio_in_video=use_audio_in_video)
+        if is_update_applied:
+            mm_placeholders = self._find_mm_placeholders(
+                mm_prompt_updates,
+                prompt_ids,
+                mm_item_counts,
+            )
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+
+            tokenizer = self.info.get_tokenizer()
+            prompt = decode_tokens(tokenizer, prompt_ids)
+        else:
+            (
+                prompt_ids,
+                prompt,
+                mm_placeholders,
+            ) = self._apply_prompt_updates(
+                prompt_ids,
+                mm_prompt_updates,
+                mm_item_counts,
+            )
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+
+        tokenizer = self.info.get_tokenizer()
+        prompt = decode_tokens(tokenizer, prompt_ids)
 
         mm_placeholder_ranges = {
             modality: [item.to_range() for item in placeholders]
