@@ -151,38 +151,54 @@ def apply_top_k_top_p(
 
     The logits tensor may be updated in-place.
     """
-    if p is None:
-        if k is None:
-            return logits
-
-        # Avoid sorting vocab for top-k only case.
-        return apply_top_k_only(logits, k)
-
-    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
-
     if k is not None:
-        # Apply top-k.
-        top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
-        # Get all the top_k values.
-        top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
-        top_k_mask = logits_sort < top_k_mask
-        logits_sort.masked_fill_(top_k_mask, -float("inf"))
+        logits = apply_top_k(logits, k)
 
     if p is not None:
-        # Apply top-p.
-        probs_sort = logits_sort.softmax(dim=-1)
-        probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
-        top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
-        # at least one
-        top_p_mask[:, -1] = False
-        logits_sort.masked_fill_(top_p_mask, -float("inf"))
+        logits = apply_top_p(logits, p)
 
-    # Re-sort the probabilities.
-    logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
     return logits
 
 
-def apply_top_k_only(
+def apply_top_p(
+    logits: torch.Tensor,
+    p: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Apply top-p mask to the logits.
+    """
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+    probs = logits.softmax(dim=-1)
+    probs_sort = logits_sort.softmax(dim=-1)
+    cumprob = probs_sort.clone()
+    torch.cumsum(cumprob, dim=-1, out=cumprob)
+    top_p_mask = cumprob <= 1 - p.unsqueeze(dim=1)
+    top_p_mask[:, -1] = False  # at least one
+    top_p_count = top_p_mask.sum(dim=-1).unsqueeze(1)
+    top_p_cutoff = logits_sort.gather(-1, top_p_count)
+    elements_to_discard = logits < top_p_cutoff
+
+    # Handle corner case where there are multiple elements that equal the
+    # cutoff value. Need to fallback to the scatter-based approach which
+    # can be slow on TPU. In practice, it should be rare to have duplicate
+    # elements in the logits, so performance shouldn't be a big concern here.
+    # This is just for theoretical correctness.
+    probs.masked_fill_(elements_to_discard, 0)
+    top_p_cutoff_prob = probs_sort.gather(-1, top_p_count)
+    if torch.any((probs.sum(dim=-1) - top_p_cutoff_prob) >= p):
+        if current_platform.is_tpu():
+            logger.warning("Falling back to scatter-based top-p since there "
+                "are duplicate elements in the logits. This may be slow.")
+        # Mask the sorted logits and then scatter them back to the pre-sort order.
+        logits_sort.masked_fill_(top_p_mask, -float("inf"))
+        logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort) 
+    else:
+        logits.masked_fill_(elements_to_discard, -float("inf"))
+
+    return logits
+
+
+def apply_top_k(
     logits: torch.Tensor,
     k: torch.Tensor,
 ) -> torch.Tensor:
