@@ -2080,8 +2080,9 @@ class LLMEngine:
             guided_decoding.backend = guided_decoding.backend or \
                 self.decoding_config.guided_decoding_backend
 
-            logger.debug("Reasoning backend: %s",
-                         self.decoding_config.reasoning_backend)
+            if self.decoding_config.reasoning_backend is not None:
+                logger.debug("Building with reasoning backend %s",
+                             self.decoding_config.reasoning_backend)
 
             processor = get_local_guided_decoding_logits_processor(
                 guided_params=guided_decoding,
