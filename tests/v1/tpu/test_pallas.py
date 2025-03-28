@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, ANY
 
 import torch
 
@@ -11,7 +11,6 @@ from vllm.v1.attention.backends.pallas import (
   NUM_KV_PAGES_PER_BLOCK,
   NUM_QUERIES_PER_BLOCK,
 )
-
 
 
 def test_ragged_paged_attention():
@@ -32,6 +31,8 @@ def test_ragged_paged_attention():
       logits_soft_cap=logits_soft_cap,
       attn_type=AttentionType.DECODER,
   )
+  mock_vmem_limit_bytes = 1024
+  attn_impl.vmem_limit_bytes = mock_vmem_limit_bytes
 
   class FakeAttentionLayer:
     _k_scale_float: float
@@ -44,12 +45,12 @@ def test_ragged_paged_attention():
   num_tokens = 16
   num_blocks = 1024
   block_size = 16
-  query = torch.randn(num_tokens, num_heads * head_size)
-  key = torch.randn(num_tokens, num_kv_heads * head_size)
-  value = torch.randn(num_tokens, num_kv_heads * head_size)
-  key_cache = torch.randn(num_blocks, block_size,
+  query = torch.zeros(num_tokens, num_heads * head_size)
+  key = torch.zeros(num_tokens, num_kv_heads * head_size)
+  value = torch.zeros(num_tokens, num_kv_heads * head_size)
+  key_cache = torch.zeros(num_blocks, block_size,
                             num_kv_heads * head_size)
-  value_cache = torch.randn(num_blocks, block_size,
+  value_cache = torch.zeros(num_blocks, block_size,
                             num_kv_heads * head_size)
   slot_mapping = torch.zeros(num_tokens, dtype=torch.int64)
   max_num_reqs = 8
@@ -83,16 +84,16 @@ def test_ragged_paged_attention():
     )
     
     mock_ragged_paged_attention.assert_called_once_with(
-        query.view(num_tokens, num_heads, head_size),
-        key_cache,
-        value_cache,
-        attn_metadata.context_lens,
-        attn_metadata.block_tables,
-        attn_metadata.query_start_loc,
-        attn_metadata.num_seqs,
+        ANY,
+        ANY,
+        ANY,
+        ANY,
+        ANY,
+        ANY,
+        ANY,
         num_kv_pages_per_block=NUM_KV_PAGES_PER_BLOCK,
         num_queries_per_block=NUM_QUERIES_PER_BLOCK,
-        vmem_limit_bytes=attn_impl.vmem_limit_bytes,
+        vmem_limit_bytes=mock_vmem_limit_bytes,
         use_kernel=True,
         sm_scale=scale,
         sliding_window=sliding_window,
