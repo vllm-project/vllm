@@ -3,7 +3,6 @@
 import pytest
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ....conftest import _ImageAssets
 from ...utils import build_model_context
@@ -34,11 +33,8 @@ def test_processor_override(
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    tokenizer = cached_tokenizer_from_config(ctx.model_config)
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        ctx.model_config,
-        tokenizer=tokenizer,
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    tokenizer = processor.info.get_tokenizer()
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
 
     # Build the image str / prompt based on the number of images we pass

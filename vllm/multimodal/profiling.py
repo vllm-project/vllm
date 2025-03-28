@@ -3,18 +3,18 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar, cast
+from typing import Generic, NamedTuple, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
 import vllm.envs as envs
-from vllm.inputs import DummyData
 from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                     MultiModalInputs)
+                     MultiModalInputs, MultiModalKwargs,
+                     MultiModalPlaceholderDict)
 from .processing import BaseMultiModalProcessor, BaseProcessingInfo
 
 logger = init_logger(__name__)
@@ -29,6 +29,20 @@ class ProcessorInputs:
     prompt_text: str
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
+
+
+class DummyEncoderData(NamedTuple):
+    """Dummy data used for profiling."""
+
+    prompt_token_ids: list[int]
+
+
+class DummyDecoderData(NamedTuple):
+    """Dummy data used for profiling."""
+
+    prompt_token_ids: list[int]
+    multi_modal_data: MultiModalKwargs
+    multi_modal_placeholders: MultiModalPlaceholderDict
 
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
@@ -179,13 +193,7 @@ class MultiModalProfiler(Generic[_I]):
                 "tokens.")
         return mm_inputs, total_placeholders_by_modality
 
-    def get_encoder_dummy_data(
-        self,
-        seq_len: int,
-    ) -> DummyData:
-        # Avoid circular import
-        from vllm.sequence import SequenceData
-
+    def get_encoder_dummy_data(self, seq_len: int) -> DummyEncoderData:
         mm_inputs, _ = self.get_and_validate_mm_inputs(seq_len)
         mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
 
@@ -197,19 +205,9 @@ class MultiModalProfiler(Generic[_I]):
         num_tokens_to_pad = max(total_len, seq_len) - total_len
         encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
 
-        return DummyData(
-            seq_data=SequenceData.from_seqs(encoder_prompt_token_ids),
-            multi_modal_data=None,
-            multi_modal_placeholders=None,
-        )
+        return DummyEncoderData(encoder_prompt_token_ids)
 
-    def get_decoder_dummy_data(
-        self,
-        seq_len: int,
-    ) -> DummyData:
-        # Avoid circular import
-        from vllm.sequence import SequenceData
-
+    def get_decoder_dummy_data(self, seq_len: int) -> DummyDecoderData:
         (mm_inputs, total_placeholders_by_modality
          ) = self.get_and_validate_mm_inputs(seq_len)
 
@@ -231,16 +229,11 @@ class MultiModalProfiler(Generic[_I]):
                 "and/or reduce `mm_counts`.", seq_len, total_len,
                 total_placeholders_by_modality)
 
-            return DummyData(
-                seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),
-                multi_modal_data=None,
-                multi_modal_placeholders=None,
-            )
+        if total_len < seq_len:
+            prompt_token_ids.extend([0] * (seq_len - total_len))
 
-        prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
-
-        return DummyData(
-            seq_data=SequenceData.from_seqs(prompt_token_ids),
+        return DummyDecoderData(
+            prompt_token_ids=prompt_token_ids,
             multi_modal_data=mm_inputs["mm_kwargs"],
             multi_modal_placeholders=mm_inputs["mm_placeholders"],
         )
