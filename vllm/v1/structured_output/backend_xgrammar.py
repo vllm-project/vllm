@@ -26,6 +26,9 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
+        self.disable_any_whitespace = (
+            "disable-any-whitespace"
+            in vllm_config.decoding_config.guided_decoding_backend)
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
@@ -74,8 +77,8 @@ class XgrammarBackend(StructuredOutputBackend):
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
-            ctx = self.compiler.compile_json_schema(grammar_spec,
-                                                    any_whitespace=False)
+            ctx = self.compiler.compile_json_schema(
+                grammar_spec, any_whitespace=not self.disable_any_whitespace)
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_builtin_json_grammar()
         elif request_type == StructuredOutputOptions.GRAMMAR:

@@ -23,12 +23,14 @@ def main(args: Namespace):
     outputs = model.embed(prompts)
 
     # Print the outputs.
+    print("\nGenerated Outputs:\n" + "-" * 60)
     for prompt, output in zip(prompts, outputs):
         embeds = output.outputs.embedding
         embeds_trimmed = ((str(embeds[:16])[:-1] +
                            ", ...]") if len(embeds) > 16 else embeds)
-        print(f"Prompt: {prompt!r} | "
+        print(f"Prompt: {prompt!r} \n"
               f"Embeddings: {embeds_trimmed} (size={len(embeds)})")
+        print("-" * 60)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,16 @@ def cutlass_block_fp8_supported() -> bool:
     return ops.cutlass_scaled_mm_supports_block_fp8(capability)
 
 
+def cutlass_group_gemm_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_group_gemm_supported(capability)
+
+
 CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
 CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
@@ -179,7 +189,7 @@ class Fp8LinearOp:
         # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
         if self.cutlass_fp8_supported:
             assert input.dtype != current_platform.fp8_dtype(
-            ), "FP8 input to cutlass is not supported"
+            ), "FP8 input to cutlass is not currently implemented"
             qinput, x_scale = ops.scaled_fp8_quant(
                 input_2d,
                 input_scale,

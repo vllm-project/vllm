@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import bisect
 import time
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
@@ -16,7 +17,6 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
-from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
@@ -87,7 +87,9 @@ class TPUModelRunner:
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
-        self.max_num_reqs = scheduler_config.max_num_seqs
+        # InputBatch needs to work with sampling tensors greater than padding
+        # to avoid dynamic shapes. Also, avoid suboptimal alignment.
+        self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
@@ -99,7 +101,6 @@ class TPUModelRunner:
         self.hidden_size = model_config.get_hidden_size()
 
         # Multi-modal data support
-        self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
         # TODO: Support M-RoPE (e.g, Qwen2-VL)
@@ -108,6 +109,7 @@ class TPUModelRunner:
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
             scheduler_config=scheduler_config,
+            mm_registry=self.mm_registry,
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
@@ -170,6 +172,10 @@ class TPUModelRunner:
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
+        self.num_tokens_paddings = _get_paddings(
+            min_token_size=16,
+            max_token_size=self.max_num_tokens,
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
@@ -279,9 +285,6 @@ class TPUModelRunner:
                 req_data.num_computed_tokens)
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
-        # Check if the batch has changed. If not, we can skip copying the
-        # sampling metadata from CPU to GPU.
-        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -300,9 +303,6 @@ class TPUModelRunner:
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        # TODO This slices tensors to copy to device, triggering recompilation.
-        if batch_changed:
-            self.input_batch.refresh_sampling_metadata()
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     def get_model(self) -> nn.Module:
@@ -428,7 +428,7 @@ class TPUModelRunner:
 
         # Do the padding and copy the tensors to the TPU.
         padded_total_num_scheduled_tokens = _get_padded_token_len(
-            total_num_scheduled_tokens)
+            self.num_tokens_paddings, total_num_scheduled_tokens)
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
@@ -579,7 +579,6 @@ class TPUModelRunner:
 
         # Prepare inputs
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
-
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -597,14 +596,12 @@ class TPUModelRunner:
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids
             inputs_embeds = None
-        sampling_metadata = self.input_batch.sampling_metadata
         num_reqs = self.input_batch.num_reqs
-        # NOTE (NickLucche) here we sync with TPU: if there's any shape
-        # mismatch in pre-processing, it will trigger a small recompilation
-        # of the code thus far. Forward graph remains untouched.
+        # NOTE (NickLucche) here we sync with TPU: sampling params tensors
+        # are copied to device in chunks of pre-compiled padded shape to
+        # avoid recompilations.
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_sampling_metadata(sampling_metadata, logits_indices,
-                                    num_reqs, self.device)
+            from_input_batch(self.input_batch, logits_indices)
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
@@ -772,52 +769,45 @@ class TPUModelRunner:
         logger.info("Compiling the model with different input shapes.")
 
         start = time.perf_counter()
-        num_tokens = 16
-        while True:
+        for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(self.kv_caches, num_tokens)
             xm.mark_step()
-            if num_tokens >= self.max_num_tokens:
-                break
-            num_tokens *= 2
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
 
         logger.info("Compiling sampling with different input shapes.")
         start = time.perf_counter()
-        num_tokens = 16
         hsize = self.model_config.get_hidden_size()
         device = self.device
         # Compile sampling step for different model+sampler outputs in bucketed
         # n_tokens x max_num_reqs. Graph is really small so this is fine.
-        while True:
+        for num_tokens in self.num_tokens_paddings:
             num_reqs_to_sample = MIN_NUM_SEQS
             dummy_hidden = torch.randn((num_tokens, hsize),
                                        device=device,
                                        dtype=torch.bfloat16)
+            # Compile for [8, 16, .., 128,.., `self.max_num_reqs`]
             while True:
-                # Default metadata is an all_greedy setup. But since the
-                # `do_argmax` flag is a tensor, we still compile the full graph
-                meta = self.input_batch.sampling_metadata
                 indices = torch.zeros(
                     num_reqs_to_sample,
                     dtype=torch.int32,
                     device=device,
                 )
+                xm.mark_step()
                 sampling_meta = TPUSupportedSamplingMetadata.\
-                    from_sampling_metadata(meta, indices,
-                                           num_reqs_to_sample, device)
+                    from_input_batch(self.input_batch, indices)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
-                self.model.sample_from_hidden(dummy_hidden, sampling_meta)
-                xm.mark_step()
+                out = self.model.sample_from_hidden(dummy_hidden,
+                                                    sampling_meta)
+                out = out.cpu()
                 if num_reqs_to_sample >= self.max_num_reqs:
                     break
-                num_reqs_to_sample *= 2
-            if num_tokens >= self.max_num_tokens:
-                break
-            num_tokens *= 2
+                # Make sure to compile the `max_num_reqs` upper-limit case
+                num_reqs_to_sample = _get_padded_num_reqs_with_upper_limit(
+                    num_reqs_to_sample + 1, self.max_num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
@@ -923,10 +913,9 @@ class ModelWrapperV1(nn.Module):
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
         logits = self.compute_logits(sample_hidden_states)
-        # Greedy sampling can't be run without branching the graph on Sampler.
-        # Therefore do_argmax/all_greedy is checked here in a xla-friendly way.
-        # NOTE do_argmax is a scalar, this is just an optimized if/else.
-        out_tokens = torch.where(sampling_metadata.do_argmax,
+        # Optimized greedy sampling branch, tracing both paths in a single pass
+        # NOTE all_greedy is a scalar, this is just an optimized if/else.
+        out_tokens = torch.where(sampling_metadata.all_greedy,
                         torch.argmax(logits, dim=-1, keepdim=True),
                         self.sample(logits, sampling_metadata)\
                                             .sampled_token_ids)
@@ -949,12 +938,50 @@ def _get_padded_number(n: int, multiple: int) -> int:
     return ((n + multiple - 1) // multiple) * multiple
 
 
-def _get_padded_token_len(x: int) -> int:
-    if x <= 16:
-        return 16
-    return 1 << (x - 1).bit_length()
-
-
 def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
     res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
     return min(res, upper_limit)
+
+
+def _get_paddings(min_token_size: int, max_token_size: int,
+                  padding_gap: int) -> list[int]:
+    """Generate a list of padding size, starting from min_token_size, 
+    ending with a number that can cover max_token_size
+    
+    If padding_gap == 0 then:
+        increase 2X each time (exponential)
+    else:
+        first increase the size to twice, 
+        then increase the padding size by padding_gap.
+    """
+    paddings = []
+    num = min_token_size
+
+    if padding_gap == 0:
+        logger.info("Using exponential paddings:")
+        while num <= max_token_size:
+            logger.info("    %d", num)
+            paddings.append(num)
+            num *= 2
+
+    else:
+        logger.info("Using incremental paddings:")
+        while num <= padding_gap:
+            logger.info("    %d", num)
+            paddings.append(num)
+            num *= 2
+        num //= 2
+        while num < max_token_size:
+            num += padding_gap
+            logger.info("    %d", num)
+            paddings.append(num)
+
+    return paddings
+
+
+def _get_padded_token_len(paddings: list[int], x: int) -> int:
+    """Return the first element in paddings list greater or equal to x.
+    """
+    index = bisect.bisect_left(paddings, x)
+    assert index < len(paddings)
+    return paddings[index]

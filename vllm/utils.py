@@ -10,6 +10,7 @@ import datetime
 import enum
 import gc
 import getpass
+import hashlib
 import importlib
 import importlib.metadata
 import importlib.util
@@ -17,6 +18,7 @@ import inspect
 import ipaddress
 import multiprocessing
 import os
+import pickle
 import re
 import signal
 import socket
@@ -31,15 +33,17 @@ import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
-from collections import OrderedDict, UserDict, defaultdict
+from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
-                             Iterable, Iterator, Mapping)
+                             Iterable, Iterator, KeysView, Mapping)
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
+from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TypeVar, Union)
+                    Optional, Type, TypeVar, Union, cast, overload)
 from uuid import uuid4
 
+import cachetools
 import cloudpickle
 import numpy as np
 import numpy.typing as npt
@@ -57,7 +61,7 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -171,6 +175,7 @@ U = TypeVar("U")
 
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
+_T = TypeVar("_T")
 
 
 class _Sentinel:
@@ -204,6 +209,19 @@ class Counter:
         self.counter = 0
 
 
+class _MappingOrderCacheView(UserDict[_K, _V]):
+
+    def __init__(self, data: Mapping[_K, _V], ordered_keys: Mapping[_K, None]):
+        super().__init__(data)
+        self.ordered_keys = ordered_keys
+
+    def __iter__(self) -> Iterator[_K]:
+        return iter(self.ordered_keys)
+
+    def keys(self) -> KeysView[_K]:
+        return KeysView(self.ordered_keys)
+
+
 class CacheInfo(NamedTuple):
     hits: int
     total: int
@@ -216,45 +234,62 @@ class CacheInfo(NamedTuple):
         return self.hits / self.total
 
 
-class LRUCache(Generic[_K, _V]):
-    """Note: This class is not thread safe!"""
+class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
 
-    def __init__(self, capacity: int) -> None:
-        self.cache = OrderedDict[_K, _V]()
+    def __init__(self,
+                 capacity: float,
+                 getsizeof: Optional[Callable[[_V], float]] = None):
+        super().__init__(capacity, getsizeof)
         self.pinned_items = set[_K]()
         self.capacity = capacity
 
         self._hits = 0
         self._total = 0
 
-    def __contains__(self, key: _K) -> bool:
-        return key in self.cache
-
-    def __len__(self) -> int:
-        return len(self.cache)
-
-    def __getitem__(self, key: _K) -> _V:
-        value = self.cache[key]  # Raise KeyError if not exists
-        self.cache.move_to_end(key)
-        return value
-
-    def __setitem__(self, key: _K, value: _V) -> None:
-        self.put(key, value)
-
     def __delitem__(self, key: _K) -> None:
-        self.pop(key)
+        run_on_remove = key in self
+        value = self.__getitem__(key)
+        super().__delitem__(key)
+        if key in self.pinned_items:
+            # Todo: add warning to inform that del pinned item
+            self._unpin(key)
+        if run_on_remove:
+            self._on_remove(key, value)
+
+    @property
+    def cache(self) -> Mapping[_K, _V]:
+        """Return the internal cache dictionary in order (read-only)."""
+        return _MappingOrderCacheView(
+            self._Cache__data,  # type: ignore
+            self.order)
+
+    @property
+    def order(self) -> Mapping[_K, None]:
+        """Return the internal order dictionary (read-only)."""
+        return MappingProxyType(self._LRUCache__order)  # type: ignore
 
     def stat(self) -> CacheInfo:
         return CacheInfo(hits=self._hits, total=self._total)
 
     def touch(self, key: _K) -> None:
-        self.cache.move_to_end(key)
+        self._LRUCache__update(key)  # type: ignore
 
-    def get(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
-        value: Optional[_V]
-        if key in self.cache:
-            value = self.cache[key]
-            self.cache.move_to_end(key)
+    @overload
+    def get(self, key: _K, /) -> Optional[_V]:
+        ...
+
+    @overload
+    def get(self, key: _K, /, default: Union[_V, _T]) -> Union[_V, _T]:
+        ...
+
+    def get(self,
+            key: _K,
+            /,
+            default: Optional[Union[_V,
+                                    _T]] = None) -> Optional[Union[_V, _T]]:
+        value: Optional[Union[_V, _T]]
+        if key in self:
+            value = self.__getitem__(key)
 
             self._hits += 1
         else:
@@ -263,60 +298,76 @@ class LRUCache(Generic[_K, _V]):
         self._total += 1
         return value
 
+    @overload
+    def pop(self, key: _K) -> _V:
+        ...
+
+    @overload
+    def pop(self, key: _K, default: Union[_V, _T]) -> Union[_V, _T]:
+        ...
+
+    def pop(self,
+            key: _K,
+            default: Optional[Union[_V,
+                                    _T]] = None) -> Optional[Union[_V, _T]]:
+        value: Optional[Union[_V, _T]]
+        if key not in self:
+            return default
+
+        value = self[key]
+        del self[key]
+        return value
+
     def put(self, key: _K, value: _V) -> None:
-        self.cache[key] = value
-        self.cache.move_to_end(key)
-        self._remove_old_if_needed()
+        self.__setitem__(key, value)
 
     def pin(self, key: _K) -> None:
         """
         Pins a key in the cache preventing it from being
         evicted in the LRU order.
         """
-        if key not in self.cache:
+        if key not in self:
             raise ValueError(f"Cannot pin key: {key} not in cache.")
         self.pinned_items.add(key)
 
     def _unpin(self, key: _K) -> None:
+        """
+        Unpins a key in the cache allowing it to be
+        evicted in the LRU order.
+        """
         self.pinned_items.remove(key)
 
     def _on_remove(self, key: _K, value: Optional[_V]) -> None:
         pass
 
     def remove_oldest(self, *, remove_pinned: bool = False) -> None:
-        if not self.cache:
+        if len(self) == 0:
             return
 
+        self.popitem(remove_pinned=remove_pinned)
+
+    def _remove_old_if_needed(self) -> None:
+        while self.currsize > self.capacity:
+            self.remove_oldest()
+
+    def clear(self) -> None:
+        while len(self) > 0:
+            self.remove_oldest(remove_pinned=True)
+
+    def popitem(self, remove_pinned: bool = False):
+        """Remove and return the `(key, value)` pair least recently used."""
         if not remove_pinned:
             # pop the oldest item in the cache that is not pinned
             lru_key = next(
-                (key for key in self.cache if key not in self.pinned_items),
+                (key for key in self.order if key not in self.pinned_items),
                 ALL_PINNED_SENTINEL)
             if lru_key is ALL_PINNED_SENTINEL:
                 raise RuntimeError("All items are pinned, "
                                    "cannot remove oldest from the cache.")
         else:
-            lru_key = next(iter(self.cache))
-        self.pop(lru_key)  # type: ignore
-
-    def _remove_old_if_needed(self) -> None:
-        while len(self.cache) > self.capacity:
-            self.remove_oldest()
-
-    def pop(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
-        run_on_remove = key in self.cache
-        value = self.cache.pop(key, default)
-        # remove from pinned items
-        if key in self.pinned_items:
-            self._unpin(key)
-        if run_on_remove:
-            self._on_remove(key, value)
-        return value
-
-    def clear(self) -> None:
-        while len(self.cache) > 0:
-            self.remove_oldest(remove_pinned=True)
-        self.cache.clear()
+            lru_key = next(iter(self.order))
+        value = self.pop(cast(_K, lru_key))
+        return (lru_key, value)
 
 
 class PyObjectCache:
@@ -527,7 +578,7 @@ def get_open_port() -> int:
         dp_port = envs.VLLM_DP_MASTER_PORT
         while True:
             port = _get_open_port()
-            if port >= dp_port and port < dp_port + 10:
+            if dp_port <= port < dp_port + 10:
                 continue
             return port
     return _get_open_port()
@@ -1544,9 +1595,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[type[T], _V]):
+class ClassRegistry(UserDict[Type[T], _V]):
 
-    def __getitem__(self, key: type[T]) -> _V:
+    def __getitem__(self, key: Type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
@@ -1577,18 +1628,21 @@ def is_navi() -> bool:
     return archName is not None and "gfx1" in archName
 
 
-def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
+def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    return torch.ops._C.weak_ref_tensor(tensor)
+    if isinstance(tensor, torch.Tensor):
+        return torch.ops._C.weak_ref_tensor(tensor)
+    else:
+        return tensor
 
 
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
-) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:
+) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
@@ -2133,11 +2187,11 @@ def make_zmq_socket(
     if socket_type == zmq.constants.PULL:
         socket.setsockopt(zmq.constants.RCVHWM, 0)
         socket.setsockopt(zmq.constants.RCVBUF, buf_size)
-        socket.connect(path)
+        socket.bind(path)
     elif socket_type == zmq.constants.PUSH:
         socket.setsockopt(zmq.constants.SNDHWM, 0)
         socket.setsockopt(zmq.constants.SNDBUF, buf_size)
-        socket.bind(path)
+        socket.connect(path)
     else:
         raise ValueError(f"Unknown Socket Type: {socket_type}")
 
@@ -2145,7 +2199,11 @@ def make_zmq_socket(
 
 
 @contextlib.contextmanager
-def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
+def zmq_socket_ctx(
+    path: str,
+    socket_type: Any,
+    linger: int = 0,
+) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
@@ -2156,7 +2214,7 @@ def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
         logger.debug("Got Keyboard Interrupt.")
 
     finally:
-        ctx.destroy(linger=0)
+        ctx.destroy(linger=linger)
 
 
 def is_in_ray_actor():
@@ -2181,6 +2239,11 @@ def _maybe_force_spawn():
     if cuda_is_initialized():
         reason = "CUDA is initialized"
     elif is_in_ray_actor():
+        # even if we choose to spawn, we need to pass the ray address
+        # to the subprocess so that it knows how to connect to the ray cluster.
+        # env vars are inherited by subprocesses, even if we use spawn.
+        import ray
+        os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reason = "In a Ray actor and can only be spawned"
 
     if reason is not None:
@@ -2448,3 +2511,33 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
         return wrapper
 
     return decorator
+
+
+# Only relevant for models using ALiBi (e.g, MPT)
+def check_use_alibi(model_config: ModelConfig) -> bool:
+    return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
+            or ("BloomForCausalLM" in getattr(model_config.hf_config,
+                                              "architectures", []))  # Bloom
+            or getattr(model_config.hf_text_config, "position_encoding_type",
+                       "") == "alibi"  # codellm_1b_alibi
+            or
+            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
+             and model_config.hf_text_config.attn_config.get("alibi", False)))
+
+
+def sha256(input) -> int:
+    """Hash any picklable Python object using SHA-256.
+
+    The input is serialized using pickle before hashing, which allows
+    arbitrary Python objects to be used. Note that this function does
+    not use a hash seed—if you need one, prepend it explicitly to the input.
+
+    Args:
+        input: Any picklable Python object.
+
+    Returns:
+        An integer representing the SHA-256 hash of the serialized input.
+    """
+    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
+                          byteorder="big")

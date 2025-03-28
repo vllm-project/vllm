@@ -104,6 +104,7 @@ _TEXT_GENERATION_MODELS = {
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
+    "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
     # [Encoder-decoder]
@@ -200,7 +201,7 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _FALLBACK_MODEL = {
-    "TransformersModel": ("transformers", "TransformersModel"),
+    "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
 
@@ -424,7 +425,7 @@ class _ModelRegistry:
 
         # make sure Transformers fallback are put at the last
         if len(normalized_arch) != len(architectures):
-            normalized_arch.append("TransformersModel")
+            normalized_arch.append("TransformersForCausalLM")
         return normalized_arch
 
     def inspect_model_cls(
