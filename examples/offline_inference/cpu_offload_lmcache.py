@@ -8,12 +8,12 @@ Learn more about LMCache in https://github.com/LMCache/LMCache.
 """
 import os
 import time
-import vllm.envs as envs
 
 from lmcache.experimental.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME
 
-from vllm import EngineArgs, LLM, SamplingParams
+import vllm.envs as envs
+from vllm import LLM, EngineArgs, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.utils import FlexibleArgumentParser
 
@@ -29,7 +29,6 @@ os.environ["LMCACHE_CHUNK_SIZE"] = "256"
 os.environ["LMCACHE_LOCAL_CPU"] = "True"
 # Set local CPU memory limit to 5.0 GB
 os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5.0"
-
 
 # This example script runs two requests with a shared prefix.
 shared_prompt = "Hello, how are you?" * 1000
