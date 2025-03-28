@@ -68,7 +68,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
                                               UnloadLoRAAdapterRequest)
-from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -85,6 +84,7 @@ from vllm.entrypoints.openai.serving_transcription import (
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
+from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
