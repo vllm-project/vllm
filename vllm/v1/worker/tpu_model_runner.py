@@ -847,8 +847,8 @@ class TPUModelRunner:
                     dtype = kv_cache_spec.dtype
 
                     tpu_kv_cache = torch.zeros(kv_cache_shape,
-                                              dtype=dtype,
-                                              device=self.device)
+                                               dtype=dtype,
+                                               device=self.device)
 
                     kv_caches[layer_name] = tpu_kv_cache
                 else:

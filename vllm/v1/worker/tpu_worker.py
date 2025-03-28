@@ -136,7 +136,9 @@ class TPUWorker:
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                tpu_kv_cache = torch.tensor([], dtype=dtype, device=self.device)
+                tpu_kv_cache = torch.tensor([],
+                                            dtype=dtype,
+                                            device=self.device)
                 kv_caches[layer_name] = tpu_kv_cache
             else:
                 raise NotImplementedError
