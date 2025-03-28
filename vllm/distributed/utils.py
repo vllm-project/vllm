@@ -15,7 +15,6 @@ import torch
 from torch.distributed import ProcessGroup, TCPStore
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
-                                                _shutdown_backend,
                                                 _unregister_process_group,
                                                 is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
@@ -343,5 +342,7 @@ def stateless_destroy_torch_distributed_process_group(
     Destroy ProcessGroup returned by
         stateless_init_torch_distributed_process_group().
     """
+    # Lazy import for non-CUDA backends.
+    from torch.distributed.distributed_c10d import _shutdown_backend
     _shutdown_backend(pg)
     _unregister_process_group(pg.group_name)
