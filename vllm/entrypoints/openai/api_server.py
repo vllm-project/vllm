@@ -818,7 +818,8 @@ def build_app(args: Namespace) -> FastAPI:
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
-    if token := envs.VLLM_API_KEY or args.api_key:
+    # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
+    if token := args.api_key or envs.VLLM_API_KEY:
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):
