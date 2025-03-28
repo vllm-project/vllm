@@ -7,9 +7,6 @@ On the server side, run one of the following commands:
         --swap-space 16 \
         --disable-log-requests
 
-    (TGI backend)
-    ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
-
 On the client side, run:
     python benchmarks/benchmark_serving.py \
         --backend <backend> \
