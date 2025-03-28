@@ -13,11 +13,16 @@ class EagleProposer:
         self,
         vllm_config: VllmConfig,
         num_speculative_tokens: int,
+        device: torch.device,
     ):
         self.model = ...
         self.vllm_config = vllm_config
         self.num_speculative_tokens = num_speculative_tokens
         self.block_size = vllm_config.cache_config.block_size
+        self.arange = torch.arange(
+            vllm_config.scheduler_config.max_num_seqs,
+            device=device,
+        )
 
     def propose(
         self,
@@ -92,13 +97,12 @@ class EagleProposer:
         positions = target_positions[last_token_indices]
         hidden_states = sample_hidden_states
         attn_metadata.num_actual_tokens = batch_size
-        attn_metadata.query_start_loc = torch.arange(batch_size,
-                                                     device=positions.device)
+        attn_metadata.max_query_len = 1
+        attn_metadata.query_start_loc = self.arange[:batch_size]
         for _ in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             input_ids = draft_token_ids_list[-1]
             positions += 1
-            attn_metadata.max_query_len = 1
             attn_metadata.max_seq_len += 1
             attn_metadata.seq_lens += 1
             attn_metadata.slot_mapping = compute_slot_mapping(
@@ -150,10 +154,8 @@ def sample_token_ids(
 
 
 def compute_slot_mapping(
-    # [num_tokens]
-    positions: torch.Tensor,
-    # [batch_size, max_num_blocks_per_req]
-    block_table: torch.Tensor,
+    positions: torch.Tensor,  # [num_tokens]
+    block_table: torch.Tensor,  # [batch_size, max_num_blocks_per_req]
     block_size: int,
 ) -> torch.Tensor:  # [num_tokens]
     # [num_tokens]
