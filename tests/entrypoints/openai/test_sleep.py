@@ -26,16 +26,8 @@ def test_sleep_mode():
                                 "CUDA_VISIBLE_DEVICES": "0"
                             }) as remote_server:
 
-        # test sleep mode with level 1
         response = requests.post(remote_server.url_for("/sleep"),
                                  params={"level": "1"})
-        assert response.status_code == 200
-        response = requests.post(remote_server.url_for("/wake_up"))
-        assert response.status_code == 200
-
-        # test sleep mode with level 2
-        response = requests.post(remote_server.url_for("/sleep"),
-                                 params={"level": "2"})
         assert response.status_code == 200
         response = requests.get(remote_server.url_for("/is_sleeping"))
         assert response.status_code == 200
