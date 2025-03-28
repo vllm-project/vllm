@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import sys
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -95,6 +96,7 @@ if TYPE_CHECKING:
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_DP_RANK: int = 0
+    VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
@@ -269,6 +271,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # API key for vLLM API server
     "VLLM_API_KEY":
     lambda: os.environ.get("VLLM_API_KEY", None),
+
+    # Whether to log responses from API Server for debugging
+    "VLLM_DEBUG_LOG_API_SERVER_RESPONSE":
+    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").
+    lower() == "true",
 
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
@@ -619,6 +626,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Rank of the process in the data parallel setting
     "VLLM_DP_RANK":
     lambda: int(os.getenv("VLLM_DP_RANK", "0")),
+
+    # Rank of the process in the data parallel setting.
+    # Defaults to VLLM_DP_RANK when not set.
+    "VLLM_DP_RANK_LOCAL":
+    lambda: int(
+        os.getenv("VLLM_DP_RANK_LOCAL", sys.modules[__name__].VLLM_DP_RANK)),
 
     # World size of the data parallel setting
     "VLLM_DP_SIZE":
