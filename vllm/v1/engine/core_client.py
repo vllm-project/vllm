@@ -2,6 +2,7 @@
 import asyncio
 import queue
 import uuid
+import weakref
 from abc import ABC, abstractmethod
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -265,7 +266,9 @@ class MPClient(EngineCoreClient):
         # This will ensure resources created so far are closed
         # when the client is garbage collected,  even if an
         # exception is raised mid-construction.
-        self.resources = BackgroundResources(ctx=sync_ctx)
+        resources = BackgroundResources(ctx=sync_ctx)
+        self.resources = resources
+        self._finalizer = weakref.finalize(self, resources)
 
         # Paths for IPC.
         self.output_path = get_open_zmq_ipc_path()
@@ -293,7 +296,7 @@ class MPClient(EngineCoreClient):
 
     def shutdown(self):
         # Terminate background resources
-        self.resources()
+        self._finalizer()
 
     def _validate_alive(self, buffer: Any):
         if buffer == EngineCoreProc.ENGINE_CORE_DEAD:
@@ -343,10 +346,13 @@ class SyncMPClient(MPClient):
         shutdown_path = get_open_zmq_inproc_path()
         self.resources.shutdown_path = shutdown_path
 
+        self_weakref = weakref.ref(self)
+
         def process_outputs_socket():
             shutdown_socket = ctx.socket(zmq.PAIR)
             shutdown_socket.bind(shutdown_path)
             out_socket = make_zmq_socket(ctx, output_path, zmq.constants.PULL)
+            local_self = None
             try:
                 poller = zmq.Poller()
                 poller.register(shutdown_socket)
@@ -358,13 +364,16 @@ class SyncMPClient(MPClient):
                     if len(socks) == 2 or socks[0][0] == shutdown_socket:
                         # shutdown signal, exit thread.
                         break
-
+                    local_self = self_weakref()
+                    if local_self is None:
+                        # Instance is being gc'd, exit loop
+                        break
                     try:
                         (frame, ) = out_socket.recv_multipart(copy=False)
-                        self._validate_alive(frame.buffer)
+                        local_self._validate_alive(frame.buffer)
                         outputs = decoder.decode(frame.buffer)
                     except Exception as e:
-                        self.outputs_queue.put_nowait(e)
+                        local_self.outputs_queue.put_nowait(e)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
