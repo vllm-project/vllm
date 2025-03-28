@@ -699,16 +699,13 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             query.dtype,
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
-                    use_fp8_out_scale = (layer._fp8_out_scale
-                                         and layer._q_scale
+                    use_fp8_out_scale = (layer._out_scale and layer._q_scale
                                          and layer._prob_scale
                                          and self.kv_cache_dtype == "fp8")
-                    full_scales = (layer._q_scale.item(),
-                                   layer._k_scale.item(),
-                                   layer._v_scale.item(),
-                                   layer._prob_scale.item(),
-                                   layer._fp8_out_scale.item()
-                                   ) if use_fp8_out_scale else None
+                    full_scales = (
+                        layer._q_scale.item(), layer._k_scale.item(),
+                        layer._v_scale.item(), layer._prob_scale.item(),
+                        layer._out_scale.item()) if use_fp8_out_scale else None
                     out, _ = self.attn_func(
                         query,
                         key,
