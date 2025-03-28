@@ -4,7 +4,7 @@ from typing import Optional, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage)
-from vllm.entrypoints.openai.reasoning_parsers import ReasoningParser
+from vllm.reasoning import ReasoningParser
 
 
 class StreamingReasoningReconstructor:

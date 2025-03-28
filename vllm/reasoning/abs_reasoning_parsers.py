@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 class ReasoningParser:
     """
-    Abstract reasoning parser class that should not be used directly. 
+    Abstract reasoning parser class that should not be used directly.
     Provided and methods should be used in derived classes.
 
     It is used to extract reasoning content from the model output.
@@ -32,6 +32,36 @@ class ReasoningParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
+    @abstractmethod
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        """
+        Check if the reasoning content ends in the input_ids.
+
+        It is used in structured engines like `xgrammar` to check if the
+        reasoning content ends in the model output.
+
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output.
+
+        Returns:
+        bool
+            True if the reasoning content ends in the input_ids.
+        """
+
+    @abstractmethod
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        """
+        Extract content token ids from the input_ids.
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output.
+        Returns:
+        list[int]
+            The extracted content from the input_ids.
+        """
+
+    @abstractmethod
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
@@ -53,10 +83,7 @@ class ReasoningParser:
             A tuple containing the reasoning content and the content.
         """
 
-        raise NotImplementedError(
-            "AbstractReasoningParser.extract_reasoning_calls "
-            "has not been implemented!")
-
+    @abstractmethod
     def extract_reasoning_content_streaming(
         self,
         previous_text: str,
@@ -73,43 +100,6 @@ class ReasoningParser:
         the current tokens/diffs, but also the information about what has
         previously been parsed and extracted (see constructor)
         """
-        raise NotImplementedError(
-            "AbstractReasoningParser.extract_reasoning_content_streaming "
-            "has not been implemented!")
-
-    # TODO: need to rebase by PR #14428
-    @abstractmethod
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        """
-        Check if the reasoning content ends in the input_ids.
-        Parameters:
-        input_ids: list[int]
-            The input_ids of the model output.
-        Returns:
-        bool
-            True if the reasoning content ends in the input_ids.
-        """
-
-        raise NotImplementedError(
-            "AbstractReasoningParser.is_reasoning_end has"
-            "not been implemented!")
-
-    # TODO: need to rebase by PR #14428
-    @abstractmethod
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """
-        Extract content token ids from the input_ids.
-        Parameters:
-        input_ids: list[int]
-            The input_ids of the model output.
-        Returns:
-        list[int]
-            The extracted content from the input_ids.
-        """
-
-        raise NotImplementedError(
-            "AbstractReasoningParser.extract_content_ids has"
-            " not been implemented!")
 
 
 class ReasoningParserManager:
@@ -125,14 +115,16 @@ class ReasoningParserManager:
         if name in cls.reasoning_parsers:
             return cls.reasoning_parsers[name]
 
-        raise KeyError(f"reasoning helper: '{name}' not found in "
-                       "reasoning_parsers")
+        raise KeyError(
+            f"reasoning helper: '{name}' not found in reasoning_parsers")
 
     @classmethod
-    def _register_module(cls,
-                         module: type,
-                         module_name: Optional[Union[str, list[str]]] = None,
-                         force: bool = True) -> None:
+    def _register_module(
+        cls,
+        module: type,
+        module_name: Optional[Union[str, list[str]]] = None,
+        force: bool = True,
+    ) -> None:
         if not issubclass(module, ReasoningParser):
             raise TypeError("module must be subclass of ReasoningParser, "
                             f"but got {type(module)}")
@@ -149,13 +141,14 @@ class ReasoningParserManager:
 
     @classmethod
     def register_module(
-            cls,
-            name: Optional[Union[str, list[str]]] = None,
-            force: bool = True,
-            module: Union[type, None] = None) -> Union[type, Callable]:
+        cls,
+        name: Optional[Union[str, list[str]]] = None,
+        force: bool = True,
+        module: Union[type, None] = None,
+    ) -> Union[type, Callable]:
         """
         Register module with the given name or name list. it can be used as a
-        decoder(with module as None) or normal function(with module as not 
+        decoder(with module as None) or normal function(with module as not
         None).
         """
         if not isinstance(force, bool):
@@ -183,7 +176,7 @@ class ReasoningParserManager:
     @classmethod
     def import_reasoning_parser(cls, plugin_path: str) -> None:
         """
-        Import a user-defined reasoning parser by the path 
+        Import a user-defined reasoning parser by the path
         of the reasoning parser define file.
         """
         module_name = os.path.splitext(os.path.basename(plugin_path))[0]
