@@ -15,7 +15,6 @@ from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
-from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -130,7 +129,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         # Multi-modal data support
-        self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
@@ -1473,16 +1471,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 encoder_budget, max_num_mm_items, dummy_data_modality)
 
             # Create dummy batch of multimodal inputs.
-            dummy_request_data = self.input_registry.dummy_data_for_profiling(
+            dummy_request_data = self.mm_registry.get_decoder_dummy_data(
                 model_config=self.model_config,
                 seq_len=self.max_num_tokens,
-                mm_registry=self.mm_registry,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
-            if not isinstance(dummy_mm_data, MultiModalKwargs):
-                # TODO: Delete this check once input mapper is fully removed.
-                raise RuntimeError(
-                    "Legacy input mapper is not supported in V1")
 
             # Dummy data definition may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we
