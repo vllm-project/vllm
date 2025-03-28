@@ -47,9 +47,9 @@ This living user guide outlines a few known **important changes and limitations*
 | **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
 | **LoRA**                                    | <nobr>🟢 Functional ([PR #13096](https://github.com/vllm-project/vllm/pull/13096))</nobr>|
 | **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                                                        |
+| **FP8 KV Cache**                            | <nobr>🟢 Functional on Hopper devices ([PR #15191](https://github.com/vllm-project/vllm/pull/15191))</nobr>|
 | **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
 | **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
-| **FP8 KV Cache**                            | <nobr>🟡 Planned</nobr>                                                           |
 | **Structured Output Alternative Backends**  | <nobr>🟡 Planned</nobr>                                                           |
 | **Embedding Models**                        | <nobr>🟡 Planned ([RFC #12249](https://github.com/vllm-project/vllm/issues/12249))</nobr> |
 | **Mamba Models**                            | <nobr>🟡 Planned</nobr>                                                           |
@@ -133,8 +133,6 @@ in progress.
   See [here](https://github.com/orgs/vllm-project/projects/8) for the status of upcoming features and optimizations.
 
 #### Features to Be Supported
-
-- **FP8 KV Cache**: While vLLM V1 introduces new FP8 kernels for model weight quantization, support for an FP8 key–value cache is not yet available. Users must continue using FP16 (or other supported precisions) for the KV cache.
 
 - **Structured Output Alternative Backends**: Structured output alternative backends (outlines, guidance) support is planned. V1 currently
   supports only the `xgrammar:no_fallback` mode, meaning that it will error out if the output schema is unsupported by xgrammar.

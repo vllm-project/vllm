@@ -139,7 +139,8 @@ class InductorAdaptor(CompilerInterface):
         from torch._inductor.codecache import torch_key
         torch_factors = torch_key()
         factors.append(torch_factors)
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()[:10]
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()[:10]
         return hash_str
 
     def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
@@ -228,7 +229,20 @@ class InductorAdaptor(CompilerInterface):
                 inductor_compiled_graph = output
                 if inductor_compiled_graph is not None:
                     nonlocal file_path
-                    file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
+                    compiled_fn = inductor_compiled_graph.current_callable
+                    file_path = compiled_fn.__code__.co_filename  # noqa
+                    if not file_path.startswith(self.cache_dir):
+                        # hooked in the align_inputs_from_check_idxs function
+                        # in torch/_inductor/utils.py
+                        for cell in compiled_fn.__closure__:
+                            if not callable(cell.cell_contents):
+                                continue
+                            code = cell.cell_contents.__code__
+                            if code.co_filename.startswith(self.cache_dir):
+                                # this is the real file path
+                                # compiled from Inductor
+                                file_path = code.co_filename
+                                break
                     hash_str = inductor_compiled_graph._fx_graph_cache_key
                 return output
 
