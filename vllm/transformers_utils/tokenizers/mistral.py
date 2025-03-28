@@ -124,13 +124,15 @@ def find_tokenizer_file(files: List[str]):
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
-        raise OSError(f"Found {len(matched_files)} files matching the "
-                      f"pattern: {file_pattern}. Make sure only one Mistral "
-                      f"tokenizer is present in {files}.")
+        raise OSError(
+            f"Found {len(matched_files)} files matching the "
+            f"pattern: `{file_pattern.pattern}`. Make sure only one Mistral "
+            f"tokenizer is present in {files}.")
     elif len(matched_files) == 0:
-        raise OSError(f"Found {len(matched_files)} files matching the "
-                      f"pattern: {file_pattern}. Make sure that a Mistral "
-                      f"tokenizer is present in {files}.")
+        raise OSError(
+            f"Found {len(matched_files)} files matching the "
+            f"pattern: `{file_pattern.pattern}`. Make sure that a Mistral "
+            f"tokenizer is present in {files}.")
 
     return matched_files[0]
 
