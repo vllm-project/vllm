@@ -37,5 +37,12 @@ def test_sleep_mode():
         response = requests.post(remote_server.url_for("/sleep"),
                                  params={"level": "2"})
         assert response.status_code == 200
+        response = requests.get(remote_server.url_for("/is_sleeping"))
+        assert response.status_code == 200
+        assert response.json().get("is_sleeping") is True
+
         response = requests.post(remote_server.url_for("/wake_up"))
         assert response.status_code == 200
+        response = requests.get(remote_server.url_for("/is_sleeping"))
+        assert response.status_code == 200
+        assert response.json().get("is_sleeping") is False

@@ -5,7 +5,6 @@ from typing import Optional
 
 import pytest
 
-from tests.v1.engine.utils import PLP_APC_UNSUPPORTED_MSG
 from vllm import LLM, SamplingParams
 
 MODEL = "facebook/opt-125m"
@@ -51,7 +50,7 @@ def _get_test_sampling_params(
     """Generate random sampling params for a batch."""
 
     def get_mostly_n_gt1() -> int:
-        """Mostly n \in [2,20], ~1/3 n=1"""
+        r"""Mostly n \in [2,20], ~1/3 n=1"""
         x = random.randint(0, 28)
         if x < 10:
             return 1
@@ -98,17 +97,3 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
             raise AssertionError(
                 f"{len(completion_counts)} unique completions; expected"
                 f" {n}. Repeats: {repeats}")
-
-
-def test_llm_engine_refuses_prompt_logprobs_with_apc(vllm_model_apc):
-    """Test passes if LLMEngine raises an exception when it is configured
-    for automatic prefix caching and it receives a request with
-    prompt_logprobs enabled, which is incompatible."""
-    model: LLM = vllm_model_apc.model
-    with pytest.raises(ValueError) as excinfo:
-        model.generate(
-            "Hello, my name is",
-            SamplingParams(temperature=0.8, top_p=0.95, prompt_logprobs=5))
-
-    # Validate exception string is correct
-    assert str(excinfo.value) == PLP_APC_UNSUPPORTED_MSG

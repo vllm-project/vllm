@@ -237,11 +237,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     tool_choice: Optional[Union[Literal["none"], Literal["auto"],
                                 ChatCompletionNamedToolChoiceParam]] = "none"
 
-    # NOTE this will be ignored by VLLM -- the model determines the behavior
+    # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
 
     # doc: begin-chat-completion-sampling-params
+    best_of: Optional[int] = None
     use_beam_search: bool = False
     top_k: Optional[int] = None
     min_p: Optional[float] = None
@@ -478,6 +479,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             n=self.n,
+            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
@@ -546,7 +548,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if top_logprobs < 0:
                 raise ValueError("`top_logprobs` must be a positive value.")
 
-            if not data.get("logprobs"):
+            if top_logprobs > 0 and not data.get("logprobs"):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
@@ -648,6 +650,7 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: Optional[str] = None
     prompt: Union[list[int], list[list[int]], str, list[str]]
+    best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[dict[str, float]] = None
@@ -845,6 +848,7 @@ class CompletionRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             n=self.n,
+            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
@@ -1234,6 +1238,9 @@ class ChatCompletionLogProb(OpenAIBaseModel):
 
 
 class ChatCompletionLogProbsContent(ChatCompletionLogProb):
+    # Workaround: redefine fields name cache so that it's not
+    # shared with the super class.
+    field_names: ClassVar[Optional[set[str]]] = None
     top_logprobs: list[ChatCompletionLogProb] = Field(default_factory=list)
 
 

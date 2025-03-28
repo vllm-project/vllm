@@ -16,8 +16,17 @@ namespace vec_op {
   AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
   AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
 
+#define VLLM_DISPATCH_CASE_FLOATING_TYPES_FP8(...)        \
+  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
+  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
+  AT_DISPATCH_CASE(at::ScalarType::Float8_e5m2, __VA_ARGS__)
+
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
+
+#define VLLM_DISPATCH_FLOATING_TYPES_WITH_E5M2(TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(TYPE, NAME,                                \
+                     VLLM_DISPATCH_CASE_FLOATING_TYPES_FP8(__VA_ARGS__))
 
 #ifndef CPU_OP_GUARD
   #define CPU_KERNEL_GUARD_IN(NAME)
@@ -120,6 +129,8 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
   constexpr static int VEC_ELEM_NUM = 32;
 
   __m512i reg;
+
+  explicit BF16Vec32() : reg(_mm512_setzero_si512()) {}
 
   explicit BF16Vec32(const void* ptr) : reg((__m512i)_mm512_loadu_si512(ptr)) {}
 

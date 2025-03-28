@@ -17,7 +17,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.scheduler import SchedulerOutput
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
@@ -66,14 +66,21 @@ class TPUWorker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
+        # Delay profiler initialization to the start of the profiling.
+        # This is because in vLLM V1, MP runtime is initialized before the
+        # TPU Worker is initialized. The profiler server needs to start after
+        # MP runtime is initialized.
         self.profiler = None
+        self.profile_dir = None
         if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
-            self.profiler = xp.start_server(9012)
+
+        if self.model_config.seed is None:
+            self.model_config.seed = 0
 
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
@@ -93,7 +100,8 @@ class TPUWorker:
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        xm.set_rng_state(self.model_config.seed, self.device)
+        if self.model_config.seed is not None:
+            xm.set_rng_state(self.model_config.seed, self.device)
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
@@ -105,9 +113,16 @@ class TPUWorker:
         # can have slightly different XLA graphs.
         world_size = self.parallel_config.world_size
         rank = xr.global_ordinal()
-        per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                     f"tp{world_size}_rank{rank}")
-        xr.initialize_cache(per_rank_path, readonly=False)
+        # The PyTorch/XLA compilation cache uses the Torch IR to generate keys.
+        # Consequently, changes in optimization flags, which affect compilation
+        # results, don't change the cache key. This can result in the wrong
+        # compilation being used. To prevent this, disabling the XLA compilation
+        # cache during development is recommended.We can disable it by
+        # `export VLLM_XLA_CACHE_PATH=`
+        if envs.VLLM_XLA_CACHE_PATH:
+            per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
+                                         f"tp{world_size}_rank{rank}")
+            xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
@@ -164,9 +179,11 @@ class TPUWorker:
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
-            if self.profiler is None:
+            if self.profile_dir is None:
                 raise RuntimeError("Profiler is not enabled.")
             if is_start:
+                if self.profiler is None:
+                    self.profiler = xp.start_server(9012)
                 xp.start_trace(self.profile_dir)
             else:
                 xp.stop_trace()
@@ -185,7 +202,7 @@ class TPUWorker:
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:

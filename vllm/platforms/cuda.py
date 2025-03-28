@@ -20,8 +20,9 @@ from vllm.utils import import_pynvml
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
+    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
@@ -112,13 +113,14 @@ class CudaPlatformBase(Platform):
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         compilation_config = vllm_config.compilation_config
+        model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Multi-step scheduling is not supported (and not "
-                        "needed) on VLLM V1. Please launch without "
+                        "needed) on vLLM V1. Please launch without "
                         "--num-scheduler-steps.")
                 else:
                     parallel_config.worker_cls = \
@@ -142,14 +144,21 @@ class CudaPlatformBase(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
+
         # TODO(lucas): handle this more gracefully
-        if envs.VLLM_ATTENTION_BACKEND is not None \
-           and envs.VLLM_ATTENTION_BACKEND == "FLASHMLA" \
-           and cache_config.block_size != 64:
-            cache_config.block_size = 64
-            logger.info(
-                "FlashMLA: Forcing kv cache block size to 64 since this"
-                " is currently the only block size supported by the kernel.")
+        # Note: model_config may be None during testing
+        if model_config is not None and model_config.use_mla:
+            # if `VLLM_ATTENTION_BACKEND` is not set and we are using MLA, then
+            # we default to FlashMLA backend, so we need to force the blocksize
+            # here
+            use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None \
+                or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
+            from vllm.attention.ops.flashmla import is_flashmla_supported
+            if use_flashmla and is_flashmla_supported()[0] \
+                and cache_config.block_size != 64:
+                cache_config.block_size = 64
+                logger.info(
+                    "Forcing kv cache block size to 64 for FlashMLA backend.")
 
         if (parallel_config.data_parallel_size > 1
                 and compilation_config.use_cudagraph):
@@ -173,7 +182,15 @@ class CudaPlatformBase(Platform):
         if use_mla:
             # TODO(lucas): refactor to  be more concise
             #  we should probably consider factoring out V1 here
-            if selected_backend == _Backend.FLASHMLA:
+            if selected_backend == _Backend.TRITON_MLA or block_size != 64:
+                if use_v1:
+                    logger.info_once("Using Triton MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "triton_mla.TritonMLABackend")
+                else:
+                    logger.info("Using Triton MLA backend.")
+                    return "vllm.attention.backends.triton_mla.TritonMLABackend"
+            else:
                 from vllm.attention.backends.flashmla import (
                     is_flashmla_supported)
                 if not is_flashmla_supported()[0]:
@@ -195,18 +212,15 @@ class CudaPlatformBase(Platform):
                         logger.info("Using FlashMLA backend.")
                         return ("vllm.attention.backends."
                                 "flashmla.FlashMLABackend")
-
-            if use_v1:
-                logger.info_once("Using Triton MLA backend on V1 engine.")
-                return ("vllm.v1.attention.backends.mla."
-                        "triton_mla.TritonMLABackend")
-            else:
-                logger.info("Using Triton MLA backend.")
-                return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if use_v1:
-            logger.info_once("Using Flash Attention backend on V1 engine.")
-            return ("vllm.v1.attention.backends.flash_attn."
-                    "FlashAttentionBackend")
+            if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+                logger.info_once("Using Triton backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "triton_attn.TritonAttentionBackend")
+            if cls.has_device_capability(80):
+                logger.info_once("Using Flash Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "flash_attn.FlashAttentionBackend")
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
@@ -232,15 +246,6 @@ class CudaPlatformBase(Platform):
                 "Cannot use FlashAttention-2 backend for dtype other than "
                 "torch.float16 or torch.bfloat16.")
             target_backend = _Backend.XFORMERS
-        elif kv_cache_dtype is not None and \
-            kv_cache_dtype.startswith("fp8"):
-            logger.info(
-                "Cannot use FlashAttention-2 backend for FP8 KV cache.")
-            logger.warning(
-                "Please use FlashInfer backend with FP8 KV Cache for "
-                "better performance by setting environment variable "
-                "VLLM_ATTENTION_BACKEND=FLASHINFER")
-            target_backend = _Backend.XFORMERS
         elif block_size % 16 != 0:
             logger.info(
                 "Cannot use FlashAttention-2 backend for block size not "
@@ -253,7 +258,7 @@ class CudaPlatformBase(Platform):
             try:
                 import vllm.vllm_flash_attn  # noqa: F401
                 from vllm.attention.backends.flash_attn import (  # noqa: F401
-                    FlashAttentionBackend)
+                    FlashAttentionBackend, flash_attn_supports_fp8)
 
                 supported_sizes = \
                     FlashAttentionBackend.get_supported_head_sizes()
@@ -261,6 +266,16 @@ class CudaPlatformBase(Platform):
                     logger.info(
                         "Cannot use FlashAttention-2 backend for head size %d.",
                         head_size)
+                    target_backend = _Backend.XFORMERS
+                fp8_kv_cache = (kv_cache_dtype is not None
+                                and kv_cache_dtype.startswith("fp8"))
+                if (fp8_kv_cache and not flash_attn_supports_fp8()):
+                    logger.info(
+                        "Cannot use FlashAttention backend for FP8 KV cache.")
+                    logger.warning(
+                        "Please use FlashInfer backend with FP8 KV Cache for "
+                        "better performance by setting environment variable "
+                        "VLLM_ATTENTION_BACKEND=FLASHINFER")
                     target_backend = _Backend.XFORMERS
             except ImportError:
                 logger.info(
@@ -284,6 +299,14 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        return cls.has_device_capability(89)
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        return True
 
 
 # NVML utils

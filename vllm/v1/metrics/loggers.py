@@ -22,7 +22,7 @@ class StatLoggerBase(ABC):
 
     @abstractmethod
     def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: IterationStats):
+               iteration_stats: Optional[IterationStats]):
         ...
 
     def log(self):  # noqa
@@ -31,7 +31,8 @@ class StatLoggerBase(ABC):
 
 class LoggingStatLogger(StatLoggerBase):
 
-    def __init__(self):
+    def __init__(self, engine_index: int = 0):
+        self.engine_index = engine_index
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
         # Prefix cache metrics. This cannot be reset.
@@ -56,10 +57,11 @@ class LoggingStatLogger(StatLoggerBase):
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
     def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: IterationStats):
+               iteration_stats: Optional[IterationStats]):
         """Log Stats to standard output."""
 
-        self._track_iteration_stats(iteration_stats)
+        if iteration_stats:
+            self._track_iteration_stats(iteration_stats)
 
         self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
@@ -77,11 +79,13 @@ class LoggingStatLogger(StatLoggerBase):
 
         # Format and print output.
         logger.info(
+            "Engine %03d: "
             "Avg prompt throughput: %.1f tokens/s, "
             "Avg generation throughput: %.1f tokens/s, "
             "Running: %d reqs, Waiting: %d reqs, "
             "GPU KV cache usage: %.1f%%, "
             "Prefix cache hit rate: %.1f%%",
+            self.engine_index,
             prompt_throughput,
             generation_throughput,
             scheduler_stats.num_running_reqs,
@@ -93,7 +97,7 @@ class LoggingStatLogger(StatLoggerBase):
 
 class PrometheusStatLogger(StatLoggerBase):
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self._unregister_vllm_metrics()
 
         # Use this flag to hide metrics that were deprecated in
@@ -101,8 +105,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self.show_hidden_metrics = \
             vllm_config.observability_config.show_hidden_metrics
 
-        labelnames = ["model_name"]
-        labelvalues = [vllm_config.model_config.served_model_name]
+        labelnames = ["model_name", "engine"]
+        labelvalues = [
+            vllm_config.model_config.served_model_name,
+            str(engine_index)
+        ]
 
         max_model_len = vllm_config.model_config.max_model_len
 
@@ -319,7 +326,7 @@ class PrometheusStatLogger(StatLoggerBase):
         info_gauge.set(1)
 
     def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: IterationStats):
+               iteration_stats: Optional[IterationStats]):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
@@ -330,6 +337,9 @@ class PrometheusStatLogger(StatLoggerBase):
             scheduler_stats.prefix_cache_stats.queries)
         self.counter_gpu_prefix_cache_hits.inc(
             scheduler_stats.prefix_cache_stats.hits)
+
+        if iteration_stats is None:
+            return
 
         self.counter_num_preempted_reqs.inc(iteration_stats.num_preempted_reqs)
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)

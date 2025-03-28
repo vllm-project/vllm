@@ -10,7 +10,6 @@ from pqdm.threads import pqdm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ...utils import build_model_context
 
@@ -36,15 +35,11 @@ def _validate_image_max_tokens_one(
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 def test_processor_max_tokens(model_id):
     ctx = build_model_context(
-        model_name=model_id,
-        tokenizer_name=model_id,
+        model_id,
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": 1},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        ctx.model_config,
-        tokenizer=cached_tokenizer_from_config(ctx.model_config),
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     info = processor.info
 
     seen_aspect_ratios = set[float]()
@@ -136,15 +131,11 @@ def _test_image_prompt_replacements(
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_prompt_replacements_regression(model_id, num_imgs):
     ctx = build_model_context(
-        model_name=model_id,
-        tokenizer_name=model_id,
+        model_id,
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        ctx.model_config,
-        tokenizer=cached_tokenizer_from_config(ctx.model_config),
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
     image_ratios = [(171, 152), (184, 161), (198, 176), (333, 296), (369, 328),
                     (488, 183), (2560, 1669)]
@@ -166,15 +157,11 @@ def test_processor_prompt_replacements_regression(model_id, num_imgs):
 @pytest.mark.parametrize("num_imgs", [1])
 def test_processor_prompt_replacements_all(model_id, num_imgs):
     ctx = build_model_context(
-        model_name=model_id,
-        tokenizer_name=model_id,
+        model_id,
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        ctx.model_config,
-        tokenizer=cached_tokenizer_from_config(ctx.model_config),
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
     seen_aspect_ratios = set[float]()
     image_sizes = list[ImageSize]()

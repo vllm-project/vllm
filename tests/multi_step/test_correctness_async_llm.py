@@ -5,7 +5,7 @@ from typing import Optional
 
 import pytest
 
-from tests.kernels.utils import override_backend_env_variable
+from vllm.utils import STR_BACKEND_ENV_VAR
 
 from ..models.utils import check_logprobs_close
 from ..utils import (completions_with_server_args, get_client_text_generations,
@@ -52,7 +52,7 @@ async def test_multi_step(
     num_logprobs: Optional[int],
     attention_backend: str,
     enable_chunked_prefill: bool,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test vLLM engine with multi-step scheduling in an OpenAI-protocol
     client/server environment.
@@ -82,67 +82,70 @@ async def test_multi_step(
         pytest.skip("Multi-step with Chunked-Prefill only supports"
                     "PP=1 and FLASH_ATTN backend")
 
-    override_backend_env_variable(monkeypatch, attention_backend)
+    with monkeypatch.context() as m:
+        m.setenv(STR_BACKEND_ENV_VAR, attention_backend)
 
-    prompts = example_prompts
-    if len(prompts) < num_prompts:
-        prompts = prompts * ((num_prompts // len(prompts)) + 1)
-    prompts = prompts[:num_prompts]
-    assert len(prompts) == num_prompts
+        prompts = example_prompts
+        if len(prompts) < num_prompts:
+            prompts = prompts * ((num_prompts // len(prompts)) + 1)
+        prompts = prompts[:num_prompts]
+        assert len(prompts) == num_prompts
 
-    server_args = DEFAULT_SERVER_ARGS + ["--enforce-eager"]
-    ms_server_args = DEFAULT_SERVER_ARGS + \
-        ["--num-scheduler-steps", f"{num_scheduler_steps}"]
+        server_args = DEFAULT_SERVER_ARGS + ["--enforce-eager"]
+        ms_server_args = DEFAULT_SERVER_ARGS + \
+            ["--num-scheduler-steps", f"{num_scheduler_steps}"]
 
-    if not is_async:
-        ms_server_args += ["--disable-async-output-proc"]
+        if not is_async:
+            ms_server_args += ["--disable-async-output-proc"]
 
-    if eager_mode:
-        ms_server_args.append("--enforce-eager")
+        if eager_mode:
+            ms_server_args.append("--enforce-eager")
 
-    if enable_chunked_prefill:
-        ms_server_args.append("--enable-chunked-prefill")
+        if enable_chunked_prefill:
+            ms_server_args.append("--enable-chunked-prefill")
 
-    distributed_args = [
-        "--tensor-parallel-size",
-        str(tp_size),
-        "--pipeline-parallel-size",
-        str(pp_size),
-    ]
+        distributed_args = [
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--pipeline-parallel-size",
+            str(pp_size),
+        ]
 
-    # Spin up client/server & issue completion API requests.
-    # Default `max_wait_seconds` is 240 but was empirically
-    # was raised 5x to 1200 *just for this test* due to
-    # observed timeouts in GHA CI
-    ref_completions = await completions_with_server_args(
-        prompts,
-        model,
-        server_args + distributed_args,
-        num_logprobs,
-        max_wait_seconds=5 * 240)
-    test_completions = await completions_with_server_args(
-        prompts,
-        model,
-        ms_server_args + distributed_args,
-        num_logprobs,
-        max_wait_seconds=5 * 240)
+        # Spin up client/server & issue completion API requests.
+        # Default `max_wait_seconds` is 240 but was empirically
+        # was raised 5x to 1200 *just for this test* due to
+        # observed timeouts in GHA CI
+        ref_completions = await completions_with_server_args(
+            prompts,
+            model,
+            server_args + distributed_args,
+            num_logprobs,
+            max_wait_seconds=5 * 240)
+        test_completions = await completions_with_server_args(
+            prompts,
+            model,
+            ms_server_args + distributed_args,
+            num_logprobs,
+            max_wait_seconds=5 * 240)
 
-    # Assert multi-step scheduling produces identical tokens
-    # to single-step scheduling.
-    ref_generations = get_client_text_generations(ref_completions)
-    test_generations = get_client_text_generations(test_completions)
-    assert ref_generations == test_generations
+        # Assert multi-step scheduling produces identical tokens
+        # to single-step scheduling.
+        ref_generations = get_client_text_generations(ref_completions)
+        test_generations = get_client_text_generations(test_completions)
+        assert ref_generations == test_generations
 
-    # Assert multi-step scheduling produces nearly-identical logprobs
-    # to single-step scheduling.
-    ref_text_logprobs = get_client_text_logprob_generations(ref_completions)
-    test_text_logprobs = get_client_text_logprob_generations(test_completions)
-    check_logprobs_close(
-        outputs_0_lst=ref_text_logprobs,
-        outputs_1_lst=test_text_logprobs,
-        name_0="hf",
-        name_1="vllm",
-    )
+        # Assert multi-step scheduling produces nearly-identical logprobs
+        # to single-step scheduling.
+        ref_text_logprobs = get_client_text_logprob_generations(
+            ref_completions)
+        test_text_logprobs = get_client_text_logprob_generations(
+            test_completions)
+        check_logprobs_close(
+            outputs_0_lst=ref_text_logprobs,
+            outputs_1_lst=test_text_logprobs,
+            name_0="hf",
+            name_1="vllm",
+        )
 
 
 @pytest.mark.parametrize(("tp_size, pp_size"), [
@@ -152,7 +155,7 @@ async def test_multi_step(
 async def test_multi_step_pp_smoke(
     tp_size: int,
     pp_size: int,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Smoke test for the vLLM engine with multi-step scheduling in an
@@ -174,54 +177,55 @@ async def test_multi_step_pp_smoke(
     attention_backend = "FLASH_ATTN"
     max_num_seqs = 3
 
-    override_backend_env_variable(monkeypatch, attention_backend)
+    with monkeypatch.context() as m:
+        m.setenv(STR_BACKEND_ENV_VAR, attention_backend)
 
-    # Prompt from the ShareGPT dataset
-    prompts = [
-        "in the jtbd context whats a push?",  # codespell:ignore
-        "in the jtbd context whats a push?",  # codespell:ignore
-        "in the jtbd context whats a push?",  # codespell:ignore
-        "in the jtbd context whats a push?",  # codespell:ignore
-    ]
-    # Use varying max_tokens to introduce scheduling randomness.
-    max_tokens = [10 * i for i in range(1, len(prompts) + 1)]
-    assert len(prompts) == len(max_tokens)
+        # Prompt from the ShareGPT dataset
+        prompts = [
+            "in the jtbd context whats a push?",  # codespell:ignore
+            "in the jtbd context whats a push?",  # codespell:ignore
+            "in the jtbd context whats a push?",  # codespell:ignore
+            "in the jtbd context whats a push?",  # codespell:ignore
+        ]
+        # Use varying max_tokens to introduce scheduling randomness.
+        max_tokens = [10 * i for i in range(1, len(prompts) + 1)]
+        assert len(prompts) == len(max_tokens)
 
-    test_args = [
-        "--tensor-parallel-size",
-        str(tp_size), "--pipeline-parallel-size",
-        str(pp_size), "--max-num-seqs",
-        str(max_num_seqs)
-    ]
+        test_args = [
+            "--tensor-parallel-size",
+            str(tp_size), "--pipeline-parallel-size",
+            str(pp_size), "--max-num-seqs",
+            str(max_num_seqs)
+        ]
 
-    server_args = DEFAULT_SERVER_ARGS + test_args
-    ms_server_args = DEFAULT_SERVER_ARGS + \
-       ["--num-scheduler-steps", f"{num_scheduler_steps}"] + \
-       test_args
+        server_args = DEFAULT_SERVER_ARGS + test_args
+        ms_server_args = DEFAULT_SERVER_ARGS + \
+          ["--num-scheduler-steps", f"{num_scheduler_steps}"] + \
+          test_args
 
-    # Spin up client/server & issue completion API requests.
-    # Default `max_wait_seconds` is 240 but was empirically
-    # was raised 3x to 720 *just for this test* due to
-    # observed timeouts in GHA CI
-    ref_completions = await completions_with_server_args(
-        prompts=prompts,
-        model_name=model,
-        server_cli_args=server_args,
-        num_logprobs=None,
-        max_wait_seconds=5 * 240,
-        max_tokens=max_tokens)
+        # Spin up client/server & issue completion API requests.
+        # Default `max_wait_seconds` is 240 but was empirically
+        # was raised 3x to 720 *just for this test* due to
+        # observed timeouts in GHA CI
+        ref_completions = await completions_with_server_args(
+            prompts=prompts,
+            model_name=model,
+            server_cli_args=server_args,
+            num_logprobs=None,
+            max_wait_seconds=5 * 240,
+            max_tokens=max_tokens)
 
-    test_completions = await completions_with_server_args(
-        prompts=prompts,
-        model_name=model,
-        server_cli_args=ms_server_args,
-        num_logprobs=None,
-        max_wait_seconds=5 * 240,
-        max_tokens=max_tokens)
+        test_completions = await completions_with_server_args(
+            prompts=prompts,
+            model_name=model,
+            server_cli_args=ms_server_args,
+            num_logprobs=None,
+            max_wait_seconds=5 * 240,
+            max_tokens=max_tokens)
 
-    # Assert multi-step scheduling produces identical tokens
-    # to single-step scheduling.
-    ref_generations = get_client_text_generations(ref_completions)
-    test_generations = get_client_text_generations(test_completions)
+        # Assert multi-step scheduling produces identical tokens
+        # to single-step scheduling.
+        ref_generations = get_client_text_generations(ref_completions)
+        test_generations = get_client_text_generations(test_completions)
 
-    assert ref_generations == test_generations
+        assert ref_generations == test_generations
