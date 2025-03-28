@@ -974,9 +974,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert i in self.encoder_cache[req_id]
                 encoder_output = self.encoder_cache[req_id][i]
 
+                if (is_embed := pos_info.get("is_embed")) is not None:
+                    is_embed = is_embed[start_idx:end_idx]
+
                 mm_embeds_item = self._gather_placeholders(
                     encoder_output[start_idx:end_idx],
-                    is_embed=pos_info.get("is_embed"),
+                    is_embed=is_embed,
                 )
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
