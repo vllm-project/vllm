@@ -2530,22 +2530,3 @@ def sha256(input) -> int:
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
     return int.from_bytes(hashlib.sha256(input_bytes).digest(),
                           byteorder="big")
-
-
-@lru_cache
-def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
-    """Get a hash function by name, or raise an error if
-    the function is not found.
-
-    Args:
-        hash_fn_name: Name of the hash function.
-
-    Returns:
-        A hash function.
-    """
-    if hash_fn_name == "sha256":
-        return sha256
-    if hash_fn_name == "builtin":
-        return hash
-
-    raise ValueError(f"Unsupported hash function: {hash_fn_name}")

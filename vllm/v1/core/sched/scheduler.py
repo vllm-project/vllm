@@ -70,7 +70,7 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching,
-            caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
+            caching_hash_fn=self.cache_config.prefix_caching_hash_fn,
             log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 

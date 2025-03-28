@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Compare the with and without prefix caching."""
 
+import unittest.mock as mock
 from typing import Optional
 
 import pytest
@@ -11,11 +12,13 @@ from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
-                                         hash_block_tokens)
+                                         hash_block_tokens,
+                                         hash_request_tokens)
 
 
 def make_request(request_id,
                  prompt_token_ids,
+                 prompt_kv_block_hashes=None,
                  mm_positions=None,
                  mm_hashes=None,
                  prompt_logprobs: Optional[int] = None):
@@ -28,6 +31,7 @@ def make_request(request_id,
         request_id=request_id,
         prompt=None,
         prompt_token_ids=prompt_token_ids,
+        prompt_kv_block_hashes=prompt_kv_block_hashes,
         multi_modal_inputs=multi_modal_inputs,
         multi_modal_hashes=mm_hashes,
         multi_modal_placeholders=mm_positions,
@@ -39,20 +43,17 @@ def make_request(request_id,
     )
 
 
-@pytest.mark.parametrize("hash_algo", ["sha256", "hash"])
-def test_prefill(hash_algo):
+@pytest.mark.parametrize("hash_fn", [sha256, hash])
+def test_prefill(hash_fn):
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
-        caching_hash_algo=hash_algo,
+        caching_hash_fn=hash_fn,
         num_preallocate_tokens=16,
     )
-
-    # choose the hash function according to the parameter
-    hash_fn = sha256 if hash_algo == "sha256" else hash
 
     # Complete 3 blocks (48 tokens)
     common_token_ids = [i for i in range(3) for _ in range(16)]
@@ -758,3 +759,56 @@ def test_reset_prefix_cache():
     assert manager.reset_prefix_cache()
     assert not manager.block_pool.cached_block_hash_to_block
     assert all([blk.block_hash is None for blk in manager.block_pool.blocks])
+
+
+def test_kv_block_hash_from_frontend():
+    """
+    This tests that the kv block hash is correctly computed from the frontend.
+    """
+    manager = KVCacheManager(
+        block_size=16,
+        num_gpu_blocks=10,
+        max_model_len=8192,
+        sliding_window=None,
+        enable_caching=True,
+        caching_hash_fn=sha256,
+        num_preallocate_tokens=16,
+    )
+
+    with (mock.patch('vllm.v1.core.kv_cache_manager.hash_request_tokens',
+                     wraps=hash_request_tokens) as mock_hash_request_tokens):
+        # Complete 3 blocks (48 tokens)
+        token_ids = [i for i in range(3) for _ in range(16)]
+        req0 = make_request("0", token_ids, prompt_kv_block_hashes=None)
+        computed_blocks, num_computed_tokens = manager.get_computed_blocks(
+            req0)
+
+        # When prompt_kv_block_hashes is not given, hash_request_tokens should
+        # be called to compute the kv block hashes for new requests.
+        mock_hash_request_tokens.assert_called_once_with(
+            sha256,
+            16,
+            req0.prompt_token_ids,
+            req0.mm_positions,
+            req0.mm_hashes,
+            req0.lora_request,
+        )
+
+        assert len(manager.req_to_block_hashes[req0.request_id]) == 3
+        assert not computed_blocks
+        assert num_computed_tokens == 0
+
+        # When prompt_kv_block_hashes is given, it should be used instead of
+        # calling hash_request_tokens, so hash_request_tokens should still be
+        # called once.
+        prompt_kv_block_hashes = manager.req_to_block_hashes[req0.request_id]
+        req1 = make_request("1",
+                            token_ids,
+                            prompt_kv_block_hashes=prompt_kv_block_hashes)
+        computed_blocks, num_computed_tokens = manager.get_computed_blocks(
+            req1)
+        mock_hash_request_tokens.assert_called_once()
+
+        assert len(manager.req_to_block_hashes[req1.request_id]) == 3
+        assert not computed_blocks
+        assert num_computed_tokens == 0
