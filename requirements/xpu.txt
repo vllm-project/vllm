@@ -15,7 +15,6 @@ torch==2.7.0+xpu
 torchaudio
 torchvision
 pytorch-triton-xpu
---extra-index-url=https://download.pytorch.org/whl/test/xpu
-
-intel_extension_for_pytorch @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu/new/validation/IPEX/weekly/PVC/2025/ww12_Stock_test_27_rc_branch/py310/intel_extension_for_pytorch-2.7.10+gitd797504-cp310-cp310-linux_x86_64.whl
-oneccl_bind_pt @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu/new/validation/IPEX/weekly/PVC/2025/ww12_Stock_test_27_rc_branch/py310/oneccl_bind_pt-2.7.0+xpu-cp310-cp310-linux_x86_64.whl
+intel_extension_for_pytorch 
+oneccl_bind_pt
+--extra-index-url=https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu-new/validation/IPEX/weekly/PVC/2025/vllm_BMG/ww12_public_release_2_7/
