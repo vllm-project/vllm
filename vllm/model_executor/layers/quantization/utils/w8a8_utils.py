@@ -21,9 +21,9 @@ TORCH_DEVICE_IDENTITY = None
 # torch._scaled_mm rowwise feature.
 # The condition is determined once as the operations
 # are time consuming.
-USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
-                               and torch.__version__[0:3] >= "2.7"
-                               and current_platform.has_device_capability(94))
+# Delay the condition check until the first time it is needed,
+# as initially CUDA_VISIBLE_DEVICES may not be set properly.
+USE_ROWWISE_TORCH_SCALED_MM = None
 
 
 def sparse_cutlass_supported() -> bool:
@@ -283,6 +283,11 @@ def dispatch_w8a8_scaled_mm(
         if current_platform.is_rocm():
             return rocm_per_tensor_w8a8_scaled_mm
         return torch_per_tensor_w8a8_scaled_mm
+    global USE_ROWWISE_TORCH_SCALED_MM
+    if USE_ROWWISE_TORCH_SCALED_MM is None:
+        USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
+            and torch.__version__[0:3] >= "2.7"
+            and current_platform.has_device_capability(94))
     # If torch.scaled_mm supports per-channel (weights) per-token (inputs)
     if not per_tensor_weights and not per_tensor_activations \
             and USE_ROWWISE_TORCH_SCALED_MM:
