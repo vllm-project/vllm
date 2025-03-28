@@ -5,6 +5,63 @@ import os
 import aiohttp
 from quart import Quart, make_response, request
 import uuid
+import zmq
+import time
+import pickle
+import threading
+import random
+from typing import Any, Dict, List, Optional
+
+prefill_instances: Dict[str, str] = {} # http_address: zmq_address
+decode_instances: Dict[str, str] = {} # http_address: zmq_address
+
+prefill_cv = threading.Condition()
+decode_cv = threading.Condition()
+
+
+def _listen_for_register(poller, router_socket):
+    while True:
+        socks = dict(poller.poll())
+        if router_socket in socks:
+            remote_address, message = router_socket.recv_multipart()
+            data = pickle.loads(message) # data: {"type": "P", "http_address": "ip:port", "zmq_address": "ip:port"}
+            logger.debug("Received message from %s, data: %s",
+                         remote_address.decode(), data)
+            if data["type"] == "P":
+                global prefill_instances
+                global prefill_cv
+                with prefill_cv:
+                    prefill_instances[data["http_address"]] = data["zmq_address"]
+            elif data["type"] == "D":
+                global decode_instances
+                global decode_cv
+                with decode_cv:
+                    decode_instances[data["http_address"]] = data["zmq_address"]
+            else:
+                logger.info(
+                    "Unexpected, Received message from %s, data: %s",
+                    remote_address, data)
+
+
+def start_service_discovery(hostname, port):
+    if not hostname:
+        hostname = socket.gethostname()
+    if port == 0:
+        raise ValueError("Port cannot be 0")
+
+    context = zmq.Context()
+    router_socket = context.socket(zmq.ROUTER)
+    router_socket.bind(f"tcp://{hostname}:{port}")
+
+    poller = zmq.Poller()
+    poller.register(router_socket, zmq.POLLIN)
+
+    _listener_thread = threading.Thread(
+        target=_listen_for_register, args=[poller, router_socket],daemon=True)
+    _listener_thread.start()
+    return _listener_thread
+
+
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -41,11 +98,17 @@ async def handle_request():
         # change max_tokens = 1 to let it only do prefill
         prefill_request['max_tokens'] = 1
 
-        prefill_host = "localhost"
+        prefill_host = "0.0.0.0"
         prefill_port = 20001
-        decode_host = "localhost"
+        decode_host = "0.0.0.0"
         decode_port = 20002
-        request_id = f"___decode_host_({decode_host})___decode_port_({decode_port})_{random_uuid()}"
+        request_id = f"___decode_address_{decode_host}:{decode_port}_{random_uuid()}"
+
+        # global prefill_instances
+        # global prefill_cv
+        # with prefill_cv:
+        #     prefill_address = random.choice(list(prefill_instances.items()))
+        #     print(f"prefill_address: %s", prefill_address)
 
         # finish prefill
         async for _ in forward_request(f'http://{prefill_host}:{prefill_port}/v1/completions',
@@ -70,4 +133,6 @@ async def handle_request():
 
 
 if __name__ == '__main__':
+    t = start_service_discovery("0.0.0.0", 30001)
     app.run(host='0.0.0.0', port=10001)
+    t.join()

@@ -42,7 +42,7 @@ class P2pNcclPipe:
 
         self.context = zmq.Context()
         self.router_socket = self.context.socket(zmq.ROUTER)
-        self.router_socket.bind(f"tcp://{self._hostname}:{self._port}")
+        self.router_socket.bind(f"tcp://{self.local_address}")
 
         self.poller = zmq.Poller()
         self.poller.register(self.router_socket, zmq.POLLIN)

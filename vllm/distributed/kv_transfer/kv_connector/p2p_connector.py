@@ -11,6 +11,7 @@ But the logic can be extended to support other pipe and lookup buffer.
 from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
+import re
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -282,7 +283,7 @@ class P2pConnector(KVConnectorBase):
     def parse_request_id(request_id: str) -> Tuple[str, int]:
         logger.info("parse_request_id, request_id: %s", request_id)
         # Regular expression to match the string hostname and integer port
-        pattern = r"___decode_host_(.*)___decode_port_(\d+)"
+        pattern = r"___decode_address_(.*):(\d+)"
 
         # Use re.search to find the pattern in the request_id
         match = re.search(pattern, request_id)
@@ -291,7 +292,7 @@ class P2pConnector(KVConnectorBase):
             decode_host = match.group(1)
             decode_port = int(match.group(2))
 
-            logger.info("parse_request_id, request_id: %, decode_host: %s, decode_port: %s", request_id, decode_host, decode_port)
+            logger.info(f"parse_request_id, {request_id=}, {decode_host=}, {decode_port=}")
             return decode_host, decode_port
         raise ValueError(f"Request id {request_id} does not contain hostname and port")
 
