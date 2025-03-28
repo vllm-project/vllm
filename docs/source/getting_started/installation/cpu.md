@@ -159,18 +159,37 @@ Currently, there are no pre-built CPU wheels.
 
 ### Pre-built images
 
-Currently, there are no pre-build CPU images.
+:::::{tab-set}
+:sync-group: device
+
+::::{tab-item} Intel/AMD x86
+:sync: x86
+
+:::{include} cpu/x86.inc.md
+:start-after: "### Pre-built images"
+:end-before: "### Build image from source"
+:::
+
+::::
+
+:::::
 
 ### Build image from source
 
 ```console
-$ docker build -f Dockerfile.cpu -t vllm-cpu-env --shm-size=4g .
-$ docker run -it \
-             --rm \
-             --network=host \
-             --cpuset-cpus=<cpu-id-list, optional> \
-             --cpuset-mems=<memory-node, optional> \
-             vllm-cpu-env
+$ docker build -f Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
+
+# Launching OpenAI server 
+$ docker run --rm \
+             --privileged=true \
+             --shm-size=4g \
+             -p 8000:8000 \
+             -e VLLM_CPU_KVCACHE_SPACE=<KV cache space> \
+             -e VLLM_CPU_OMP_THREADS_BIND=<CPU cores for inference> \
+             vllm-cpu-env \
+             --model=meta-llama/Llama-3.2-1B-Instruct \
+             --dtype=bfloat16 \
+             other vLLM OpenAI server arguments
 ```
 
 ::::{tip}
