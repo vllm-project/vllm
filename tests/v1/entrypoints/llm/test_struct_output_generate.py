@@ -425,7 +425,7 @@ def test_guided_json_completion_with_enum(
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=json_schema))
     outputs = llm.generate(
-        prompt="Generate a JSON with the brand, model and car_type of"
+        prompts="Generate a JSON with the brand, model and car_type of"
         "the most iconic car from the 90's",
         sampling_params=sampling_params,
         use_tqdm=True)
