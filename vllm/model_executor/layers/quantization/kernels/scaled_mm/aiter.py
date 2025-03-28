@@ -112,5 +112,6 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
 
         # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
         # a to be [M, K]
-        # b to be [N, K] # cutlass prepare weights in [K, N] format
+        # b to be [N, K]
+        # CutlassScaledMMLinearKernel prepare weight `w_q` in [K, N] format
         return gemm_a8w8_CK(x_q, w_q.t(), x_s, w_s, bias).to(out_dtype)
