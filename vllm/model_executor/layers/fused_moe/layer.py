@@ -3,10 +3,13 @@
 from abc import abstractmethod
 from enum import Enum
 from typing import Callable, List, Optional, Tuple
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
+
+import pplx_kernels as pplx
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
@@ -34,6 +37,24 @@ else:
     fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
 
+MOE_DP_CHUNK_SIZE = 256
+
+# Adapted from pplx-kernels tests/all_to_all_utils.py
+@dataclass
+class MoEConfig:
+    num_experts: int
+    experts_per_token: int
+    hidden_dim: int
+
+    num_local_experts: int
+    dp_size: int
+    dp_rank: int
+    ep_size: int
+    ep_rank: int
+
+    in_dtype: torch.dtype = torch.bfloat16
+    out_dtype: torch.dtype = torch.bfloat16
+    block_size: int = 128
 
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
@@ -71,10 +92,22 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
+    def __init__(self, moe: MoEConfig):
+        self.all_to_all = pplx.AllToAll(
+            max_num_tokens=MOE_DP_CHUNK_SIZE // moe.dp_size,
+            num_experts=moe.num_experts,
+            experts_per_token=moe.experts_per_token,
+            rank=moe.ep_rank,
+            world_size=moe.ep_size,
+            dp_size=moe.dp_size,
+            hidden_dim=moe.hidden_dim,
+            hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
+            hidden_dim_scale_bytes=0,
+        )
+
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -854,8 +887,7 @@ class FusedMoE(torch.nn.Module):
         # 1. chunk_range - The current iteration of the loops's range over the DP world tokens
         # 2. my_tokens_in_chunk - The tokens within chunk_range that this DP rank owns.
 
-        moe_dp_chunk_size = 256
-        moe_dp_chunk_size_per_rank = moe_dp_chunk_size // self.dp_size
+        moe_dp_chunk_size_per_rank = MOE_DP_CHUNK_SIZE // self.dp_size
 
         num_tokens_remaining_across_dp = num_tokens_across_dp
         chunk_start = 0
