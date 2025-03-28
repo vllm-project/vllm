@@ -612,10 +612,17 @@ class TPUModelRunner:
                 kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
             )
-        selected_token_ids = self.model.sample_from_hidden(
-            hidden_states, tpu_sampling_metadata)
-        # Remove padding on cpu and keep dynamic op outside of xla graph.
-        selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+        
+        if envs.VLLM_TPU_DISABLE_SAMPLER_DEBUG:
+            selected_token_ids = self.model.compute_logits(hidden_states,
+                                                           logits_indices, None)
+            selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+        else:
+            selected_token_ids = self.model.sample_from_hidden(
+                hidden_states, tpu_sampling_metadata)
+
+            # Remove padding on cpu and keep dynamic op outside of xla graph.
+            selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
