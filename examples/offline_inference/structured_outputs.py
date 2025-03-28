@@ -58,11 +58,11 @@ print(outputs[0].outputs[0].text)
 # Guided decoding by Grammar
 simplified_sql_grammar = """
 root ::= select_statement
-select_statement ::= "SELECT" column "from" table "where" condition
-column ::= "col_1" | "col_2"
-table ::= "table_1" | "table_2"
-condition ::= column "=" number
-number ::= "1" | "2"
+select_statement ::= "SELECT " column " from " table " where " condition
+column ::= "col_1 " | "col_2 "
+table ::= "table_1 " | "table_2 "
+condition ::= column "= " number
+number ::= "1 " | "2 "
 """
 guided_decoding_params = GuidedDecodingParams(grammar=simplified_sql_grammar)
 sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
