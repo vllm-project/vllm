@@ -182,6 +182,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * Example HF Models
   * [LoRA](#lora-adapter)
   * [PP](#distributed-serving)
+- * `AyaVisionForConditionalGeneration`
+  * Aya Vision
+  * `CohereForAI/aya-vision-8b`, `CohereForAI/aya-vision-32b`, etc.
+  * ✅︎
+  * ✅︎
 - * `AquilaForCausalLM`
   * Aquila, Aquila2
   * `BAAI/Aquila-7B`, `BAAI/AquilaChat-7B`, etc.
