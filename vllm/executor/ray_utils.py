@@ -11,7 +11,6 @@ import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -87,9 +86,10 @@ try:
             # TODO(swang): This is needed right now because Ray Compiled Graph
             # executes on a background thread, so we need to reset torch's
             # current device.
-            import torch
             if not self.compiled_dag_cuda_device_set:
-                torch.cuda.set_device(self.worker.device)
+                torch_namespace = \
+                    vllm.platforms.current_platform.get_torch_namespace()
+                torch_namespace.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
             output = self.worker._execute_model_spmd(execute_model_req,
@@ -109,12 +109,13 @@ try:
             # We can remove this API after it is fixed in compiled graph.
             assert self.worker is not None, "Worker is not initialized"
             if not self.compiled_dag_cuda_device_set:
-                if current_platform.is_tpu():
+                if vllm.platforms.current_platform.is_tpu():
                     # Not needed
                     pass
                 else:
-                    import torch
-                    torch.cuda.set_device(self.worker.device)
+                    torch_namespace = \
+                        vllm.platforms.current_platform.get_torch_namespace()
+                    torch_namespace.set_device(self.worker.device)
 
                 self.compiled_dag_cuda_device_set = True
 
