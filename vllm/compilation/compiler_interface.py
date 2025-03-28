@@ -144,6 +144,7 @@ class InductorAdaptor(CompilerInterface):
         return hash_str
 
     def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
+        self.cache_dir = cache_dir
         if disable_cache:
             return
         # redirect the cache directory to a sub-directory
@@ -156,7 +157,6 @@ class InductorAdaptor(CompilerInterface):
         triton_cache = os.path.join(cache_dir, "triton_cache")
         os.makedirs(triton_cache, exist_ok=True)
         os.environ["TRITON_CACHE_DIR"] = triton_cache
-        self.cache_dir = cache_dir
 
     def compile(
         self,
