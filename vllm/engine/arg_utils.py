@@ -23,6 +23,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
+from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
@@ -114,6 +115,7 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
+    data_parallel_size: int = 1
     enable_expert_parallel: bool = False
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
@@ -443,6 +445,14 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tensor_parallel_size,
                             help='Number of tensor parallel replicas.')
+        parser.add_argument('--data-parallel-size',
+                            '-dp',
+                            type=int,
+                            default=EngineArgs.data_parallel_size,
+                            help='Number of data parallel replicas. '
+                            'MoE layers will be sharded according to the '
+                            'product of the tensor-parallel-size and '
+                            'data-parallel-size.')
         parser.add_argument(
             '--enable-expert-parallel',
             action='store_true',
@@ -676,7 +686,7 @@ class EngineArgs:
             type=nullable_kvs,
             default=EngineArgs.limit_mm_per_prompt,
             # The default value is given in
-            # MultiModalRegistry.init_mm_limits_per_prompt
+            # MultiModalConfig.get_limit_per_prompt
             help=('For each multimodal plugin, limit how many '
                   'input instances to allow for each prompt. '
                   'Expects a comma-separated list of items, '
@@ -1121,7 +1131,7 @@ class EngineArgs:
         parser.add_argument(
             "--reasoning-parser",
             type=str,
-            choices=["deepseek_r1", "granite"],
+            choices=list(ReasoningParserManager.reasoning_parsers),
             default=None,
             help=
             "Select the reasoning parser depending on the model that you're "
@@ -1371,6 +1381,7 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            data_parallel_size=self.data_parallel_size,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
@@ -1562,7 +1573,8 @@ class EngineArgs:
 
         # Xgrammar and Guidance are supported.
         SUPPORTED_GUIDED_DECODING = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance", "auto"
+            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
+            "guidance:disable-any-whitespace", "auto"
         ]
         if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
             _raise_or_fallback(feature_name="--guided-decoding-backend",
@@ -1618,7 +1630,7 @@ class EngineArgs:
             return False
 
         # Some quantization is not compatible with torch.compile.
-        V1_UNSUPPORTED_QUANT = ["bitsandbytes", "gguf"]
+        V1_UNSUPPORTED_QUANT = ["gguf"]
         if model_config.quantization in V1_UNSUPPORTED_QUANT:
             _raise_or_fallback(
                 feature_name=f"--quantization {model_config.quantization}",

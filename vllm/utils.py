@@ -61,7 +61,7 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -578,7 +578,7 @@ def get_open_port() -> int:
         dp_port = envs.VLLM_DP_MASTER_PORT
         while True:
             port = _get_open_port()
-            if port >= dp_port and port < dp_port + 10:
+            if dp_port <= port < dp_port + 10:
                 continue
             return port
     return _get_open_port()
@@ -2176,11 +2176,11 @@ def make_zmq_socket(
     if socket_type == zmq.constants.PULL:
         socket.setsockopt(zmq.constants.RCVHWM, 0)
         socket.setsockopt(zmq.constants.RCVBUF, buf_size)
-        socket.connect(path)
+        socket.bind(path)
     elif socket_type == zmq.constants.PUSH:
         socket.setsockopt(zmq.constants.SNDHWM, 0)
         socket.setsockopt(zmq.constants.SNDBUF, buf_size)
-        socket.bind(path)
+        socket.connect(path)
     else:
         raise ValueError(f"Unknown Socket Type: {socket_type}")
 
@@ -2188,7 +2188,11 @@ def make_zmq_socket(
 
 
 @contextlib.contextmanager
-def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
+def zmq_socket_ctx(
+    path: str,
+    socket_type: Any,
+    linger: int = 0,
+) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
@@ -2199,7 +2203,7 @@ def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
         logger.debug("Got Keyboard Interrupt.")
 
     finally:
-        ctx.destroy(linger=0)
+        ctx.destroy(linger=linger)
 
 
 def is_in_ray_actor():
@@ -2496,6 +2500,18 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
         return wrapper
 
     return decorator
+
+
+# Only relevant for models using ALiBi (e.g, MPT)
+def check_use_alibi(model_config: ModelConfig) -> bool:
+    return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
+            or ("BloomForCausalLM" in getattr(model_config.hf_config,
+                                              "architectures", []))  # Bloom
+            or getattr(model_config.hf_text_config, "position_encoding_type",
+                       "") == "alibi"  # codellm_1b_alibi
+            or
+            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
+             and model_config.hf_text_config.attn_config.get("alibi", False)))
 
 
 def sha256(input) -> int:
