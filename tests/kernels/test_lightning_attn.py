@@ -22,37 +22,36 @@ def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
     """
     B, H, S, D = q.shape
     E = v.shape[-1]
-    output = torch.zeros((B, H, S, E), dtype=q.dtype, device=q.device)
+    dtype = q.dtype
+    output = torch.zeros((B, H, S, E), dtype=dtype, device=q.device)
 
-    # Initialize KV cache to zeros if not provided
+    # Unify data type handling
     if kv_history is None:
-        kv_cache = torch.zeros((B, H, D, E),
-                               dtype=torch.float32,
-                               device=q.device)
+        kv_cache = torch.zeros((B, H, D, E), dtype=dtype, device=q.device)
     else:
         kv_cache = kv_history.clone()
 
-    # Ensure ed has correct dimensions
+    # More efficient implementation
+    # Convert ed to decay factor matrix
     if ed.dim() == 1:
-        ed = ed.view(1, -1, 1, 1)
+        decay = torch.exp(-ed).view(1, -1, 1, 1)
+    else:
+        decay = torch.exp(-ed)
 
-    # Process each token sequentially
+    # Process each position, avoiding unnecessary type conversions
     for step in range(S):
         for b in range(B):
             for h in range(H):
-                # Get current query, key and value
-                q_bhs = q[b, h, step].float()  # [D]
-                k_bhs = k[b, h, step].float()  # [D]
-                v_bhs = v[b, h, step].float()  # [E]
+                # Keep original data type
+                q_bhs = q[b, h, step]
+                k_bhs = k[b, h, step]
+                v_bhs = v[b, h, step]
 
-                # Calculate decay rate
-                decay = torch.exp(-ed[0, h, 0, 0].float())
-
-                # Calculate key-value outer product
-                kv_outer = torch.outer(k_bhs, v_bhs)  # [D, E]
+                # Calculate KV outer product
+                kv_outer = torch.outer(k_bhs, v_bhs)
 
                 # Update KV cache
-                kv_cache[b, h] = decay * kv_cache[b, h] + kv_outer
+                kv_cache[b, h] = decay[0, h, 0, 0] * kv_cache[b, h] + kv_outer
 
                 # Calculate attention output
                 output[b, h, step] = torch.matmul(q_bhs, kv_cache[b, h])
@@ -214,16 +213,16 @@ def test_linear_decode_forward_triton_with_padding(
     # Compare results
     torch.testing.assert_close(triton_masked,
                                reference_masked,
-                               rtol=1.0,
-                               atol=1.0)
+                               rtol=1e-1,
+                               atol=1e-1)
 
     # For non-padding positions, also compare KV cache
     for i in range(batch_size):
         if slot_idx[i] != -1:
             torch.testing.assert_close(kv_caches[i],
                                        kv_caches_copy[i],
-                                       rtol=1.0,
-                                       atol=1.0)
+                                       rtol=1e-1,
+                                       atol=1e-1)
 
     assert triton_output.shape == (batch_size, num_heads * head_size)
 
@@ -257,45 +256,31 @@ def test_lightning_attention_reference(
     ed = torch.rand(num_heads, device="cuda")
 
     # Optional KV history
-    kv_history = torch.randn(
-        batch_size,
-        num_heads,
-        head_size,
-        head_size,
-        dtype=dtype,
-        device="cuda")
+    kv_history = torch.randn(batch_size,
+                             num_heads,
+                             head_size,
+                             head_size,
+                             dtype=dtype,
+                             device="cuda")
     kv_history_clone = kv_history.clone()
 
     # Use reference implementation
     ref_output, ref_kv_cache = reference_lightning_attention(
         q, k, v, ed, 256, kv_history)
 
-    try:
-        # Use actual implementation
-        from vllm.model_executor.layers.lightning_attn import (
-            lightning_attention)
-        actual_output, actual_kv_cache = lightning_attention(
-            q, k, v, ed, 256, kv_history_clone)
+    # Use actual implementation
+    from vllm.model_executor.layers.lightning_attn import lightning_attention
+    actual_output, actual_kv_cache = lightning_attention(
+        q, k, v, ed, 256, kv_history_clone)
 
-        # Compare results with more relaxed tolerances
-        # due to implementation differences
-        torch.testing.assert_close(ref_output,
-                                   actual_output,
-                                   rtol=1.0,
-                                   atol=2.0)
-        torch.testing.assert_close(ref_kv_cache,
-                                   actual_kv_cache,
-                                   rtol=1.0,
-                                   atol=2.0)
+    # Compare results with more relaxed tolerances
+    # due to implementation differences
+    torch.testing.assert_close(ref_output, actual_output, rtol=1e-1, atol=1e-1)
+    torch.testing.assert_close(ref_kv_cache,
+                               actual_kv_cache,
+                               rtol=1e-1,
+                               atol=1e-1)
 
-        # Verify output shapes
-        assert ref_output.shape == (batch_size, num_heads, seq_len, head_size)
-        assert ref_kv_cache.shape == actual_kv_cache.shape
-    except (RuntimeError, AssertionError) as e:
-        # If we encounter a Triton compilation error or numerical
-        # instability issue, mark the test as expected failure
-        if "CompilationError" in str(e) or "Tensor-likes are not close" in str(
-                e):
-            pytest.xfail(f"Known issue with lightning attention: {str(e)}")
-        else:
-            raise
+    # Verify output shapes
+    assert ref_output.shape == (batch_size, num_heads, seq_len, head_size)
+    assert ref_kv_cache.shape == actual_kv_cache.shape
