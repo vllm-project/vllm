@@ -42,8 +42,8 @@ def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
 
-    # CUDA_VISIBLE_DEVICES for each DP rank is set automatically inside the
-    # engine processes.
+    # CUDA_VISIBLE_DEVICES for each DP rank is set before the Process creation
+    # in the main function.
 
     # Sample prompts.
     prompts = [
@@ -147,6 +147,12 @@ if __name__ == "__main__":
     procs = []
     for local_dp_rank, global_dp_rank in enumerate(
             range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)):
+        # set CUDA_VISIBLE_DEVICES before Process creation to
+        # be inherited by the child process before it runs any code
+        # that might trigger CUDA initialization.
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+            str(i) for i in range(local_dp_rank *
+                                  tp_size, (local_dp_rank + 1) * tp_size))
         proc = Process(target=main,
                        args=(args.model, dp_size, local_dp_rank,
                              global_dp_rank, dp_master_ip, dp_master_port,
