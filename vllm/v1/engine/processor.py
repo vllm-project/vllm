@@ -121,7 +121,8 @@ class Processor:
             return
 
         supported_backends = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance", "auto"
+            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
+            "guidance:disable-any-whitespace", "auto"
         ]
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
@@ -140,11 +141,10 @@ class Processor:
             raise ValueError("Structured output is not supported on TPU.")
 
         # Request content validation
-
-        if engine_level_backend == "xgrammar":
+        if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
             validate_structured_output_request_xgrammar(params)
-            params.guided_decoding.backend = "xgrammar"
+            params.guided_decoding.backend = engine_level_backend
         elif engine_level_backend == "auto":
             # "auto" is an opt-in to opinionated behavior where we try to
             # choose a backend based on request contents. This is not the
@@ -158,12 +158,13 @@ class Processor:
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
 
-        if params.guided_decoding.backend == "guidance":
+        if engine_level_backend.startswith("guidance"):
             # TODO ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
             validate_guidance_grammar(params, tokenizer=None)
+            params.guided_decoding.backend = engine_level_backend
 
     def process_inputs(
         self,
