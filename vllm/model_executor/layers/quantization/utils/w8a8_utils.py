@@ -18,9 +18,9 @@ TORCH_DEVICE_IDENTITY = None
 # torch._scaled_mm rowwise feature.
 # The condition is determined once as the operations
 # are time consuming.
-USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
-                               and torch.__version__[0:3] >= "2.7"
-                               and current_platform.has_device_capability(94))
+# Delay the condition check until the first time it is needed,
+# as initially CUDA_VISIBLE_DEVICES may not be set properly.
+USE_ROWWISE_TORCH_SCALED_MM = None
 
 
 def sparse_cutlass_supported() -> bool:
@@ -354,6 +354,11 @@ class Fp8LinearOp:
                 scale_ub=input_scale_ub,
                 use_per_token_if_dynamic=use_per_token_if_dynamic)
         else:
+            global USE_ROWWISE_TORCH_SCALED_MM
+            if USE_ROWWISE_TORCH_SCALED_MM is None:
+                USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
+                    and torch.__version__[0:3] >= "2.7"
+                    and current_platform.has_device_capability(94))
             if input.dtype != current_platform.fp8_dtype():
                 # Maybe apply padding to output, see comment in __init__
                 qinput, x_scale = ops.scaled_fp8_quant(
