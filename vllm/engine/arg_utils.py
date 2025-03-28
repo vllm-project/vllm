@@ -1616,7 +1616,7 @@ class EngineArgs:
             return False
 
         # Some quantization is not compatible with torch.compile.
-        V1_UNSUPPORTED_QUANT = ["bitsandbytes", "gguf"]
+        V1_UNSUPPORTED_QUANT = ["gguf"]
         if model_config.quantization in V1_UNSUPPORTED_QUANT:
             _raise_or_fallback(
                 feature_name=f"--quantization {model_config.quantization}",
