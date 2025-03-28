@@ -140,6 +140,7 @@ def native_w8a8_block_fp8_matmul(A,
     return C
 
 
+# Fold into utils.py torch_moe?
 def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, expert_map, block_shape):
     """Fused moe with block-wise quantization using native torch."""
     B, D = a.shape
@@ -241,8 +242,6 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 @pytest.mark.parametrize(
     "M,N,K,E,topk,ep_size,block_size,dtype,seed",
     itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, EP_SIZE, BLOCK_SIZE, DTYPES, SEEDS))
-    #itertools.product([1], [128], [256], E, [6], [1, 4], BLOCK_SIZE, DTYPES, SEEDS))
-    #itertools.product([1], [128], [256], [16], [6], [4], BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, seed):
     if topk > E: # or ep_size < E:
@@ -459,7 +458,7 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
 
 @pytest.mark.parametrize(
-    "M,N,K,E,ep_size,topk,seed",
+    "M,N,K,E,topk,ep_size,seed",
     itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, EP_SIZE, SEEDS))
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
@@ -526,44 +525,47 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
             e_ids[ep_rank] = e_map[e_map >= 0]
 
     # Set the context to avoid lots of warning spam.
+
+    ref_out: Optional[torch.Tensor] = None
+    out: Optional[torch.Tensor] = None
+
     with set_current_vllm_config(vllm_config):
         for ep_rank in range(ep_size):
             if M >= 128 and ep_size == 1:
-                ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a,
-                                                       w1,
-                                                       w2,
-                                                       w1_s,
-                                                       w2_s,
-                                                       score, topk, block_size)
+                # TODO: NYI expert map
+                ep_ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s,
+                                                          w2_s, score, topk,
+                                                          block_size)
             else:
-                ref_out = torch_w8a8_block_fp8_moe(a,
-                                                   fp8_perm(w1, e_ids[ep_rank]),
-                                                   fp8_perm(w2, e_ids[ep_rank]),
-                                                   fp8_perm(w1_s, e_ids[ep_rank]),
-                                                   fp8_perm(w2_s, e_ids[ep_rank]),
-                                                   score, topk,
-                                                   expert_map[ep_rank], block_size)
+                ep_ref_out = torch_w8a8_block_fp8_moe(
+                    a,
+                    fp8_perm(w1, e_ids[ep_rank]),
+                    fp8_perm(w2, e_ids[ep_rank]),
+                    fp8_perm(w1_s, e_ids[ep_rank]),
+                    fp8_perm(w2_s, e_ids[ep_rank]),
+                    score, topk, expert_map[ep_rank],
+                    block_size)
 
-            out = fdeep_gemm_moe_fp8(a,
-                            fp8_perm(w1, e_ids[ep_rank]),
-                            fp8_perm(w2, e_ids[ep_rank]),
-                            score,
-                            topk,
-                            renormalize=False,
-                            use_fp8_w8a8=True,
-                            w1_scale=fp8_perm(w1_s, e_ids[ep_rank]),
-                            w2_scale=fp8_perm(w2_s, e_ids[ep_rank]),
-                            block_shape=block_size,
-                            global_num_experts=E,
-                            expert_map=expert_map[ep_rank],
-                            allow_deep_gemm=True)
+            ep_out = deep_gemm_moe_fp8(a,
+                               fp8_perm(w1, e_ids[ep_rank]),
+                               fp8_perm(w2, e_ids[ep_rank]),
+                               topk_weight,
+                               topk,
+                               w1_scale=fp8_perm(w1_s, e_ids[ep_rank]),
+                               w2_scale=fp8_perm(w2_s, e_ids[ep_rank]),
+                               global_num_experts=E,
+                               expert_map=expert_map[ep_rank]
+                                       )
 
-            #print(f"{out.sum()=}")
-            #print(f"{ref_out.sum()=}")
+            if ref_out is None:
+                ref_out = ep_ref_out
+                out = ep_out
+            else:
+                ref_out = ref_out + ep_ref_out
+                out = out + ep_out
 
-            rel_diff = (torch.mean(
-                torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                        torch.mean(torch.abs(ref_out.to(torch.float32))))
+        #print(f"{out.sum()=}")
+        #print(f"{ref_out.sum()=}")
 
     rel_diff = (torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /

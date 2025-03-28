@@ -703,7 +703,7 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
 
     # For now, disable DeepGemm for small N until better permute/unpermute
     # ops are available.
-    if N <= 512:
+    if False and N <= 512:
         logger.debug("DeepGemm disabled: N <= 512.")
         return False
 
