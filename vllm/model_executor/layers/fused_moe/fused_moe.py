@@ -783,7 +783,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         # Note: we never apply the topk_weights here since it requires
         # unpermuting and resizing the output.  This goes against the
         # existing interface as the `mul_routed_weight` argument is
-        # ignored.  The weights are applied in _moe_unpermute.
+        # ignored.  The weights are applied in _moe_unpermute_and_reduce.
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (A, A_scale), (B, B_scale), C, expert_ids)
 
