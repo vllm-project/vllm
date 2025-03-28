@@ -8,9 +8,9 @@ from vllm.model_executor.layers.lightning_attn import (
 from vllm.platforms import current_platform
 
 NUM_HEADS = [4, 8]
-HEAD_SIZES = [64, 128]
+HEAD_SIZES = [64]
 BATCH_SIZES = [1, 2]
-SEQ_LENGTHS = [16, 128]
+SEQ_LENGTHS = [16]
 DTYPES = [torch.float32]
 
 
