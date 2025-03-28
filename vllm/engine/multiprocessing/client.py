@@ -95,6 +95,7 @@ class MQLLMEngineClient(EngineClient):
         # Get the configs.
         self.model_config = engine_config.model_config
         self.decoding_config = engine_config.decoding_config
+        self.speculative_config = engine_config.speculative_config
 
         # Create the tokenizer group.
         self.tokenizer = init_tokenizer_from_configs(
@@ -617,6 +618,7 @@ class MQLLMEngineClient(EngineClient):
                         else DecodingConfig.guided_decoding_backend),
                     model_config=self.model_config,
                     reasoning_backend=self.decoding_config.reasoning_backend,
+                    speculative_config=self.speculative_config,
                 )
 
         # 1) Create output queue for this requests.
