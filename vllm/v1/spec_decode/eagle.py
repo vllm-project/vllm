@@ -19,10 +19,8 @@ class EagleProposer:
         self.vllm_config = vllm_config
         self.num_speculative_tokens = num_speculative_tokens
         self.block_size = vllm_config.cache_config.block_size
-        self.arange = torch.arange(
-            vllm_config.scheduler_config.max_num_seqs,
-            device=device,
-        )
+        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs,
+                                   device=device)
 
     def propose(
         self,
