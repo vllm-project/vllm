@@ -64,7 +64,8 @@ def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
     # The actual implementation returns a tensor of shape [B, H, 2, D, E]
     # where dimension 2 contains both KV and KV history
     kv_reshaped = kv_cache.unsqueeze(2)  # [B, H, 1, D, E]
-    final_kv_cache = torch.cat([kv_reshaped, kv_reshaped], dim=2)  # [B, H, 2, D, E]
+    final_kv_cache = torch.cat([kv_reshaped, kv_reshaped],
+                               dim=2)  # [B, H, 2, D, E]
 
     return output, final_kv_cache
 
