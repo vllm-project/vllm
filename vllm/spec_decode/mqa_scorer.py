@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Optional
+
 from vllm.sequence import (ExecuteModelRequest, SequenceData,
                            SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
@@ -15,7 +17,7 @@ class MQAScorer(SpeculativeScorer):
         self,
         execute_model_req: ExecuteModelRequest,
         proposals: SpeculativeProposals,
-    ) -> SpeculativeScores:
+    ) -> Optional[SpeculativeScores]:
         target_seq_group_metadata_list = []
         target_seq_id_start = max(
             get_all_seq_ids(execute_model_req.seq_group_metadata_list)) + 1
@@ -68,6 +70,8 @@ class MQAScorer(SpeculativeScorer):
                 seq_group_metadata_list=target_seq_group_metadata_list))
 
         target_sampler_output = target_sampler_output[0]
+        if target_sampler_output is None:
+            return None
 
         k = execute_model_req.num_lookahead_slots
         bs = len(execute_model_req.seq_group_metadata_list)

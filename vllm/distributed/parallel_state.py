@@ -1011,11 +1011,13 @@ def model_parallel_is_initialized():
 
 
 _TP_STATE_PATCHED = False
+_PP_STATE_PATCHED = False
 
 
 @contextmanager
-def patch_tensor_parallel_group(tp_group: GroupCoordinator):
-    """Patch the tp group temporarily until this function ends.
+def patch_model_parallel_group(tp_group: GroupCoordinator,
+                               pp_group: GroupCoordinator):
+    """Patch the tp and pp group temporarily until this function ends.
 
     This method is for draft workers of speculative decoding to run draft model
     with different tp degree from that of target model workers.
@@ -1026,16 +1028,26 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
     global _TP_STATE_PATCHED
     assert not _TP_STATE_PATCHED, "Should not call when it's already patched"
 
+    global _PP_STATE_PATCHED
+    assert not _PP_STATE_PATCHED, "Should not call when it's already patched"
+
     _TP_STATE_PATCHED = True
     old_tp_group = get_tp_group()
     global _TP
     _TP = tp_group
+
+    _PP_STATE_PATCHED = True
+    old_pp_group = get_pp_group()
+    global _PP
+    _PP = pp_group
     try:
         yield
     finally:
         # restore the original state
         _TP_STATE_PATCHED = False
         _TP = old_tp_group
+        _PP_STATE_PATCHED = False
+        _PP = old_pp_group
 
 
 def get_tensor_model_parallel_world_size():

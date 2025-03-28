@@ -36,7 +36,7 @@ debug_advance_input = False
 allow_gpu_advance_step = True
 
 
-class TP1DraftModelRunner(ModelRunnerWrapperBase):
+class TP1PP1DraftModelRunner(ModelRunnerWrapperBase):
     """Specialized model runner for speculative decoding draft model.
     Since the draft model always execute k forward passes consecutively to
     generate k speculative tokens in a single speculative decoding step,
