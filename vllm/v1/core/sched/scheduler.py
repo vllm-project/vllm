@@ -10,6 +10,7 @@ from typing import Optional, Union
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.logger import init_logger
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -36,8 +37,10 @@ class Scheduler(SchedulerInterface):
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
         speculative_config: Optional[SpeculativeConfig],
-        log_stats: bool,
         structured_output_manager: StructuredOutputManager,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+        include_finished_set: bool = False,
+        log_stats: bool = False,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -45,6 +48,12 @@ class Scheduler(SchedulerInterface):
         self.speculative_config = speculative_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
+
+        # include_finished_set controls whether a separate set of finished
+        # request ids should be included in the EngineCoreOutputs returned
+        # by update_from_outputs(). This is currently used in the multi-engine
+        # case to track request lifetimes efficiently.
+        self.include_finished_set = include_finished_set
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -93,6 +102,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
             scheduler_config=scheduler_config,
+            mm_registry=mm_registry,
         )
 
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
@@ -660,10 +670,16 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
 
         self.running = new_running
-        return EngineCoreOutputs(
+        engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
             scheduler_stats=self.make_stats(),
         )
+        if self.include_finished_set:
+            #TODO currently sending duplicates here, improve this
+            engine_core_outputs.finished_requests = (
+                scheduler_output.finished_req_ids | self.finished_req_ids)
+
+        return engine_core_outputs
 
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
