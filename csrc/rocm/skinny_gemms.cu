@@ -32,38 +32,40 @@ template <typename T>
 struct scalar2 {};
 
 template <typename T>
-C10_DEVICE C10_ALWAYS_INLINE float2 __s22float2(T v);
+__device__ __forceinline__ float2 __s22float2(T v);
 
 template <typename T>
-C10_DEVICE C10_ALWAYS_INLINE T __float22s2_rn(float2 v);
+__device__ __forceinline__ T __float22s2_rn(float2 v);
 
+// Vector (size 2) definition and cvt functions for fp16
 template <>
 struct scalar2<c10::Half> {
   using type = __half2;
 };
 
 template <>
-C10_DEVICE C10_ALWAYS_INLINE float2 __s22float2(__half2 v) {
+__device__ __forceinline__ float2 __s22float2(__half2 v) {
   return __half22float2(v);
 }
 
 template <>
-C10_DEVICE C10_ALWAYS_INLINE __half2 __float22s2_rn(float2 v) {
+__device__ __forceinline__ __half2 __float22s2_rn(float2 v) {
   return __float22half2_rn(v);
 }
 
+// Vector (size 2) definition and cvt functions for bf16
 template <>
 struct scalar2<c10::BFloat16> {
   using type = __hip_bfloat162;
 };
 
 template <>
-C10_DEVICE C10_ALWAYS_INLINE float2 __s22float2(__hip_bfloat162 v) {
+__device__ __forceinline__ float2 __s22float2(__hip_bfloat162 v) {
   return __bfloat1622float2(v);
 }
 
 template <>
-C10_DEVICE C10_ALWAYS_INLINE __hip_bfloat162 __float22s2_rn(float2 v) {
+__device__ __forceinline__ __hip_bfloat162 __float22s2_rn(float2 v) {
   return __float22bfloat162_rn(v);
 }
 

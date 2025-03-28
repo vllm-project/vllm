@@ -77,7 +77,7 @@ def apply_gemm_rocm(x: torch.Tensor,
 
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
-    if m > 8 and n <= 4:
+    if m > 8 and n <= 2:
         out = torch.empty(x_view.shape[0],
                           weight.shape[0],
                           dtype=x.dtype,
