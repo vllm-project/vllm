@@ -16,7 +16,7 @@ from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 GUIDED_DECODING_BACKENDS_V1 = ["xgrammar", "guidance"]
 MODELS_TO_TEST = [
-    "Qwen/Qwen2.5-1.5B-Instruct",
+    "Qwen/Qwen2.5-1.5B-Instruct", "mistralai/Ministral-8B-Instruct-2410"
 ]
 
 
