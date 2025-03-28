@@ -24,7 +24,6 @@
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
-import torch.utils.checkpoint
 from torch import nn
 from transformers import CohereConfig
 

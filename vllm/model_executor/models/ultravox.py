@@ -8,7 +8,6 @@ from functools import cached_property
 from typing import Any, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
-import torch.utils.checkpoint
 from torch import nn
 from torch.nn import functional as F
 from transformers import BatchFeature, ProcessorMixin
@@ -160,7 +159,7 @@ class UltravoxMultiModalProcessor(
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
-        if not mm_data or not mm_data.get("audios", []):
+        if not mm_data.get("audios", []):
             prompt_ids = self.info.get_tokenizer().encode(
                 prompt, add_special_tokens=False)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
