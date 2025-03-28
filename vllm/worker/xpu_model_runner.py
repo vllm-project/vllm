@@ -15,7 +15,6 @@ from vllm.attention import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
-from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadataCache
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -24,7 +23,8 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, SequenceData,
+                           SequenceGroupMetadata)
 from vllm.utils import DeviceMemoryProfiler, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import (
@@ -188,19 +188,10 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             input_positions.extend(list(positions_range))
 
             if seq_group_metadata.multi_modal_data:
-                # NOTE: mm_data only includes the subset of multi-modal items
+                # NOTE: mm_kwargs only includes the subset of multi-modal items
                 # that intersect with the current prefill positions.
-                mm_data, placeholder_maps = MultiModalPlaceholderMap \
+                mm_kwargs, placeholder_maps = MultiModalPlaceholderMap \
                     .from_seq_group(seq_group_metadata, positions_range)
-
-                if self.runner.mm_registry.has_processor(
-                        self.runner.model_config):
-                    mm_kwargs = mm_data
-                else:
-                    mm_kwargs = self.runner.multi_modal_input_mapper(
-                        mm_data,
-                        seq_group_metadata.mm_processor_kwargs,
-                    )
 
                 multi_modal_kwargs_list.append(mm_kwargs)
 
@@ -377,7 +368,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         return_hidden_states: bool = False,
-        input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
@@ -402,11 +392,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         )
 
         # Multi-modal data support
-        self.input_registry = input_registry
         self.mm_registry = mm_registry
-        self.multi_modal_input_mapper = mm_registry \
-            .create_input_mapper(model_config)
-        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
@@ -468,15 +454,15 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            dummy_data = self.input_registry \
-                .dummy_data_for_profiling(self.model_config,
-                                          seq_len,
-                                          self.mm_registry)
+            dummy_data = self.mm_registry.get_decoder_dummy_data(
+                self.model_config, seq_len)
+            dummy_seq_data = SequenceData.from_seqs(
+                dummy_data.prompt_token_ids)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: dummy_data.seq_data},
+                seq_data={group_id: dummy_seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
                 lora_request=None,
