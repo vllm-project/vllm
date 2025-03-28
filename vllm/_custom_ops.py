@@ -546,6 +546,7 @@ def cutlass_scaled_mm(a: torch.Tensor,
     n = b.shape[1]
 
     if current_platform.is_rocm():
+        # TODO(luka) remove this once all uses go through the ScaledMMKernel path
         triton_scaled_mm_module = importlib.import_module(
             "vllm.model_executor.layers.quantization.compressed_tensors."
             "triton_scaled_mm")

@@ -4,6 +4,9 @@ from typing import Optional, Tuple
 
 import torch
 
+from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
+    triton_scaled_mm)
 from vllm.platforms import current_platform
 
 from .cutlass import CutlassScaledMMLinearKernel
@@ -36,10 +39,26 @@ class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # TODO maybe this doesn't need to transpose the weight?
+        # Could also skip asymmetric-only paths
         super().process_weights_after_loading(layer)
 
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return super().apply_weights(layer, x, bias)
+        w_q, w_s, i_s, _, _ = self._get_weight_params(layer)
+
+        # ops.scaled_int8_quant supports both dynamic and static quant:
+        # * dynamic, i_s is None and x_s computed from x.
+        # * static, i_s is scalar and x_s is i_s.
+
+        # Only symmetric supported in triton_scaled_mm
+        x_q, x_s, _ = ops.scaled_int8_quant(x, i_s, symmetric=True)
+
+        return triton_scaled_mm(x_q,
+                                w_q,
+                                scale_a=x_s,
+                                scale_b=w_s,
+                                out_dtype=x.dtype,
+                                bias=bias)
