@@ -10,7 +10,15 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm import _custom_ops as ops
+from vllm import envs
+
 from .prefix_prefill import context_attention_fwd
+
+_PARTITION_SIZE_ROCM = 256
+_GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+_ON_NAVI = "gfx1" in _GPU_ARCH
+_ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 
 @triton.jit
@@ -212,6 +220,7 @@ def chunked_prefill_paged_decode(
     block_table,
     query_start_loc,
     seq_lens,
+    max_seq_len,
     max_query_len,
     k_scale,
     v_scale,
@@ -275,43 +284,99 @@ def chunked_prefill_paged_decode(
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv),
                                     16)
 
-    kernel_paged_attention_2d[(
-        num_seqs,
-        num_kv_heads,
-    )](
-        output_ptr=output,
-        query_ptr=query,
-        key_cache_ptr=key_cache,
-        value_cache_ptr=value_cache,
-        block_tables_ptr=block_table,
-        seq_lens_ptr=seq_lens,
-        alibi_slopes_ptr=alibi_slopes,
-        scale=sm_scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        num_query_heads=num_query_heads,
-        num_queries_per_kv=num_queries_per_kv,
-        num_queries_per_kv_padded=num_queries_per_kv_padded,
-        block_table_stride=block_table.stride(0),
-        query_stride_0=query.stride(0),
-        query_stride_1=query.stride(1),
-        output_stride_0=output.stride(0),
-        output_stride_1=output.stride(1),
-        BLOCK_SIZE=block_size,
-        HEAD_SIZE=head_size,
-        HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-        USE_ALIBI_SLOPES=use_alibi_slopes,
-        SLIDING_WINDOW=sliding_window,
-        x=key_cache.shape[4],
-        stride_k_cache_0=key_cache.stride(0),
-        stride_k_cache_1=key_cache.stride(1),
-        stride_k_cache_2=key_cache.stride(2),
-        stride_k_cache_3=key_cache.stride(3),
-        stride_k_cache_4=key_cache.stride(4),
-        stride_v_cache_0=value_cache.stride(0),
-        stride_v_cache_1=value_cache.stride(1),
-        stride_v_cache_2=value_cache.stride(2),
-        stride_v_cache_3=value_cache.stride(3),
-        filter_by_query_len=True,
-        query_start_len_ptr=query_start_loc,
-    )
+    # max_seq_len = torch.max(seq_lens) # perf pain
+    use_custom = _use_rocm_custom_paged_attention(query.dtype, head_size,
+                                                  block_size,
+                                                  num_queries_per_kv,
+                                                  max_seq_len)
+    if use_custom:
+        max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
+                              _PARTITION_SIZE_ROCM)
+        assert _PARTITION_SIZE_ROCM % block_size == 0
+        total_num_seq = query.shape[0]
+        tmp_output = torch.empty(
+            size=(total_num_seq, num_query_heads, max_num_partitions,
+                  head_size),
+            dtype=output.dtype,
+            device=output.device,
+        )
+        exp_sums = torch.empty(
+            size=(total_num_seq, num_query_heads, max_num_partitions),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        max_logits = torch.empty_like(exp_sums)
+
+        ops.paged_attention_rocm(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            scale=sm_scale,
+            block_tables=block_table,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            block_size=block_size,
+            max_seq_len=max_seq_len,
+            alibi_slopes=alibi_slopes,
+            kv_cache_dtype=kv_cache_dtype,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+    else:
+        kernel_paged_attention_2d[(
+            num_seqs,
+            num_kv_heads,
+        )](
+            output_ptr=output,
+            query_ptr=query,
+            key_cache_ptr=key_cache,
+            value_cache_ptr=value_cache,
+            block_tables_ptr=block_table,
+            seq_lens_ptr=seq_lens,
+            alibi_slopes_ptr=alibi_slopes,
+            scale=sm_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            num_query_heads=num_query_heads,
+            num_queries_per_kv=num_queries_per_kv,
+            num_queries_per_kv_padded=num_queries_per_kv_padded,
+            block_table_stride=block_table.stride(0),
+            query_stride_0=query.stride(0),
+            query_stride_1=query.stride(1),
+            output_stride_0=output.stride(0),
+            output_stride_1=output.stride(1),
+            BLOCK_SIZE=block_size,
+            HEAD_SIZE=head_size,
+            HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+            USE_ALIBI_SLOPES=use_alibi_slopes,
+            SLIDING_WINDOW=sliding_window,
+            x=key_cache.shape[4],
+            stride_k_cache_0=key_cache.stride(0),
+            stride_k_cache_1=key_cache.stride(1),
+            stride_k_cache_2=key_cache.stride(2),
+            stride_k_cache_3=key_cache.stride(3),
+            stride_k_cache_4=key_cache.stride(4),
+            stride_v_cache_0=value_cache.stride(0),
+            stride_v_cache_1=value_cache.stride(1),
+            stride_v_cache_2=value_cache.stride(2),
+            stride_v_cache_3=value_cache.stride(3),
+            filter_by_query_len=True,
+            query_start_len_ptr=query_start_loc,
+        )
+
+
+def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
+                                     block_size: int, gqa_ratio: int,
+                                     max_seq_len: int) -> bool:
+    # rocm custom page attention not support on navi (gfx1*)
+    return (_ON_MI250_MI300 and not _ON_NAVI
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and (head_size == 64 or head_size == 128)
+            and (block_size == 16 or block_size == 32)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
+            and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
