@@ -6,10 +6,10 @@ import torch.nn as nn
 
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.penalties import (apply_all_penalties,
                                           apply_min_token_penalties)
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
-from vllm.v1.sample.rejection_sampler import RejectionSampler
 
 _SAMPLING_EPS = 1e-5
 
@@ -19,22 +19,12 @@ class Sampler(nn.Module):
     def __init__(self):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
-        self.rejection_sampler = RejectionSampler()
 
     def forward(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        if sampling_metadata.rejection_sampling:
-            if sampling_metadata.max_num_logprobs:
-                raise NotImplementedError(
-                    "Rejection sampling does not support logprobs.")
-            return self.rejection_sampler(
-                logits,
-                sampling_metadata,
-            )
-
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
         # This is different from the V0 sampler, which uses the logits that
@@ -47,12 +37,21 @@ class Sampler(nn.Module):
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
+        # Apply allowed token ids.
+        logits = self.apply_allowed_token_ids(logits, sampling_metadata)
+        # Apply bad words exclusion.
+        logits = self.apply_bad_words(logits, sampling_metadata)
         # Apply logits bias.
         logits = self.apply_logits_bias(logits, sampling_metadata)
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
+        # Convert sampled token ids to int64 (long) type to ensure compatibility
+        # with subsequent operations that may use these values as indices.
+        # This conversion is necessary because FlashInfer sampling operations
+        # return int32 (while PyTorch argmax and topk return int64).
+        sampled = sampled.long()
 
         # Gather the logprobs of the topk and sampled token (if requested).
         # Get logprobs and rank tensors (if requested)
@@ -77,11 +76,8 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         temp: torch.Tensor,
     ) -> torch.Tensor:
-        # Avoid division by zero.
-        temp = torch.where(temp < _SAMPLING_EPS, 1.0, temp)
         # Use in-place division to avoid creating a new tensor.
-        logits.div_(temp.unsqueeze(dim=1))
-        return logits
+        return logits.div_(temp.unsqueeze(dim=1))
 
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
@@ -91,6 +87,12 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
+        """Sample logits based on sampling metadata.
+
+        The various logits processing functions called in this method
+        may update the logits tensor in-place.
+        """
+
         assert not (sampling_metadata.all_greedy
                     and sampling_metadata.all_random)
         if sampling_metadata.all_random:
@@ -100,20 +102,20 @@ class Sampler(nn.Module):
             if sampling_metadata.all_greedy:
                 return greedy_sampled
 
+        assert sampling_metadata.temperature is not None
+
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
 
         # Apply min_p.
-        if not sampling_metadata.no_min_p:
+        if sampling_metadata.min_p is not None:
             logits = self.apply_min_p(logits, sampling_metadata.min_p)
 
         # Apply top_k and/or top_p.
         random_sampled = self.topk_topp_sampler(
             logits,
             sampling_metadata.generators,
-            sampling_metadata.no_top_k,
             sampling_metadata.top_k,
-            sampling_metadata.no_top_p,
             sampling_metadata.top_p,
         )
 
@@ -124,6 +126,7 @@ class Sampler(nn.Module):
             sampling_metadata.temperature < _SAMPLING_EPS,
             greedy_sampled,
             random_sampled,
+            out=greedy_sampled,  # Reuse tensor
         )
         return sampled
 
@@ -140,19 +143,21 @@ class Sampler(nn.Module):
         Gather logprobs for topk and sampled/prompt token.
 
         Args:
-          logits: (num tokens) x (vocab) tensor
+          logprobs: (num tokens) x (vocab) tensor
           num_logprobs: minimum number of logprobs to
                         retain per token
           token_ids: prompt tokens (if prompt logprobs)
                      or sampled tokens (if sampled
                      logprobs); 1D token ID tensor
                      with (num tokens) elements
+                     Must be int64.
 
         Returns:
           Top-k int indices tensor, (num tokens) x (num_logprobs + 1)
           Top-k float logprobs tensor, (num tokens) x (num_logprobs + 1)
           Sampled token rank tensor, (num tokens)
         """
+        assert token_ids.dtype == torch.int64
         # Find the topK values.
         topk_logprobs, topk_indices = torch.topk(logprobs,
                                                  num_logprobs,
@@ -179,17 +184,20 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        apply_min_token_penalties(logits, sampling_metadata.output_token_ids,
-                                  sampling_metadata.stop_token_ids,
-                                  sampling_metadata.min_tokens)
+        if sampling_metadata.min_tokens:
+            apply_min_token_penalties(logits,
+                                      sampling_metadata.output_token_ids,
+                                      sampling_metadata.min_tokens)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
             logits = apply_all_penalties(
-                logits, sampling_metadata.prompt_token_ids,
+                logits,
+                sampling_metadata.prompt_token_ids,
                 sampling_metadata.presence_penalties,
                 sampling_metadata.frequency_penalties,
                 sampling_metadata.repetition_penalties,
-                sampling_metadata.output_token_ids)
+                sampling_metadata.output_token_ids,
+            )
         return logits
 
     def apply_min_p(
@@ -226,4 +234,27 @@ class Sampler(nn.Module):
             if logit_bias:
                 for token_id, bias in logit_bias.items():
                     logits[i, token_id] += bias
+        return logits
+
+    def apply_allowed_token_ids(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        if sampling_metadata.allowed_token_ids_mask is not None:
+            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask,
+                                float("-inf"))
+        return logits
+
+    def apply_bad_words(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        if sampling_metadata.bad_words_token_ids:
+            apply_bad_words(
+                logits,
+                sampling_metadata.bad_words_token_ids,
+                sampling_metadata.output_token_ids,
+            )
         return logits

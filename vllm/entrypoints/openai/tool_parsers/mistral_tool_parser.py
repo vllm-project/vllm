@@ -2,9 +2,10 @@
 
 import json
 import re
+from collections.abc import Sequence
 from random import choices
 from string import ascii_letters, digits
-from typing import Dict, List, Sequence, Union
+from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -56,10 +57,10 @@ class MistralToolParser(ToolParser):
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode
-        self.prev_tool_call_arr: List[Dict] = []
+        self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.streamed_args_for_tool: List[str] = [
+        self.streamed_args_for_tool: list[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "[TOOL_CALLS]"
         self.bot_token_id = self.vocab.get(self.bot_token)
@@ -104,7 +105,7 @@ class MistralToolParser(ToolParser):
                 function_call_arr = json.loads(raw_tool_call)
 
             # Tool Call
-            tool_calls: List[MistralToolCall] = [
+            tool_calls: list[MistralToolCall] = [
                 MistralToolCall(
                     type="function",
                     function=FunctionCall(
@@ -172,7 +173,7 @@ class MistralToolParser(ToolParser):
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
             try:
-                tool_call_arr: List[Dict] = partial_json_parser.loads(
+                tool_call_arr: list[dict] = partial_json_parser.loads(
                     parsable_arr, flags)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
@@ -180,7 +181,7 @@ class MistralToolParser(ToolParser):
 
             # select as the current tool call the one we're on the state at
 
-            current_tool_call: Dict = tool_call_arr[self.current_tool_id] \
+            current_tool_call: dict = tool_call_arr[self.current_tool_id] \
                 if len(tool_call_arr) > 0 else {}
 
             # case -- if no tokens have been streamed for the tool, e.g.

@@ -20,15 +20,17 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLora,
+                              LinearScalingRotaryEmbeddingWithLoRA,
                               LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
+                             get_supported_lora_modules,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
+from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
 from vllm.utils import is_pin_memory_available
@@ -102,6 +104,9 @@ class LoRAModel(AdapterModel):
     def get_lora(self, module_name: str) -> Optional[LoRALayerWeights]:
         """Get LoRA for a given module by name"""
         return self.loras.get(module_name, None)
+
+    def check_lora_name(self, lora_name: str) -> bool:
+        return lora_name in self.loras
 
     # (yard1): TODO see if we can derive target_embedding_padding automatically
     @classmethod
@@ -200,7 +205,7 @@ class LoRAModel(AdapterModel):
             expected_lora_modules: Name of modules that are expected to be
                 replaced by lora.
             peft_helper: Loaded lora configuration information.
-            lora_model_id: Lora model id. If not given, automatically set by
+            lora_model_id: LoRA model id. If not given, automatically set by
                 a global counter.
             device: Device where the lora model is loaded.
             dtype: dtype of the lora model weights.
@@ -267,7 +272,9 @@ class LoRAModel(AdapterModel):
                     f" target modules in {expected_lora_modules}"
                     f" but received {unexpected_modules}."
                     f" Please verify that the loaded LoRA module is correct")
-            tensors = torch.load(lora_bin_file_path, map_location=device)
+            tensors = torch.load(lora_bin_file_path,
+                                 map_location=device,
+                                 weights_only=True)
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
@@ -325,28 +332,32 @@ class LoRAModelManager(AdapterModelManager):
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
-        self.punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
-                                                 max_batches=self.max_num_seqs,
-                                                 device=self.device)
+        self.punica_wrapper = get_punica_wrapper(
+            max_num_batched_tokens,
+            max_batches=self.max_num_seqs,
+            device=self.device,
+            max_loras=self.lora_config.max_loras)
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
         super().__init__(model)
-        if hasattr(self.model, "supported_lora_modules"):
-            self.supported_lora_modules = copy.deepcopy(
-                self.model.supported_lora_modules)
-            if lora_config.long_lora_scaling_factors:
-                # We need to replace rotary emb layer to do batch computation
-                # for long lora.
-                self.supported_lora_modules.append("rotary_emb")
-            self.packed_modules_mapping = copy.deepcopy(
-                self.model.packed_modules_mapping)
+
+        self.supported_lora_modules = get_supported_lora_modules(self.model)
+        assert self.supported_lora_modules, "No supported LoRA modules found in"
+        f"{self.model.__class__.__name__}."
+        if lora_config.long_lora_scaling_factors:
+            # We need to replace rotary emb layer to do batch computation
+            # for long lora.
+            self.supported_lora_modules.append("rotary_emb")
+        self.packed_modules_mapping = copy.deepcopy(
+            self.model.packed_modules_mapping)
         # Used to indicate whether the model is a multimodal model
         self.supports_mm: bool = (
             supports_multimodal(self.model)
             # In case the model only supports LoRA for
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping"))
+        self.is_pooling_model = is_pooling_model(self.model)
         self.packed_modules: Dict[str, List[str]] = {}
         self.modules: Dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a Set for compatibility with LRUCache.
@@ -386,7 +397,7 @@ class LoRAModelManager(AdapterModelManager):
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
-            module_lora = lora_model.get_lora(module_name)
+            module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
                 module_lora.optimize()
                 # Bias is not explicitly enabled with the flag enable_lora_bias.
@@ -436,7 +447,7 @@ class LoRAModelManager(AdapterModelManager):
     def pin_adapter(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
         raise NotImplementedError(
-            "Pinning is not supported in LoRAModelManager."
+            "Pinning is not supported in LoRAModelManager. "
             "Use LRUCacheLoRAModelManager for pinning")  # type: ignore
 
     def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
@@ -479,9 +490,9 @@ class LoRAModelManager(AdapterModelManager):
                 from_layer(module, self.lora_slots, self.lora_config,
                            packed_moduled_lst, self.model.config))
 
-            # LinearScalingRotaryEmbeddingWithLora is used to handle
+            # LinearScalingRotaryEmbeddingWithLoRA is used to handle
             # long context lora. Register relevant metadata.
-            if isinstance(new_module, LinearScalingRotaryEmbeddingWithLora):
+            if isinstance(new_module, LinearScalingRotaryEmbeddingWithLoRA):
                 self.long_lora_context = LongContextLoRAContext(
                     new_module.scaling_factors, new_module.rotary_dim)
                 self.scaling_factor_to_offset = \
@@ -526,7 +537,7 @@ class LoRAModelManager(AdapterModelManager):
             bias_enabled = self.lora_config.bias_enabled
             if (not self._match_target_modules(module_name)
                     or not isinstance(module, BaseLayerWithLoRA)
-                    or isinstance(module, LinearScalingRotaryEmbeddingWithLora)
+                    or isinstance(module, LinearScalingRotaryEmbeddingWithLoRA)
                     or self._filter_unsupported_mm_module(module_name)):
                 continue
             parts = module_name.split(".")
@@ -623,7 +634,7 @@ class LoRAModelManager(AdapterModelManager):
             replaced_module: Set[str] = set()
             has_replacement = False
             for r in new_module_names:
-                lora = lora_model.get_lora(r)
+                lora = self._get_lora_layer_weights(lora_model, r)
                 replacement_loras.append(lora)
                 if lora:
                     has_replacement = True
@@ -634,11 +645,33 @@ class LoRAModelManager(AdapterModelManager):
                 if replacement_loras[i]:
                     continue
                 replacement_loras[i] = None
+            # HACK Temporary solution for the pool model.
+            if self.is_pooling_model and not lora_model.check_lora_name(
+                    module_name):
+                replaced_module_name = module_name.replace("model.", "")
+                if lora_model.check_lora_name(module_name):
+                    module_name = replaced_module_name
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                 replacement_loras)
             # Remove the modules that have been replaced.
             for module in replaced_module:
                 lora_model.loras.pop(module, None)
+
+    def _get_lora_layer_weights(
+            self, lora_model: LoRAModel,
+            module_name: str) -> Optional[LoRALayerWeights]:
+        org_module_name = module_name
+        if self.is_pooling_model and not lora_model.check_lora_name(
+                module_name):
+            # If it's a pool model, and the layer name is not found,
+            # remove the prefix 'model.' and search again.
+            module_name = module_name.replace("model.", "")
+            if lora_model.check_lora_name(module_name):
+                org_module_name = module_name
+                logger.info_once(
+                    "For the pool model, successfully loaded the LoRA weights "
+                    "after removing the prefix 'model.'.")
+        return lora_model.get_lora(org_module_name)
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
         return deactivate_adapter(adapter_id, self._active_adapters,
@@ -756,7 +789,7 @@ def create_lora_manager(
         lora_manager_cls: Type[LoRAModelManager] = LoRAModelManager,
         **kwargs) -> LoRAModelManager:
     """Create a LoRA adapter for a given model."""
-    if not hasattr(model, "supported_lora_modules"):
+    if not hasattr(model, "packed_modules_mapping"):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")
     lora_manager = lora_manager_cls(
         model=model,

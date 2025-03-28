@@ -5,7 +5,7 @@ handling multimodal placeholder substitution, and so on.
 """
 import itertools
 from collections import OrderedDict
-from typing import Dict, Iterable, Tuple
+from collections.abc import Iterable
 
 import pytest
 
@@ -13,9 +13,9 @@ from .types import (EMBEDDING_SIZE_FACTORS, ExpandableVLMTestArgs,
                     ImageSizeWrapper, SizeType, VLMTestInfo, VLMTestType)
 
 
-def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
-                               test_type: VLMTestType,
-                               fork_per_test: bool) -> Dict[str, VLMTestInfo]:
+def get_filtered_test_settings(
+        test_settings: dict[str, VLMTestInfo], test_type: VLMTestType,
+        new_proc_per_test: bool) -> dict[str, VLMTestInfo]:
     """Given the dict of potential test settings to run, return a subdict
     of tests who have the current test type enabled with the matching val for
     fork_per_test.
@@ -43,22 +43,22 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
 
             # Everything looks okay; keep if this is has correct proc handling
             if (test_info.distributed_executor_backend
-                    is not None) == fork_per_test:
+                    is not None) == new_proc_per_test:
                 matching_tests[test_name] = test_info
 
     return matching_tests
 
 
-def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
+def get_parametrized_options(test_settings: dict[str, VLMTestInfo],
                              test_type: VLMTestType,
-                             fork_new_process_for_each_test: bool):
+                             create_new_process_for_each_test: bool):
     """Converts all of our VLMTestInfo into an expanded list of parameters.
     This is similar to nesting pytest parametrize calls, but done directly
     through an itertools product so that each test can set things like
     size factors etc, while still running in isolated test cases.
     """
     matching_tests = get_filtered_test_settings(
-        test_settings, test_type, fork_new_process_for_each_test)
+        test_settings, test_type, create_new_process_for_each_test)
 
     # Ensure that something is wrapped as an iterable it's not already
     ensure_wrapped = lambda e: e if isinstance(e, (list, tuple)) else (e, )
@@ -121,7 +121,7 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
 
 def get_wrapped_test_sizes(
         test_info: VLMTestInfo,
-        test_type: VLMTestType) -> Tuple[ImageSizeWrapper, ...]:
+        test_type: VLMTestType) -> tuple[ImageSizeWrapper, ...]:
     """Given a test info which may have size factors or fixed sizes, wrap them
     and combine them into an iterable, each of which will be used in parameter
     expansion.

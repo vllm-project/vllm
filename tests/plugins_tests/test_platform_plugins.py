@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 
-from tests.kernels.utils import override_backend_env_variable
 from vllm.attention.selector import get_attn_backend
-from vllm.utils import STR_INVALID_VAL
+from vllm.utils import STR_BACKEND_ENV_VAR, STR_INVALID_VAL
 
 
 def test_platform_plugins():
@@ -14,7 +14,7 @@ def test_platform_plugins():
     import os
     example_file = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(current_file))),
-        "examples", "offline_inference/basic.py")
+        "examples", "offline_inference/basic/basic.py")
     runpy.run_path(example_file)
 
     # check if the plugin is loaded correctly
@@ -25,8 +25,9 @@ def test_platform_plugins():
         f" is loaded. The first import:\n{_init_trace}")
 
 
-def test_oot_attention_backend(monkeypatch):
+def test_oot_attention_backend(monkeypatch: pytest.MonkeyPatch):
     # ignore the backend env variable if it is set
-    override_backend_env_variable(monkeypatch, STR_INVALID_VAL)
-    backend = get_attn_backend(16, torch.float16, torch.float16, 16, False)
-    assert backend.get_name() == "Dummy_Backend"
+    with monkeypatch.context() as m:
+        m.setenv(STR_BACKEND_ENV_VAR, STR_INVALID_VAL)
+        backend = get_attn_backend(16, torch.float16, torch.float16, 16, False)
+        assert backend.get_name() == "Dummy_Backend"

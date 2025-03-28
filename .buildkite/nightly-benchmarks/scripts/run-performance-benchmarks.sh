@@ -309,11 +309,14 @@ run_serving_tests() {
 
       new_test_name=$test_name"_qps_"$qps
 
+      # pass the tensor parallel size to the client so that it can be displayed
+      # on the benchmark dashboard
       client_command="python3 benchmark_serving.py \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \
         --request-rate $qps \
+        --metadata "tensor_parallel_size=$tp" \
         $client_args"
 
       echo "Running test case $test_name with qps $qps"
@@ -358,7 +361,7 @@ main() {
   # get the current IP address, required by benchmark_serving.py
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
   # turn of the reporting of the status of each request, to clean up the terminal output
-  export VLLM_LOG_LEVEL="WARNING"
+  export VLLM_LOGGING_LEVEL="WARNING"
 
   # prepare for benchmarking
   cd benchmarks || exit 1

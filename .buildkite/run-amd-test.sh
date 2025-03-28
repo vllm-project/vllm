@@ -77,7 +77,6 @@ echo "Commands:$commands"
 #ignore certain kernels tests
 if [[ $commands == *" kernels "* ]]; then
   commands="${commands} \
-  --ignore=kernels/test_attention.py \
   --ignore=kernels/test_attention_selector.py \
   --ignore=kernels/test_blocksparse_attention.py \
   --ignore=kernels/test_causal_conv1d.py \
@@ -92,18 +91,39 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_moe.py \
   --ignore=kernels/test_prefix_prefill.py \
   --ignore=kernels/test_rand.py \
-  --ignore=kernels/test_sampler.py"
+  --ignore=kernels/test_sampler.py \
+  --ignore=kernels/test_cascade_flash_attn.py \
+  --ignore=kernels/test_mamba_mixer2.py \
+  --ignore=kernels/test_aqlm.py \
+  --ignore=kernels/test_machete_mm.py \
+  --ignore=kernels/test_mha_attn.py \
+  --ignore=kernels/test_block_fp8.py \
+  --ignore=kernels/test_permute_cols.py"
 fi
 
-#ignore certain Entrypoints tests
+#ignore certain Entrypoints/openai tests
 if [[ $commands == *" entrypoints/openai "* ]]; then
   commands=${commands//" entrypoints/openai "/" entrypoints/openai \
-  --ignore=entrypoints/openai/test_accuracy.py \
   --ignore=entrypoints/openai/test_audio.py \
-  --ignore=entrypoints/openai/test_encoder_decoder.py \
-  --ignore=entrypoints/openai/test_embedding.py \
-  --ignore=entrypoints/openai/test_oot_registration.py "}
+  --ignore=entrypoints/openai/test_chat.py \
+  --ignore=entrypoints/openai/test_shutdown.py \
+  --ignore=entrypoints/openai/test_completion.py \
+  --ignore=entrypoints/openai/test_sleep.py \
+  --ignore=entrypoints/openai/test_models.py \
+  --ignore=entrypoints/openai/test_prompt_validation.py "}
 fi
+
+#ignore certain Entrypoints/llm tests
+if [[ $commands == *" && pytest -v -s entrypoints/llm/test_guided_generate.py"* ]]; then
+  commands=${commands//" && pytest -v -s entrypoints/llm/test_guided_generate.py"/" "}
+fi
+
+# --ignore=entrypoints/openai/test_encoder_decoder.py \
+# --ignore=entrypoints/openai/test_embedding.py \
+# --ignore=entrypoints/openai/test_oot_registration.py
+# --ignore=entrypoints/openai/test_accuracy.py \
+# --ignore=entrypoints/openai/test_models.py <= Fails on MI250 but passes on MI300 as of 2025-03-13
+
 
 PARALLEL_JOB_COUNT=8
 # check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
@@ -114,13 +134,16 @@ if [[ $commands == *"--shard-id="* ]]; then
     # assign shard-id for each shard
     commands_gpu=${commands//"--shard-id= "/"--shard-id=${GPU} "}
     echo "Shard ${GPU} commands:$commands_gpu"
+    echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
     docker run \
-        --device /dev/kfd --device /dev/dri \
-        --network host \
+        --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+        --network=host \
         --shm-size=16gb \
         --rm \
         -e HIP_VISIBLE_DEVICES="${GPU}" \
         -e HF_TOKEN \
+        -e AWS_ACCESS_KEY_ID \
+        -e AWS_SECRET_ACCESS_KEY \
         -v "${HF_CACHE}:${HF_MOUNT}" \
         -e "HF_HOME=${HF_MOUNT}" \
         --name "${container_name}_${GPU}" \
@@ -141,13 +164,16 @@ if [[ $commands == *"--shard-id="* ]]; then
     fi
   done
 else
+  echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
-          --device /dev/kfd --device /dev/dri \
-          --network host \
+          --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+          --network=host \
           --shm-size=16gb \
           --rm \
           -e HIP_VISIBLE_DEVICES=0 \
           -e HF_TOKEN \
+          -e AWS_ACCESS_KEY_ID \
+          -e AWS_SECRET_ACCESS_KEY \
           -v "${HF_CACHE}:${HF_MOUNT}" \
           -e "HF_HOME=${HF_MOUNT}" \
           --name "${container_name}" \

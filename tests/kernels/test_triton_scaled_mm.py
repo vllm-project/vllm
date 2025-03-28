@@ -4,7 +4,7 @@
 Run `pytest tests/kernels/test_triton_scaled_mm.py`.
 """
 import importlib
-from typing import Optional, Type
+from typing import Optional
 
 import pytest
 import torch
@@ -18,7 +18,7 @@ def scaled_mm_torch(a: torch.Tensor,
                     b: torch.Tensor,
                     scale_a: torch.Tensor,
                     scale_b: torch.Tensor,
-                    out_dtype: Type[torch.dtype],
+                    out_dtype: type[torch.dtype],
                     bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     out = torch.mm(a.to(torch.float32), b.to(torch.float32))
     out = scale_a * out
@@ -32,11 +32,8 @@ def scaled_mm_torch(a: torch.Tensor,
 
 def get_8bit_types():
     types = [torch.int8]
-    supports_fp8 = current_platform.has_device_capability(89)
-    if current_platform.is_rocm() and supports_fp8:
-        types.append(torch.float8_e4m3fnuz)
-    elif current_platform.is_cuda() and supports_fp8:
-        types.append(torch.float8_e4m3fn)
+    if current_platform.supports_fp8():
+        types.append(current_platform.fp8_dtype())
     return types
 
 

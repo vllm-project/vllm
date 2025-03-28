@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List
-
 import openai
 import pytest
 import pytest_asyncio
@@ -27,8 +25,6 @@ def server():
     args = [
         "--task",
         "generate",
-        "--dtype",
-        "bfloat16",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -50,7 +46,7 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> Dict[str, str]:
+def base64_encoded_image() -> dict[str, str]:
     return {
         image_url: encode_image_base64(fetch_image(image_url))
         for image_url in TEST_IMAGE_URLS
@@ -152,7 +148,7 @@ async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded(
         client: openai.AsyncOpenAI, model_name: str, image_url: str,
-        base64_encoded_image: Dict[str, str]):
+        base64_encoded_image: dict[str, str]):
 
     messages = [{
         "role":
@@ -210,7 +206,7 @@ async def test_single_chat_session_image_base64encoded(
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded_beamsearch(
         client: openai.AsyncOpenAI, model_name: str, image_url: str,
-        base64_encoded_image: Dict[str, str]):
+        base64_encoded_image: dict[str, str]):
 
     messages = [{
         "role":
@@ -280,7 +276,7 @@ async def test_chat_streaming_image(client: openai.AsyncOpenAI,
         temperature=0.0,
         stream=True,
     )
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta
@@ -303,7 +299,7 @@ async def test_chat_streaming_image(client: openai.AsyncOpenAI,
     "image_urls",
     [TEST_IMAGE_URLS[:i] for i in range(2, len(TEST_IMAGE_URLS))])
 async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
-                                 image_urls: List[str]):
+                                 image_urls: list[str]):
 
     messages = [{
         "role":

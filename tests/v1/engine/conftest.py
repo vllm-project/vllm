@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Tuple
-
 import pytest
 import torch
 from transformers import AutoTokenizer
@@ -17,8 +15,8 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 from tests.v1.engine.utils import FULL_STRINGS  # isort: skip
 
-EngineCoreSampleLogprobsType = List[Tuple[torch.Tensor, torch.Tensor]]
-EngineCorePromptLogprobsType = Tuple[torch.Tensor, torch.Tensor]
+EngineCoreSampleLogprobsType = list[tuple[torch.Tensor, torch.Tensor]]
+EngineCorePromptLogprobsType = tuple[torch.Tensor, torch.Tensor]
 
 
 def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:

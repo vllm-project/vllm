@@ -227,9 +227,11 @@ EXPECTED_METRICS_V1 = [
     "vllm:gpu_cache_usage_perc",
     "vllm:gpu_prefix_cache_queries",
     "vllm:gpu_prefix_cache_hits",
+    "vllm:num_preemptions_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
     "vllm:iteration_tokens_total",
+    "vllm:cache_config_info",
     "vllm:request_success_total",
     "vllm:request_prompt_tokens_sum",
     "vllm:request_prompt_tokens_bucket",
@@ -237,6 +239,12 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_generation_tokens_sum",
     "vllm:request_generation_tokens_bucket",
     "vllm:request_generation_tokens_count",
+    "vllm:request_params_n_sum",
+    "vllm:request_params_n_bucket",
+    "vllm:request_params_n_count",
+    "vllm:request_params_max_tokens_sum",
+    "vllm:request_params_max_tokens_bucket",
+    "vllm:request_params_max_tokens_count",
     "vllm:time_to_first_token_seconds_sum",
     "vllm:time_to_first_token_seconds_bucket",
     "vllm:time_to_first_token_seconds_count",
@@ -280,7 +288,7 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
 def test_metrics_exist_run_batch(use_v1: bool):
     if use_v1:
         pytest.skip("Skipping test on vllm V1")
-    input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}"""  # noqa: E501
+    input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/multilingual-e5-small", "input": "You are a helpful assistant."}}"""  # noqa: E501
 
     base_url = "0.0.0.0"
     port = "8001"
@@ -300,7 +308,7 @@ def test_metrics_exist_run_batch(use_v1: bool):
             "-o",
             output_file.name,
             "--model",
-            "intfloat/e5-mistral-7b-instruct",
+            "intfloat/multilingual-e5-small",
             "--enable-metrics",
             "--url",
             base_url,

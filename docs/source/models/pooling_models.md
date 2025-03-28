@@ -28,10 +28,10 @@ The selected option sets the default pooler used to extract the final hidden sta
 - * Embedding (`embed`)
   * `LAST`
   * ✅︎
-  * ✗
+  * ❌
 - * Classification (`classify`)
   * `LAST`
-  * ✗
+  * ❌
   * ✅︎
 - * Sentence Pair Scoring (`score`)
   * \*
@@ -39,8 +39,8 @@ The selected option sets the default pooler used to extract the final hidden sta
   * \*
 - * Reward Modeling (`reward`)
   * `ALL`
-  * ✗
-  * ✗
+  * ❌
+  * ❌
 :::
 
 \*The default pooler is always defined by the model.
@@ -88,7 +88,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/embedding.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic/embed.py>
 
 ### `LLM.classify`
 
@@ -103,13 +103,12 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/classification.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic/classify.py>
 
 ### `LLM.score`
 
 The {class}`~vllm.LLM.score` method outputs similarity scores between sentence pairs.
-It is primarily designed for [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html).
-These types of models serve as rerankers between candidate query-document pairs in RAG systems.
+It is designed for embedding models and cross encoder models. Embedding models use cosine similarity, and [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html) serve as rerankers between candidate query-document pairs in RAG systems.
 
 :::{note}
 vLLM can only perform the model inference component (e.g. embedding, reranking) of RAG.
@@ -125,7 +124,7 @@ score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/scoring.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic/score.py>
 
 ## Online Serving
 

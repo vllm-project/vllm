@@ -143,10 +143,6 @@ def make_mistral_chat_completion_request(
     if last_message["role"] == "assistant":
         last_message["prefix"] = True
 
-        last_message = cast(Dict[str, Any], messages[-1])
-        if last_message["role"] == "assistant":
-            last_message["prefix"] = True
-
     # mistral-common requires AssistantMessage content to be string [1].
     #
     # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
@@ -164,7 +160,8 @@ def make_mistral_chat_completion_request(
                 tool["function"] for tool in tools
                 if tool["type"] == "function"
         ]:
-            function.setdefault("parameters", {})
+            if function.get("parameters") is None:
+                function["parameters"] = {}
 
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     return ChatCompletionRequest(messages=messages,
@@ -248,7 +245,7 @@ class MistralTokenizer(TokenizerBase):
                                          revision=revision)
         return tokenizer_file
 
-    # the following attributes are set to fit VLLM's design and are used
+    # the following attributes are set to fit vLLM's design and are used
     # by the guided structured output backends.
     @property
     def all_special_tokens_extended(self) -> List[str]:

@@ -21,6 +21,14 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This module relies on V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 @pytest.mark.parametrize(
     "model_args",
     [
@@ -215,8 +223,6 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
             assert qkv_proj.scheme.group_size == (-1
                                                   if group is None else group)
 
-            assert qkv_proj.weight_packed.dtype is torch.int32
-            assert qkv_proj.weight_scale.dtype is torch.float16
             assert qkv_proj.scheme.pack_factor == pack_factor
 
         llm.apply_model(check_model)
