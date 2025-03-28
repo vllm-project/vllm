@@ -14,7 +14,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
-from vllm.utils import round_up
 
 dg_available = False
 try:
@@ -362,16 +361,9 @@ def test_moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
     M, K = a.shape
 
     sorted_token_ids, m_indices, num_pad = moe_align_block_size(
-        topk_ids, block_m, num_groups, None)
+        topk_ids, block_m, num_groups, None, pad_sorted_ids=True)
 
     num_tokens = topk * M
-
-    pad_size = (round_up(sorted_token_ids.numel(), block_m) -
-                sorted_token_ids.numel())
-    if pad_size > 0:
-        sorted_token_ids = torch.nn.functional.pad(sorted_token_ids,
-                                                   (0, pad_size), "constant",
-                                                   num_tokens)
 
     sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
     m_indices = torch.repeat_interleave(m_indices, block_m, dim=0)
@@ -419,9 +411,7 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     act_out = SiluAndMul().forward_native(inter_out)
     act_out_q, act_out_s = per_token_group_quant_fp8(act_out, block_k)
 
-    out = torch.zeros(a_q.shape[0], K,
-                      dtype=torch.bfloat16,
-                      device=a.device)
+    out = torch.zeros(a_q.shape[0], K, dtype=torch.bfloat16, device=a.device)
 
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
         (act_out_q, act_out_s), (w2, w2_s), out, m_indices)
@@ -490,8 +480,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
             ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
                                                    score, topk, block_size)
         else:
-            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
-                                               block_size)
+            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
+                                               topk, block_size)
 
         out = fused_moe(a,
                         w1,

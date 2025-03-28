@@ -1446,8 +1446,11 @@ def _moe_permute(
     tokens_in_chunk, _ = curr_hidden_states.shape
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = (
-        moe_align_block_size(curr_topk_ids, block_m, global_num_experts,
-                             expert_map, pad_sorted_ids=needs_permute))
+        moe_align_block_size(curr_topk_ids,
+                             block_m,
+                             global_num_experts,
+                             expert_map,
+                             pad_sorted_ids=needs_permute))
 
     inv_perm: Optional[torch.Tensor] = None
 
@@ -1641,9 +1644,10 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             a1q_scale = a1_scale
 
         (qcurr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
-         num_tokens_post_padded, inv_perm) = _moe_permute(
-             qcurr_hidden_states, a1q_scale, curr_topk_ids, global_num_experts,
-             expert_map, top_k_num, block_m, use_dg)
+         num_tokens_post_padded,
+         inv_perm) = _moe_permute(qcurr_hidden_states, a1q_scale,
+                                  curr_topk_ids, global_num_experts,
+                                  expert_map, top_k_num, block_m, use_dg)
 
         # Adjust the intermediate cache size and config for the last chunk.
         # Note that in most cases we only have one chunk so the cache size
