@@ -338,9 +338,11 @@ class InputRegistry:
             dummy_data_v1 = (profiler.get_encoder_dummy_data(seq_len)
                              if is_encoder_data else
                              profiler.get_decoder_dummy_data(seq_len))
+            _seq_data = SequenceData.from_seqs(
+                dummy_data_v1.prompt_token_ids)  # type: ignore[attr-defined]
+
             dummy_data = DummyData(
-                seq_data=SequenceData.from_seqs(
-                    dummy_data_v1.prompt_token_ids),
+                seq_data=_seq_data,
                 multi_modal_data=getattr(dummy_data_v1, "multi_modal_data",
                                          None),
                 multi_modal_placeholders=getattr(dummy_data_v1,
