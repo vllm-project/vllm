@@ -109,7 +109,6 @@ steps:
   mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
