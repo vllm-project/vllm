@@ -10,8 +10,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal import MultiModalKwargs
-    from vllm.multimodal.base import PlaceholderRange
+    from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 

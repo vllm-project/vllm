@@ -12,16 +12,12 @@ from PIL import Image
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
-from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .audio import AudioMediaIO
 from .base import MediaIO
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .inputs import PlaceholderRange
 from .video import VideoMediaIO
-
-logger = init_logger(__name__)
 
 _M = TypeVar("_M")
 
@@ -294,121 +290,6 @@ def encode_video_base64(frames: npt.NDArray) -> str:
     image_io = ImageMediaIO()
     video_io = VideoMediaIO(image_io)
     return video_io.encode_base64(frames)
-
-
-# Utilities for input processors
-_T = TypeVar("_T", str, int)
-
-
-def repeat_and_pad_token(
-    token: _T,
-    *,
-    repeat_count: int = 1,
-    pad_token_left: Optional[_T] = None,
-    pad_token_right: Optional[_T] = None,
-) -> list[_T]:
-    replacement = [token] * repeat_count
-    if pad_token_left is not None:
-        replacement = [pad_token_left] + replacement
-    if pad_token_right is not None:
-        replacement = replacement + [pad_token_right]
-
-    return replacement
-
-
-def repeat_and_pad_placeholder_tokens(
-    tokenizer: AnyTokenizer,
-    prompt: Optional[str],
-    prompt_token_ids: list[int],
-    *,
-    placeholder_token_id: int,
-    repeat_count: Union[int, list[int]],
-    pad_token_left: Optional[int] = None,
-    pad_token_right: Optional[int] = None,
-) -> tuple[Optional[str], list[int], list[PlaceholderRange]]:
-    if isinstance(repeat_count, int):
-        repeat_count = [repeat_count]
-
-    if prompt is None:
-        new_prompt = None
-    else:
-        placeholder_token_str = tokenizer.decode(placeholder_token_id)
-        pad_token_str_left = (None if pad_token_left is None else
-                              tokenizer.decode(pad_token_left))
-        pad_token_str_right = (None if pad_token_right is None else
-                               tokenizer.decode(pad_token_right))
-
-        placeholder_token_count = prompt.count(placeholder_token_str)
-        # This is an arbitrary number to distinguish between the two cases
-        if placeholder_token_count > 16:
-            logger.warning(
-                "Please follow the prompt format that is "
-                "documented on HuggingFace which does not involve "
-                "repeating %s tokens.", placeholder_token_str)
-        if placeholder_token_count < len(repeat_count):
-            logger.warning(
-                "The number of multi-modal placeholder tokens in the prompt "
-                "is less than the number of multi-modal inputs. Extra "
-                "placeholder tokens will be treated as plain text")
-            repeat_count = repeat_count[:placeholder_token_count]
-
-        prompt_parts = prompt.split(placeholder_token_str,
-                                    maxsplit=len(repeat_count))
-        new_prompt = ""
-        for i, repeat_count_item in enumerate(repeat_count):
-            replacement_str = "".join(
-                repeat_and_pad_token(
-                    placeholder_token_str,
-                    repeat_count=repeat_count_item,
-                    pad_token_left=pad_token_str_left,
-                    pad_token_right=pad_token_str_right,
-                ))
-            # The image tokens are removed to be consistent with HuggingFace
-            new_prompt += prompt_parts[i] + replacement_str
-        new_prompt += prompt_parts[-1]
-
-    new_token_ids = list[int]()
-    placeholder_ranges = list[PlaceholderRange]()
-    placeholder_token_idx = 0
-    for i, token in enumerate(prompt_token_ids):
-        if token == placeholder_token_id:
-            curr_repeat_count = repeat_count[placeholder_token_idx]
-            replacement_ids = repeat_and_pad_token(
-                placeholder_token_id,
-                repeat_count=curr_repeat_count,
-                pad_token_left=pad_token_left,
-                pad_token_right=pad_token_right,
-            )
-            offset = len(new_token_ids)
-            if pad_token_left is not None:
-                offset += 1
-            placeholder_ranges.append({
-                "offset": offset,
-                "length": curr_repeat_count,
-            })
-            new_token_ids.extend(replacement_ids)
-            placeholder_token_idx += 1
-
-            # No need to further scan the list since we replaced all tokens
-            if placeholder_token_idx >= len(repeat_count):
-                new_token_ids.extend(prompt_token_ids[i + 1:])
-                break
-        else:
-            new_token_ids.append(token)
-
-    return new_prompt, new_token_ids, placeholder_ranges
-
-
-def consecutive_placeholder_ranges(
-        num_items: int,
-        item_size: int,
-        initial_offset: int = 0) -> list[PlaceholderRange]:
-    """Returns a list of consecutive PlaceholderRanges of a fixed size"""
-
-    return [
-        PlaceholderRange(offset=initial_offset + i * item_size,
-                         length=item_size) for i in range(num_items)
-    ]
 
 
 def merge_and_sort_multimodal_metadata(
