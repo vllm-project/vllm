@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import torch
 # Required to register custom ops.
@@ -78,11 +78,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
+        alibi_slopes: Optional[list[float]],
+        sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: dict[str, Any] | None = None,
-        logits_soft_cap: float | None = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
@@ -134,7 +134,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: PallasMetadata,
-        output: torch.Tensor | None = None,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
 
