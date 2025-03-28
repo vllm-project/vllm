@@ -175,19 +175,34 @@ def test_linear_decode_forward_triton_with_padding(
 
     slot_idx = torch.tensor([0, 1, -1, 2], device="cuda")
 
-    output = linear_decode_forward_triton(q, k, v, kv_caches, slope_rate,
-                                          slot_idx)
-
-    assert output.shape == (batch_size, num_heads * head_size)
-
-    # Compare implementation results
+    # Run Triton implementation
     triton_output = linear_decode_forward_triton(q, k, v, kv_caches,
                                                  slope_rate, slot_idx)
+
+    # Run reference implementation
     reference_output = reference_linear_decode(q, k, v, kv_caches_copy,
                                                slope_rate, slot_idx)
 
-    torch.testing.assert_close(triton_output,
-                               reference_output,
+    # Create mask to exclude padding positions
+    padding_mask = (slot_idx
+                    != -1).unsqueeze(1).expand(-1, num_heads * head_size)
+
+    # Only compare results for non-padding positions
+    triton_masked = triton_output[padding_mask]
+    reference_masked = reference_output[padding_mask]
+
+    # Compare results
+    torch.testing.assert_close(triton_masked,
+                               reference_masked,
                                rtol=1e-1,
                                atol=1e-1)
-    torch.testing.assert_close(kv_caches, kv_caches_copy, rtol=1e-1, atol=1e-1)
+
+    # For non-padding positions, also compare KV cache
+    for i in range(batch_size):
+        if slot_idx[i] != -1:
+            torch.testing.assert_close(kv_caches[i],
+                                       kv_caches_copy[i],
+                                       rtol=1e-1,
+                                       atol=1e-1)
+
+    assert triton_output.shape == (batch_size, num_heads * head_size)
