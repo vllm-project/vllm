@@ -622,6 +622,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
+        tokenize: bool = True,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
@@ -653,6 +654,7 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
               If not provided, the model's default chat template will be used.
+            tokenize: Whether to tokenize the output. If `False`, the output will be a string.
             chat_template_content_format: The format to render message content.
 
               - "string" will render the content as a string.
@@ -725,6 +727,7 @@ class LLM:
                     trust_remote_code=model_config.trust_remote_code,
                     conversation=conversation,
                     chat_template=chat_template,
+                    tokenize=tokenize,
                     tools=tools,
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
