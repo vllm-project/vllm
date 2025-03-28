@@ -29,7 +29,7 @@ class EagleProposer:
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        # [batch_size + 1]
+        # [batch_size + 1] starting with 0
         cu_num_tokens: torch.Tensor,
         max_num_tokens: int,
         # [batch_size, max_num_blocks_per_req]
@@ -38,9 +38,14 @@ class EagleProposer:
     ) -> torch.Tensor:  # [batch_size, num_speculative_tokens]
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
-
         last_token_indices = cu_num_tokens[1:] - 1
+
         input_ids = target_token_ids
+        # Shift the input ids by one token.
+        # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
+        input_ids[:-1] = target_token_ids[1:]
+        # Replace the last token with the next token.
+        # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         input_ids[last_token_indices] = next_token_ids
 
         seq_lens = target_positions[last_token_indices] + 1
