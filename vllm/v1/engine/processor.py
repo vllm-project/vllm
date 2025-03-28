@@ -4,11 +4,10 @@ import time
 from collections.abc import Mapping
 from typing import Optional, Union
 
-import vllm.platforms
 from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
-from vllm.inputs.parse import is_encoder_decoder_inputs
+from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
@@ -20,7 +19,10 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.structured_output.utils import validate_structured_output_request
+from vllm.v1.structured_output.backend_guidance import (
+    validate_guidance_grammar)
+from vllm.v1.structured_output.utils import (
+    validate_structured_output_request_xgrammar)
 
 
 class Processor:
@@ -120,7 +122,9 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = ["xgrammar", "xgrammar:disable-any-whitespace"]
+        supported_backends = [
+            "xgrammar", "xgrammar:disable-any-whitespace", "guidance", "auto"
+        ]
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
             raise ValueError(f"Only {supported_backends} structured output is "
@@ -133,11 +137,35 @@ class Processor:
                                  f" != {engine_level_backend}")
         else:
             params.guided_decoding.backend = engine_level_backend
-
+        import vllm.platforms
         if vllm.platforms.current_platform.is_tpu():
             raise ValueError("Structured output is not supported on TPU.")
 
-        validate_structured_output_request(params)
+        # Request content validation
+
+        if engine_level_backend == "xgrammar":
+            # xgrammar with no fallback
+            validate_structured_output_request_xgrammar(params)
+            params.guided_decoding.backend = "xgrammar"
+        elif engine_level_backend == "auto":
+            # "auto" is an opt-in to opinionated behavior where we try to
+            # choose a backend based on request contents. This is not the
+            # default as it is less predictable and subject to change
+            # between releases as feature support changes.
+            try:
+                validate_structured_output_request_xgrammar(params)
+                params.guided_decoding.backend = "xgrammar"
+            except ValueError:
+                # The request includes some jsonschema feature(s) that
+                # are not supported in xgrammar. Fall back to guidance.
+                params.guided_decoding.backend = "guidance"
+
+        if params.guided_decoding.backend == "guidance":
+            # TODO ideally we would have the LLTokenizer here as Lark syntax
+            # allows <|special_token|> and similar, see
+            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
+            # Without tokenizer these are disallowed in grammars.
+            validate_guidance_grammar(params, tokenizer=None)
 
     def process_inputs(
         self,
@@ -181,14 +209,8 @@ class Processor:
 
         self._validate_model_inputs(processed_inputs, lora_request)
 
-        if is_encoder_decoder_inputs(processed_inputs):
-            decoder_inputs = SingletonInputsAdapter(
-                processed_inputs["decoder"])
-            encoder_inputs = SingletonInputsAdapter(
-                processed_inputs["encoder"])
-        else:
-            decoder_inputs = SingletonInputsAdapter(processed_inputs)
-            encoder_inputs = None
+        encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
+        decoder_inputs = SingletonInputsAdapter(decoder_inputs)
 
         # TODO: Impl encoder-decoder
         if encoder_inputs is not None:
@@ -273,15 +295,16 @@ class Processor:
     def _validate_model_inputs(self,
                                inputs: ProcessorInputs,
                                lora_request: Optional[LoRARequest] = None):
-        if is_encoder_decoder_inputs(inputs):
-            # For encoder-decoder multimodal models, the max_prompt_len
-            # restricts the decoder prompt length
-            prompt_inputs = inputs["decoder" if self.model_config.
-                                   is_multimodal_model else "encoder"]
-        else:
-            prompt_inputs = inputs
+        encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
-        prompt_ids = SingletonInputsAdapter(prompt_inputs).prompt_token_ids
+        # For encoder-decoder multimodal models, the max_prompt_len
+        # restricts the decoder prompt length
+        if self.model_config.is_multimodal_model:
+            prompt_inputs = decoder_inputs
+        else:
+            prompt_inputs = encoder_inputs or decoder_inputs
+
+        prompt_ids = prompt_inputs["prompt_token_ids"]
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
