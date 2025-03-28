@@ -868,6 +868,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
         mm_kwargs = result["mm_kwargs"]
+        mm_hashes = result["mm_hashes"]
 
         # We reimplement the functionality of MLlavaProcessor from
         # https://github.com/TIGER-AI-Lab/Mantis.git
@@ -916,6 +917,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
 

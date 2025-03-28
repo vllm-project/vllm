@@ -1378,7 +1378,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
             # Because attn_metadata.encoder_seq_lens only counts the last
             # group of images for each sample, which is used to cheat the
             # block manager to allocate blocks for those images only.
-            # See input_processor_for_mllama() for more details.
+            # See MllamaMultiModalProcessor for more details.
             num_tiles_tensor = kwargs.pop("num_tiles")
             num_tiles = [t.tolist() for t in num_tiles_tensor]
             num_tokens_per_tile = calc_token_per_chunk(self.image_size)
