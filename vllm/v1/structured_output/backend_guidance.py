@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar,
@@ -29,21 +29,11 @@ else:
 logger = init_logger(__name__)
 
 
+@dataclass
 class GuidanceBackend(StructuredOutputBackend):
 
-    def __init__(self, vllm_config: VllmConfig):
-        self.vllm_config = vllm_config
-        tokenizer_group = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
-            lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
-        self.vllm_config = vllm_config
-        self.vocab_size = vllm_config.model_config.get_vocab_size()
-
-        tokenizer = tokenizer_group.get_lora_tokenizer(None)
-        self.ll_tokenizer = llguidance_hf.from_tokenizer(tokenizer, None)
+    def __post_init__(self):
+        self.ll_tokenizer = llguidance_hf.from_tokenizer(self.tokenizer, None)
 
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
@@ -68,6 +58,14 @@ class GuidanceBackend(StructuredOutputBackend):
     def allocate_token_bitmask(self, max_num_seqs: int):
         return llguidance_torch.allocate_token_bitmask(
             max_num_seqs, self.ll_tokenizer.vocab_size)
+
+    def encode_with_jump(
+        self,
+        output_token_ids: list[int],
+        jump_forward_string: str,
+    ) -> list[int]:
+        # TO BE IMPLEMENTED
+        pass
 
 
 @dataclass
@@ -120,9 +118,18 @@ class GuidanceGrammar(StructuredOutputGrammar):
     def is_terminated(self) -> bool:
         return self.terminated
 
-    def reset(self):
-        # This method may be not needed anymore? TODO
-        self.ll_matcher.reset()
+    def find_token_divergence(
+        self,
+        request_id: str,
+        prev_tokens: list[int],
+        combined_tokens: list[int],
+    ) -> int:
+        # TO BE IMPLEMENTED
+        pass
+
+    def jump_forward_string(self) -> str | None:
+        # TO BE IMPLEMENTED
+        return
 
 
 def serialize_guidance_grammar(request_type: StructuredOutputOptions,

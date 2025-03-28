@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
+import itertools
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -22,42 +23,34 @@ else:
 logger = init_logger(__name__)
 
 
+@dataclass
 class XgrammarBackend(StructuredOutputBackend):
 
-    def __init__(self, vllm_config: VllmConfig):
-        self.vllm_config = vllm_config
+    def __post_init__(self):
         self.disable_any_whitespace = (
             "disable-any-whitespace"
-            in vllm_config.decoding_config.guided_decoding_backend)
-        tokenizer_group = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
-            lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
+            in self.vllm_config.decoding_config.guided_decoding_backend)
 
-        tokenizer = tokenizer_group.get_lora_tokenizer(None)
-        self.vocab_size = vllm_config.model_config.get_vocab_size()
-        if isinstance(tokenizer, MistralTokenizer):
+        if isinstance(self.tokenizer, MistralTokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
             try:
                 encoded_vocab = [
                     token for token, _ in sorted(
-                        tokenizer.get_vocab().items(),
+                        self.tokenizer.get_vocab().items(),
                         key=lambda x: x[1],
                     )
                 ]
                 stop_token_ids = None
                 if hasattr(
-                        tokenizer,
+                        self.tokenizer,
                         "eos_token_id",
-                ) and tokenizer.eos_token_id is not None:
-                    stop_token_ids = [tokenizer.eos_token_id]
+                ) and self.tokenizer.eos_token_id is not None:
+                    stop_token_ids = [self.tokenizer.eos_token_id]
             except AttributeError as e:
                 raise ValueError(
                     f"Cannot get the vocabulary of the tokenizer "
-                    f"{type(tokenizer)}. The tokenizer should have a "
+                    f"{type(self.tokenizer)}. The tokenizer should have a "
                     "get_vocab method.") from e
             tokenizer_info = xgr.TokenizerInfo(  # type: ignore
                 encoded_vocab=encoded_vocab,
@@ -69,7 +62,7 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         else:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
-                tokenizer,
+                self.tokenizer,
                 vocab_size=self.vocab_size,
             )
         self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
@@ -93,7 +86,10 @@ class XgrammarBackend(StructuredOutputBackend):
                 f"grammar is not of valid supported types. ({request_type!s})")
 
         return XgrammarGrammar(
-            matcher=xgr.GrammarMatcher(ctx),
+            # NOTE: conservatively fixed this value for now
+            # given that the length of jf-forward string in theory
+            # won't have a limit
+            matcher=xgr.GrammarMatcher(ctx, max_rollback_tokens=50),
             vocab_size=self.vocab_size,
             ctx=ctx,
         )
@@ -101,24 +97,19 @@ class XgrammarBackend(StructuredOutputBackend):
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
 
+    def encode_with_jump(
+        self,
+        output_token_ids: list[int],
+        jump_forward_string: str,
+    ) -> list[int]:
+        ...
+
 
 @dataclass
 class XgrammarGrammar(StructuredOutputGrammar):
-    # NOTE: This would be a generic-enough class for
-    # supporting different backends, in the future.
-    # For now, just xgrammar.
-    #
-    # TODO: support max_rollback_tokens
-    # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
-    # for jump-forward decoding
-
     vocab_size: int
     matcher: xgr.GrammarMatcher = field(hash=False)
     ctx: xgr.CompiledGrammar = field(hash=False)
-    num_processed_tokens: int = field(default_factory=lambda: 0,
-                                      repr=False,
-                                      hash=False,
-                                      init=False)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
@@ -132,7 +123,6 @@ class XgrammarGrammar(StructuredOutputGrammar):
                     "Failed to advance FSM for request %s "
                     "for tokens %s. Please file an issue.", request_id, token)
                 return False
-            self.num_processed_tokens += 1
         return True
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
@@ -141,6 +131,24 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def is_terminated(self) -> bool:
         return self.matcher.is_terminated()
 
-    def reset(self):
-        self.num_processed_tokens = 0
-        self.matcher.reset()
+    def jump_forward_string(self) -> str | None:
+        jf_string = self.matcher.find_jump_forward_string()
+        return jf_string if jf_string else None
+
+    def find_token_divergence(
+        self,
+        request_id: str,
+        prev_tokens: list[int],
+        combined_tokens: list[int],
+    ) -> int:
+        min_len = min(len(prev_tokens), len(combined_tokens))
+        k = sum(1 for _ in itertools.takewhile(
+            lambda x: x[0] == x[1],
+            zip(prev_tokens[:(min_len)], combined_tokens[:min_len]),
+        ))
+
+        # We have to rollback the tokens to the divergence point
+        if k < len(prev_tokens):
+            self.matcher.rollback(len(prev_tokens) - k)
+        assert self.accept_tokens(request_id, combined_tokens[k:])
+        return k
