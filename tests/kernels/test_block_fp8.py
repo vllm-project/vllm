@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
+from vllm.utils import round_up
 
 dg_available = False
 try:
@@ -352,8 +353,7 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
 
 def fp8_perm(m, idx):
     if torch.is_floating_point(m) and torch.finfo(m.dtype).bits == 8:
-        return m.view(dtype=torch.uint8)[idx,
-                                         ...].view(dtype=torch.float8_e4m3fn)
+        return m.view(dtype=torch.uint8)[idx, ...].view(dtype=m.dtype)
     else:
         return m[idx, ...]
 
@@ -366,34 +366,26 @@ def test_moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
 
     num_tokens = topk * M
 
-    pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) *
-                block_m) - sorted_token_ids.numel()
+    pad_size = (round_up(sorted_token_ids.numel(), block_m) -
+                sorted_token_ids.numel())
     if pad_size > 0:
         sorted_token_ids = torch.nn.functional.pad(sorted_token_ids,
                                                    (0, pad_size), "constant",
                                                    num_tokens)
 
     sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
-
     m_indices = torch.repeat_interleave(m_indices, block_m, dim=0)
-
-    assert sorted_token_ids[sorted_token_ids >= num_tokens].sum() == 0
-
     inv_perm = torch.argsort(sorted_token_ids)[:M * topk]
 
-    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
-    a = fp8_perm(a, sorted_token_ids)
-
+    a = fp8_perm(a, sorted_token_ids // topk)
     if a_s is not None:
-        a_s = a_s.view(M, -1, K // 128).repeat(1, topk,
-                                               1).reshape(-1, K // 128)
-        a_s = a_s[sorted_token_ids]
+        a_s = a_s[sorted_token_ids // topk]
 
     return a, a_s, m_indices, inv_perm
 
 
-def test_moe_unpermute(out, inv_perm, m_indices, topk, num_groups, M, K,
-                       topk_weight, topk_ids):
+def test_moe_unpermute(out, inv_perm, topk, K, topk_weight):
+    M = topk_weight.shape[0]
     out = out[inv_perm, ...]
     tmp_out = out.view(-1, topk, K)
     return (tmp_out * topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
@@ -404,6 +396,7 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     """Fused moe with block-wise quantization using DeepGemm grouped gemm."""
     num_groups = w1.shape[0]
     M, K = a.shape
+    N = w2.shape[-1]
 
     topk_weight, topk_ids = fused_topk(a, score.float(), topk, False)
 
@@ -416,7 +409,7 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     a_q, a_s, m_indices, inv_perm = test_moe_permute(a_q, a_s, topk_ids,
                                                      num_groups, topk, block_m)
 
-    inter_out = torch.zeros((a_q.shape[0], w1[0].shape[0]),
+    inter_out = torch.zeros((a_q.shape[0], N * 2),
                             dtype=torch.bfloat16,
                             device=a.device)
 
@@ -426,16 +419,14 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     act_out = SiluAndMul().forward_native(inter_out)
     act_out_q, act_out_s = per_token_group_quant_fp8(act_out, block_k)
 
-    out = torch.zeros(act_out.shape[0],
-                      w2.shape[1],
+    out = torch.zeros(a_q.shape[0], K,
                       dtype=torch.bfloat16,
                       device=a.device)
 
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
         (act_out_q, act_out_s), (w2, w2_s), out, m_indices)
 
-    final_out = test_moe_unpermute(out, inv_perm, m_indices, topk, num_groups,
-                                   M, K, topk_weight, topk_ids)
+    final_out = test_moe_unpermute(out, inv_perm, topk, K, topk_weight)
 
     return final_out
 
@@ -495,7 +486,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
-        if M % 128 == 0:
+        if M >= 128:
             ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
                                                    score, topk, block_size)
         else:
