@@ -5,8 +5,7 @@ from collections.abc import Mapping
 from typing import Optional, Union
 
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
-                         PromptType, SingletonInputsAdapter)
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
@@ -31,7 +30,6 @@ class Processor:
         self,
         vllm_config: VllmConfig,
         tokenizer: BaseTokenizerGroup,
-        input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
@@ -123,7 +121,8 @@ class Processor:
             return
 
         supported_backends = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance", "auto"
+            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
+            "guidance:disable-any-whitespace", "auto"
         ]
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
@@ -142,11 +141,10 @@ class Processor:
             raise ValueError("Structured output is not supported on TPU.")
 
         # Request content validation
-
-        if engine_level_backend == "xgrammar":
+        if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
             validate_structured_output_request_xgrammar(params)
-            params.guided_decoding.backend = "xgrammar"
+            params.guided_decoding.backend = engine_level_backend
         elif engine_level_backend == "auto":
             # "auto" is an opt-in to opinionated behavior where we try to
             # choose a backend based on request contents. This is not the
@@ -160,12 +158,13 @@ class Processor:
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
 
-        if params.guided_decoding.backend == "guidance":
+        if engine_level_backend.startswith("guidance"):
             # TODO ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
             validate_guidance_grammar(params, tokenizer=None)
+            params.guided_decoding.backend = engine_level_backend
 
     def process_inputs(
         self,
@@ -210,7 +209,6 @@ class Processor:
         self._validate_model_inputs(processed_inputs, lora_request)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
-        decoder_inputs = SingletonInputsAdapter(decoder_inputs)
 
         # TODO: Impl encoder-decoder
         if encoder_inputs is not None:
@@ -221,8 +219,9 @@ class Processor:
         sampling_params = params.clone()
         # If unset max tokens, then generate up to the max_model_len.
         if sampling_params.max_tokens is None:
-            sampling_params.max_tokens = (self.model_config.max_model_len -
-                                          len(decoder_inputs.prompt_token_ids))
+            sampling_params.max_tokens = (
+                self.model_config.max_model_len -
+                len(decoder_inputs["prompt_token_ids"]))
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
         sampling_params.update_from_tokenizer(
@@ -232,8 +231,8 @@ class Processor:
         sorted_mm_inputs: Optional[list[MultiModalKwargs]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
-        if (decoder_mm_inputs := decoder_inputs.multi_modal_data):
-            assert isinstance(decoder_mm_inputs, MultiModalKwargs)
+        if decoder_inputs["type"] == "multimodal":
+            decoder_mm_inputs = decoder_inputs["mm_kwargs"]
 
             # The output of merged multi-modal processor (`decoder_mm_inputs`)
             # contains the kwargs for all items from all modalities.
@@ -254,8 +253,8 @@ class Processor:
                 sorted_mm_positions,
                 sorted_mm_hashes,
             ) = merge_and_sort_multimodal_metadata(
-                decoder_inputs.multi_modal_placeholders,
-                decoder_inputs.multi_modal_hashes if self.use_hash else None,
+                decoder_inputs["mm_placeholders"],
+                decoder_inputs["mm_hashes"] if self.use_hash else None,
             )
 
             # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
@@ -281,8 +280,8 @@ class Processor:
 
         return EngineCoreRequest(
             request_id=request_id,
-            prompt=decoder_inputs.prompt,
-            prompt_token_ids=decoder_inputs.prompt_token_ids,
+            prompt=decoder_inputs.get("prompt"),
+            prompt_token_ids=decoder_inputs["prompt_token_ids"],
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
             mm_placeholders=sorted_mm_positions,
