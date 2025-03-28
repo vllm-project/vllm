@@ -400,7 +400,8 @@ class EngineArgs:
             'With "auto", we will make opinionated choices based on request'
             'contents and what the backend libraries currently support, so '
             'the behavior is subject to change in each release. '
-            'The default is auto for V1 and xgrammar for V0.')
+            'The default is "auto" for V1 and "xgrammar" when '
+            'VLLM_USE_V1 is set to "0"')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,
