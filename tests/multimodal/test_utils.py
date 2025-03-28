@@ -9,12 +9,10 @@ from typing import TYPE_CHECKING, NamedTuple, Optional
 import numpy as np
 import pytest
 from PIL import Image, ImageChops
-from transformers import AutoConfig, AutoTokenizer
 
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (MediaConnector,
-                                   merge_and_sort_multimodal_metadata,
-                                   repeat_and_pad_placeholder_tokens)
+                                   merge_and_sort_multimodal_metadata)
 
 if TYPE_CHECKING:
     from vllm.multimodal.hasher import MultiModalHashDict
@@ -134,71 +132,6 @@ async def test_fetch_image_local_files(image_url: str):
         with pytest.raises(RuntimeError, match="Cannot load local files"):
             connector.fetch_image(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
-
-
-@pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-mistral-7b-hf"])
-def test_repeat_and_pad_placeholder_tokens(model):
-    config = AutoConfig.from_pretrained(model)
-    image_token_id = config.image_token_index
-
-    tokenizer = AutoTokenizer.from_pretrained(model)
-
-    test_cases = [
-        (
-            "<image>",
-            2,
-            "<image><image>",
-            [32000, 32000],
-            [{ "offset": 0, "length": 2 }],
-        ),
-        (
-            "<image><image>",
-            2,
-            "<image><image><image>",
-            [32000, 32000, 32000],
-            [{ "offset": 0, "length": 2 }],
-        ),
-        (
-            "<image><image>",
-            [3, 2],
-            "<image><image><image><image><image>",
-            [32000, 32000, 32000, 32000, 32000],
-            [{ "offset": 0, "length": 3 }, { "offset": 3, "length": 2 }],
-        ),
-        (
-            "Image:<image>Image:<image>!",
-            [3, 2],
-            "Image:<image><image><image>Image:<image><image>!",
-            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
-            [{ "offset": 2, "length": 3 }, { "offset": 7, "length": 2 }],
-        ),
-        (
-            "<image>",
-            [3, 2],
-            "<image><image><image>",
-            [32000, 32000, 32000],
-            [{ "offset": 0, "length": 3 }],
-        ),
-    ]  # yapf: disable
-
-    for (
-            prompt,
-            repeat_count,
-            expected_prompt,
-            expected_token_ids,
-            expected_ranges,
-    ) in test_cases:
-        new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
-            tokenizer=tokenizer,
-            prompt=prompt,
-            prompt_token_ids=tokenizer.encode(prompt,
-                                              add_special_tokens=False),
-            placeholder_token_id=image_token_id,
-            repeat_count=repeat_count,
-        )
-        assert new_prompt == expected_prompt
-        assert new_token_ids == expected_token_ids
-        assert ranges == expected_ranges
 
 
 # Used for the next two tests related to `merge_and_sort_multimodal_metadata`.
