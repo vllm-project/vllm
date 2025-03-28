@@ -261,13 +261,13 @@ class InputPreprocessor:
         # initialized without a tokenizer while using also multi-modal
         # input.
         if not self.tokenizer:
-            tokenizer = None
+            tokenizer = object()  # Dummy
         else:
             tokenizer_group = self.get_tokenizer_group()
             tokenizer = tokenizer_group.get_lora_tokenizer(lora_request)
 
-        mm_processor = self.mm_registry.create_processor(
-            self.model_config, tokenizer)
+        mm_processor = self.mm_registry.create_processor(self.model_config,
+                                                         tokenizer=tokenizer)
 
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
@@ -288,14 +288,14 @@ class InputPreprocessor:
         # initialized without a tokenizer while using also multi-modal
         # input.
         if not self.tokenizer:
-            tokenizer = None
+            tokenizer = object()  # Dummy
         else:
             tokenizer_group = self.get_tokenizer_group()
             tokenizer = await tokenizer_group.get_lora_tokenizer_async(
                 lora_request)
 
-        mm_processor = self.mm_registry.create_processor(
-            self.model_config, tokenizer)
+        mm_processor = self.mm_registry.create_processor(self.model_config,
+                                                         tokenizer=tokenizer)
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 

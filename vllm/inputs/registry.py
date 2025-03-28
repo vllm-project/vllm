@@ -13,8 +13,7 @@ from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               cached_tokenizer_from_config)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
                         resolve_mm_processor_kwargs)
 
@@ -329,17 +328,27 @@ class InputRegistry:
         from vllm.model_executor.model_loader import get_model_architecture
         from vllm.multimodal import MultiModalKwargs
         from vllm.multimodal.profiling import MultiModalProfiler
+        from vllm.sequence import SequenceData
 
         if mm_registry.has_processor(model_config):
-            tokenizer = cached_tokenizer_from_config(model_config)
             processor = mm_registry.create_processor(model_config,
-                                                     tokenizer,
                                                      disable_cache=True)
             profiler = MultiModalProfiler(processor)
-            dummy_data_factory = (profiler.get_encoder_dummy_data
-                                  if is_encoder_data else
-                                  profiler.get_decoder_dummy_data)
-            dummy_data = dummy_data_factory(seq_len)
+
+            dummy_data_v1 = (profiler.get_encoder_dummy_data(seq_len)
+                             if is_encoder_data else
+                             profiler.get_decoder_dummy_data(seq_len))
+            _seq_data = SequenceData.from_seqs(
+                dummy_data_v1.prompt_token_ids)  # type: ignore[attr-defined]
+
+            dummy_data = DummyData(
+                seq_data=_seq_data,
+                multi_modal_data=getattr(dummy_data_v1, "multi_modal_data",
+                                         None),
+                multi_modal_placeholders=getattr(dummy_data_v1,
+                                                 "multi_modal_placeholders",
+                                                 None),
+            )
         else:
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:

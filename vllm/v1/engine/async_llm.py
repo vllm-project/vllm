@@ -14,10 +14,11 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
-from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
+from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -48,7 +49,7 @@ class AsyncLLM(EngineClient):
         executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
@@ -90,7 +91,7 @@ class AsyncLLM(EngineClient):
         self.processor = Processor(
             vllm_config=vllm_config,
             tokenizer=self.tokenizer,
-            input_registry=input_registry,
+            mm_registry=mm_registry,
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
