@@ -20,6 +20,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     sparse_cutlass_supported)
 from vllm.platforms import current_platform
 
+# AITER only supports per-channel-per-channel INT8 gemm
+# and per-tensor-per-tensor INT8 GEMM.
+# It does not support mix precision MM and mix quantization scheme.
 ROCM_AITER_SUPPORTED_INT8_MODEL = [
     "neuralmagic/Llama-3.2-1B-quantized.w8a8",
     "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2"

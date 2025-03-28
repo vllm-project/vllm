@@ -12,12 +12,6 @@ from .cutlass import CutlassScaledMMLinearKernel
 from .ScaledMMLinearKernel import ScaledMMLinearLayerConfig
 
 
-def is_rocm_aiter_gemm_w8a8_scaled_mm_enabled() -> bool:
-    return current_platform.is_rocm() \
-        and envs.VLLM_ROCM_USE_AITER_LINEAR \
-        and envs.VLLM_ROCM_USE_AITER
-
-
 class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
 
     @classmethod
@@ -27,11 +21,11 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
     @classmethod
     def can_implement(
             cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
-        if current_platform.is_cpu() or not current_platform.is_rocm():
+        if not current_platform.is_rocm():
             return (
                 False,
                 "AiterScaledMMLinearKernel requires `aiter` which is not " +
-                "currently supported on CPU and non-ROCm platform.")
+                "currently supported on non-ROCm platform.")
 
         try:
             import aiter  # noqa: F401 # deliberately attempt to import aiter
@@ -40,7 +34,12 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
                 False,
                 "AiterScaledMMLinearKernel requires `aiter` which is not " +
                 "installed supported on ROCm.")
-        if not is_rocm_aiter_gemm_w8a8_scaled_mm_enabled():
+        # Check if rocm_aiter_gemm_w8a8_scaled_mm is enabled
+        if not (
+            current_platform.is_rocm() \
+            and envs.VLLM_ROCM_USE_AITER_LINEAR \
+            and envs.VLLM_ROCM_USE_AITER
+        ):
             return (False, "AiterScaledMMLinearKernel is disabled. " +
                     "Enable by setting `VLLM_ROCM_USE_AITER=1`.")
 
@@ -94,8 +93,8 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
 
         per_tensor_scale_a = (x_s.numel() == 1)
         per_tensor_scale_b = (w_s.numel() == 1)
-        per_channel_tensor_scale_a = (x_s.numel() == m)
-        per_channel_tensor_scale_b = (w_s.numel() == n)
+        per_token_scale_a = (x_s.numel() == m)
+        per_channel_scale_b = (w_s.numel() == n)
 
         # @TODO:
         # Maybe broadcast the per-tensor-scale into per-channel-scale
@@ -103,8 +102,8 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         # For now, it only supports
         # per-tensor-per-tensor a8w8 scaled GEMM and
         # per-channel-per-channel a8w8 scacled GEMM
-        assert ((per_tensor_scale_a and per_tensor_scale_b) or
-                (per_channel_tensor_scale_a and per_channel_tensor_scale_b)), (
+        assert ((per_tensor_scale_a and per_tensor_scale_b)
+                or (per_token_scale_a and per_channel_scale_b)), (
                     "Currently only support per-tensor-per-tensor GEMM " +
                     " and per-channel-per-channel GEMM through AITER"
                     " w8a8 scaled gemm. `cutlass_scaled_mm` does not support" +
