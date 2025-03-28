@@ -215,9 +215,10 @@ _VLLM_MODELS = {
     **_FALLBACK_MODEL,
 }
 
-# This variable is used as the args for subprocess.run(). We can modify  this
-# variable to alter the args if needed. e.g.  when we use par format to pack
-# things together, sys.executable might not be the target we want to run.
+# This variable is used as the args for subprocess.run(). We
+# can modify  this variable to alter the args if needed. e.g.
+# when we use par format to pack things together, sys.executable
+# might not be the target we want to run.
 _SUBPROCESS_COMMAND = [
     sys.executable, "-m", "vllm.model_executor.models.registry"
 ]
@@ -539,16 +540,15 @@ _T = TypeVar("_T")
 
 def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
     # NOTE: We use a temporary directory instead of a temporary file to avoid
-    # issues like
-    # https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file
-    with tempfile.TemporaryDirectory() as tempdir:
+    # issues like https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file
+  with tempfile.TemporaryDirectory() as tempdir:
         output_filepath = os.path.join(tempdir, "registry_output.tmp")
 
         # `cloudpickle` allows pickling lambda functions directly
         input_bytes = cloudpickle.dumps((fn, output_filepath))
 
-        # cannot use `sys.executable __file__` here because the script contains
-        # relative imports
+        # cannot use `sys.executable __file__` here because the script
+        # contains relative imports
         returned = subprocess.run(_SUBPROCESS_COMMAND,
                                   input=input_bytes,
                                   capture_output=True)
