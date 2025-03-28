@@ -344,57 +344,60 @@ class Idefics3MultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        # Text-only input not supported in composite processor
+        if not mm_data or not (images := mm_data.get("images", [])):
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
             mm_kwargs,
         )
 
-        if (images := mm_data.get("images")) is not None:
-            parsed_images = (self._get_data_parser().parse_mm_data({
-                "image":
-                images
-            }).get_items("image", ImageProcessorItems))
-            image_sizes = [
-                parsed_images.get_image_size(i)
-                for i in range(len(parsed_images))
-            ]
-            hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        parsed_images = (self._get_data_parser().parse_mm_data({
+            "image": images
+        }).get_items("image", ImageProcessorItems))
+        image_sizes = [
+            parsed_images.get_image_size(i) for i in range(len(parsed_images))
+        ]
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
 
-            image_repl_features = [
-                self.info.get_image_repl(image_width=size.width,
-                                         image_height=size.height,
-                                         processor=hf_processor)
-                for size in image_sizes
-            ]
+        image_repl_features = [
+            self.info.get_image_repl(image_width=size.width,
+                                     image_height=size.height,
+                                     processor=hf_processor)
+            for size in image_sizes
+        ]
 
-            tokenizer = self.info.get_tokenizer()
-            image_repls_feature_tokens = [
-                tokenizer.encode(image_repl, add_special_tokens=False)
-                for image_repl in image_repl_features
-            ]
+        tokenizer = self.info.get_tokenizer()
+        image_repls_feature_tokens = [
+            tokenizer.encode(image_repl, add_special_tokens=False)
+            for image_repl in image_repl_features
+        ]
 
-            vocab = tokenizer.get_vocab()
-            image_token_id = vocab[hf_processor.image_token.content]
+        vocab = tokenizer.get_vocab()
+        image_token_id = vocab[hf_processor.image_token.content]
 
-            embed_is_patch = [
-                torch.tensor(image_repl_tokens) == image_token_id
-                for image_repl_tokens in image_repls_feature_tokens
-            ]
-            processed_outputs["embed_is_patch"] = embed_is_patch
+        embed_is_patch = [
+            torch.tensor(image_repl_tokens) == image_token_id
+            for image_repl_tokens in image_repls_feature_tokens
+        ]
+        processed_outputs["embed_is_patch"] = embed_is_patch
 
-            num_patches = [
-                self.info.get_num_patches(
-                    image_width=size.width,
-                    image_height=size.height,
-                    processor=hf_processor,
-                ) for size in image_sizes
-            ]
-            processed_outputs["num_patches"] = torch.tensor(num_patches)
+        num_patches = [
+            self.info.get_num_patches(
+                image_width=size.width,
+                image_height=size.height,
+                processor=hf_processor,
+            ) for size in image_sizes
+        ]
+        processed_outputs["num_patches"] = torch.tensor(num_patches)
 
-            # Remove the extra batch dimension
-            processed_outputs["pixel_values"].squeeze_(0)
-            processed_outputs["pixel_attention_mask"].squeeze_(0)
+        # Remove the extra batch dimension
+        processed_outputs["pixel_values"].squeeze_(0)
+        processed_outputs["pixel_attention_mask"].squeeze_(0)
 
         return processed_outputs
 
