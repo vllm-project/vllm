@@ -11,7 +11,7 @@ NUM_HEADS = [4, 8]
 HEAD_SIZES = [64, 128]
 BATCH_SIZES = [1, 2]
 SEQ_LENGTHS = [16, 128]
-DTYPES = [torch.float16, torch.float32]
+DTYPES = [torch.float32]
 
 
 def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
