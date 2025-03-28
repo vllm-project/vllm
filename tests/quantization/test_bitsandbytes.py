@@ -101,8 +101,6 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
         "--enable-prefix-caching",
         "--quantization",
         "bitsandbytes",
-        "--load-format",
-        "bitsandbytes",
         "--gpu-memory-utilization",
         "0.7",
     ]
@@ -137,7 +135,6 @@ def validate_generated_texts(hf_runner,
     # when using distributed inference
     with vllm_runner(model_name,
                      quantization='bitsandbytes',
-                     load_format='bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
                      enforce_eager=False) as llm:
         vllm_outputs = llm.generate_greedy(prompts, 8)
