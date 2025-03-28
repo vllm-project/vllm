@@ -2,7 +2,6 @@
 
 import torch
 
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -39,9 +38,6 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                                            requires_grad=False)
         layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0),
                                            requires_grad=False)
-        # Initialize Q and P = softmax(QK^T) scales
-        layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0),
-                                              requires_grad=False)
 
     def apply(self, layer: torch.nn.Module) -> torch.Tensor:
         raise RuntimeError(
@@ -101,36 +97,5 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     "may cause accuracy issues. Please make sure k/v_scale "
                     "scaling factors are available in the fp8 checkpoint.")
 
-        if layer.q_scale > 0.0:
-            q_scale = layer.q_scale.to("cpu").tolist()
-            if current_platform.is_rocm():
-                q_scale *= 2
-            layer.calculate_kv_scales = False
-        else:
-            q_scale = 1.0
-        if layer.prob_scale > 0.0:
-            prob_scale = layer.prob_scale.to("cpu").tolist()
-            if current_platform.is_rocm():
-                prob_scale *= 2
-        else:
-            prob_scale = 1.0
-
-        if not isinstance(q_scale, float) or not isinstance(prob_scale, float):
-            raise ValueError("Only support per-tensor scaling factor"
-                             "for fp8-quantized Q/prob")
-
-        # These are used in the final Attention.forward()
-        layer._q_scale.copy_(q_scale)
-        layer._prob_scale.copy_(prob_scale)
-        if (q_scale == 1.0
-                or prob_scale == 1.0) and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN:
-            logger.warning_once(
-                f"Using Q scale {q_scale} and prob scale {prob_scale} "
-                "with fp8 attention. This may cause accuracy issues. "
-                "Please make sure Q/prob scaling factors are "
-                "available in the fp8 checkpoint.")
-
         del layer.k_scale
         del layer.v_scale
-        del layer.q_scale
-        del layer.prob_scale
