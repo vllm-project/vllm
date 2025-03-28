@@ -141,6 +141,7 @@ class CustomAllreduce:
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
+        # On AMD GPU, p2p is always enabled between XGMI connected GPUs
         if not current_platform.is_rocm() and not _can_p2p(rank, world_size):
             logger.warning(
                 "Custom allreduce is disabled because your platform lacks "
