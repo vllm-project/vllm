@@ -9,7 +9,7 @@ register_tt_models()  # Import and register models from tt-metal
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="meta-llama/Meta-Llama-3.1-70B", help="Model name")
+    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.1-70B-Instruct", help="Model name")
     args = parser.parse_args()
     
     check_tt_model_supported(args.model)
