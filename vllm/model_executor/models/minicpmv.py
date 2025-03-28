@@ -432,9 +432,13 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             use_image_id=False,
         )
 
-    def get_max_video_tokens(self, seq_len: int) -> int:
-        return self.get_max_video_frame_tokens(
-        ) * self.get_num_frames_with_most_features(seq_len)
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        return self.get_max_video_frame_tokens() * num_frames
 
     def get_video_max_slice_num(self) -> int:
         return 1
@@ -449,10 +453,13 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         num_frames = max_tokens // num_frame_tokens
         return num_frames
 
-    def get_num_frames_with_most_features(self, seq_len: int) -> int:
-        mm_config = self.ctx.get_mm_config()
-        max_images = mm_config.get_limit_per_prompt("image")
-        max_videos = mm_config.get_limit_per_prompt("video")
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        max_images = mm_counts.get("image", 0)
+        max_videos = mm_counts.get("video", 0)
 
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self.get_max_video_frames(seq_len -
@@ -483,7 +490,7 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         video_width, video_height = \
             self.info.get_video_frame_size_with_most_features()
         num_video_frames = \
-            self.info.get_num_frames_with_most_features(seq_len)
+            self.info.get_num_frames_with_most_features(seq_len, mm_counts)
 
         mm_data = {
             "image":
