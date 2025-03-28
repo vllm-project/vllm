@@ -242,7 +242,7 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
-    "AyaVisionForConditionalGeneration": ("ayavision", "AyaVisionForConditionalGeneration"), # noqa: E501
+    "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b", min_transformers_version="4.50"), # noqa: E501
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b"),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
