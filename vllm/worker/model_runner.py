@@ -1049,6 +1049,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
             dtype=np.int32)
 
+        # paged_kv_indices: flattened graph_block_tables
+        # used by AITER MLA
+        self.paged_kv_indices = np.zeros(self.max_batchsize_to_capture *
+                                         self.get_max_block_per_batch(),
+                                         dtype=np.int32)
+
         # Attention-free but stateful models like Mamba need a placeholder attn
         # backend, as the attention metadata is needed to manage internal state.
         # However we must bypass attention selection altogether for some models
