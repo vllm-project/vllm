@@ -70,11 +70,11 @@ def reference_linear_decode(q, k, v, kv_caches, slope_rate, slot_idx):
 
     # Process each batch
     for b in range(B):
-        slot_id = slot_idx[b].item()
+        # slot_id = slot_idx[b].item()
 
-        # Skip padding positions
-        if slot_id == -1:
-            continue
+        # # # Skip padding positions
+        # # if slot_id == -1:
+        # #     continue
 
         # Process all heads at once for this batch
         q_b = q[b, :, 0]  # [H, D]
@@ -262,62 +262,64 @@ def test_lightning_attention_reference(
     seq_len: int,
     dtype: torch.dtype,
 ):
-    """
-    Test if the reference implementation of lightning_attention 
-    is consistent with the actual implementation
-    """
-    torch.set_default_device("cuda")
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    
+    try:
+        torch.set_default_device("cuda")
+        torch.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+        current_platform.seed_everything(42)
 
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
-    current_platform.seed_everything(42)
+        base = 0.01
+        q = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+        k = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+        v = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
 
-    base = 0.01
-    q = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
-    k = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
-    v = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+        for i in range(batch_size):
+            for j in range(num_heads):
+                for s in range(seq_len):
+                    for d in range(head_size):
+                        q[i, j, s, d] = base * (i + j + s + d + 1)
+                        k[i, j, s, d] = base * (i + j + s + d + 2)
+                        v[i, j, s, d] = base * (i + j + s + d + 3)
 
-    for i in range(batch_size):
-        for j in range(num_heads):
-            for s in range(seq_len):
-                for d in range(head_size):
-                    q[i, j, s, d] = base * (i + j + s + d + 1)
-                    k[i, j, s, d] = base * (i + j + s + d + 2)
-                    v[i, j, s, d] = base * (i + j + s + d + 3)
+        ed = torch.zeros(num_heads, device="cuda")
+        for h in range(num_heads):
+            ed[h] = 0.1 * (h + 1)
 
-    ed = torch.zeros(num_heads, device="cuda")
-    for h in range(num_heads):
-        ed[h] = 0.1 * (h + 1)
+        kv_history = torch.zeros(batch_size,
+                                 num_heads,
+                                 head_size,
+                                 head_size,
+                                 dtype=dtype,
+                                 device="cuda")
 
-    kv_history = torch.zeros(batch_size,
-                             num_heads,
-                             head_size,
-                             head_size,
-                             dtype=dtype,
-                             device="cuda")
+        for i in range(batch_size):
+            for j in range(num_heads):
+                for k_idx in range(head_size):
+                    for v_idx in range(head_size):
+                        kv_history[i, j, k_idx,
+                                   v_idx] = base * (i + j + k_idx + v_idx + 4)
 
-    for i in range(batch_size):
-        for j in range(num_heads):
-            for k_idx in range(head_size):
-                for v_idx in range(head_size):
-                    kv_history[i, j, k_idx,
-                               v_idx] = base * (i + j + k_idx + v_idx + 4)
+        kv_history_clone = kv_history.clone()
 
-    kv_history_clone = kv_history.clone()
+        ref_output, ref_kv_cache = reference_lightning_attention(
+            q, k, v, ed, 256, kv_history)
 
-    ref_output, ref_kv_cache = reference_lightning_attention(
-        q, k, v, ed, 256, kv_history)
+        from vllm.model_executor.layers.lightning_attn import lightning_attention
+        actual_output, actual_kv_cache = lightning_attention(
+            q, k, v, ed, 256, kv_history_clone)
 
-    from vllm.model_executor.layers.lightning_attn import lightning_attention
-    actual_output, actual_kv_cache = lightning_attention(
-        q, k, v, ed, 256, kv_history_clone)
+        atol, rtol = 1.5e-1, 1.5e-1
+        torch.testing.assert_close(ref_output, actual_output, rtol=rtol, atol=atol)
+        torch.testing.assert_close(ref_kv_cache,
+                                   actual_kv_cache,
+                                   rtol=rtol,
+                                   atol=atol)
 
-    atol, rtol = 1.5e-1, 1.5e-1
-    torch.testing.assert_close(ref_output, actual_output, rtol=rtol, atol=atol)
-    torch.testing.assert_close(ref_kv_cache,
-                               actual_kv_cache,
-                               rtol=rtol,
-                               atol=atol)
-
-    assert ref_output.shape == (batch_size, num_heads, seq_len, head_size)
-    assert ref_kv_cache.shape == actual_kv_cache.shape
+        assert ref_output.shape == (batch_size, num_heads, seq_len, head_size)
+        assert ref_kv_cache.shape == actual_kv_cache.shape
+    finally:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
