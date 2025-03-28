@@ -1036,7 +1036,7 @@ class EngineArgs:
 
         parser.add_argument('--kv-transfer-config',
                             type=KVTransferConfig.from_cli,
-                            default=None,
+                            default=EngineArgs.kv_transfer_config,
                             help='The configurations for distributed KV cache '
                             'transfer. Should be a JSON string.')
 

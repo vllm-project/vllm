@@ -8,12 +8,17 @@ Learn more about LMCache in https://github.com/LMCache/LMCache.
 """
 import os
 import time
+import vllm.envs as envs
 
 from lmcache.experimental.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME
 
-from vllm import LLM, SamplingParams
+from vllm import EngineArgs, LLM, SamplingParams
 from vllm.config import KVTransferConfig
+from vllm.utils import FlexibleArgumentParser
+
+# set VLLLM version(V0/V1)
+os.environ["VLLM_USE_V1"] = "1"
 
 # LMCache-related environment variables
 # Use experimental features in LMCache
@@ -24,6 +29,7 @@ os.environ["LMCACHE_CHUNK_SIZE"] = "256"
 os.environ["LMCACHE_LOCAL_CPU"] = "True"
 # Set local CPU memory limit to 5.0 GB
 os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5.0"
+
 
 # This example script runs two requests with a shared prefix.
 shared_prompt = "Hello, how are you?" * 1000
@@ -38,6 +44,13 @@ sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
 ktc = KVTransferConfig.from_cli(
     '{"kv_connector":"LMCacheConnector", "kv_role":"kv_both"}')
+
+if envs.is_set("VLLM_USE_V1"):
+    parser = FlexibleArgumentParser()
+    EngineArgs.kv_transfer_config = ktc
+    parser = EngineArgs.add_cli_args(parser)
+    args = parser.parse_args()
+
 # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
 # memory. Reduce the value if your GPU has less memory.
 # Note that LMCache is not compatible with chunked prefill for now.
