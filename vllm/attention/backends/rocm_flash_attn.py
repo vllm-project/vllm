@@ -702,7 +702,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     use_fp8_out_scale = (layer._fp8_out_scale
                                          and layer._q_scale
                                          and layer._prob_scale
-                                         and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN)
+                                         and self.kv_cache_dtype == "fp8")
                     full_scales = (layer._q_scale.item(),
                                    layer._k_scale.item(),
                                    layer._v_scale.item(),
