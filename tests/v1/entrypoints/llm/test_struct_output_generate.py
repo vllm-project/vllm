@@ -56,6 +56,7 @@ def test_structured_output(
     # Use a single LLM instance for several scenarios to
     # speed up the test suite.
     llm = LLM(model=model_name,
+              enforce_eager=True,
               max_model_len=1024,
               guided_decoding_backend=guided_decoding_backend)
 
