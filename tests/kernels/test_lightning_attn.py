@@ -15,27 +15,29 @@ DTYPES = [torch.float16, torch.float32, torch.bfloat16]
 
 
 def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
-    """Rreference implementation: using sequential linear decoding"""
+    """Reference implementation: using sequential linear decoding"""
     B, H, S, D = q.shape
     output = torch.zeros_like(q)
     kv_cache = kv_history.clone() if kv_history is not None else \
         torch.zeros((B, H, D, D), dtype=torch.float32, device=q.device)
 
     for step in range(S):
-        q_step = q[:, :, step:step + 1]
-        k_step = k[:, :, step:step + 1]
-        v_step = v[:, :, step:step + 1]
+        q_step = q[:, :, step:step + 1]  # [B, H, 1, D]
+        k_step = k[:, :, step:step + 1]  # [B, H, 1, D]
+        v_step = v[:, :, step:step + 1]  # [B, H, 1, D]
 
-        q_linear = q_step.permute(0, 1, 3, 2)
-        k_linear = k_step.permute(0, 1, 3, 2)
-        v_linear = v_step.permute(0, 1, 3, 2)
+        # No need to swap dimensions, use original shapes
+        # q_linear, k_linear, v_linear should maintain [B, H, 1, D] shape
+        q_linear = q_step
+        k_linear = k_step
+        v_linear = v_step
 
         output_step = linear_decode_forward_triton(
             q_linear, k_linear, v_linear, kv_cache, ed,
             torch.arange(B, device=q.device))
 
-        output_step = output_step.view(B, H, D).permute(0, 1, 3, 2)
-        output[:, :, step] = output_step.squeeze(2)
+        output_step = output_step.view(B, H, D)
+        output[:, :, step] = output_step
 
     return output, kv_cache
 

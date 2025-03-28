@@ -176,13 +176,13 @@ def _fwd_kv_parallel(
         # Load key and value, handling boundary conditions
         k_trans = tl.load(K_trans_block_ptr - left_shift * d,
                           mask=kv_index[None, :] >= left_bound,
-                          other=0.0)
+                          other=0.0).to(tl.float32)
         v = tl.load(V_block_ptr - left_shift * e,
                     mask=kv_index[:, None] >= left_bound,
-                    other=0.0)
+                    other=0.0).to(tl.float32)
 
         # Load decay factor and compute weighted key-value outer product
-        k_decay = tl.load(k_decay_ptr)
+        k_decay = tl.load(k_decay_ptr).to(tl.float32)
         kv += tl.dot(k_trans * k_decay, v)
 
         # Move to the next sub-block
@@ -454,8 +454,7 @@ lightning_attention_ = _attention.apply
 
 def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
     """
-    Apply lightning attention algorithm 
-    to compute attention efficiently.
+    Apply lightning attention algorithm to compute attention efficiently.
     
     Args:
         q: Query tensor of shape [batch, heads, seq_len, dim]
@@ -475,7 +474,14 @@ def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
     if ed.dim() == 1:
         ed = ed.view(1, -1, 1, 1)
 
-    # Split the computation into chunks for better parallelism
+    # Ensure data type consistency
+    compute_dtype = torch.float32
+    orig_dtype = q.dtype
+    q = q.to(compute_dtype)
+    k = k.to(compute_dtype)
+    v = v.to(compute_dtype)
+
+    # Split computation into chunks for better parallelism
     m = 128 if d >= 128 else 64
     assert d % m == 0, f"Dimension d ({d}) must be divisible by m ({m})"
     arr = [m * i for i in range(d // m + 1)]
@@ -500,7 +506,9 @@ def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
         k1 = k[..., s:e]
         o, kv = lightning_attention_(q1, k1, v, ed, kv_history)
         output = output + o
-    return output, kv
+
+    # Convert result back to original data type
+    return output.to(orig_dtype), kv
 
 
 @triton.jit
@@ -604,13 +612,23 @@ def linear_decode_forward_triton(
         slope_rate: Decay rate tensor
         slot_idx: Slot indices for batches
         BLOCK_SIZE: Size of blocks for processing
-        
+    
     Returns:
         output: Attention output tensor
     """
-    B, H, _, D = q.shape
-    assert k.shape == (B, H, 1, D)
-    assert v.shape == (B, H, 1, D)
+    B, H, N, D = q.shape
+    assert N == 1, f"Expected sequence length 1, got {N}"
+    assert k.shape == (
+        B, H, 1, D), f"Key shape error: expected {(B, H, 1, D)}, got {k.shape}"
+    assert v.shape[:-1] == (
+        B, H,
+        1), f"Value shape error: expected {(B, H, 1, '*')}, got {v.shape}"
+
+    # Ensure data type consistency
+    compute_dtype = torch.float32
+    q = q.to(compute_dtype)
+    k = k.to(compute_dtype)
+    v = v.to(compute_dtype)
 
     # Initialize output tensor
     output = torch.empty_like(q)
