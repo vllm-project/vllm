@@ -262,7 +262,7 @@ def test_lightning_attention_reference(
         num_heads,
         head_size,
         head_size,
-        dtype=torch.float32,  # Use float32 for better precision
+        dtype=dtype,
         device="cuda")
     kv_history_clone = kv_history.clone()
 
