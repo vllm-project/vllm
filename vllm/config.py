@@ -1573,18 +1573,6 @@ class ParallelConfig:
                 "Disabled the custom all-reduce kernel because it is not "
                 "working correctly when using two AMD Navi GPUs.")
 
-        if is_mi250() and self.tensor_parallel_size > 1:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "working correctly on multi AMD MI250.")
-
-        if is_navi() and self.tensor_parallel_size <= 2:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "working correctly when using two AMD Navi GPUs.")
-
     @property
     def use_ray(self) -> bool:
         return self.distributed_executor_backend == "ray" or (
