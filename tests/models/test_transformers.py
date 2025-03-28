@@ -72,7 +72,6 @@ def test_distributed(
         "meta-llama/Llama-3.2-1B-Instruct",
         {
             "quantization": "bitsandbytes",
-            "load_format": "bitsandbytes",
         },
     ),
 ])
