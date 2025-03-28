@@ -57,6 +57,15 @@ def apply_w8a8_block_fp8_linear(
                 or br not in (1, weight.shape[0])):
             shape_supported_by_cutlass = False
     if cutlass_block_fp8_supported and shape_supported_by_cutlass:
+        rows, cols = input_2d.shape
+        should_pad = current_platform.has_device_capability(
+            100) and rows % 4 != 0
+        if should_pad:
+            padding = torch.zeros((4 - (rows % 4), cols),
+                                  dtype=input_2d.dtype,
+                                  device=input_2d.device)
+            input_2d = torch.cat([input_2d, padding], dim=0).contiguous()
+
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
                                                      column_major_scales=True)
@@ -65,6 +74,8 @@ def apply_w8a8_block_fp8_linear(
                                        out_dtype=input.dtype,
                                        scale_a=x_scale,
                                        scale_b=weight_scale.T)
+        if should_pad:
+            output = output[:rows, :]
     else:
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],

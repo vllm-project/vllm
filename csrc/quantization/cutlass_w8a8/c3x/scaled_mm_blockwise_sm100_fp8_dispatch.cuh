@@ -65,10 +65,6 @@ struct cutlass_3x_gemm_fp8_blockwise {
   // Shape of the threadblocks in a cluster
   using ClusterShape_MNK = Shape<_1, _1, _1>;
 
-  // using ScaleConfig =
-  // decltype(cutlass::detail::sm100_trivial_blockwise_scale_config(MmaTileShape_MNK{}));
-  // static constexpr int ScaleGranularityM = size<0>(MmaTileShape{}) /
-  // ScaleMsPerTile;
   using ScaleConfig = cutlass::detail::Sm100BlockwiseScaleConfig<
       ScaleGranularityM, ScaleGranularityN, ScaleGranularityK,
       cute::UMMA::Major::MN, cute::UMMA::Major::K>;
@@ -84,22 +80,42 @@ struct cutlass_3x_gemm_fp8_blockwise {
 
   using AtomThrShape = Shape<_1, _1, _1>;
 
-  using CollectiveEpilogue =
-      typename cutlass::epilogue::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, PerSmTileShape, ClusterShape,
-          EpilogueTileShape, ElementAccumulator, ElementCompute, ElementC,
-          LayoutC, AlignmentC, ElementD, LayoutD, AlignmentD,
-          cutlass::epilogue::TmaWarpSpecialized1Sm>::CollectiveOp;
-
-  using CollectiveMainloop =
-      typename cutlass::gemm::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, ElementA, cute::tuple<LayoutA, LayoutSFA>,
-          AlignmentA, ElementB, cute::tuple<LayoutB, LayoutSFB>, AlignmentB,
-          ElementAccumulator, MmaTileShape, ClusterShape,
-          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-              sizeof(typename CollectiveEpilogue::SharedStorage))>,
-          cutlass::gemm::KernelTmaWarpSpecializedBlockwise1SmSm100>::
-          CollectiveOp;
+  // clang-format off
+  using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+      ArchTag,
+      OperatorClass,
+      PerSmTileShape,
+      ClusterShape,
+      EpilogueTileShape,
+      ElementAccumulator,
+      ElementCompute,
+      ElementC,
+      LayoutC,
+      AlignmentC,
+      ElementD,
+      LayoutD,
+      AlignmentD,
+      cutlass::epilogue::TmaWarpSpecialized1Sm
+  >::CollectiveOp;
+  
+  using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
+      ArchTag,
+      OperatorClass,
+      ElementA,
+      cute::tuple<LayoutA, LayoutSFA>,
+      AlignmentA,
+      ElementB,
+      cute::tuple<LayoutB, LayoutSFB>,
+      AlignmentB,
+      ElementAccumulator,
+      MmaTileShape,
+      ClusterShape,
+      cutlass::gemm::collective::StageCountAutoCarveout<
+          static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))
+      >,
+      cutlass::gemm::KernelTmaWarpSpecializedBlockwise1SmSm100
+  >::CollectiveOp;
+  // clang-format on
 
   using KernelType = enable_sm100_or_later<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
