@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-from enum import Enum
 import json
 import re
+from enum import Enum
 from typing import Any
 
 import jsonschema
