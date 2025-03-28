@@ -13,26 +13,30 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
-GUIDED_DECODING_BACKENDS_V1 = ["xgrammar", "guidance"]
-MODELS_TO_TEST = [
-    "Qwen/Qwen2.5-1.5B-Instruct", "mistralai/Ministral-8B-Instruct-2410"
+params_models_backends_tokenizer_mode = [
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral"),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto"),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
 ]
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend",
-                         GUIDED_DECODING_BACKENDS_V1)
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         params_models_backends_tokenizer_mode)
 def test_guided_json_completion(
     monkeypatch: pytest.MonkeyPatch,
     sample_json_schema: dict[str, Any],
     guided_decoding_backend: str,
+    tokenizer_mode: str,
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend)
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
@@ -59,13 +63,13 @@ def test_guided_json_completion(
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend",
-                         GUIDED_DECODING_BACKENDS_V1)
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         params_models_backends_tokenizer_mode)
 def test_guided_json_completion_disable_any_whitespace(
     monkeypatch: pytest.MonkeyPatch,
     sample_json_schema: dict[str, Any],
     guided_decoding_backend: str,
+    tokenizer_mode: str,
     model_name: str,
 ):
     if guided_decoding_backend != "xgrammar":
@@ -75,7 +79,8 @@ def test_guided_json_completion_disable_any_whitespace(
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend)
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
@@ -103,18 +108,19 @@ def test_guided_json_completion_disable_any_whitespace(
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend",
-                         GUIDED_DECODING_BACKENDS_V1)
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         params_models_backends_tokenizer_mode)
 def test_guided_json_object(
     monkeypatch: pytest.MonkeyPatch,
     guided_decoding_backend: str,
+    tokenizer_mode: str,
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend)
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=100,
@@ -151,19 +157,20 @@ def test_guided_json_object(
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend",
-                         GUIDED_DECODING_BACKENDS_V1 + ["auto"])
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         params_models_backends_tokenizer_mode)
 def test_guided_json_unsupported_schema(
     monkeypatch: pytest.MonkeyPatch,
     unsupported_json_schema: dict[str, Any],
     guided_decoding_backend: str,
+    tokenizer_mode: str,
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend)
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
@@ -201,19 +208,20 @@ def test_guided_json_unsupported_schema(
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend",
-                         GUIDED_DECODING_BACKENDS_V1)
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         params_models_backends_tokenizer_mode)
 def test_guided_grammar_ebnf(
     monkeypatch: pytest.MonkeyPatch,
     sample_sql_ebnf: str,
     guided_decoding_backend: str,
+    tokenizer_mode: str,
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend)
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
@@ -245,19 +253,20 @@ def test_guided_grammar_ebnf(
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend",
-                         GUIDED_DECODING_BACKENDS_V1)
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         params_models_backends_tokenizer_mode)
 def test_guided_grammar_lark(
     monkeypatch: pytest.MonkeyPatch,
     sample_sql_lark: str,
     guided_decoding_backend: str,
+    tokenizer_mode: str,
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend)
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
@@ -294,18 +303,19 @@ def test_guided_grammar_lark(
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend",
-                         GUIDED_DECODING_BACKENDS_V1)
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         params_models_backends_tokenizer_mode)
 def test_guided_grammar_ebnf_invalid(
     monkeypatch: pytest.MonkeyPatch,
     guided_decoding_backend: str,
+    tokenizer_mode: str,
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend)
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
@@ -321,19 +331,20 @@ def test_guided_grammar_ebnf_invalid(
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend",
-                         GUIDED_DECODING_BACKENDS_V1)
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         params_models_backends_tokenizer_mode)
 def test_guided_regex(
     monkeypatch: pytest.MonkeyPatch,
     sample_regex: str,
     guided_decoding_backend: str,
+    tokenizer_mode: str,
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend)
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
@@ -359,19 +370,20 @@ def test_guided_regex(
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend",
-                         GUIDED_DECODING_BACKENDS_V1)
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         params_models_backends_tokenizer_mode)
 def test_guided_choice_completion(
     monkeypatch: pytest.MonkeyPatch,
     sample_guided_choice: str,
     guided_decoding_backend: str,
+    tokenizer_mode: str,
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend)
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
