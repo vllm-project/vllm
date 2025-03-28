@@ -825,30 +825,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return metadata
 
-    def _validate_encoder_outputs(
+    def _validate_mm_encoder_outputs(
         self,
-        encoder_outputs: object,
+        mm_encoder_outputs: object,
         num_items: int,
     ) -> None:
-        if not isinstance(encoder_outputs, (list, tuple, torch.Tensor)):
+        if not isinstance(mm_encoder_outputs, (list, tuple, torch.Tensor)):
             raise TypeError(
                 "Expected encoder outputs to be a list/tuple of 2D tensors, "
-                f"or a single 3D tensor, but got {type(encoder_outputs)} "
+                f"or a single 3D tensor, but got {type(mm_encoder_outputs)} "
                 "instead. This is most likely due to incorrect implementation "
                 "of the model's `get_multimodal_embeddings` method.")
 
-        if len(encoder_outputs) > 0 and encoder_outputs[0].ndim != 2:
+        if len(mm_encoder_outputs) > 0 and mm_encoder_outputs[0].ndim != 2:
             raise ValueError(
                 "Expected encoder outputs to be a sequence of 2D tensors, "
-                f"but got {encoder_outputs[0].ndim}D tensors "
-                f"with shapes {[e.shape for e in encoder_outputs]} "
+                f"but got {mm_encoder_outputs[0].ndim}D tensors "
+                f"with shapes {[e.shape for e in mm_encoder_outputs]} "
                 "instead. This is most likely due to incorrect implementation "
                 "of the model's `get_multimodal_embeddings` method.")
 
-        if len(encoder_outputs) != num_items:
+        if len(mm_encoder_outputs) != num_items:
             raise RuntimeError(
                 "Expected `len(encoder outputs)` to match number of multimodal "
-                f"data items: {num_items}, but got {len(encoder_outputs)=} "
+                f"data items: {num_items}, but got {len(mm_encoder_outputs)=} "
                 "instead. This is most likely due to incorrect implementation "
                 "of the model's `get_multimodal_embeddings` method.")
 
@@ -919,8 +919,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
 
-            self._validate_encoder_outputs(curr_group_outputs,
-                                           len(grouped_mm_inputs))
+            self._validate_mm_encoder_outputs(curr_group_outputs,
+                                              len(grouped_mm_inputs))
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
@@ -1568,8 +1568,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
                 **batched_dummy_mm_inputs)
 
-            self._validate_encoder_outputs(dummy_encoder_outputs,
-                                           max_num_mm_items)
+            self._validate_mm_encoder_outputs(dummy_encoder_outputs,
+                                              max_num_mm_items)
 
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
