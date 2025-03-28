@@ -31,6 +31,7 @@ steps:
 ##### fast check tests  #####
 
 - label: Documentation Build # 2min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/test_docs/docs"
   fast_check: true
   no_gpu: True
@@ -41,6 +42,7 @@ steps:
   - grep \"sig sig-object py\" build/html/api/inference_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/mq_llm_engine
@@ -61,6 +63,7 @@ steps:
   - pytest -v -s worker # Worker
 
 - label: Python-only Installation Test
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
@@ -68,7 +71,7 @@ steps:
   - bash standalone_tests/python_only_compile.sh
 
 - label: Basic Correctness Test # 30min
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   fast_check: true
   source_file_dependencies:
   - vllm/
@@ -84,6 +87,7 @@ steps:
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
 - label: Chunked Prefill Test
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_chunked_prefill
@@ -102,6 +106,7 @@ steps:
   - pytest -v -s core
 
 - label: Entrypoints Test # 40min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   mirror_hardwares: [amd]
@@ -123,6 +128,7 @@ steps:
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 - label: Distributed Tests (4 GPUs) # 10min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -154,6 +160,7 @@ steps:
 
 - label: Metrics, Tracing Test # 10min
   num_gpus: 2
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/metrics
@@ -195,7 +202,7 @@ steps:
   - pytest -v -s tokenization
 
 - label: V1 Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -220,7 +227,7 @@ steps:
 
 - label: Examples Test # 25min
   working_dir: "/vllm-workspace/examples"
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/entrypoints
   - examples/
@@ -252,6 +259,7 @@ steps:
     - pytest -v -s prefix_caching
 
 - label: Samplers Test # 36min
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
@@ -273,6 +281,7 @@ steps:
     - pytest -v -s model_executor/test_guided_processors.py
 
 - label: Speculative decoding tests # 40min
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/spec_decode
   - tests/spec_decode
@@ -291,6 +300,7 @@ steps:
   parallelism: 4
 
 - label: PyTorch Fullgraph Smoke Test # 9min
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -302,6 +312,7 @@ steps:
   - pytest -v -s compile/test_pass_manager.py
 
 - label: PyTorch Fullgraph Test # 18min
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -338,6 +349,7 @@ steps:
   - bash run-benchmarks.sh
 
 - label: Quantization Test # 33min
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -345,6 +357,7 @@ steps:
   command: VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
 
 - label: LM Eval Small Models # 53min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
@@ -354,6 +367,7 @@ steps:
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
 - label: OpenAI API correctness
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - vllm/entrypoints/openai/
@@ -362,6 +376,7 @@ steps:
   - pytest -s entrypoints/openai/correctness/
 
 - label: Encoder Decoder tests # 5min
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/encoder_decoder
@@ -380,6 +395,7 @@ steps:
 #####  models test  #####
 
 - label: Basic Models Test # 24min
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models
@@ -390,7 +406,7 @@ steps:
     - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py
 
 - label: Language Models Test (Standard) # 32min
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
@@ -401,6 +417,7 @@ steps:
     - pytest -v -s models/embedding/language -m core_model
 
 - label: Language Models Test (Extended) # 1h10min
+  mirror_hardwares: [amd]
   optional: true
   source_file_dependencies:
   - vllm/
@@ -412,7 +429,7 @@ steps:
     - pytest -v -s models/embedding/language -m 'not core_model'
 
 - label: Multi-Modal Models Test (Standard) # 40min
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
@@ -431,6 +448,7 @@ steps:
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
 - label: Multi-Modal Models Test (Extended) 1 # 48m
+  mirror_hardwares: [amd]
   optional: true
   source_file_dependencies:
   - vllm/
@@ -451,6 +469,7 @@ steps:
     - pytest -v -s models/encoder_decoder/vision_language -m 'not core_model'
 
 - label: Multi-Modal Models Test (Extended) 2 # 38m
+  mirror_hardwares: [amd]
   optional: true
   source_file_dependencies:
   - vllm/
@@ -461,6 +480,7 @@ steps:
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
+  mirror_hardwares: [amd]
   optional: true
   commands:
     - echo 'Testing custom models...'
@@ -472,6 +492,7 @@ steps:
 #####  multi gpus test  #####
 
 - label: Distributed Comm Ops Test # 7min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -482,6 +503,7 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   num_nodes: 2
@@ -500,7 +522,7 @@ steps:
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
 
 - label: Distributed Tests (2 GPUs) # 40min
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -532,6 +554,7 @@ steps:
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/test_disagg.py
 
 - label: Plugin Tests (2 GPUs) # 40min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -551,6 +574,7 @@ steps:
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
 
 - label: Multi-step Tests (4 GPUs) # 36min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -571,6 +595,7 @@ steps:
   - pytest -v -s multi_step/test_correctness_llm.py
 
 - label: Pipeline Parallelism Test # 45min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -584,6 +609,7 @@ steps:
   - pytest -v -s distributed/test_pipeline_parallel.py
 
 - label: LoRA TP Test (Distributed)
+  mirror_hardwares: [amd]
   num_gpus: 4
   source_file_dependencies:
   - vllm/lora
@@ -601,6 +627,7 @@ steps:
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -610,6 +637,7 @@ steps:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
 
 - label: Weight Loading Multiple GPU Test - Large Models # optional
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   gpu: a100
