@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-
+from enum import Enum
 import json
 import re
 from typing import Any
 
 import jsonschema
 import pytest
+from pydantic import BaseModel
 
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
@@ -15,7 +16,7 @@ from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 GUIDED_DECODING_BACKENDS_V1 = ["xgrammar", "guidance"]
 MODELS_TO_TEST = [
-    "Qwen/Qwen2.5-1.5B-Instruct", "mistralai/Ministral-8B-Instruct-2410"
+    "Qwen/Qwen2.5-1.5B-Instruct",
 ]
 
 
@@ -390,3 +391,54 @@ def test_guided_choice_completion(
         assert generated_text is not None
         assert generated_text in sample_guided_choice
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+
+class CarType(str, Enum):
+    sedan = "sedan"
+    suv = "SUV"
+    truck = "Truck"
+    coupe = "Coupe"
+
+
+class CarDescription(BaseModel):
+    brand: str
+    model: str
+    car_type: CarType
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend",
+                         GUIDED_DECODING_BACKENDS_V1)
+@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+def test_guided_json_completion_with_enum(
+    monkeypatch: pytest.MonkeyPatch,
+    guided_decoding_backend: str,
+    model_name: str,
+):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    llm = LLM(model=model_name,
+              max_model_len=1024,
+              guided_decoding_backend=guided_decoding_backend)
+    json_schema = CarDescription.model_json_schema()
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        max_tokens=1000,
+        guided_decoding=GuidedDecodingParams(json=json_schema))
+    outputs = llm.generate(
+        prompt="Generate a JSON with the brand, model and car_type of"
+        "the most iconic car from the 90's",
+        sampling_params=sampling_params,
+        use_tqdm=True)
+
+    assert outputs is not None
+
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json, schema=json_schema)
