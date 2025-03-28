@@ -21,7 +21,6 @@ from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.utils.checkpoint
 import transformers.models.mllama.configuration_mllama as config_mllama
 from PIL.Image import Image
 from torch import nn
