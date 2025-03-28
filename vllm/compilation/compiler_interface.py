@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+import contextlib
 import copy
 import hashlib
+import importlib.metadata
 import os
 from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import torch
-import torch._dynamo.metrics_context
-import torch._dynamo.utils
 import torch._inductor.compile_fx
 import torch.fx as fx
+from packaging.version import Version
 
 from vllm.config import VllmConfig
 
@@ -287,7 +288,7 @@ class InductorAdaptor(CompilerInterface):
                     "torch._inductor.codecache.FxGraphCache._check_can_cache",
                     _check_can_cache))
 
-            # Dynamo metrics context, see method for more information
+            # Dynamo metrics context, see method for more details.
             stack.enter_context(self.metrics_context())
 
             compiled_graph = compile_fx(
@@ -362,11 +363,12 @@ class InductorAdaptor(CompilerInterface):
 
         return compiled_graph
 
-    def metrics_context(self) -> torch._dynamo.metrics_context.MetricsContext:
+    def metrics_context(self) -> contextlib.AbstractContextManager:
         """
-        This method returns the Dynamo metrics context, used by various compile
-        components. Specifically, it's used inside FxGraphCache in torch==2.6
-        (but neither before nor after). It might also be used in various other
+        This method returns the Dynamo metrics context (if it exists,
+        otherwise a null context). It is used by various compile components.
+        Present in torch>=2.6, it's used inside FxGraphCache in
+        torch==2.6 (but not after). It might also be used in various other
         torch.compile internal functions.
 
         Because it is re-entrant, we always set it (even if entering via Dynamo
@@ -377,7 +379,11 @@ class InductorAdaptor(CompilerInterface):
         manually setting up internal contexts. But we also rely on non-public
         APIs which might not provide these guarantees.
         """
-        return torch._dynamo.utils.get_metrics_context()
+        if Version(importlib.metadata.version('torch')) >= Version("2.6"):
+            import torch._dynamo.utils
+            return torch._dynamo.utils.get_metrics_context()
+        else:
+            return contextlib.nullcontext()
 
 
 class EagerAdaptor(CompilerInterface):
