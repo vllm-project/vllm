@@ -528,6 +528,7 @@ class InputPreprocessor:
                     prompt_token_ids=decoder_inputs_to_override[
                         "prompt_token_ids"],
                     mm_kwargs=inputs["mm_kwargs"],
+                    mm_hashes=inputs["mm_hashes"],
                     mm_placeholders=inputs["mm_placeholders"],
                 )
             else:
@@ -536,6 +537,7 @@ class InputPreprocessor:
                     prompt=inputs["prompt"],
                     prompt_token_ids=inputs["prompt_token_ids"],
                     mm_kwargs=inputs["mm_kwargs"],
+                    mm_hashes=inputs["mm_hashes"],
                     mm_placeholders=inputs["mm_placeholders"],
                 )
         elif inputs["type"] == "token":

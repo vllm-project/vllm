@@ -105,6 +105,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             prompt=prompt,
             prompt_token_ids=[1],
             mm_kwargs=MultiModalKwargs(mm_kwargs),
+            mm_hashes=None,
             mm_placeholders={},
         )
 
