@@ -334,10 +334,10 @@ class InputRegistry:
             processor = mm_registry.create_processor(model_config,
                                                      disable_cache=True)
             profiler = MultiModalProfiler(processor)
-            dummy_data_factory = (profiler.get_encoder_dummy_data
-                                  if is_encoder_data else
-                                  profiler.get_decoder_dummy_data)
-            dummy_data_v1 = dummy_data_factory(seq_len)
+
+            dummy_data_v1 = (profiler.get_encoder_dummy_data(seq_len)
+                             if is_encoder_data else
+                             profiler.get_decoder_dummy_data(seq_len))
             dummy_data = DummyData(
                 seq_data=SequenceData.from_seqs(
                     dummy_data_v1.prompt_token_ids),
