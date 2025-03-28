@@ -788,6 +788,8 @@ class TPUModelRunner:
             dummy_hidden = torch.randn((num_tokens, hsize),
                                        device=device,
                                        dtype=torch.bfloat16)
+            # TODO this is causing a shape mismatch error when compiling.
+            # torch._dynamo.mark_dynamic(dummy_hidden, 0)
             # Compile for [8, 16, .., 128,.., `self.max_num_reqs`]
             while True:
                 indices = torch.zeros(
@@ -795,14 +797,12 @@ class TPUModelRunner:
                     dtype=torch.int32,
                     device=device,
                 )
-                xm.mark_step()
                 sampling_meta = TPUSupportedSamplingMetadata.\
                     from_input_batch(self.input_batch, indices)
+                sampling_meta._mark_dynamic()
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
-                out = self.model.sample_from_hidden(dummy_hidden,
-                                                    sampling_meta)
-                out = out.cpu()
+                self.model.sample_from_hidden(dummy_hidden, sampling_meta)
                 if num_reqs_to_sample >= self.max_num_reqs:
                     break
                 # Make sure to compile the `max_num_reqs` upper-limit case
@@ -900,6 +900,7 @@ class ModelWrapperV1(nn.Module):
 
         return hidden_states
 
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_hidden(
         self,
         hidden_states: torch.Tensor,
