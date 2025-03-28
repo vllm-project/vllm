@@ -191,7 +191,7 @@ def write_to_kv_cache(
         kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
 
     """
-    _, _, num_combined_kv_heads, head_size = kv_cache
+    _, _, num_combined_kv_heads, head_size = kv_cache.shape
     num_kv_heads = num_combined_kv_heads // 2
 
     key = key.view(-1, num_kv_heads, head_size)
