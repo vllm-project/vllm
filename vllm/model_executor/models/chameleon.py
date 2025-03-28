@@ -70,9 +70,21 @@ class ChameleonProcessingInfo(BaseProcessingInfo):
     ) -> Mapping[str, int]:
         return {"image": self.get_num_image_tokens()}
 
-    def get_num_image_tokens(self) -> int:
+    def get_image_repl(self) -> list[int]:
+        tokenizer = self.get_tokenizer()
         processor = self.get_hf_processor()
-        return processor.image_seq_length
+        vocab = tokenizer.get_vocab()
+
+        image_start_id = vocab[processor.image_start_token]
+        image_token_id = vocab[processor.image_token]
+        image_end_id = vocab[processor.image_end_token]
+        num_image_tokens = processor.image_seq_length
+
+        image_tokens = [image_token_id] * num_image_tokens
+        return [image_start_id] + image_tokens + [image_end_id]
+
+    def get_num_image_tokens(self) -> int:
+        return len(self.get_image_repl())
 
 
 class ChameleonDummyInputsBuilder(
@@ -150,19 +162,14 @@ class ChameleonMultiModalProcessor(
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
-        image_start_id = vocab[processor.image_start_token]
         image_token_id = vocab[processor.image_token]
-        image_end_id = vocab[processor.image_end_token]
-
-        num_image_tokens = self.info.get_num_image_tokens()
-        image_tokens = [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
                 target=[image_token_id],
                 replacement=PromptUpdateDetails.select_token_id(
-                    [image_start_id] + image_tokens + [image_end_id],
+                    self.info.get_image_repl(),
                     embed_token_id=image_token_id,
                 ),
             )

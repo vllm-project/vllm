@@ -350,7 +350,12 @@ class BaseInternVLProcessor(ABC):
             use_thumbnail=self.use_thumbnail,
         )
 
-        return num_patches * self.num_image_token
+        feature_size = num_patches * self.num_image_token
+
+        repl_text = self.get_image_repl(feature_size, num_patches).full
+        repl_tokens = self.tokenizer.encode(repl_text,
+                                            add_special_tokens=False)
+        return len(repl_tokens)
 
     def _images_to_pixel_values_lst(
         self,
