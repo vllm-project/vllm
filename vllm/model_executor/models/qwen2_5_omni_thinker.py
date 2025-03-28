@@ -351,7 +351,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 prompt_ids,
                 mm_item_counts,
             )
-            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+            self._validate_mm_placeholders(
+                mm_placeholders,
+                mm_item_counts,
+                use_audio_in_video=use_audio_in_video)
 
             tokenizer = self.info.get_tokenizer()
             prompt = decode_tokens(tokenizer, prompt_ids)
@@ -365,7 +368,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 mm_prompt_updates,
                 mm_item_counts,
             )
-            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+            self._validate_mm_placeholders(
+                mm_placeholders,
+                mm_item_counts,
+                use_audio_in_video=use_audio_in_video)
 
         tokenizer = self.info.get_tokenizer()
         prompt = decode_tokens(tokenizer, prompt_ids)
@@ -493,6 +499,35 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 replacement=video_replacement_fn,
             ),
         ]
+
+    def _apply_hf_processor_mm_only(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalKwargs:
+        """
+        Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
+        """
+        mm_counts = mm_items.get_all_counts()
+
+        use_audio_in_video = hf_processor_mm_kwargs.get(
+            "use_audio_in_video", False)
+        if use_audio_in_video and "video" in mm_counts:
+            assert "audio" in mm_counts
+            mm_counts["audio"] -= mm_counts["video"]
+
+        dummy_inputs = self.dummy_inputs.get_dummy_processor_inputs(
+            self.info.ctx.model_config.max_model_len,
+            mm_counts,
+        )
+
+        _, mm_kwargs, _ = self._apply_hf_processor_text_mm(
+            prompt_text=dummy_inputs.prompt_text,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return mm_kwargs
 
     def _validate_mm_placeholders(
         self,
@@ -637,7 +672,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
                 audio_feature_lengths))
 
         audio_outputs = self.audio_tower(
-            input_features,
+            input_features.to(self.audio_tower.dtype),
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_feat_lengths,
         )
