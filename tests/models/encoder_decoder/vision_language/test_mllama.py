@@ -425,7 +425,6 @@ def test_bnb_regression(
         max_model_len=4096,
         max_num_seqs=2,
         quantization="bitsandbytes",
-        load_format="bitsandbytes",
     )
     sampling_params = SamplingParams(
         temperature=0,
