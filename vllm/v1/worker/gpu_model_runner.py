@@ -19,7 +19,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -824,19 +825,74 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return metadata
 
-    def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
+    def _validate_encoder_outputs(
+        self,
+        encoder_outputs: object,
+        num_items: int,
+    ) -> None:
+        if not isinstance(encoder_outputs, (list, tuple, torch.Tensor)):
+            raise TypeError(
+                "Expected encoder outputs to be a list/tuple of 2D tensors, "
+                f"or a single 3D tensor, but got {type(encoder_outputs)} "
+                "instead. This is most likely due to incorrect implementation "
+                "of the model's `get_multimodal_embeddings` method.")
+
+        if len(encoder_outputs) > 0 and encoder_outputs[0].ndim != 2:
+            raise ValueError(
+                "Expected encoder outputs to be a sequence of 2D tensors, "
+                f"but got {encoder_outputs[0].ndim}D tensors "
+                f"with shapes {[e.shape for e in encoder_outputs]} "
+                "instead. This is most likely due to incorrect implementation "
+                "of the model's `get_multimodal_embeddings` method.")
+
+        if len(encoder_outputs) != num_items:
+            raise RuntimeError(
+                "Expected `len(encoder outputs)` to match number of multimodal "
+                f"data items: {num_items}, but got {len(encoder_outputs)=} "
+                "instead. This is most likely due to incorrect implementation "
+                "of the model's `get_multimodal_embeddings` method.")
+
+    def _scatter_placeholders(
+        self,
+        embeds: torch.Tensor,
+        is_embed: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if is_embed is None:
+            return embeds
+
+        placeholders = embeds.new_full(
+            (is_embed.shape[0], embeds.shape[-1]),
+            fill_value=torch.nan,
+        )
+        placeholders[is_embed] = embeds.flatten(0, -2)
+        return placeholders
+
+    def _gather_placeholders(
+        self,
+        placeholders: torch.Tensor,
+        is_embed: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if is_embed is None:
+            return placeholders
+
+        return placeholders[is_embed]
+
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
 
         # Batch the multi-modal inputs.
-        mm_inputs: list[MultiModalKwargs] = []
-        req_input_ids: list[tuple[str, int]] = []
+        mm_inputs = list[MultiModalKwargs]()
+        req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
-            for input_id in encoder_input_ids:
+            for input_id, pos_info in zip(
+                    encoder_input_ids,
+                    req_state.mm_positions,
+            ):
                 mm_inputs.append(req_state.mm_inputs[input_id])
-                req_input_ids.append((req_id, input_id))
+                req_ids_pos.append((req_id, input_id, pos_info))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -863,20 +919,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
 
+            self._validate_encoder_outputs(curr_group_outputs,
+                                           len(grouped_mm_inputs))
+
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
 
         # Cache the encoder outputs.
-        for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
+        for (req_id, input_id, pos_info), output in zip(
+                req_ids_pos,
+                encoder_outputs,
+        ):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
-            self.encoder_cache[req_id][input_id] = output
 
-    def _gather_encoder_outputs(
+            self.encoder_cache[req_id][input_id] = self._scatter_placeholders(
+                output,
+                is_embed=pos_info.get("is_embed"),
+            )
+
+    def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> list[torch.Tensor]:
-        encoder_outputs: list[torch.Tensor] = []
+        mm_embeds: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -907,8 +973,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert req_id in self.encoder_cache
                 assert i in self.encoder_cache[req_id]
                 encoder_output = self.encoder_cache[req_id][i]
-                encoder_outputs.append(encoder_output[start_idx:end_idx])
-        return encoder_outputs
+
+                mm_embeds_item = self._gather_placeholders(
+                    encoder_output[start_idx:end_idx],
+                    is_embed=pos_info.get("is_embed"),
+                )
+                mm_embeds.append(mm_embeds_item)
+        return mm_embeds
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -973,10 +1044,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
-            self._execute_encoder(scheduler_output)
-            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+            self._execute_mm_encoder(scheduler_output)
+            mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
-            encoder_outputs = []
+            mm_embeds = []
 
         # Prepare the decoder inputs.
         attn_metadata, logits_indices, spec_decode_metadata = (
@@ -998,9 +1069,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:num_scheduled_tokens]
-            if encoder_outputs:
+            if mm_embeds:
                 inputs_embeds = self.model.get_input_embeddings(
-                    input_ids, encoder_outputs)
+                    input_ids, mm_embeds)
             else:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
             # TODO(woosuk): Avoid the copy. Optimize.
@@ -1493,12 +1564,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Run multimodal encoder.
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
                 **batched_dummy_mm_inputs)
-            assert len(dummy_encoder_outputs) == max_num_mm_items, (
-                "Expected dimension 0 of encoder outputs to match the number "
-                f"of multimodal data items: {max_num_mm_items}, got "
-                f"{len(dummy_encoder_outputs)=} instead. This is most likely "
-                "due to the 'get_multimodal_embeddings' method of the model "
-                "not implemented correctly.")
+
+            self._validate_encoder_outputs(dummy_encoder_outputs,
+                                           max_num_mm_items)
 
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))

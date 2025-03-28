@@ -448,9 +448,9 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
             image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
 
-            return PromptUpdateDetails(
-                full=image_tokens + [bos_token_id],
-                features=image_tokens,
+            return PromptUpdateDetails.select_token_id(
+                image_tokens + [bos_token_id],
+                embed_token_id=_IMAGE_TOKEN_ID,
             )
 
         num_images = mm_items.get_count("image", strict=False)
@@ -486,6 +486,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                         item_idx=p.item_idx,
                         start_idx=p.start_idx - 1,
                         tokens=p.tokens,
+                        is_embed=p.is_embed,
                     ) for p in ps
                 ]
                 for modality, ps in placeholders.items()
