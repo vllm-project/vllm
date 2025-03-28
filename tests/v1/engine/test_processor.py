@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -36,6 +37,9 @@ def make_processor(cache_config: CacheConfig):
 
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
 def test_process_inputs_prompt_kv_block_hashes(enable_prefix_caching: bool):
+    """Test whether the processor.process_inputs() would generate the kv block
+    hashes for the prompt when prefix caching is enabled.
+    """
     processor = make_processor(
         CacheConfig(
             block_size=16,
