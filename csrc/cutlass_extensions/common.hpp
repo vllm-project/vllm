@@ -1,4 +1,4 @@
-;#pragma once
+#pragma once
 
 #include "cutlass/cutlass.h"
 #include <climits>
