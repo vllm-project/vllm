@@ -1265,6 +1265,7 @@ class EngineArgs:
                 "posterior_alpha":
                 self.typical_acceptance_sampler_posterior_alpha,
                 "disable_logprobs": self.disable_logprobs_during_spec_decoding,
+                "speculative_token_tree": self.speculative_token_tree
             }
 
             self.speculative_config = spec_config_dict

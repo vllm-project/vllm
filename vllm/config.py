@@ -1952,6 +1952,7 @@ class SpeculativeConfig:
     prompt_lookup_min: Optional[int] = None
     posterior_threshold: Optional[float] = None
     posterior_alpha: Optional[float] = None
+    speculative_token_tree: Optional[str] = None
 
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
