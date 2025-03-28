@@ -104,7 +104,7 @@ steps:
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
@@ -309,7 +309,7 @@ steps:
   - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 1h each
-  mirror_hardwares: [amd]
+  # mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - vllm/attention
@@ -319,7 +319,7 @@ steps:
   parallelism: 4
 
 - label: Tensorizer Test # 11min
-  mirror_hardwares: [amd]
+  # mirror_hardwares: [amd]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
@@ -370,7 +370,7 @@ steps:
 
 - label: OpenAI-Compatible Tool Use # 20 min
   fast_check: false
-  mirror_hardwares: [ amd ]
+  #mirror_hardwares: [ amd ]
   source_file_dependencies:
     - vllm/
     - tests/tool_use
