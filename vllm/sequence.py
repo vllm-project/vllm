@@ -470,7 +470,7 @@ class Sequence:
         if self.inputs["type"] == "multimodal":
             return self.inputs["mm_placeholders"]
 
-        return MultiModalPlaceholderDict()
+        return {}
 
     @property
     def lora_int_id(self) -> int:
