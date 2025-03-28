@@ -83,7 +83,7 @@ class EagleProposer:
             return draft_token_ids.view(-1, 1)
 
         # Generate the remaining draft tokens.
-        draft_token_ids_list: list[torch.Tensor] = [draft_token_ids]
+        draft_token_ids_list = [draft_token_ids]
         positions = target_positions[last_token_indices]
         hidden_states = sample_hidden_states
         attn_metadata.num_actual_tokens = batch_size
