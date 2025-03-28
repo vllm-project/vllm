@@ -43,17 +43,20 @@ def make_request(request_id,
     )
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, hash])
-def test_prefill(hash_fn):
+@pytest.mark.parametrize("hash_algo", ["sha256", "hash"])
+def test_prefill(hash_algo):
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
-        caching_hash_fn=hash_fn,
+        caching_hash_algo=hash_algo,
         num_preallocate_tokens=16,
     )
+
+    # choose the hash function according to the parameter
+    hash_fn = sha256 if hash_algo == "sha256" else hash
 
     # Complete 3 blocks (48 tokens)
     common_token_ids = [i for i in range(3) for _ in range(16)]
@@ -771,7 +774,7 @@ def test_kv_block_hash_from_frontend():
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
-        caching_hash_fn=sha256,
+        caching_hash_algo="sha256",
         num_preallocate_tokens=16,
     )
 

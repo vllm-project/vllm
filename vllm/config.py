@@ -41,7 +41,7 @@ from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         get_cpu_memory, get_open_port, random_uuid,
-                        resolve_obj_by_qualname, sha256)
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -1158,11 +1158,6 @@ class CacheConfig:
         # Set calculate_kv_scales to False if the value is unset.
         if self.calculate_kv_scales is None:
             self.calculate_kv_scales = False
-
-        # The prefix caching hash function.
-        self.prefix_caching_hash_fn = hash
-        if self.prefix_caching_hash_algo == "sha256":
-            self.prefix_caching_hash_fn = sha256
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus

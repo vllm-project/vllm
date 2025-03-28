@@ -17,6 +17,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.utils import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import hash_request_tokens
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.structured_output.backend_guidance import (
@@ -48,9 +49,13 @@ class Processor:
                                                     mm_registry)
 
         # Multi-modal hasher (for images)
-        self.use_hash = (
+        self.hash_mm_inputs = (
             not self.model_config.disable_mm_preprocessor_cache) or \
             self.cache_config.enable_prefix_caching
+
+        # Prefix caching hash function.
+        self.kv_block_hash_fn = get_hash_fn_by_name(
+            self.cache_config.prefix_caching_hash_fn)
 
     def _validate_logprobs(
         self,
@@ -203,7 +208,7 @@ class Processor:
             prompt,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
-            return_mm_hashes=self.use_hash,
+            return_mm_hashes=self.hash_mm_inputs,
         )
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
@@ -255,7 +260,7 @@ class Processor:
                 sorted_mm_hashes,
             ) = merge_and_sort_multimodal_metadata(
                 decoder_inputs["mm_placeholders"],
-                decoder_inputs["mm_hashes"] if self.use_hash else None,
+                decoder_inputs["mm_hashes"] if self.hash_mm_inputs else None,
             )
 
             # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
@@ -283,7 +288,7 @@ class Processor:
         prompt_kv_block_hashes = None
         if self.cache_config.enable_prefix_caching:
             prompt_kv_block_hashes = hash_request_tokens(
-                self.cache_config.prefix_caching_hash_fn,
+                self.kv_block_hash_fn,
                 self.cache_config.block_size,
                 decoder_inputs["prompt_token_ids"],
                 sorted_mm_positions,

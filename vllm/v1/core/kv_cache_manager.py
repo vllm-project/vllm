@@ -2,10 +2,10 @@
 
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Callable, Optional
+from typing import Optional
 
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils import cdiv, get_hash_fn_by_name
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, hash_request_tokens
 from vllm.v1.metrics.stats import PrefixCacheStats
@@ -23,7 +23,7 @@ class KVCacheManager:
         max_model_len: int,
         sliding_window: Optional[int] = None,
         enable_caching: bool = True,
-        caching_hash_fn: Callable = hash,
+        caching_hash_algo: str = "builtin",
         num_preallocate_tokens: int = 64,
         log_stats: bool = False,
     ) -> None:
@@ -33,7 +33,7 @@ class KVCacheManager:
         self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
         self.sliding_window = sliding_window
         self.enable_caching = enable_caching
-        self.caching_hash_fn = caching_hash_fn
+        self.caching_hash_fn = get_hash_fn_by_name(caching_hash_algo)
         # FIXME: make prefix cache stats conditional on log_stats
         self.log_stats = log_stats
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
@@ -110,8 +110,6 @@ class KVCacheManager:
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
-            # The block hashes for new requests may already be computed
-            # at the frontend.
             if request.prompt_kv_block_hashes is not None:
                 block_hashes = request.prompt_kv_block_hashes
             else:
