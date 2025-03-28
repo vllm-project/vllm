@@ -10,6 +10,7 @@ import inspect
 import itertools
 import math
 import os
+import re
 import time
 import warnings
 from abc import ABC, abstractmethod
@@ -212,6 +213,9 @@ class DefaultModelLoader(BaseModelLoader):
         prefix: str = ""
         """A prefix to prepend to all weights."""
 
+        keep_patterns: Optional[list[str]] = None
+        """keep weights with these patterns."""
+
         fall_back_to_pt: bool = True
         """Whether .pt weights can be used."""
 
@@ -399,6 +403,12 @@ class DefaultModelLoader(BaseModelLoader):
 
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()
+        if source.keep_patterns:
+            # apply keep patterns
+            weights_iterator = ((name, tensor)
+                                for (name, tensor) in weights_iterator if any(
+                                    re.match(pattern, name)
+                                    for pattern in source.keep_patterns))
         # Apply the prefix.
         return ((source.prefix + name, tensor)
                 for (name, tensor) in weights_iterator)

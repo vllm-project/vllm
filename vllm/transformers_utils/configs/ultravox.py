@@ -79,29 +79,36 @@ class UltravoxConfig(transformers.PretrainedConfig):
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            self.text_config = get_config(text_model_id,
-                                          trust_remote_code=False)
+            text_config = get_config(text_model_id, trust_remote_code=False)
         else:
             text_config = text_config or {}
-            self.text_config = transformers.CONFIG_MAPPING[text_config.get(
+            text_config = transformers.CONFIG_MAPPING[text_config.get(
                 "model_type", "llama")](**text_config)
+
+        if text_config.__class__.__name__ == "Gemma3Config":
+            text_config = text_config.text_config
+            text_config.architectures = ["Gemma3ForCausalLM"]
+            text_config.nested = True
+        else:
+            text_config.nested = False
 
         if audio_model_id is not None:
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            self.audio_config = get_config(audio_model_id,
-                                           trust_remote_code=False)
+            audio_config = get_config(audio_model_id, trust_remote_code=False)
         else:
             audio_config = audio_config or {}
-            self.audio_config = transformers.CONFIG_MAPPING[audio_config.get(
+            audio_config = transformers.CONFIG_MAPPING[audio_config.get(
                 "model_type", "whisper")](**audio_config)
 
+        self.text_config = text_config
+        self.audio_config = audio_config
         self.text_model_lora_config = text_model_lora_config or {}
         self.audio_model_lora_config = audio_model_lora_config or {}
 
-        self.vocab_size = self.text_config.vocab_size
+        self.vocab_size = text_config.vocab_size
 
-        self.initializer_range = self.text_config.initializer_range
+        self.initializer_range = text_config.initializer_range
 
         super().__init__(**kwargs)

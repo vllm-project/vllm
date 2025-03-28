@@ -42,8 +42,8 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings,
                     merge_multimodal_embeddings_from_map)
 
-_AUDIO_PLACEHOLDER_OVERRIDE = "<|reserved_special_token_0|>"
-_AUDIO_PLACEHOLDER_TOKEN = 128002
+_AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
+_AUDIO_PLACEHOLDER_TOKEN = 0
 _AUDIO_TOKENS_PER_SECOND = 6.25
 _MAX_ENCODER_BATCH_SIZE = 16
 
@@ -84,6 +84,16 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         **kwargs: object,
     ) -> ProcessorMixin:
         hf_processor = self.ctx.get_hf_processor(**kwargs)
+
+        if (_AUDIO_PLACEHOLDER_OVERRIDE
+                not in hf_processor.tokenizer.additional_special_tokens):
+            hf_processor.tokenizer.add_special_tokens(
+                {'additional_special_tokens': [_AUDIO_PLACEHOLDER_OVERRIDE]})
+            hf_processor.vocab = hf_processor.tokenizer.get_vocab()
+
+        global _AUDIO_PLACEHOLDER_TOKEN
+        _AUDIO_PLACEHOLDER_TOKEN = hf_processor.tokenizer.encode(
+            _AUDIO_PLACEHOLDER_OVERRIDE, add_special_tokens=False)[0]
 
         # NOTE: Ultravox processing definition uses '<|eot_id|>' as the
         # placeholder that will cause confusion with the actual end of turn
@@ -441,12 +451,20 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             prefix=maybe_prefix(prefix, "language_model"),
         )
         if config.text_model_id is not None:
-            # this prefix is not for initialization, but for loading weights
-            # note the trailing dot
+            if config.text_config.nested:
+                # For Gemma3, we throw away the vision_model
+                keep_patterns = ["language_model\..*"]
+                prefix = ""
+            else:
+                # this prefix is not for initialization, but for loading weights
+                # note the trailing dot
+                keep_patterns = None
+                prefix = "language_model."
             self.secondary_weights.append(
                 DefaultModelLoader.Source(model_or_path=config.text_model_id,
                                           revision=None,
-                                          prefix="language_model."))
+                                          prefix=prefix,
+                                          keep_patterns=keep_patterns))
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
@@ -577,7 +595,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        safe_input_ids = input_ids.clone()
+        safe_input_ids[safe_input_ids == _AUDIO_PLACEHOLDER_TOKEN] = 0
+        inputs_embeds = self.language_model.get_input_embeddings(
+            safe_input_ids)
         if multimodal_embeddings is not None:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
