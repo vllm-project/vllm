@@ -5,7 +5,7 @@
 set -ex
 
 # Try building the docker image
-docker build -t hpu-test-env -f Dockerfile.hpu .
+docker build -t hpu-test-env -f dockerfiles/Dockerfile.hpu .
 
 # Setup cleanup
 # certain versions of HPU software stack have a bug that can
