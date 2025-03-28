@@ -1794,7 +1794,6 @@ class LLMEngine:
                 # NOTE: a seq_group that completed all of its prefill tokens
                 # in the last iteration will have seq_group.is_prefill() = False
                 # with group_was_prefill = True
-                # Add token counting for current batch
                 if group_was_prefill:
                     # Number of prompt tokens.
                     num_prompt_tokens_iter += (
@@ -1809,7 +1808,6 @@ class LLMEngine:
                         # One generation token per finished prefill.
                         num_generation_tokens_from_prefill_groups += (
                             seq_group.num_seqs())
-
                 else:
                     # TPOTs.
                     latency = seq_group.get_last_token_latency()
@@ -1860,7 +1858,6 @@ class LLMEngine:
                     if seq_group.metrics.model_execute_time is not None:
                         model_execute_time_requests.append(
                             seq_group.metrics.model_execute_time * 1000)
-
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))

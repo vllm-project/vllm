@@ -105,7 +105,7 @@ class RequestMetrics:
         time_in_queue: The time the request spent in the queue.
         finished_time: The time when the request was finished.
         scheduler_time: The time spent in the scheduler when this request was
-                       being considered by the scheduler.
+                        being considered by the scheduler.
         model_forward_time: The time spent in the model forward pass when this
                            request was in the batch.
         model_execute_time: The time spent in the model execute function. This
@@ -440,12 +440,6 @@ class Sequence:
         self.prefix_offset = 0
         self.read_offset = 0
         # Input + output tokens
-        self.metrics = RequestMetrics(arrival_time=0.0,
-                                      last_token_time=0.0,
-                                      first_scheduled_time=None,
-                                      first_token_time=None,
-                                      time_in_queue=None)
-
         self.tokens: Optional[list[str]] = None
 
     @property
