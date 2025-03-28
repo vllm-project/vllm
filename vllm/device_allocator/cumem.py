@@ -63,7 +63,7 @@ except ModuleNotFoundError:
     libcudart = None
 
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = Tuple[int, int, int, int]
+HandleType = Tuple[int, int, int, Any]
 
 
 @dataclasses.dataclass
