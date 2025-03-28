@@ -273,15 +273,15 @@ __global__ void Marlin_24(
                 (threadIdx.x % b_sh_stride_threads) * b_thread_vecs;
   b_gl_rd += b_sh_stride * slice_col;
   b_gl_rd += b_gl_rd_delta_o * slice_row;
-  int b_sh_wr = threadIdx.x * b_thread_vecs;
-  int b_sh_rd = threadIdx.x * b_thread_vecs;
+  auto b_sh_wr = threadIdx.x * b_thread_vecs;
+  auto b_sh_rd = threadIdx.x * b_thread_vecs;
 
   int m_gl_rd = m_gl_stride * (threadIdx.x / (m_sh_stride)) +
                 (threadIdx.x % (m_sh_stride));
   m_gl_rd += (m_sh_stride)*slice_col;
   m_gl_rd += m_gl_rd_delta_o * slice_row;
-  int m_sh_wr = threadIdx.x;
-  int m_sh_rd = threadIdx.x % 16 + (threadIdx.x / 32) * 16;
+  auto m_sh_wr = threadIdx.x;
+  auto m_sh_rd = threadIdx.x % 16 + (threadIdx.x / 32) * 16;
 
   int s_gl_rd;
   if constexpr (group_blocks == -1) {
@@ -291,7 +291,7 @@ __global__ void Marlin_24(
               s_sh_stride * slice_col + threadIdx.x;
   }
 
-  int s_sh_wr = threadIdx.x;
+  auto s_sh_wr = threadIdx.x;
   int s_sh_rd;
   // We use a different scale layout for grouped and column-wise quantization as
   // we scale a `half2` tile in column-major layout in the former and in
@@ -516,7 +516,7 @@ __global__ void Marlin_24(
   auto thread_block_reduce = [&]() {
     constexpr int red_off = threads / b_sh_stride_threads / 2;
     if (red_off >= 1) {
-      int red_idx = threadIdx.x / b_sh_stride_threads;
+      auto red_idx = threadIdx.x / b_sh_stride_threads;
       constexpr int red_sh_stride = b_sh_stride_threads * 4 * 2;
       constexpr int red_sh_delta = b_sh_stride_threads;
       int red_sh_rd = red_sh_stride * (threadIdx.x / b_sh_stride_threads) +
@@ -583,7 +583,7 @@ __global__ void Marlin_24(
                     8 * (threadIdx.x / 32) + (threadIdx.x % 32) / 4;
       c_gl_wr += (2 * thread_n_blocks) * slice_col;
       constexpr int c_sh_wr_delta = active_threads;
-      int c_sh_wr = threadIdx.x;
+      auto c_sh_wr = threadIdx.x;
 
       int col = 2 * ((threadIdx.x % 32) % 4);
 
