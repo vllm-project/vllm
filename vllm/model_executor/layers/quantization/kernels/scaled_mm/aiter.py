@@ -33,14 +33,16 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
             return (
                 False,
                 "AiterScaledMMLinearKernel requires `aiter` which is not " +
-                "installed supported on ROCm.")
+                "installed on ROCm.")
         # Check if rocm_aiter_gemm_w8a8_scaled_mm is enabled
         if not (
             envs.VLLM_ROCM_USE_AITER_LINEAR \
             and envs.VLLM_ROCM_USE_AITER
         ):
             return (False, "AiterScaledMMLinearKernel is disabled. " +
-                    "Enable by setting `VLLM_ROCM_USE_AITER=1`.")
+                    "Enable by setting `VLLM_ROCM_USE_AITER=1` " +
+                    "and `VLLM_ROCM_USE_AITER_LINEAR=1`. " +
+                    "`VLLM_ROCM_USE_AITER_LINEAR` default is True.")
 
         if not c.input_symmetric:
             return (False,
@@ -61,7 +63,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         where scale_a * a and scale_b * b are implemented using numpy-style
         broadcasting.
         Currently only support per-tensor-per-tensor GEMM
-        and per-channel-per-channel GEMM through AITER
+        and per-token-per-channel GEMM through AITER
         w8a8 scaled gemm. `AiterScaledMMLinearKernel` also does not support
         ATIER block scaled GEMM and mix-precision GEMM.
         """
@@ -98,15 +100,15 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         # @TODO:
         # Maybe broadcast the per-tensor-scale into per-channel-scale
         # if one of the scale is a per-channel-scale.
-        # For now, it only supports
-        # per-tensor-per-tensor a8w8 scaled GEMM and
-        # per-channel-per-channel a8w8 scacled GEMM
+        # For now, it only supports:
+        # - per-tensor-per-tensor a8w8 scaled GEMM, and
+        # - per-token-per-channel a8w8 scaled GEMM
         assert ((per_tensor_scale_a and per_tensor_scale_b)
                 or (per_token_scale_a and per_channel_scale_b)), (
                     "Currently only support per-tensor-per-tensor GEMM " +
-                    " and per-channel-per-channel GEMM through AITER"
-                    " w8a8 scaled gemm. `cutlass_scaled_mm` does not support" +
-                    " ATIER block scaled GEMM yet.")
+                    " and per-token-per-channel GEMM through AITER"
+                    " w8a8 scaled gemm. `AiterScaledMMLinearKernel` " +
+                    "does not support AITER block scaled GEMM.")
 
         from aiter import gemm_a8w8_CK
 
