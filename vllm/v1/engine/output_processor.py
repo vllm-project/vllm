@@ -268,7 +268,7 @@ class OutputProcessor:
         # finished_reason.
         return
 
-    def free_finised_reqs(self, req_ids: Iterable[str]):
+    def free_finished_reqs(self, req_ids: Iterable[str]):
         """
         Handle a finished request. This method is called when EngineCore detects
         that the request has ended, and the resources related to the request
@@ -390,7 +390,7 @@ class OutputProcessor:
                     # detected stop string, abort needed in EngineCore.
                     reqs_to_abort.append(req_id)
                 else:
-                    self.free_finised_reqs((req_id, ))
+                    self.free_finished_reqs((req_id, ))
 
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,
