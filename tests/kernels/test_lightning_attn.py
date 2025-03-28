@@ -231,32 +231,32 @@ def test_lightning_attention_reference(
     k = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
     v = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
     ed = torch.rand(num_heads, device="cuda")
-
+    
     # Optional KV history
     kv_history = torch.randn(batch_size,
                              num_heads,
                              head_size,
                              head_size,
-                             dtype=torch.float32,
+                             dtype=dtype,
                              device="cuda")
     kv_history_clone = kv_history.clone()
-
+    
     # Use reference implementation
     ref_output, ref_kv_cache = reference_lightning_attention(
         q, k, v, ed, 256, kv_history)
-
+    
     # Use actual implementation
     from vllm.model_executor.layers.lightning_attn import lightning_attention
     actual_output, actual_kv_cache = lightning_attention(
         q, k, v, ed, 256, kv_history_clone)
-
+    
     # Compare results
     torch.testing.assert_close(ref_output, actual_output, rtol=1e-1, atol=1e-1)
     torch.testing.assert_close(ref_kv_cache,
-                               actual_kv_cache,
-                               rtol=1e-1,
-                               atol=1e-1)
-
+                              actual_kv_cache,
+                              rtol=1e-1,
+                              atol=1e-1)
+    
     # Verify output shapes
     assert ref_output.shape == (batch_size, num_heads, seq_len, head_size)
     assert ref_kv_cache.shape == actual_kv_cache.shape
