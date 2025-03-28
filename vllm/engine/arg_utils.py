@@ -23,6 +23,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
+from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
@@ -114,10 +115,12 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
+    data_parallel_size: int = 1
     enable_expert_parallel: bool = False
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
+    prefix_caching_hash_algo: str = "builtin"
     disable_sliding_window: bool = False
     disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
@@ -441,6 +444,14 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tensor_parallel_size,
                             help='Number of tensor parallel replicas.')
+        parser.add_argument('--data-parallel-size',
+                            '-dp',
+                            type=int,
+                            default=EngineArgs.data_parallel_size,
+                            help='Number of data parallel replicas. '
+                            'MoE layers will be sharded according to the '
+                            'product of the tensor-parallel-size and '
+                            'data-parallel-size.')
         parser.add_argument(
             '--enable-expert-parallel',
             action='store_true',
@@ -474,6 +485,16 @@ class EngineArgs:
             default=EngineArgs.enable_prefix_caching,
             help="Enables automatic prefix caching. "
             "Use ``--no-enable-prefix-caching`` to disable explicitly.",
+        )
+        parser.add_argument(
+            "--prefix-caching-hash-algo",
+            type=str,
+            choices=["builtin", "sha256"],
+            default=EngineArgs.prefix_caching_hash_algo,
+            help="Set the hash algorithm for prefix caching. "
+            "Options are 'builtin' (Python's built-in hash) or 'sha256' "
+            "(collision resistant but with certain overheads). Defaults "
+            "to 'builtin'.",
         )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
@@ -654,7 +675,7 @@ class EngineArgs:
             type=nullable_kvs,
             default=EngineArgs.limit_mm_per_prompt,
             # The default value is given in
-            # MultiModalRegistry.init_mm_limits_per_prompt
+            # MultiModalConfig.get_limit_per_prompt
             help=('For each multimodal plugin, limit how many '
                   'input instances to allow for each prompt. '
                   'Expects a comma-separated list of items, '
@@ -1099,7 +1120,7 @@ class EngineArgs:
         parser.add_argument(
             "--reasoning-parser",
             type=str,
-            choices=["deepseek_r1"],
+            choices=list(ReasoningParserManager.reasoning_parsers),
             default=None,
             help=
             "Select the reasoning parser depending on the model that you're "
@@ -1329,6 +1350,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
+            prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
         )
@@ -1347,6 +1369,7 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            data_parallel_size=self.data_parallel_size,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
@@ -1538,7 +1561,8 @@ class EngineArgs:
 
         # Xgrammar and Guidance are supported.
         SUPPORTED_GUIDED_DECODING = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance", "auto"
+            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
+            "guidance:disable-any-whitespace", "auto"
         ]
         if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
             _raise_or_fallback(feature_name="--guided-decoding-backend",
@@ -1594,7 +1618,7 @@ class EngineArgs:
             return False
 
         # Some quantization is not compatible with torch.compile.
-        V1_UNSUPPORTED_QUANT = ["bitsandbytes", "gguf"]
+        V1_UNSUPPORTED_QUANT = ["gguf"]
         if model_config.quantization in V1_UNSUPPORTED_QUANT:
             _raise_or_fallback(
                 feature_name=f"--quantization {model_config.quantization}",
@@ -1613,21 +1637,11 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No TransformersModel support so far.
-        if (model_config.model_impl == ModelImpl.TRANSFORMERS
-                or model_config.model_impl == "transformers"):
-            _raise_or_fallback(
-                feature_name=f"model_impl={model_config.model_impl}",
-                recommend_to_remove=False)
-            return False
-
         # No Concurrent Partial Prefills so far.
         if (self.max_num_partial_prefills
                 != EngineArgs.max_num_partial_prefills
                 or self.max_long_partial_prefills
-                != EngineArgs.max_long_partial_prefills
-                or self.long_prefill_token_threshold
-                != EngineArgs.long_prefill_token_threshold):
+                != EngineArgs.max_long_partial_prefills):
             _raise_or_fallback(feature_name="Concurrent Partial Prefill",
                                recommend_to_remove=False)
             return False
@@ -1666,9 +1680,8 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False
 
-        # No support for device type other than CUDA, AMD (experiemntal) or
-        # TPU (experimental) so far.
-        if not (current_platform.is_cuda_alike() or current_platform.is_tpu()):
+        # Platforms must decide if they can support v1 for this model
+        if not current_platform.supports_v1(model_config=model_config):
             _raise_or_fallback(
                 feature_name=f"device type={current_platform.device_type}",
                 recommend_to_remove=False)
@@ -1685,8 +1698,11 @@ class EngineArgs:
         if self.enable_lora and _warn_or_fallback("LORA"):
             return False
 
-        # PP is supported on V1, but off by default for now.
-        if self.pipeline_parallel_size > 1 and _warn_or_fallback("PP"):
+        # PP is supported on V1 with Ray distributed executor,
+        # but off for MP distributed executor for now.
+        if (self.pipeline_parallel_size > 1
+                and self.distributed_executor_backend == "mp"
+                and _warn_or_fallback("PP (MP distributed executor)")):
             return False
 
         # ngram is supported on V1, but off by default for now.
@@ -1748,12 +1764,22 @@ class EngineArgs:
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
-        # Disable prefix caching for multimodal models for VLLM_V0.
-        if (model_config.is_multimodal_model and self.enable_prefix_caching):
-            logger.warning(
-                "--enable-prefix-caching is not supported for multimodal "
-                "models in V0 and has been disabled.")
-            self.enable_prefix_caching = False
+        # if using prefix caching, we must set a hash algo
+        if self.enable_prefix_caching:
+            # Disable prefix caching for multimodal models for VLLM_V0.
+            if model_config.is_multimodal_model:
+                logger.warning(
+                    "--enable-prefix-caching is not supported for multimodal "
+                    "models in V0 and has been disabled.")
+                self.enable_prefix_caching = False
+
+            # VLLM_V0 only supports builtin hash algo for prefix caching.
+            if self.prefix_caching_hash_algo is None:
+                self.prefix_caching_hash_algo = "builtin"
+            elif self.prefix_caching_hash_algo == "sha256":
+                raise ValueError(
+                    "sha256 is not supported for prefix caching in V0 engine. "
+                    "Please use 'builtin'.")
 
         # Set max_num_seqs to 256 for VLLM_V0.
         if self.max_num_seqs is None:
@@ -1768,6 +1794,10 @@ class EngineArgs:
         # V1 enables prefix caching by default.
         if self.enable_prefix_caching is None:
             self.enable_prefix_caching = True
+
+        # if using prefix caching, we must set a hash algo
+        if self.enable_prefix_caching and self.prefix_caching_hash_algo is None:
+            self.prefix_caching_hash_algo = "builtin"
 
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default
