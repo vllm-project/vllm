@@ -624,6 +624,8 @@ def linear_decode_forward_triton(
         B, H,
         1), f"Value shape error: expected {(B, H, 1, '*')}, got {v.shape}"
 
+    input_dtype = q.dtype
+    
     # Ensure data type consistency
     compute_dtype = torch.float32
     q = q.to(compute_dtype)
@@ -666,4 +668,4 @@ def linear_decode_forward_triton(
 
     # Reshape output and return
     output = rearrange(output, "b h n d -> b n (h d)")
-    return output.squeeze(1).contiguous()
+    return output.squeeze(1).contiguous().to(input_dtype)
