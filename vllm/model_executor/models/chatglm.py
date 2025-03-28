@@ -10,6 +10,7 @@ from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.attention import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -293,6 +294,7 @@ class GLMTransformer(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class ChatGLMModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
