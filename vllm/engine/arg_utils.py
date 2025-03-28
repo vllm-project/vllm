@@ -23,6 +23,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
+from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
@@ -1119,7 +1120,7 @@ class EngineArgs:
         parser.add_argument(
             "--reasoning-parser",
             type=str,
-            choices=["deepseek_r1", "granite"],
+            choices=list(ReasoningParserManager.reasoning_parsers),
             default=None,
             help=
             "Select the reasoning parser depending on the model that you're "
