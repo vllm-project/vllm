@@ -94,21 +94,25 @@ THINK_NO_END = {
     "output": "<think>This is a reasoning section",
     "reasoning_content": "This is a reasoning section",
     "content": None,
+    "is_reasoning_end": False,
 }
 EMPTY = {
     "output": "",
     "reasoning_content": "",
     "content": None,
+    "is_reasoning_end": False,
 }
 EMPTY_STREAMING = {
     "output": "",
     "reasoning_content": None,
     "content": None,
+    "is_reasoning_end": False,
 }
 NEW_LINE = {
     "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
     "reasoning_content": "This is a reasoning section",
     "content": "\nThis is the rest",
+    "is_reasoning_end": True,
 }
 # Streaming cannot handle new lines at the beginning of the output
 # because we need to support <think>...</think> and </think>...
@@ -118,6 +122,7 @@ NEW_LINE_STREAMING = {
     "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
     "reasoning_content": "\nThis is a reasoning section",
     "content": "\nThis is the rest",
+    "is_reasoning_end": True,
 }
 
 TEST_CASES = [

@@ -152,7 +152,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
 
         # Check if the start token is present in the model output, remove it
         # if it is present.
-        model_output_parts = model_output.partition(self.think_start_token)
+        model_output_parts = model_output.partition(self.start_token)
         model_output = model_output_parts[2] if model_output_parts[
             1] else model_output_parts[0]
 
@@ -163,7 +163,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
             return model_output, None
         else:
             reasoning_content, _, content = model_output.partition(
-                self.think_end_token)
+                self.end_token)
             # If the end token is not found, return the model output as is.
             # It should not happen since we already checked for the presence
             # of the end token.
