@@ -1,4 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0 Adapted from
+# https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
 from functools import cached_property
 from typing import (Iterable, Literal, Mapping, Optional, Sequence, Set, Tuple,
                     TypedDict, Union, cast)
@@ -166,6 +167,11 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
 
     def get_num_patches(self, *, image_width: int, image_height: int,
                         size: dict, min_patches: int, max_patches: int) -> int:
+        """
+        Calculate the number of patches needed for a given image based on size
+        constraints.  This method replicates and adjusts the logic from:
+        transformers/models/got_ocr2/image_processing_got_ocr2
+        """
         size = get_size_dict(size, default_to_square=False)
         num_columns, num_rows = get_optimal_tiled_canvas(
             (image_height, image_width), (size["height"], size["width"]),
