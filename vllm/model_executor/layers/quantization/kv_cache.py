@@ -40,8 +40,6 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0),
                                            requires_grad=False)
         # Initialize Q and P = softmax(QK^T) scales
-        layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0),
-                                           requires_grad=False)
         layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0),
                                               requires_grad=False)
 
