@@ -533,8 +533,15 @@ def _linear_attn_decode_kernel(
     # Load slot index for the current batch
     slot_id = tl.load(slot_idx + pid_b)
 
+    # Skip if slot_id is -1 (padding)
+    if slot_id == -1:
+        return
+
     batch_id = pid_b
     head_id = pid_h
+
+    # Load decay rate for the current head
+    ratio = tl.load(slope_rate + pid_h)
 
     # Calculate offsets for dimensions
     qk_d_offsets = tl.arange(0, D)
@@ -547,19 +554,11 @@ def _linear_attn_decode_kernel(
     k_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
     v_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
 
-    cache_offset = batch_id * cache_b_stride + head_id * cache_h_stride
+    cache_offset = slot_id * cache_b_stride + head_id * cache_h_stride
 
     # Create masks for loading tensors
     qk_mask = qk_d_offsets < D
     v_mask = v_d_offsets < D
-
-    # Skip processing for padding positions but initialize output to zero
-    if slot_id == -1:
-        # Still need to zero-initialize output for padding positions
-        tl.store(output_ptr + q_offset + v_d_offsets,
-                 tl.zeros([BLOCK_SIZE], dtype=tl.float32),
-                 mask=v_mask)
-        return
 
     # Load query, key, and value tensors
     q = tl.load(q_ptr + q_offset + qk_d_offsets, mask=qk_mask, other=0.0)
@@ -571,7 +570,7 @@ def _linear_attn_decode_kernel(
     kv_mask = qk_mask[:, None] & v_mask[None, :]
 
     # Apply decay to previous KV cache
-    ratio = tl.exp(-tl.load(slope_rate + pid_h))
+    ratio = tl.exp(-ratio)
     kv_ptr = kv_cache_ptr + cache_offset + cache_d_offsets
     kv_cache_old = tl.load(kv_ptr, mask=kv_mask, other=0.0)
     kv_outer = kv_outer + ratio * kv_cache_old

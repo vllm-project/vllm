@@ -206,3 +206,59 @@ def test_linear_decode_forward_triton_with_padding(
                                        atol=1e-1)
 
     assert triton_output.shape == (batch_size, num_heads * head_size)
+
+
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("seq_len", SEQ_LENGTHS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_lightning_attention_reference(
+    batch_size: int,
+    num_heads: int,
+    head_size: int,
+    seq_len: int,
+    dtype: torch.dtype,
+):
+    """
+    Test if the reference implementation of lightning_attention 
+    is consistent with the actual implementation
+    """
+    torch.set_default_device("cuda")
+    current_platform.seed_everything(0)
+
+    # Prepare test data
+    q = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+    k = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+    v = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+    ed = torch.rand(num_heads, device="cuda")
+
+    # Optional KV history
+    kv_history = torch.randn(batch_size,
+                             num_heads,
+                             head_size,
+                             head_size,
+                             dtype=torch.float32,
+                             device="cuda")
+    kv_history_clone = kv_history.clone()
+
+    # Use reference implementation
+    ref_output, ref_kv_cache = reference_lightning_attention(
+        q, k, v, ed, 256, kv_history)
+
+    # Use actual implementation
+    from vllm.model_executor.layers.lightning_attn import lightning_attention
+    actual_output, actual_kv_cache = lightning_attention(
+        q, k, v, ed, 256, kv_history_clone)
+
+    # Compare results
+    torch.testing.assert_close(ref_output, actual_output, rtol=1e-1, atol=1e-1)
+    torch.testing.assert_close(ref_kv_cache,
+                               actual_kv_cache,
+                               rtol=1e-1,
+                               atol=1e-1)
+
+    # Verify output shapes
+    assert ref_output.shape == (batch_size, num_heads, seq_len, head_size)
+    assert ref_kv_cache.shape == actual_kv_cache.shape
