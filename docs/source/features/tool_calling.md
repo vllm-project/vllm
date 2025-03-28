@@ -1,6 +1,6 @@
 # Tool Calling
 
-vLLM currently supports named function calling, as well as the `auto` and `none` options for the `tool_choice` field in the chat completion API. The `tool_choice` option `required` is **not yet supported** but [on the roadmap](gh-issue:13002).
+vLLM currently supports named function calling, as well as the `auto`, `required` (as of `vllm>=0.7.4`) and `none` options for the `tool_choice` field in the chat completion API.
 
 ## Quickstart
 
@@ -90,6 +90,12 @@ For best results, we recommend ensuring that the expected output format / schema
 
 To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
 specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
+
+## Required Function Calling
+
+vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses guided decoding, so this is enabled by default and will work with any supported model.
+
+When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter.
 
 ## Automatic Function Calling
 
