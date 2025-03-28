@@ -28,8 +28,7 @@ from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
                                         replace_token_matches)
 # yapf: enable
 from vllm.multimodal.profiling import MultiModalProfiler
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               cached_tokenizer_from_config)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import full_groupby
 
 from .utils import random_image
@@ -955,10 +954,7 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
 
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     profiler = MultiModalProfiler(processor)
 
     mock_supported_mm_limits = MagicMock(return_value={"image": num_supported})
@@ -994,10 +990,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
 
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
     rng = np.random.RandomState(0)
     image = random_image(rng, min_wh=128, max_wh=256)
@@ -1066,10 +1059,7 @@ def test_hf_processor_kwargs(model_id, call_kwargs, expected_kwargs):
         revision=None,
     )
 
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     orig_get_hf_processor = processor.info.get_hf_processor
 
     def get_hf_processor(self, **kwargs):

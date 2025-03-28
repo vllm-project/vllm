@@ -10,7 +10,6 @@ from transformers import PretrainedConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ....conftest import _ImageAssets
 from ...utils import build_model_context
@@ -113,11 +112,7 @@ def test_processor_override(
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
         limit_mm_per_prompt={"image": len(size_factors)},
     )
-    tokenizer = cached_tokenizer_from_config(ctx.model_config)
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        ctx.model_config,
-        tokenizer=tokenizer,
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
 
     min_num = min_dynamic_patch if dynamic_image_size else 1
