@@ -3,7 +3,7 @@ import enum
 import platform
 import random
 from platform import uname
-from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -449,6 +449,20 @@ class Platform:
         Returns the total number of compute units (CU) on single GPU.
         """
         raise NotImplementedError
+
+    @classmethod
+    def get_torch_namespace(cls) -> Any:
+        """
+        Return the corresponding torch attribute based on 
+        the device type string, or torch.cuda if not found.
+        """
+        try:
+            return getattr(torch, cls.device_type)
+        except AttributeError:
+            logger.warning(
+                "Device namespace %s not found in torch, "
+                "try to load torch.cuda.", cls.device_type)
+            return torch.cuda
 
 
 class UnspecifiedPlatform(Platform):
