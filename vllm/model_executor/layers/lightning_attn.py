@@ -176,13 +176,13 @@ def _fwd_kv_parallel(
         # Load key and value, handling boundary conditions
         k_trans = tl.load(K_trans_block_ptr - left_shift * d,
                           mask=kv_index[None, :] >= left_bound,
-                          other=0.0).to(tl.float32)
+                          other=0.0)
         v = tl.load(V_block_ptr - left_shift * e,
                     mask=kv_index[:, None] >= left_bound,
-                    other=0.0).to(tl.float32)
+                    other=0.0)
 
         # Load decay factor and compute weighted key-value outer product
-        k_decay = tl.load(k_decay_ptr).to(tl.float32)
+        k_decay = tl.load(k_decay_ptr)
         kv += tl.dot(k_trans * k_decay, v)
 
         # Move to the next sub-block
@@ -454,7 +454,8 @@ lightning_attention_ = _attention.apply
 
 def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
     """
-    Apply lightning attention algorithm to compute attention efficiently.
+    Apply lightning attention algorithm 
+    to compute attention efficiently.
     
     Args:
         q: Query tensor of shape [batch, heads, seq_len, dim]
@@ -474,14 +475,7 @@ def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
     if ed.dim() == 1:
         ed = ed.view(1, -1, 1, 1)
 
-    # Ensure data type consistency
-    compute_dtype = torch.float32
-    orig_dtype = q.dtype
-    q = q.to(compute_dtype)
-    k = k.to(compute_dtype)
-    v = v.to(compute_dtype)
-
-    # Split computation into chunks for better parallelism
+    # Split the computation into chunks for better parallelism
     m = 128 if d >= 128 else 64
     assert d % m == 0, f"Dimension d ({d}) must be divisible by m ({m})"
     arr = [m * i for i in range(d // m + 1)]
@@ -506,9 +500,7 @@ def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
         k1 = k[..., s:e]
         o, kv = lightning_attention_(q1, k1, v, ed, kv_history)
         output = output + o
-
-    # Convert result back to original data type
-    return output.to(orig_dtype), kv
+    return output, kv
 
 
 @triton.jit
@@ -517,10 +509,10 @@ def _linear_attn_decode_kernel(
     k_ptr,
     v_ptr,
     kv_cache_ptr,
-    slope_rate_ptr,
-    slot_idx_ptr,
-    out_ptr,
-    D,
+    slope_rate,
+    slot_idx,
+    output_ptr,
+    D: tl.constexpr,
     qkv_b_stride,
     qkv_h_stride,
     cache_b_stride,
@@ -529,105 +521,67 @@ def _linear_attn_decode_kernel(
     cache_d1_stride,
     BLOCK_SIZE: tl.constexpr,
 ):
-    b = tl.program_id(0)  # Batch index
-    h = tl.program_id(1)  # Head index
-    d_block = tl.program_id(2)  # Block of dimension
+    """
+    Kernel for linear attention decoding with KV cache.
+    
+    This kernel computes attention for a single token using the KV cache.
+    """
+    pid_b = tl.program_id(0)  # batch index
+    pid_h = tl.program_id(1)  # head index
+    pid_d = tl.program_id(2)  # dimension block index
 
-    # Check if this is a padding position (slot_idx == -1)
-    slot_id = tl.load(slot_idx_ptr + b)
+    # Load slot index for the current batch
+    slot_id = tl.load(slot_idx + pid_b)
+
+    # Skip if slot_id is -1 (padding)
     if slot_id == -1:
-        # For padding positions, don't update anything
         return
 
-    # Compute offsets
-    q_offset = b * qkv_b_stride + h * qkv_h_stride
-    k_offset = b * qkv_b_stride + h * qkv_h_stride
-    v_offset = b * qkv_b_stride + h * qkv_h_stride
-    kv_offset = b * cache_b_stride + h * cache_h_stride
+    batch_id = pid_b
+    head_id = pid_h
 
-    # Load slope rate for exponential decay
-    s = tl.load(slope_rate_ptr + h)
+    # Load decay rate for the current head
+    ratio = tl.load(slope_rate + pid_h)
 
-    # Compute d indices
-    d_start = d_block * BLOCK_SIZE
-    d_end = min(d_start + BLOCK_SIZE, D)
-    d_size = d_end - d_start
+    # Calculate offsets for dimensions
+    qk_d_offsets = tl.arange(0, D)
+    v_d_offsets = tl.arange(0, BLOCK_SIZE) + pid_d * BLOCK_SIZE
+    cache_d_offsets = qk_d_offsets[:, None] * cache_d0_stride + v_d_offsets[
+        None, :] * cache_d1_stride
 
-    d_block_indices = d_start + tl.arange(0, BLOCK_SIZE)
-    mask = d_block_indices < D
+    # Calculate offsets for the current batch and head
+    q_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
+    k_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
+    v_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
 
-    # Load query, key, and value vectors
-    q_block_ptr = q_ptr + q_offset + d_block_indices
-    k_block_ptr = k_ptr + k_offset + d_block_indices
-    v_block_ptr = v_ptr + v_offset + d_block_indices
+    cache_offset = slot_id * cache_b_stride + head_id * cache_h_stride
 
-    q_values = tl.load(q_block_ptr, mask=mask, other=0.0)
-    k_values = tl.load(k_block_ptr, mask=mask, other=0.0)
-    v_values = tl.load(v_block_ptr, mask=mask, other=0.0)
+    # Create masks for loading tensors
+    qk_mask = qk_d_offsets < D
+    v_mask = v_d_offsets < D
 
-    # Get KV cache
-    # For the current block of d dimension
-    kv_cache_block_ptr = kv_cache_ptr + kv_offset + d_start * cache_d0_stride
+    # Load query, key, and value tensors
+    q = tl.load(q_ptr + q_offset + qk_d_offsets, mask=qk_mask, other=0.0)
+    k = tl.load(k_ptr + k_offset + qk_d_offsets, mask=qk_mask, other=0.0)
+    v = tl.load(v_ptr + v_offset + v_d_offsets, mask=v_mask, other=0.0)
 
-    # Update KV cache and compute output
-    decay = tl.exp(-s)  # Compute decay factor once
+    # Compute key-value outer product
+    kv_outer = k[:, None] * v[None, :]
+    kv_mask = qk_mask[:, None] & v_mask[None, :]
 
-    # Compute the outer product of k and v
-    k_expanded = tl.expand_dims(k_values, 1)
-    v_expanded = tl.expand_dims(v_values, 0)
-    kv_outer = k_expanded * v_expanded
+    # Apply decay to previous KV cache
+    ratio = tl.exp(-ratio)
+    kv_ptr = kv_cache_ptr + cache_offset + cache_d_offsets
+    kv_cache_old = tl.load(kv_ptr, mask=kv_mask, other=0.0)
+    kv_outer = kv_outer + ratio * kv_cache_old
 
-    # Loop through the D dimension to update the KV cache
-    for i in range(0, d_size):
-        d_idx = d_start + i
-        if d_idx >= D:
-            break
+    # Compute attention output
+    output = q[:, None].to(tl.float32) * kv_outer
+    output = tl.sum(output, axis=0)
 
-        kv_cache_row_ptr = kv_cache_block_ptr + i * cache_d0_stride
-
-        # Load current cache row
-        cache_row_block_indices = tl.arange(0, BLOCK_SIZE)
-        cache_row_mask = cache_row_block_indices < D
-        cache_row_ptrs = kv_cache_row_ptr + (cache_row_block_indices *
-                                             cache_d1_stride)
-        cache_row_vals = tl.load(cache_row_ptrs,
-                                 mask=cache_row_mask,
-                                 other=0.0)
-
-        # Update with decay and new KV values
-        updated_cache_row = decay * cache_row_vals
-        updated_cache_row = updated_cache_row + kv_outer[i, :BLOCK_SIZE]
-
-        # Store back
-        tl.store(cache_row_ptrs, updated_cache_row, mask=cache_row_mask)
-
-    # Compute output for the current block: q @ kv_cache
-    output_values = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-
-    # For each row in the current block
-    for i in range(0, d_size):
-        d_idx = d_start + i
-        if d_idx >= D:
-            break
-
-        q_val = q_values[i]
-
-        # Load the corresponding KV cache row
-        kv_cache_row_ptr = kv_cache_block_ptr + i * cache_d0_stride
-        cache_row_block_indices = tl.arange(0, BLOCK_SIZE)
-        cache_row_mask = cache_row_block_indices < D
-        cache_row_ptrs = kv_cache_row_ptr + (cache_row_block_indices *
-                                             cache_d1_stride)
-        cache_row_vals = tl.load(cache_row_ptrs,
-                                 mask=cache_row_mask,
-                                 other=0.0)
-
-        # Update output values
-        output_values += q_val * cache_row_vals
-
-    # Store output values
-    out_block_ptr = out_ptr + b * D * h + d_block_indices
-    tl.store(out_block_ptr, output_values, mask=mask)
+    # Update KV cache and store output
+    tl.store(kv_ptr, kv_outer, mask=kv_mask)
+    tl.store(output_ptr + q_offset + v_d_offsets, output, mask=v_mask)
 
 
 def linear_decode_forward_triton(
@@ -650,25 +604,13 @@ def linear_decode_forward_triton(
         slope_rate: Decay rate tensor
         slot_idx: Slot indices for batches
         BLOCK_SIZE: Size of blocks for processing
-    
+        
     Returns:
         output: Attention output tensor
     """
-    B, H, N, D = q.shape
-    assert N == 1, f"Expected sequence length 1, got {N}"
-    assert k.shape == (
-        B, H, 1, D), f"Key shape error: expected {(B, H, 1, D)}, got {k.shape}"
-    assert v.shape[:-1] == (
-        B, H,
-        1), f"Value shape error: expected {(B, H, 1, '*')}, got {v.shape}"
-
-    input_dtype = q.dtype
-
-    # Ensure data type consistency
-    compute_dtype = torch.float32
-    q = q.to(compute_dtype)
-    k = k.to(compute_dtype)
-    v = v.to(compute_dtype)
+    B, H, _, D = q.shape
+    assert k.shape == (B, H, 1, D)
+    assert v.shape == (B, H, 1, D)
 
     # Initialize output tensor
     output = torch.empty_like(q)
@@ -706,4 +648,4 @@ def linear_decode_forward_triton(
 
     # Reshape output and return
     output = rearrange(output, "b h n d -> b n (h d)")
-    return output.squeeze(1).contiguous().to(input_dtype)
+    return output.squeeze(1).contiguous()
