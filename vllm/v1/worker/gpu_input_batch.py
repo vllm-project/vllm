@@ -2,13 +2,13 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, cast
+from typing import Optional, cast
 
 import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
@@ -18,9 +18,6 @@ from vllm.v1.worker.block_table import BlockTable
 
 _SAMPLING_EPS = 1e-5
 
-if TYPE_CHECKING:
-    from vllm.multimodal.inputs import PlaceholderRange
-
 
 @dataclass
 class CachedRequestState:
@@ -29,7 +26,7 @@ class CachedRequestState:
     prompt_token_ids: list[int]
     prompt: Optional[str]
     mm_inputs: list[MultiModalKwargs]
-    mm_positions: list["PlaceholderRange"]
+    mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
