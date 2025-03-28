@@ -541,7 +541,7 @@ _T = TypeVar("_T")
 def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
     # NOTE: We use a temporary directory instead of a temporary file to avoid
     # issues like https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file
-  with tempfile.TemporaryDirectory() as tempdir:
+    with tempfile.TemporaryDirectory() as tempdir:
         output_filepath = os.path.join(tempdir, "registry_output.tmp")
 
         # `cloudpickle` allows pickling lambda functions directly
