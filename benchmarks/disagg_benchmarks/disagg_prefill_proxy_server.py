@@ -4,16 +4,20 @@ import os
 
 import aiohttp
 from quart import Quart, make_response, request
+import uuid
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 app = Quart(__name__)
 
+def random_uuid() -> str:
+    return str(uuid.uuid4().hex)
 
-async def forward_request(url, data):
+async def forward_request(url, data, request_id):
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+            "X-Request-Id": request_id
         }
         async with session.post(url=url, json=data,
                                 headers=headers) as response:
@@ -37,14 +41,20 @@ async def handle_request():
         # change max_tokens = 1 to let it only do prefill
         prefill_request['max_tokens'] = 1
 
+        prefill_host = "localhost"
+        prefill_port = 20001
+        decode_host = "localhost"
+        decode_port = 20002
+        request_id = f"___decode_host_({decode_host})___decode_port_({decode_port})_{random_uuid()}"
+
         # finish prefill
-        async for _ in forward_request('http://localhost:8100/v1/completions',
-                                       prefill_request):
+        async for _ in forward_request(f'http://{prefill_host}:{prefill_port}/v1/completions',
+                                       prefill_request, request_id):
             continue
 
         # return decode
-        generator = forward_request('http://localhost:8200/v1/completions',
-                                    original_request_data)
+        generator = forward_request(f'http://{decode_host}:{decode_port}/v1/completions',
+                                    original_request_data, request_id)
         response = await make_response(generator)
         response.timeout = None
 
@@ -60,4 +70,4 @@ async def handle_request():
 
 
 if __name__ == '__main__':
-    app.run(port=8000)
+    app.run(host='0.0.0.0', port=10001)

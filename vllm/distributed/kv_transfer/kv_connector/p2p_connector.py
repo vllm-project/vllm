@@ -64,6 +64,7 @@ class P2pConnector(KVConnectorBase):
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
+        request_ids = list(model_input.request_ids_to_seq_ids.keys())
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
 
@@ -129,13 +130,10 @@ class P2pConnector(KVConnectorBase):
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
 
-            request_id = ""
-            remote_address = ""
-            self.p2p_nccl_pipe.send_tensor(request_id + "tokens",
-                                           current_tokens, remote_address)
-            self.p2p_nccl_pipe.send_tensor(
-                request_id + "roi",
-                torch.ones_like(current_tokens, dtype=bool), remote_address)
+            request_id = request_ids[idx]
+            decode_host, decode_port = self.parse_request_id(request_id)
+            remote_address = decode_host + ":" + str(decode_port + self.rank)
+
             self.p2p_nccl_pipe.send_tensor(request_id + "keys", keys,
                                            remote_address)
             self.p2p_nccl_pipe.send_tensor(request_id + "values", values,
@@ -166,6 +164,7 @@ class P2pConnector(KVConnectorBase):
         seq_lens = model_input.attn_metadata.seq_lens
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
+        request_ids = list(model_input.request_ids_to_seq_ids.keys())
 
         hidden_or_intermediate_states_for_one_req = []
 
@@ -198,11 +197,10 @@ class P2pConnector(KVConnectorBase):
             input_tokens_list.append(current_tokens)
             start_pos_list.append(start_pos)
 
-            request_id = ""
-            remote_address = ""
+            request_id = request_ids[idx]
+            decode_host, decode_port = self.parse_request_id(request_id)
+            remote_address = decode_host + ":" + str(decode_port + self.rank)
 
-            roi = self.p2p_nccl_pipe.recv_tensor(request_id + "roi",
-                                                 remote_address)
             keys = self.p2p_nccl_pipe.recv_tensor(request_id + "keys",
                                                   remote_address)
             values = self.p2p_nccl_pipe.recv_tensor(request_id + "values",
@@ -279,6 +277,23 @@ class P2pConnector(KVConnectorBase):
                 hidden_or_intermediate_states_for_one_req, dim=0)
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
+
+    @staticmethod
+    def parse_request_id(request_id: str) -> Tuple[str, int]:
+        logger.info("parse_request_id, request_id: %s", request_id)
+        # Regular expression to match the string hostname and integer port
+        pattern = r"___decode_host_(.*)___decode_port_(\d+)"
+
+        # Use re.search to find the pattern in the request_id
+        match = re.search(pattern, request_id)
+        if match:
+            # Extract the ranks
+            decode_host = match.group(1)
+            decode_port = int(match.group(2))
+
+            logger.info("parse_request_id, request_id: %, decode_host: %s, decode_port: %s", request_id, decode_host, decode_port)
+            return decode_host, decode_port
+        raise ValueError(f"Request id {request_id} does not contain hostname and port")
 
     def close(self):
         self.p2p_nccl_pipe.close()
