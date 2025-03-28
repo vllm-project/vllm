@@ -19,7 +19,8 @@ import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
                          VllmConfig)
-from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
+from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
+                                 SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
@@ -1878,9 +1879,11 @@ class LLMEngine:
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
                     ])
-                    if scheduler_outputs is not None:
-                        total_evicted_tokens_requests.append(
-                            scheduler_outputs.num_evicted_tokens)
+                    total_evicted = 0
+                    for scheduler in self.scheduler:
+                        if isinstance(scheduler, Scheduler):
+                            total_evicted += scheduler.num_evicted_tokens
+                    total_evicted_tokens_requests.append(total_evicted)
 
             # Number of generation tokens.
             #   num_batched_tokens equals the number of prompt_tokens plus the

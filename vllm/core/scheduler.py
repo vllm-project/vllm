@@ -155,8 +155,6 @@ class SchedulerOutputs:
     # The number of requests in the running queue
     running_queue_size: int
     preempted: int
-    # Number of tokens evicted in this scheduling step
-    num_evicted_tokens: int = 0
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -510,6 +508,7 @@ class Scheduler:
         self.output_proc_callback = output_proc_callback
         self.use_async_output_proc = self.output_proc_callback is not None
         self.num_cache_iters = 2 if self.use_async_output_proc else 1
+        self.num_evicted_tokens: int = 0
 
         self.cache_id = 0
         for i in range(self.num_cache_iters):
@@ -1823,7 +1822,7 @@ class Scheduler:
             # Track token evictions before freeing
             num_tokens = seq.get_num_computed_tokens()
             if num_tokens > 0:
-                self.scheduler_outputs.num_evicted_tokens += num_tokens
+                self.num_evicted_tokens += num_tokens
             seq.status = SequenceStatus.WAITING
             self.free_seq(seq)
             seq.reset_state_for_recompute()
@@ -1839,7 +1838,7 @@ class Scheduler:
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             num_tokens = seq.get_num_computed_tokens()
             if num_tokens > 0:
-                self.scheduler_outputs.num_evicted_tokens += num_tokens
+                self.num_evicted_tokens += num_tokens
         self._swap_out(seq_group, blocks_to_swap_out)
         self._waiting_tokens += self._get_seq_group_tokens(seq_group)
 
