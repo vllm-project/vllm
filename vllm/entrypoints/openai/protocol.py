@@ -548,7 +548,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if top_logprobs < 0:
                 raise ValueError("`top_logprobs` must be a positive value.")
 
-            if not data.get("logprobs"):
+            if top_logprobs > 0 and not data.get("logprobs"):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
@@ -1238,6 +1238,9 @@ class ChatCompletionLogProb(OpenAIBaseModel):
 
 
 class ChatCompletionLogProbsContent(ChatCompletionLogProb):
+    # Workaround: redefine fields name cache so that it's not
+    # shared with the super class.
+    field_names: ClassVar[Optional[set[str]]] = None
     top_logprobs: list[ChatCompletionLogProb] = Field(default_factory=list)
 
 

@@ -12,7 +12,8 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
-    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev
+    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
+    apt-transport-https ca-certificates wget curl
 # Remove sccache    
 RUN python3 -m pip install --upgrade pip && pip install setuptools_scm
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
@@ -40,7 +41,7 @@ ARG USE_CYTHON
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
     && python3 setup.py clean --all  \
-    && if [ ${USE_CYTHON} -eq "1" ]; then python3 setup_cython.py build_ext --inplace; fi \
+    && if [ ${USE_CYTHON} -eq "1" ]; then python3 tests/build_cython.py build_ext --inplace; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
@@ -61,6 +62,7 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
     && pip install -U -r requirements/rocm.txt \
+    && pip install -U -r requirements/rocm-test.txt \
     && pip uninstall -y vllm \
     && pip install *.whl
 

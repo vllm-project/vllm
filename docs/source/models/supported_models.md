@@ -57,10 +57,10 @@ llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
 ```
 
-If it is `TransformersModel` then it means it's based on Transformers!
+If it is `TransformersForCausalLM` then it means it's based on Transformers!
 
 :::{tip}
-You can force the use of `TransformersModel` by setting `model_impl="transformers"` for <project:#offline-inference> or `--model-impl transformers` for the <project:#openai-compatible-server>.
+You can force the use of `TransformersForCausalLM` by setting `model_impl="transformers"` for <project:#offline-inference> or `--model-impl transformers` for the <project:#openai-compatible-server>.
 :::
 
 :::{note}
@@ -73,7 +73,7 @@ The Transformers fallback explicitly supports the following features:
 
 - <project:#quantization-index> (except GGUF)
 - <project:#lora-adapter>
-- <project:#distributed-serving> (pipeline parallel coming soon <gh-pr:12832>!)
+- <project:#distributed-serving> (requires `transformers>=4.49.0`)
 
 #### Remote code
 
@@ -101,7 +101,7 @@ class MyAttention(nn.Module):
 
   def forward(self, hidden_states, **kwargs): # <- kwargs are required
     ...
-    attention_interface = attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
     attn_output, attn_weights = attention_interface(
       self,
       query_states,
@@ -119,7 +119,7 @@ Here is what happens in the background:
 
 1. The config is loaded
 2. `MyModel` Python class is loaded from the `auto_map`, and we check that the model `_supports_attention_backend`.
-3. The `TransformersModel` backend is used. See <gh-file:vllm/model_executor/models/transformers.py>, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`.
+3. The `TransformersForCausalLM` backend is used. See <gh-file:vllm/model_executor/models/transformers.py>, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`.
 
 To make your model compatible with tensor parallel, it needs:
 
@@ -263,8 +263,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
 - * `Gemma2ForCausalLM`
-  * Gemma2
+  * Gemma 2
   * `google/gemma-2-9b`, `google/gemma-2-27b`, etc.
+  * ✅︎
+  * ✅︎
+- * `Gemma3ForCausalLM`
+  * Gemma 3
+  * `google/gemma-3-1b-it`, etc.
   * ✅︎
   * ✅︎
 - * `GlmForCausalLM`
@@ -467,11 +472,21 @@ See [this page](#generative-models) for more information on how to use generativ
   * `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.
   * ✅︎
   * ✅︎
+- * `TeleFLMForCausalLM`
+  * TeleFLM
+  * `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc.
+  * ✅︎
+  * ✅︎
 - * `XverseForCausalLM`
   * XVERSE
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
   * ✅︎
   * ✅︎
+- * `Zamba2ForCausalLM`
+  * Zamba2
+  * `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.
+  *
+  *
 :::
 
 :::{note}
@@ -504,7 +519,7 @@ you should explicitly specify the task type to ensure that the model is used in 
   *
   *
 - * `Gemma2Model`
-  * Gemma2-based
+  * Gemma 2-based
   * `BAAI/bge-multilingual-gemma2`, etc.
   *
   * ✅︎
@@ -541,14 +556,11 @@ You should manually set mean pooling by passing `--override-pooler-config '{"poo
 :::
 
 :::{note}
-Unlike base Qwen2, `Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
-You can set `--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
+The HF implementation of `Alibaba-NLP/gte-Qwen2-1.5B-instruct` is hardcoded to use causal attention despite what is shown in `config.json`. To compare vLLM vs HF results,
+you should set `--hf-overrides '{"is_causal": true}'` in vLLM so that the two implementations are consistent with each other.
 
-On the other hand, its 1.5B variant (`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
-despite being described otherwise on its model card.
-
-Regardless of the variant, you need to enable `--trust-remote-code` for the correct tokenizer to be
-loaded. See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
+For both the 1.5B and 7B variants, you also need to enable `--trust-remote-code` for the correct tokenizer to be loaded.
+See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
 :::
 
 If your model is not in the above list, we will try to automatically convert the model using
@@ -755,6 +767,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `Gemma3ForConditionalGeneration`
+  * Gemma 3
+  * T + I<sup>+</sup>
+  * `google/gemma-3-4b-it`, `google/gemma-3-27b-it`, etc.
+  * ✅︎
+  * ✅︎
+  * ⚠️
 - * `GLM4VForCausalLM`<sup>^</sup>
   * GLM-4V
   * T + I
@@ -777,9 +796,9 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
 - * `InternVLChatModel`
-  * InternVL 2.5, Mono-InternVL, InternVL 2.0
+  * InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
-  * `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
+  * `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
   *
   * ✅︎
   * ✅︎
@@ -817,14 +836,14 @@ See [this page](#generative-models) for more information on how to use generativ
   * `openbmb/MiniCPM-o-2_6`, etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `MiniCPMV`
   * MiniCPM-V
   * T + I<sup>E+</sup> + V<sup>E+</sup>
   * `openbmb/MiniCPM-V-2` (see note), `openbmb/MiniCPM-Llama3-V-2_5`, `openbmb/MiniCPM-V-2_6`, etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `MllamaForConditionalGeneration`
   * Llama 3.2
   * T + I<sup>+</sup>
@@ -834,7 +853,7 @@ See [this page](#generative-models) for more information on how to use generativ
   *
 - * `MolmoForCausalLM`
   * Molmo
-  * T + I
+  * T + I<sup>+</sup>
   * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-7B-O-0924`, etc.
   * ✅︎
   * ✅︎
@@ -847,12 +866,12 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
 - * `PaliGemmaForConditionalGeneration`
-  * PaliGemma ⚠️, PaliGemma 2 ⚠️
+  * PaliGemma, PaliGemma 2
   * T + I<sup>E</sup>
   * `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc.
   *
   * ✅︎
-  * ✅︎
+  * ⚠️
 - * `Phi3VForCausalLM`
   * Phi-3-Vision, Phi-3.5-Vision
   * T + I<sup>E+</sup>
@@ -870,7 +889,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
-  * `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b`, etc.
+  * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, `mistral-community/pixtral-12b`, etc.
   *
   * ✅︎
   * ✅︎
@@ -917,10 +936,30 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-:::{warning}
-vLLM does not currently support PrefixLM attention mask, so our PaliGemma implementation uses regular causal attention, which causes the model output to be unstable.
+:::{important}
+To use Gemma3 series models, you have to install Hugging Face Transformers library from source via
+`pip install git+https://github.com/huggingface/transformers`.
 
-We may deprecate this model series in a future release.
+Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
+You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": True}'`.
+:::
+
+:::{warning}
+Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
+However, there are differences in how they handle text + image inputs:
+
+V0 correctly implements the model's attention pattern:
+- Uses bidirectional attention between the image tokens corresponding to the same image
+- Uses causal attention for other tokens
+- Implemented via (naive) PyTorch SDPA with masking tensors
+- Note: May use significant memory for long prompts with image
+
+V1 currently uses a simplified attention pattern:
+- Uses causal attention for all tokens, including image tokens
+- Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": True}`
+- Will be updated in the future to support the correct behavior
+
+This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
 :::
 
 :::{note}
@@ -936,8 +975,8 @@ The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 :::
 
-:::{note}
-To use Qwen2.5-VL series models, you have to install Hugging Face Transformers library from source via `pip install git+https://github.com/huggingface/transformers`.
+:::{warning}
+Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
 :::
 
 ### Pooling Models

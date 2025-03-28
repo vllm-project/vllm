@@ -149,7 +149,7 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     FetchContent_Declare(
         oneDNN
         GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG  v3.6
+        GIT_TAG  v3.7.1
         GIT_PROGRESS TRUE
         GIT_SHALLOW TRUE
     )
@@ -190,6 +190,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/cache.cpp"
     "csrc/cpu/utils.cpp"
     "csrc/cpu/layernorm.cpp"
+    "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/torch_bindings.cpp")
 

@@ -36,6 +36,16 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ::::
 
+::::{tab-item} IBM Z (S390X)
+:sync: s390x
+
+:::{include} cpu/s390x.inc.md
+:start-after: "# Installation"
+:end-before: "## Requirements"
+:::
+
+::::
+
 :::::
 
 ## Requirements
@@ -69,6 +79,16 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 :sync: apple
 
 :::{include} cpu/apple.inc.md
+:start-after: "## Requirements"
+:end-before: "## Set up using Python"
+:::
+
+::::
+
+::::{tab-item} IBM Z (S390X)
+:sync: s390x
+
+:::{include} cpu/s390x.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
 :::
@@ -123,28 +143,61 @@ Currently, there are no pre-built CPU wheels.
 
 ::::
 
+::::{tab-item} IBM Z (s390x)
+:sync: s390x
+
+:::{include} cpu/s390x.inc.md
+:start-after: "### Build wheel from source"
+:end-before: "## Set up using Docker"
+:::
+
+::::
+
 :::::
 
 ## Set up using Docker
 
 ### Pre-built images
 
-Currently, there are no pre-build CPU images.
+:::::{tab-set}
+:sync-group: device
+
+::::{tab-item} Intel/AMD x86
+:sync: x86
+
+:::{include} cpu/x86.inc.md
+:start-after: "### Pre-built images"
+:end-before: "### Build image from source"
+:::
+
+::::
+
+:::::
 
 ### Build image from source
 
 ```console
-$ docker build -f Dockerfile.cpu -t vllm-cpu-env --shm-size=4g .
-$ docker run -it \
-             --rm \
-             --network=host \
-             --cpuset-cpus=<cpu-id-list, optional> \
-             --cpuset-mems=<memory-node, optional> \
-             vllm-cpu-env
+$ docker build -f Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
+
+# Launching OpenAI server 
+$ docker run --rm \
+             --privileged=true \
+             --shm-size=4g \
+             -p 8000:8000 \
+             -e VLLM_CPU_KVCACHE_SPACE=<KV cache space> \
+             -e VLLM_CPU_OMP_THREADS_BIND=<CPU cores for inference> \
+             vllm-cpu-env \
+             --model=meta-llama/Llama-3.2-1B-Instruct \
+             --dtype=bfloat16 \
+             other vLLM OpenAI server arguments
 ```
 
 ::::{tip}
 For ARM or Apple silicon, use `Dockerfile.arm`
+::::
+
+::::{tip}
+For IBM Z (s390x), use `Dockerfile.s390x` and in `docker run` use flag `--dtype float`
 ::::
 
 ## Supported features
@@ -155,12 +208,13 @@ vLLM CPU backend supports the following vLLM features:
 - Model Quantization (`INT8 W8A8, AWQ, GPTQ`)
 - Chunked-prefill
 - Prefix-caching
-- FP8-E5M2 KV-Caching (TODO)
+- FP8-E5M2 KV cache
 
 ## Related runtime environment variables
 
-- `VLLM_CPU_KVCACHE_SPACE`: specify the KV Cache size (e.g, `VLLM_CPU_KVCACHE_SPACE=40` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
+- `VLLM_CPU_KVCACHE_SPACE`: specify the KV Cache size (e.g, `VLLM_CPU_KVCACHE_SPACE=40` means 40 GiB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
 - `VLLM_CPU_OMP_THREADS_BIND`: specify the CPU cores dedicated to the OpenMP threads. For example, `VLLM_CPU_OMP_THREADS_BIND=0-31` means there will be 32 OpenMP threads bound on 0-31 CPU cores. `VLLM_CPU_OMP_THREADS_BIND=0-31|32-63` means there will be 2 tensor parallel processes, 32 OpenMP threads of rank0 are bound on 0-31 CPU cores, and the OpenMP threads of rank1 are bound on 32-63 CPU cores.
+- `VLLM_CPU_MOE_PREPACK`: whether to use prepack for MoE layer. This will be passed to `ipex.llm.modules.GatedMLPMOE`. Default is `1` (True). On unsupported CPUs, you might need to set this to `0` (False).
 
 ## Performance tips
 

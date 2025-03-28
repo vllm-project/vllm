@@ -14,6 +14,7 @@ from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -27,7 +28,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
 
 
 class Worker(WorkerBase):
@@ -184,7 +185,7 @@ class Worker(WorkerBase):
 
         return int(available_kv_cache_memory)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
@@ -219,20 +220,12 @@ class Worker(WorkerBase):
         # fragmentation issue.
         # NOTE: This is called after `capture_model` on purpose to prevent
         # memory buffers from being cleared by `torch.cuda.empty_cache`.
-        try:
+        if get_pp_group().is_last_rank:
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
             self.model_runner._dummy_sampler_run(
                 hidden_states=self.model_runner._dummy_run(
                     num_tokens=max_num_reqs))
-        except RuntimeError as e:
-            if 'out of memory' in str(e):
-                raise RuntimeError(
-                    "CUDA out of memory occurred when warming up sampler. "
-                    "Please try lowering `gpu_memory_utilization` when "
-                    "initializing the engine.") from None
-            else:
-                raise e
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
