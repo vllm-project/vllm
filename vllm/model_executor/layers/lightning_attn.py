@@ -533,54 +533,55 @@ def _linear_attn_decode_kernel(
     # Load slot index for the current batch
     slot_id = tl.load(slot_idx + pid_b)
 
-    # Skip if slot_id is -1 (padding)
-    if slot_id == -1:
-        return
-
-    batch_id = pid_b
-    head_id = pid_h
-
-    # Load decay rate for the current head
-    ratio = tl.load(slope_rate + pid_h)
-
-    # Calculate offsets for dimensions
+    # 准备维度偏移量
     qk_d_offsets = tl.arange(0, D)
     v_d_offsets = tl.arange(0, BLOCK_SIZE) + pid_d * BLOCK_SIZE
-    cache_d_offsets = qk_d_offsets[:, None] * cache_d0_stride + v_d_offsets[
-        None, :] * cache_d1_stride
 
-    # Calculate offsets for the current batch and head
-    q_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
-    k_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
-    v_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
+    # 计算当前批次和头部的偏移量
+    q_offset = pid_b * qkv_b_stride + pid_h * qkv_h_stride
+    k_offset = pid_b * qkv_b_stride + pid_h * qkv_h_stride
+    v_offset = pid_b * qkv_b_stride + pid_h * qkv_h_stride
 
-    cache_offset = slot_id * cache_b_stride + head_id * cache_h_stride
-
-    # Create masks for loading tensors
+    # 创建加载张量的掩码
     qk_mask = qk_d_offsets < D
     v_mask = v_d_offsets < D
 
-    # Load query, key, and value tensors
-    q = tl.load(q_ptr + q_offset + qk_d_offsets, mask=qk_mask, other=0.0)
-    k = tl.load(k_ptr + k_offset + qk_d_offsets, mask=qk_mask, other=0.0)
-    v = tl.load(v_ptr + v_offset + v_d_offsets, mask=v_mask, other=0.0)
+    # 初始化输出为零
+    output = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
 
-    # Compute key-value outer product
-    kv_outer = k[:, None] * v[None, :]
-    kv_mask = qk_mask[:, None] & v_mask[None, :]
+    # 仅在有效位置（非填充）执行计算
+    if slot_id != -1:
+        # 加载查询、键和值张量
+        q = tl.load(q_ptr + q_offset + qk_d_offsets, mask=qk_mask, other=0.0)
+        k = tl.load(k_ptr + k_offset + qk_d_offsets, mask=qk_mask, other=0.0)
+        v = tl.load(v_ptr + v_offset + v_d_offsets, mask=v_mask, other=0.0)
 
-    # Apply decay to previous KV cache
-    ratio = tl.exp(-ratio)
-    kv_ptr = kv_cache_ptr + cache_offset + cache_d_offsets
-    kv_cache_old = tl.load(kv_ptr, mask=kv_mask, other=0.0)
-    kv_outer = kv_outer + ratio * kv_cache_old
+        # 加载衰减率
+        ratio = tl.load(slope_rate + pid_h)
+        ratio = tl.exp(-ratio)
 
-    # Compute attention output
-    output = q[:, None].to(tl.float32) * kv_outer
-    output = tl.sum(output, axis=0)
+        # 计算缓存偏移量
+        cache_offset = slot_id * cache_b_stride + pid_h * cache_h_stride
+        cache_d_offsets = qk_d_offsets[:,
+                                       None] * cache_d0_stride + v_d_offsets[
+                                           None, :] * cache_d1_stride
 
-    # Update KV cache and store output
-    tl.store(kv_ptr, kv_outer, mask=kv_mask)
+        # 计算键值外积
+        kv_outer = k[:, None] * v[None, :]
+        kv_mask = qk_mask[:, None] & v_mask[None, :]
+
+        # 应用衰减到先前的KV缓存
+        kv_ptr = kv_cache_ptr + cache_offset + cache_d_offsets
+        kv_cache_old = tl.load(kv_ptr, mask=kv_mask, other=0.0)
+        kv_new = kv_outer + ratio * kv_cache_old
+
+        # 计算注意力输出
+        output = tl.sum(q[:, None].to(tl.float32) * kv_new, axis=0)
+
+        # 更新KV缓存
+        tl.store(kv_ptr, kv_new, mask=kv_mask)
+
+    # 存储输出
     tl.store(output_ptr + q_offset + v_d_offsets, output, mask=v_mask)
 
 
