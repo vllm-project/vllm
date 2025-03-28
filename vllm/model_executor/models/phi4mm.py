@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
-from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Tuple,
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
 import numpy as np
@@ -11,7 +12,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import PretrainedConfig, SiglipVisionConfig
+from transformers import PretrainedConfig, SiglipVisionConfig, ProcessorMixin, BatchFeature
 from transformers.utils import logging
 
 from vllm.config import VllmConfig
@@ -21,21 +22,29 @@ from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
 from vllm.inputs.data import TokenInputs, token_inputs
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalInputs, NestedTensors
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors, MultiModalInputs)
+from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
+                                   ImageSize, MultiModalDataItems, AudioEmbeddingItems, AudioProcessorItems)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.utils import is_list_of
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsV0Only
+from .interfaces import SupportsLoRA, SupportsMultiModal, MultiModalEmbeddings
 from .phi4mm_audio import AudioEmbedding
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix, merge_multimodal_embeddings
 
 # <|endoftext10|> (see vocab.json in hf model)
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
@@ -121,8 +130,7 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
     return best_ratio
 
 
-def _find_target_aspect_ratio(image, image_size, max_num, min_num):
-    orig_width, orig_height = image.size
+def _find_target_aspect_ratio(orig_width: int, orig_height: int, image_size: int, max_num: int, min_num: int,):
 
     w_crop_num = math.ceil(orig_width / float(image_size))
     h_crop_num = math.ceil(orig_height / float(image_size))
@@ -150,8 +158,7 @@ def _find_target_aspect_ratio(image, image_size, max_num, min_num):
     return target_aspect_ratio, target_height, target_width
 
 
-def _get_padding_size(image, target_height, target_width):
-    orig_width, orig_height = image.size
+def _get_padding_size(orig_width: int, orig_height: int, target_height: int, target_width: int):
     ratio_width = target_width / orig_width
     ratio_height = target_height / orig_height
 
@@ -169,14 +176,14 @@ def dynamic_preprocess(image,
                        max_num=12,
                        image_size=384,
                        mask_size=27):
+    orig_width, orig_height = image.size
     target_aspect_ratio, target_height, target_width =\
           _find_target_aspect_ratio(
-        image, image_size, max_num, min_num)
+        orig_width, orig_height, image_size, max_num, min_num)
     padding_height, padding_width = _get_padding_size(image, target_height,
                                                       target_width)
 
     # Calculate the ratio
-    orig_width, orig_height = image.size
     ratio_width = target_width / orig_width
     ratio_height = target_height / orig_height
     if ratio_width < ratio_height:
@@ -492,7 +499,7 @@ class Phi4MMImageEncoder(nn.Module):
 
     def forward(self, pixel_values: torch.FloatTensor,
                 image_sizes: torch.Tensor,
-                image_attention_mask: torch.Tensor) -> torch.FloatTensor:
+                image_attention_mask: torch.Tensor) -> list[torch.FloatTensor]:
         """
         process image and return vision embeddings.
 
@@ -661,6 +668,40 @@ class Phi4MMImageEncoder(nn.Module):
         return img_set_tensor
 
 
+class Phi4MMImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: Union[torch.Tensor, List[torch.Tensor]]
+    """
+    Shape:
+    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
+
+    Note that `num_patches` may be different per batch and image,
+    in which case the data is passed as a list instead of a batched tensor.
+    """
+
+    image_sizes: torch.Tensor
+    """
+    Shape: `(batch_size * num_images, 2)`
+
+    This should be in `(height, width)` format.
+    """
+
+    num_img_tokens: list[int]
+    """Shape: `(batch_size * num_images)`"""
+
+    image_attention_mask: torch.Tensor
+    """Shape: `(batch_size * num_images, H_mask, W_mask)`"""
+
+
+class Phi4MMImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: Union[torch.Tensor, List[torch.Tensor]]
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
+
+
 class Phi4MMAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
     data: Tuple[NestedTensors]
@@ -673,6 +714,7 @@ class Phi4MMAudioEmbeddingInputs(TypedDict):
     """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)"""
 
 
+Phi4MMImageInput = Union[Phi4MMImagePixelInputs, Phi4MMImageEmbeddingInputs]
 Phi4MMAudioInputs = Union[Phi4MMAudioFeatureInputs, Phi4MMAudioEmbeddingInputs]
 
 
@@ -858,8 +900,14 @@ def audio_feature_extractor() -> LogFbankProcessor:
     return LogFbankProcessor()
 
 
-def _compute_num_image_tokens(image, dynamic_hd_size, vit_image_size,
-                              vit_patch_size, token_compression_factor):
+def _compute_num_image_tokens(
+    orig_width: int,
+    orig_height: int,
+    dynamic_hd_size: int,
+    vit_image_size: int,
+    vit_patch_size: int,
+    token_compression_factor: int = 2,
+):
     """
     compute the number of tokens an image is expected to take up considering 
     the image encoder architecture and exclude output features containing 
@@ -876,7 +924,8 @@ def _compute_num_image_tokens(image, dynamic_hd_size, vit_image_size,
             "token_compression_factor"
 
     target_aspect_ratio, target_height, target_width = (
-        _find_target_aspect_ratio(image,
+        _find_target_aspect_ratio(orig_width,
+                                  orig_height,
                                   vit_image_size,
                                   dynamic_hd_size,
                                   min_num=1))
@@ -889,7 +938,7 @@ def _compute_num_image_tokens(image, dynamic_hd_size, vit_image_size,
     assert (target_height % vit_image_size == 0
             and target_width % vit_image_size == 0)
 
-    padding_height, padding_width = _get_padding_size(image, target_height,
+    padding_height, padding_width = _get_padding_size(orig_width, orig_height, target_height,
                                                       target_width)
     assert padding_width == 0 or padding_height == 0, \
         "padding_width or padding_height must be 0"
@@ -1218,7 +1267,7 @@ def input_processor_for_phi4mm(ctx: InputContext,
     )
 
 
-def _compute_audio_embed_size(hf_config, audio_frames):
+def _compute_audio_embed_size(hf_config: PretrainedConfig, audio_frames: int) -> int:
     """
     Compute the audio embedding size based on the audio frames and
     compression rate.
@@ -1423,18 +1472,220 @@ def cat_with_pad(tensors, dim, padding_value=0):
     return output
 
 
-@MULTIMODAL_REGISTRY.register_input_mapper("audio",
-                                           input_mapper_for_phi4mm_audio)
-@MULTIMODAL_REGISTRY.register_input_mapper("image",
-                                           input_mapper_for_phi4mm_image)
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "audio", get_max_phi4mm_audio_tokens)
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "image", get_max_phi4mm_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4mm)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_phi4mm)
-class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
-                        SupportsV0Only):
+class Phi4MMProcessingInfo(BaseProcessingInfo):
+
+    @property
+    def image_tokens(self) -> list[str]:
+        return [f"<|image_{i+1}|>" for i in range(100)]
+
+    @property
+    def audio_tokens(self) -> list[str]:
+        return [f"<|audio_{i+1}|>" for i in range(100)]
+    
+    @property
+    def dynamic_hd(self) -> int:
+        image_processor = self.get_hf_processor().image_processor
+        return image_processor.dynamic_hd
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {
+            "image": self.get_max_image_tokens(),
+            # "audio": self.get_max_audio_tokens(),
+        }
+
+    def get_max_audio_tokens(self) -> int:
+        return 10000
+    
+    def get_max_image_tokens(self) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+        return self.get_num_image_tokens(
+            image_width=target_width, image_height=target_height)
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_encoder_name = hf_config.img_processor
+        if vision_encoder_name is None:
+            vision_encoder_name = SIGLIP_NAME
+        prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[vision_encoder_name]
+        vit_image_size = prepro_config['vit_image_size']
+        vit_patch_size = prepro_config['vit_patch_size']
+        token_compression_factor = prepro_config['token_compression_factor']
+
+        dynamic_hd_size = self.dynamic_hd
+
+        image_num_tokens = _compute_num_image_tokens(
+            image_width, image_height, 
+            dynamic_hd_size=dynamic_hd_size,
+            vit_image_size=vit_image_size,
+            vit_patch_size=vit_patch_size,
+            token_compression_factor=token_compression_factor,
+        )
+
+        return image_num_tokens
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self.get_hf_config()
+        vision_encoder_name = hf_config.img_processor
+        if vision_encoder_name is None:
+            vision_encoder_name = SIGLIP_NAME
+        prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[vision_encoder_name]
+        vit_image_size = prepro_config['vit_image_size']
+
+        max_side = vit_image_size * self.dynamic_hd
+        return ImageSize(height=max_side, width=vit_image_size)
+
+
+class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        # num_audios = mm_counts.get("audio", 0)
+        num_images = mm_counts.get("image", 0)
+
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images),
+            # "audio": self._get_dummy_audios(length=_AUDIO_MAX_SOUNDFILE_SIZE,
+            #                                 num_audios=num_audios),
+        }
+
+        image_tokens: list[str] = self.info.image_tokens[:num_images]
+        # audio_tokens: list[str] = self.info.audio_tokens[:num_audios]
+
+        return ProcessorInputs(
+            prompt_text="".join(image_tokens),
+            mm_data=mm_data,
+        )
+
+
+class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if mm_data:
+            processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+            num_img_tokens = [
+                self.info.get_num_image_tokens(image_width=img_size[0], image_height=img_size[1])
+                for img_size in processed_outputs["image_sizes"]
+            ]
+            processed_outputs["num_img_tokens"] = num_img_tokens
+            processed_outputs["pixel_values"] = processed_outputs.pop('input_image_embeds')
+        else:
+            tokenizer = self.info.get_tokenizer()
+            processed_outputs = tokenizer(prompt,
+                                          add_special_tokens=True,
+                                          return_tensors="pt")
+        return processed_outputs
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_attention_mask=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+            num_img_tokens=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, Any],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
+        image_tokens: list[str] = self.info.image_tokens  # type: ignore
+        audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
+
+        def get_image_replacement_phi4mm(item_idx: int):
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems))
+
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                image_size = images.get_image_size(item_idx)
+                num_image_tokens = self.info.get_num_image_tokens(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                )
+
+            image_tokens = [_IMAGE_PLACEHOLDER_TOKEN_ID] * num_image_tokens
+
+            return image_tokens
+
+        def get_audio_replacement_phi4mm(item_idx: int):
+            audios = mm_items.get_items("audio", AudioProcessorItems)
+            # TODO(Isotr0py): support embedding inputs
+            audio_len = audios.get_audio_length(item_idx)
+            audio_frames, _ = compute_logfbank_output_size(audio_len, DUMMY_SAMPLING_FREQUENCY)
+            audio_embed_size = _compute_audio_embed_size(self.info.get_hf_config(), audio_frames)
+
+            audio_tokens = [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
+
+            return audio_tokens
+
+        num_images = mm_items.get_count("image", strict=False)
+        num_audios = mm_items.get_count("audio", strict=False)
+
+        image_repl = [
+            PromptReplacement(
+                modality="image",
+                target=image_token,
+                replacement=get_image_replacement_phi4mm,
+            ) for image_token in image_tokens[:num_images]
+        ]
+        audio_repl = [
+            PromptReplacement(
+                modality="image",
+                target=audio_token,
+                replacement=get_audio_replacement_phi4mm,
+            ) for audio_token in audio_tokens[:num_audios]
+        ]
+        return image_repl + audio_repl
+
+
+# @MULTIMODAL_REGISTRY.register_input_mapper("audio",
+#                                            input_mapper_for_phi4mm_audio)
+# @MULTIMODAL_REGISTRY.register_input_mapper("image",
+#                                            input_mapper_for_phi4mm_image)
+# @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
+#     "audio", get_max_phi4mm_audio_tokens)
+# @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
+#     "image", get_max_phi4mm_image_tokens)
+# @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4mm)
+# @INPUT_REGISTRY.register_input_processor(input_processor_for_phi4mm)
+@MULTIMODAL_REGISTRY.register_processor(
+    Phi4MMMultiModalProcessor,
+    info=Phi4MMProcessingInfo,
+    dummy_inputs=Phi4MMDummyInputsBuilder,
+)
+class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     """
     Implements the Phi-4-multimodal-instruct model in vLLM.
     """
@@ -1518,7 +1769,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def _audio_features_to_embeddings(
         self,
@@ -1633,7 +1884,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
 
     def _parse_and_validate_image_input(self,
                                         **kwargs: object) -> Optional[Dict]:
-        pixel_values: Optional[Dict] = kwargs.get("pixel_values")
+        pixel_values: NestedTensors = kwargs.get("pixel_values")
         if pixel_values is None:
             return None
 
@@ -1643,8 +1894,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
         assert image_sizes is not None and image_attention_mask is not None\
               and num_img_tokens is not None, "Missing image inputs"
 
-        if isinstance(pixel_values, list):
-            assert pixel_values[0].dim() == 5, "Incorrect image inputs"
+        if is_list_of(pixel_values, torch.Tensor):
+            assert all(p.dim() == 5 for p in pixel_values), "Incorrect image inputs"
             # list len is batch_size.
             # each tensor has dimension: num_img_per_example, num_hd_patches,
             # channels, height, width.
@@ -1685,12 +1936,13 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
         else:
             raise ValueError("Incorrect image_attention_mask inputs")
 
-        return {
-            'pixel_values': pixel_values,
-            'image_sizes': image_sizes,
-            'image_attention_mask': image_attention_mask,
-            'num_img_tokens': num_img_tokens,
-        }
+        return Phi4MMImagePixelInputs(
+            type="pixel_values_videos",
+            data=pixel_values,
+            image_sizes=image_sizes,
+            image_attention_mask=image_attention_mask,
+            num_img_tokens=num_img_tokens,
+        )
 
     def merge_image_features_to_inputs_embeds(
         self,
@@ -1714,51 +1966,127 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
         )
         return merged_embeds
 
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        modalities = {}
+
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if input_key in ("pixel_values",
+                             "image_embeds") and "images" not in modalities:
+                modalities["images"] = self._parse_and_validate_image_input(
+                    **kwargs)
+            if input_key in ("audio_features",
+                             "audio_embeds") and "audios" not in modalities:
+                modalities["audios"] = self._parse_and_validate_audio_input(
+                    **kwargs)
+
+        return modalities
+    
+    def _process_image_input(self, image_input: Phi4MMImagePixelInputs) -> list[torch.Tensor]:
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+        else:
+            dtype = next(self.vision_encoder.parameters()).dtype
+            pixel_values = image_input['data'].to(dtype)
+            image_sizes = image_input['image_sizes']
+            image_attention_mask = image_input['image_attention_mask']
+            image_embeds = self.vision_encoder(
+                pixel_values, image_sizes, image_attention_mask)
+        return image_embeds
+    
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+
+        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not modalities:
+            return None
+
+        # The result multimodal_embeddings is tuple of tensors, with each
+        # tensor correspoending to a multimodal data item (image or video).
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+
+        # NOTE: It is important to iterate over the keys in this dictionary
+        # to preserve the order of the modalities.
+        audio_projection_mode = 'speech'
+        for modality in modalities:
+            # make sure process images first
+            if modality == "images":
+                audio_projection_mode = "vision"
+                image_input = modalities["images"]
+                vision_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(vision_embeddings)
+            # if modality == "audios":
+            #     audio_input = modalities["audios"]
+            #     audio_embeddings = self._process_audio_input(audio_input)
+            #     multimodal_embeddings += audio_embeddings
+
+        return multimodal_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.embed_tokens(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                [_IMAGE_PLACEHOLDER_TOKEN_ID, _AUDIO_PLACEHOLDER_TOKEN_ID])
+        return inputs_embeds
+    
+    def get_input_embeddings_v0(
+        self,
+        input_ids: torch.Tensor,
+        image_input: Optional[Phi4MMImagePixelInputs] = None,
+        audio_input: Optional[Phi4MMAudioFeatureInputs] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.get_input_embeddings(input_ids)
+        if image_input is not None:
+            image_embeds = self._process_image_input(image_input)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                image_embeds,
+                placeholder_token_id=_IMAGE_PLACEHOLDER_TOKEN_ID,
+            )
+
+        # if audio_input is not None:
+        #     audio_embeds = self._process_audio_input(audio_input)
+        #     inputs_embeds = merge_multimodal_embeddings(
+        #         input_ids,
+        #         inputs_embeds,
+        #         audio_embeds,
+        #         placeholder_token_id=_AUDIO_PLACEHOLDER_TOKEN_ID,
+        #     )
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> torch.Tensor:
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
-        else:
-            # Each entry in this is a pair of audio_features and audio_embed
-            # lengths
+
+        # NOTE: In v1, inputs_embeds is always generated at model runner from
+        # `get_multimodal_embeddings` and `get_input_embeddings`, this
+        # condition is only for v0 compatibility.
+        elif inputs_embeds is None:
+            image_input = self._parse_and_validate_image_input(**kwargs)
             audio_input = self._parse_and_validate_audio_input(**kwargs)
-            image_inputs = self._parse_and_validate_image_input(**kwargs)
 
-            has_audio = audio_input is not None
-            has_image = image_inputs is not None
-
-            if has_audio:
-                audio_projection_mode = 'vision' if has_image else 'speech'
-                inputs_embeds = self._process_audio_input(
-                    input_ids, audio_input, audio_projection_mode)
-
-            if has_image:
-                dtype = self.vision_encoder.img_processor.embeddings.\
-                    patch_embedding.weight.dtype
-                pixel_values = image_inputs['pixel_values'].to(dtype)
-                image_sizes = image_inputs['image_sizes']
-                image_attention_mask = image_inputs['image_attention_mask']
-                image_set_tensors = self.vision_encoder(
-                    pixel_values, image_sizes, image_attention_mask)
-                if not has_audio:
-                    inputs_embeds = self.model.embed_tokens(input_ids)
-
-                inputs_embeds = self.merge_image_features_to_inputs_embeds(
-                    input_ids, inputs_embeds, image_set_tensors)
-
-            if has_image or has_audio:
-                # multi-modal input, we have set inputs_embeds properly in
-                # previous steps
-                input_ids = None
-            else:
-                # text-only, we keep using original input_ids
+            if image_input is None and audio_input is None:
                 inputs_embeds = None
+            else:
+                inputs_embeds = self.get_input_embeddings_v0(
+                    input_ids,
+                    image_input=image_input,
+                    audio_input=audio_input)
+                input_ids = None
 
         hidden_states = self.model(
             input_ids,
