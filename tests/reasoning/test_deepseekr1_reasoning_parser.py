@@ -90,6 +90,40 @@ SHORTEST_REASONING_WITH_THINK = {
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
+THINK_NO_END = {
+    "output": "<think>This is a reasoning section",
+    "reasoning_content": "This is a reasoning section",
+    "content": None,
+    "is_reasoning_end": False,
+}
+EMPTY = {
+    "output": "",
+    "reasoning_content": "",
+    "content": None,
+    "is_reasoning_end": False,
+}
+EMPTY_STREAMING = {
+    "output": "",
+    "reasoning_content": None,
+    "content": None,
+    "is_reasoning_end": False,
+}
+NEW_LINE = {
+    "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
+    "reasoning_content": "This is a reasoning section",
+    "content": "\nThis is the rest",
+    "is_reasoning_end": True,
+}
+# Streaming cannot handle new lines at the beginning of the output
+# because we need to support <think>...</think> and </think>...
+# We cannot know if the text before <think> is reasoning content
+# or not.
+NEW_LINE_STREAMING = {
+    "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
+    "reasoning_content": "\nThis is a reasoning section",
+    "content": "\nThis is the rest",
+    "is_reasoning_end": True,
+}
 
 TEST_CASES = [
     pytest.param(
@@ -181,6 +215,36 @@ TEST_CASES = [
         True,
         SHORTEST_REASONING_WITH_THINK,
         id="shortest_with_think_streaming",
+    ),
+    pytest.param(
+        False,
+        THINK_NO_END,
+        id="think_no_end",
+    ),
+    pytest.param(
+        True,
+        THINK_NO_END,
+        id="think_no_end_streaming",
+    ),
+    pytest.param(
+        False,
+        EMPTY,
+        id="empty",
+    ),
+    pytest.param(
+        True,
+        EMPTY_STREAMING,
+        id="empty_streaming",
+    ),
+    pytest.param(
+        False,
+        NEW_LINE,
+        id="new_line",
+    ),
+    pytest.param(
+        True,
+        NEW_LINE_STREAMING,
+        id="new_line_streaming",
     ),
 ]
 
