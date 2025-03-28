@@ -18,7 +18,7 @@ from setuptools.command.build_ext import build_ext
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
-
+# 从路径中加载python模块
 def load_module_from_path(module_name, path):
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
@@ -27,7 +27,7 @@ def load_module_from_path(module_name, path):
     return module
 
 
-ROOT_DIR = Path(__file__).parent
+ROOT_DIR = Path(__file__).parent                                
 logger = logging.getLogger(__name__)
 
 # cannot import envs directly because it depends on vllm,
@@ -60,14 +60,12 @@ MAIN_CUDA_VERSION = "12.4"
 def is_sccache_available() -> bool:
     return which("sccache") is not None
 
-
 def is_ccache_available() -> bool:
     return which("ccache") is not None
 
 
 def is_ninja_available() -> bool:
     return which("ninja") is not None
-
 
 def is_url_available(url: str) -> bool:
     from urllib.request import urlopen
