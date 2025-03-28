@@ -422,8 +422,16 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
+        "audio_tower.model.encoder.":
+        "audio_tower.",
+        "language_model.vision_tower.":
+        None,
+        "language_model.multi_modal_projector.":
+        None,
+        "language_model.language_model.":
+        "language_model."
+    }, )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -451,20 +459,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             prefix=maybe_prefix(prefix, "language_model"),
         )
         if config.text_model_id is not None:
-            if config.text_config.nested:
-                # For Gemma3, we throw away the vision_model
-                keep_patterns = ["language_model\..*"]
-                prefix = ""
-            else:
-                # this prefix is not for initialization, but for loading weights
-                # note the trailing dot
-                keep_patterns = None
-                prefix = "language_model."
+            # this prefix is not for initialization, but for loading weights
+            # note the trailing dot
             self.secondary_weights.append(
                 DefaultModelLoader.Source(model_or_path=config.text_model_id,
                                           revision=None,
-                                          prefix=prefix,
-                                          keep_patterns=keep_patterns))
+                                          prefix="language_model."))
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
