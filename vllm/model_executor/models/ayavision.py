@@ -136,7 +136,7 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
         return {"image": self.get_max_image_tokens()}
 
     def get_max_image_tokens(self) -> int:
-        hf_processor: AyaVisionProcessor = self.get_hf_processor()
+        hf_processor = self.get_hf_processor()
         image_processor = hf_processor.image_processor
         image_size = self.get_image_size_with_most_features()
         tokenizer = hf_processor.tokenizer

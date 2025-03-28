@@ -242,6 +242,7 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
+    "AyaVisionForConditionalGeneration": ("ayavision", "AyaVisionForConditionalGeneration"), # noqa: E501
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b"),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
@@ -304,8 +305,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
-    "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b", # noqa: E501
-                                                      min_transformers_version="4.50.0"),
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {

@@ -181,6 +181,20 @@ VLM_TEST_SETTINGS = {
         max_tokens=64,
         marks=[large_gpu_mark(min_gb=64)],
     ),
+    "aya_vision": VLMTestInfo(
+        models=["CohereForAI/aya-vision-8b"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>\n{img_prompt}<|END_OF_TURN_TOKEN|>", # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<image>What's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "<image>What is the season?",  # noqa: E501
+        }),
+        multi_image_prompt="<image><image>Describe the two images in detail.",  # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}}
+    ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
@@ -252,26 +266,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
-    ),
-    "ayavision": VLMTestInfo(
-        models=["CohereForAI/aya-vision-8b"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>\n{img_prompt}<|END_OF_TURN_TOKEN|>", # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<image>What's the content in the center of the image?",  # noqa: E501
-            "cherry_blossom": "<image>What is the season?",  # noqa: E501
-        }),
-        multi_image_prompt="<image><image>Describe the two images in detail.",  # noqa: E501
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
-        marks=[
-            pytest.mark.skipif(
-                TRANSFORMERS_VERSION < "4.50.0",
-                reason="HF model is not compatible with transformers < 4.50.0",
-            )
-        ],
     ),
     "glm4v": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
