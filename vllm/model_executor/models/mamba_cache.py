@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Tuple
 
 import torch
 
@@ -61,8 +61,7 @@ class MambaCacheManager(ConstantSizeCache):
         Return the tensors for the current run's conv and ssm state.
         """
         cache_tensors, state_indices_tensor = super().current_run_tensors(
-            input_ids=None, attn_metadata=None, **kwargs)
-
+            **kwargs)
         return MambaCacheParams(cache_tensors[0], cache_tensors[1],
                                 state_indices_tensor)
 
@@ -72,58 +71,6 @@ class MambaCacheManager(ConstantSizeCache):
         The buffer is used to maintain the Mamba Cache during the CUDA graph
         replay runs.
         """
-        state_indices_tensor = torch.as_tensor([PAD_SLOT_ID] * batch_size,
-                                               dtype=torch.int32,
-                                               device="cuda")
-        return (self._mamba_cache, state_indices_tensor)
-
-    def _assign_seq_id_to_cache_index(self, cur_rid: str, seq_id: int,
-                                      finished_requests_ids) -> int:
-        """
-        Assign (req_id,seq_id) pair to a `destination_index` index, if
-        already occupied, move the occupying index to a free index.
-        """
-        if cur_rid in finished_requests_ids:
-            # set as pad, do not allocate destination index
-            return PAD_SLOT_ID
-        elif cur_rid not in self.mamba_cache_indices_mapping:
-            destination_index = self.free_cache_indices.pop()
-            self.mamba_cache_indices_mapping[cur_rid] = {
-                seq_id: destination_index
-            }
-            return destination_index
-        elif seq_id not in (seq_ids2indices :=
-                            self.mamba_cache_indices_mapping[cur_rid]):
-            # parallel sampling , where n > 1, assume prefill have
-            # already happened, so we copy the
-            # existing cache into the siblings seq_ids caches
-            index_exists = next(iter(seq_ids2indices.values()))
-            # case of decoding n>1, copy prefill cache to decoding indices
-            destination_index = self.free_cache_indices.pop()
-            self._copy_cache(from_index=index_exists,
-                             to_index=destination_index)
-            self.mamba_cache_indices_mapping[cur_rid][
-                seq_id] = destination_index
-            return destination_index
-        else:
-            # already exists
-            return self.mamba_cache_indices_mapping[cur_rid][seq_id]
-
-    def _prepare_current_run_mamba_cache(
-            self, request_ids_to_seq_ids: Dict[str, list[int]],
-            finished_requests_ids: List[str]) -> List[int]:
-        return [
-            self._assign_seq_id_to_cache_index(req_id, seq_id,
-                                               finished_requests_ids)
-            for req_id, seq_ids in request_ids_to_seq_ids.items()
-            for seq_id in seq_ids
-        ]
-
-    def _release_finished_requests(self,
-                                   finished_seq_groups_req_ids: List[str]):
-        for req_id in finished_seq_groups_req_ids:
-            if req_id in self.mamba_cache_indices_mapping:
-                for seq_id in self.mamba_cache_indices_mapping[req_id]:
-                    self.free_cache_indices.append(
-                        self.mamba_cache_indices_mapping[req_id][seq_id])
-                self.mamba_cache_indices_mapping.pop(req_id)
+        return self._mamba_cache, torch.as_tensor([PAD_SLOT_ID] * batch_size,
+                                                  dtype=torch.int32,
+                                                  device="cuda")
