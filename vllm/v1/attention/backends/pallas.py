@@ -148,7 +148,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         # For determine_available_memory case.
-        if kv_cache[0].numel() == 0:
+        if kv_cache.numel() == 0:
             if output is None:
                 output = torch.ones_like(query)
             return output
@@ -157,7 +157,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         num_tokens, hidden_size = query.shape
         query = query.view(num_tokens, self.num_heads, self.head_size)
 
-        if kv_cache[0].numel() > 0:
+        if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             write_to_kv_cache(key, value, kv_cache, slot_mapping)
 
