@@ -141,27 +141,11 @@ class TokenInputs(TypedDict):
     The original prompt text corresponding to the token IDs, if available.
     """
 
-    multi_modal_data: NotRequired["MultiModalDataDict"]
-    """
-    Optional multi-modal data to pass to the model,
-    if the model supports it.
-    """
-
-    mm_processor_kwargs: NotRequired[dict[str, Any]]
-    """
-    Optional multi-modal processor kwargs to be forwarded to the
-    multimodal input mapper & processor. Note that if multiple modalities
-    have registered mappers etc for the model being considered, we attempt
-    to pass the mm_processor_kwargs to each of them.
-    """
-
 
 def token_inputs(
     prompt_token_ids: list[int],
     token_type_ids: Optional[list[int]] = None,
     prompt: Optional[str] = None,
-    multi_modal_data: Optional["MultiModalDataDict"] = None,
-    mm_processor_kwargs: Optional[dict[str, Any]] = None,
 ) -> TokenInputs:
     """Construct :class:`TokenInputs` from optional values."""
     inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
@@ -170,10 +154,6 @@ def token_inputs(
         inputs["prompt"] = prompt
     if token_type_ids is not None:
         inputs["token_type_ids"] = token_type_ids
-    if multi_modal_data is not None:
-        inputs["multi_modal_data"] = multi_modal_data
-    if mm_processor_kwargs is not None:
-        inputs["mm_processor_kwargs"] = mm_processor_kwargs
 
     return inputs
 

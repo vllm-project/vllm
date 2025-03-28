@@ -331,8 +331,6 @@ class InputPreprocessor:
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
                 token_type_ids=token_type_ids,
-                multi_modal_data=multi_modal_data,
-                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         if parsed["type"] == "text":
@@ -359,8 +357,6 @@ class InputPreprocessor:
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
-                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         assert_never(parsed)
@@ -402,11 +398,7 @@ class InputPreprocessor:
                     return_mm_hashes=return_mm_hashes,
                 )
 
-            return token_inputs(
-                prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
-                mm_processor_kwargs=mm_processor_kwargs,
-            )
+            return token_inputs(prompt_token_ids=prompt_token_ids)
 
         if parsed["type"] == "text":
             text_content = parsed["content"]
@@ -432,8 +424,6 @@ class InputPreprocessor:
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
-                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         assert_never(parsed)
