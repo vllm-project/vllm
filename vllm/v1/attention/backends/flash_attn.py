@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import torch
@@ -336,6 +336,7 @@ def use_cascade_attention(
     use_alibi: bool,
     use_sliding_window: bool,
     num_sms: int,
+    sliding_window: Optional[Union[int, list[Optional[int]]]],
 ) -> bool:
     """Decide whether to use cascade attention.
 
@@ -350,7 +351,19 @@ def use_cascade_attention(
     if common_prefix_len < 256:
         return False
     # Cascade attention is currently not supported with these variants.
-    if use_alibi or use_sliding_window:
+    # For sliding window, we could support it if the query length does not exceed
+    # the sliding window size.
+    def get_sliding_window(sliding_window: Optional[Union[int, list[Optional[int]]]]) -> int:
+        if sliding_window is None:
+            return 0
+        if isinstance(sliding_window, int):
+            return sliding_window
+        if isinstance(sliding_window, list):
+            # Filter out None values and sum the remaining integers
+            return sum(x for x in sliding_window if x is not None)
+        return 0
+
+    if use_alibi or (use_sliding_window and np.any(query_lens > get_sliding_window(sliding_window))):
         return False
     # Too few queries. Probably not worth using cascade attention.
     # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
