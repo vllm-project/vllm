@@ -389,7 +389,16 @@ class MambaMixer2(CustomOp):
         hidden_states: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
+        chunk_indices: Optional[torch.Tensor] = None,
+        chunk_offsets: Optional[torch.Tensor] = None,
     ):
+        # For the mamba2 triton kernels to operate in continuous batching,
+        # the sequence_idx is needed to be passed in. Also, for the kernels
+        # to operate in chunked prefill, the chunk_indices and chunk_offsets
+        # can be optionally passed in; it is more efficient to pre-compute
+        # once since they are common to all layers. If they are not provided
+        # then they will be derived from sequence_idx inside the kernels
+
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
         seq_len, _ = hidden_states.shape
@@ -468,15 +477,13 @@ class MambaMixer2(CustomOp):
 
         # 3. State Space Model sequence transformation
         if has_prefill:
-
             initial_states = None
-            if has_initial_states is not None and torch.any(
-                    has_initial_states):
-                zero_init_indices = mamba_cache_params.state_indices_tensor[
-                    ~has_initial_states]
-                mamba_cache_params.ssm_state[zero_init_indices] = 0
-                initial_states = mamba_cache_params.ssm_state[
-                    mamba_cache_params.state_indices_tensor]
+            if has_initial_states is not None:
+                # making a copy of the states
+                initial_states = torch.where(
+                    has_initial_states[:, None, None, None],
+                    mamba_cache_params.ssm_state[
+                        mamba_cache_params.state_indices_tensor], 0)
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
                 hidden_states.view(1, seq_len, self.num_heads // self.tp_size,
@@ -490,6 +497,8 @@ class MambaMixer2(CustomOp):
                 z=None,
                 dt_bias=self.dt_bias,
                 seq_idx=sequence_idx,
+                chunk_indices=chunk_indices,
+                chunk_offsets=chunk_offsets,
                 cu_seqlens=attn_metadata.query_start_loc,
                 initial_states=initial_states,
                 return_varlen_states=True,
