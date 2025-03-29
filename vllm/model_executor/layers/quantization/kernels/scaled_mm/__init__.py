@@ -3,6 +3,8 @@
 import os
 from typing import Dict, List, Optional, Type
 
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
+    AiterScaledMMLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassScaledMMLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
@@ -17,7 +19,7 @@ from vllm.platforms import PlatformEnum, current_platform
 _POSSIBLE_KERNELS: Dict[PlatformEnum, List[Type[ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CutlassScaledMMLinearKernel],
     PlatformEnum.CUDA: [CutlassScaledMMLinearKernel],
-    PlatformEnum.ROCM: [TritonScaledMMLinearKernel],
+    PlatformEnum.ROCM: [AiterScaledMMLinearKernel, TritonScaledMMLinearKernel],
     PlatformEnum.TPU: [XLAScaledMMLinearKernel],
 }
 
