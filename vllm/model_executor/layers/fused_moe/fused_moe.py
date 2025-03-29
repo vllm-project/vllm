@@ -738,6 +738,88 @@ def _fp8_quantize(
         assert triton.cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
     return A, A_scale
 
+def find_contiguous_segments(t: torch.Tensor):
+    non_matching = t[:-1] != t[1:]
+    ends = non_matching.nonzero().flatten() + 1
+    starts = torch.concat((torch.tensor([0], device=t.device), ends))
+    ends = torch.concat((ends, torch.tensor([t.numel()], device=t.device)))
+    return starts, ends
+
+
+# TODO: this doesn't work.  can compute ranges + positive matrices up front
+# since they depend on the expert_map
+def put_a_bird_on_it(
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        B: torch.Tensor,
+        B_scale: Optional[torch.Tensor],
+        C: torch.Tensor,
+        expert_ids: torch.Tensor,
+) -> None:
+    #expanded_expert_ids = torch.repeat_interleave(expert_ids, 128, dim=0)
+
+    # chunk by non-negative expert_ids
+    starts, ends = find_contiguous_segments(expert_ids)
+    #starts = torch.arange(0, expert_ids.numel(), device=expert_ids.device)
+    #ends = torch.arange(1, expert_ids.numel()+1, device=expert_ids.device)
+
+    positive = expert_ids >= 0
+    for start, end in zip(starts, ends):
+        start128 = start * 128
+        end128 = end * 128
+        if positive[start]:
+            if False:
+                chunk_expert_ids = expanded_expert_ids[start128:end128]
+            else:
+                chunk_expert_ids = torch.repeat_interleave(expert_ids[start:end], 128, dim=0)
+            dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                (A[start128:end128], A_scale[start128:end128]), (B, B_scale),
+                C[start128:end128], chunk_expert_ids)
+        else:
+            C[start128:end128].fill_(0)
+
+
+direct_register_custom_op(
+    op_name="put_a_bird_on_it",
+    op_func=put_a_bird_on_it,
+    mutates_args=["C"],
+)
+
+def cold_harbor(
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        B: torch.Tensor,
+        B_scale: Optional[torch.Tensor],
+        C: torch.Tensor,
+        e_ids: torch.Tensor,
+) -> None:
+    # chunk by non-negative expert_ids
+    expanded_expert_ids = torch.repeat_interleave(e_ids, 128, dim=0)
+    positive = (e_ids >= 0)
+    i = 0
+    start = 0
+    end = 0
+    numel = e_ids.numel()
+    while i < numel:
+        while i < numel and positive[i]:
+            i = i + 1
+        end = i * 128
+        if start != end:
+            #print(f"compute: {start} {end} {A.shape}")
+            dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                (A[start:end, ...], A_scale[start:end, ...]), (B, B_scale), C[start:end],
+                expanded_expert_ids[start:end])
+            start = end
+        while i < numel and not positive[i]:
+            i = i + 1
+        end = i * 128
+        if start != end:
+            #print(f"skip: {start} {end} {A.shape}")
+            # TODO: fill answer with zeros instead?
+            C[start:end, ...].fill_(0)
+            start = end
+        i = i + 1
+
 
 def invoke_fused_moe_kernel(A: torch.Tensor,
                             B: torch.Tensor,
@@ -1508,14 +1590,6 @@ def _resize_cache(x: torch.Tensor, v: Tuple[int, ...]) -> torch.Tensor:
     return x.flatten()[:prod(v)].view(*v)
 
 
-def find_contiguous_segments(t: torch.Tensor):
-    non_matching = t[:-1] != t[1:]
-    ends = non_matching.nonzero().flatten() + 1
-    starts = torch.concat((torch.tensor([0], device=t.device), ends))
-    ends = torch.concat((ends, torch.tensor([t.numel()], device=t.device)))
-    return starts, ends
-
-
 def fused_experts_impl(hidden_states: torch.Tensor,
                        w1: torch.Tensor,
                        w2: torch.Tensor,
@@ -1601,7 +1675,10 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     if inplace:
         out_hidden_states = hidden_states
     else:
-        out_hidden_states = torch.empty_like(hidden_states)
+        if False and expert_map is not None and use_dg:
+            out_hidden_states = torch.zeros_like(hidden_states)
+        else:
+            out_hidden_states = torch.empty_like(hidden_states)
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
@@ -1759,8 +1836,8 @@ def fused_moe(
         Defaults to False.
     - global_num_experts (int): The total number of experts in the global
         expert space.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
-        from the global expert space to the local expert space of the expert 
+    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+        from the global expert space to the local expert space of the expert
         parallel shard.
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.

@@ -288,10 +288,13 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, 
         if e_map is not None:
             e_ids[ep_rank] = e_map[e_map >= 0]
 
+    ref_out: Optional[torch.Tensor] = None
+    out: Optional[torch.Tensor] = None
+
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         for ep_rank in range(ep_size):
-            out = fused_moe(
+            ep_out = fused_moe(
                 a,
                 fp8_perm(w1, e_ids[ep_rank]),
                 fp8_perm(w2, e_ids[ep_rank]),
@@ -307,25 +310,34 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, 
                 allow_deep_gemm=False,
             )
 
-            ref_out = torch_w8a8_block_fp8_moe(a,
-                                               fp8_perm(w1, e_ids[ep_rank]),
-                                               fp8_perm(w2, e_ids[ep_rank]),
-                                               fp8_perm(w1_s, e_ids[ep_rank]),
-                                               fp8_perm(w2_s, e_ids[ep_rank]),
-                                               score,
-                                               topk,
-                                               expert_map[ep_rank],
-                                               block_size)
+            ep_ref_out = torch_w8a8_block_fp8_moe(
+                a,
+                fp8_perm(w1, e_ids[ep_rank]),
+                fp8_perm(w2, e_ids[ep_rank]),
+                fp8_perm(w1_s, e_ids[ep_rank]),
+                fp8_perm(w2_s, e_ids[ep_rank]),
+                score,
+                topk,
+                expert_map[ep_rank],
+                block_size
+            )
 
-            #print(f"{out.sum()=}")
-            #print(f"{ref_out.sum()=}")
+            if ref_out is None:
+                ref_out = ep_ref_out
+                out = ep_out
+            else:
+                ref_out = ref_out + ep_ref_out
+                out = out + ep_out
 
-            rel_diff = (torch.mean(
-                torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                        torch.mean(torch.abs(ref_out.to(torch.float32))))
 
-            # out/ref_out can be all zero in the expert_map case. TODO: better check
-            assert torch.all(out == ref_out) or rel_diff < 0.03
+        #print(f"{out.sum()=}")
+        #print(f"{ref_out.sum()=}")
+
+        rel_diff = (torch.mean(
+            torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+                    torch.mean(torch.abs(ref_out.to(torch.float32))))
+
+        assert rel_diff < 0.03
 
 
 def per_block_cast_to_fp8(
