@@ -84,6 +84,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     additional fields.
     """
     input_tokens: Optional[torch.Tensor] = None
+    inputs_embeds: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     token_types: Optional[torch.Tensor] = None
     seq_lens: Optional[List[int]] = None
@@ -104,6 +105,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
+            "inputs_embeds": self.inputs_embeds,
             "input_positions": self.input_positions,
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
@@ -154,6 +156,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
+            "inputs_embeds": self.inputs_embeds,
             "input_positions": self.input_positions,
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
@@ -193,6 +196,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         def simple_reinit(self):
             self.input_tokens[0].clear()  # type: ignore
+            self.inputs_embeds = None  # type: ignore
             self.input_positions[0].clear()  # type: ignore
             self.token_types[0].clear()  # type: ignore
             self.mrope_input_positions = None  # type: ignore
@@ -220,6 +224,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             # Input tokens and positions.
             input_tokens: Optional[List[List[int]]] = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
             input_positions: Optional[List[List[int]]] = None,
             token_types: Optional[List[List[int]]] = None,
             mrope_input_positions: Optional[List[List[List[int]]]] = None,
@@ -280,6 +285,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     else:
                         for seq_id in range(len(self.seq_ids)):
                             self.input_tokens[seq_id].clear()
+
+                    if inputs_embeds is not None:
+                        self.inputs_embeds = inputs_embeds
+                    else:
+                        self.inputs_embeds = None
 
                     if input_positions:
                         self.input_positions = input_positions
@@ -355,6 +365,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             else:
                 self.input_tokens = input_tokens or []
+                self.inputs_embeds = inputs_embeds
                 self.input_positions = input_positions or []
                 self.token_types = token_types or []
                 self.mrope_input_positions = mrope_input_positions or None
@@ -399,6 +410,26 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             self.lora_index_mapping = []
             self.lora_prompt_mapping = []
+
+        def __repr__(self) -> str:
+            return (
+                f"InterDataForSeqGroup("
+                f"request_id={self.request_id}, "
+                f"seq_ids={self.seq_ids}, "
+                f"is_prompt={self.is_prompt}, "
+                f"block_tables={self.block_tables}, "
+                f"computed_block_nums={self.computed_block_nums}, "
+                f"n_seqs={self.n_seqs}, "
+                f"input_tokens={self.input_tokens}, "
+                f"inputs_embeds={getattr(self.inputs_embeds, 'shape', None)}, "
+                f"input_positions={self.input_positions}, "
+                f"token_types={self.token_types}, "
+                f"mrope_input_positions={self.mrope_input_positions}, "
+                f"seq_lens={self.seq_lens}, "
+                f"orig_seq_lens={self.orig_seq_lens}, "
+                f"query_lens={self.query_lens}, "
+                f"context_lens={self.context_lens}, "
+                f"multi_modal_kwargs={self.multi_modal_kwargs}")
 
     def gen_inter_data_builder(self, num_seqs: int):
         return lambda: ModelInputForGPUBuilder.InterDataForSeqGroup(
@@ -511,13 +542,24 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             context_len = seq_data.get_num_computed_tokens()
 
         # Compute tokens.
-        tokens = seq_data.get_token_ids()[context_len:seq_len]
+        if seq_data.prompt_embeds is None:
+            tokens = seq_data.get_token_ids()[context_len:seq_len]
+            prompt_embeds = None
+        else:
+            tokens = [0] * (seq_len - context_len)
+            prompt_embeds = seq_data.prompt_embeds[context_len:seq_len]
+            if len(prompt_embeds) == 0:
+                # Sometimes the prompt_embeds can be fully processed, so the
+                # seq_data.prompt_embeds[context_len:seq_len] can be empty.
+                prompt_embeds = None
+
         token_types = seq_group_metadata.token_type_ids
 
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
         inter_data.input_tokens[seq_idx].extend(tokens)
+        inter_data.inputs_embeds = prompt_embeds
         inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
         inter_data.token_types[seq_idx].extend(
             token_types if token_types else [])
@@ -823,14 +865,25 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         """
         # Combine and flatten intermediate data.
         input_tokens = []
+        inputs_embeds_: list[torch.Tensor] = []
         token_types = []
         for inter_data in self.inter_data_list:
             for cur_input_tokens in inter_data.input_tokens:
                 input_tokens.extend(cur_input_tokens)
             for cur_token_types in inter_data.token_types:
                 token_types.extend(cur_token_types)
+            if inter_data.inputs_embeds is not None:
+                inputs_embeds_.append(
+                    inter_data.inputs_embeds.to(self.runner.device))
+        inputs_embeds: Optional[torch.Tensor]
+        if len(inputs_embeds_) == 0:
+            inputs_embeds = None
+        elif len(inputs_embeds_) == 1:
+            inputs_embeds = inputs_embeds_[0]
+        else:
+            inputs_embeds = torch.cat(inputs_embeds_, dim=0)
 
-        if not input_tokens:
+        if not input_tokens and inputs_embeds is None:
             # This may happen when all prefill requests hit
             # prefix caching and there is no decode request.
             return self.model_input_cls()
@@ -980,6 +1033,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
+            inputs_embeds=inputs_embeds,
             input_positions=input_positions_tensor,
             token_types=token_types_tensor,
             attn_metadata=attn_metadata,
@@ -1769,6 +1823,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                      self.vllm_config, virtual_engine):
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
+                    **{
+                        "inputs_embeds": model_input.inputs_embeds,
+                    } if model_input.inputs_embeds is not None else {},
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,

@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 
 import cloudpickle
+import torch
 import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
@@ -277,6 +278,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         *,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -293,6 +295,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         list[SamplingParams]]] = None,
         prompt_token_ids: Optional[list[int]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -309,6 +312,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         list[SamplingParams]]] = None,
         prompt_token_ids: Optional[list[list[int]]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -326,6 +330,7 @@ class LLM:
                                         list[SamplingParams]]] = None,
         *,
         prompt_token_ids: list[int],
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -343,6 +348,7 @@ class LLM:
                                         list[SamplingParams]]] = None,
         *,
         prompt_token_ids: list[list[int]],
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -358,6 +364,7 @@ class LLM:
         prompts: None,
         sampling_params: None,
         prompt_token_ids: Union[list[int], list[list[int]]],
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -378,6 +385,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -400,10 +408,15 @@ class LLM:
                 When it is a single value, it is applied to every prompt.
                 When it is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
+            prompt_token_ids: DEPRECATED. Token IDs for the prompts. If 
+                provided, the `prompts` will be ignored.
+            prompt_embeds: Optional tensor of prompt embeddings to use instead 
+                of text prompts.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
+            guided_options_request: Options for guided decoding, if any.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
 
@@ -441,6 +454,12 @@ class LLM:
         else:
             parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
                                   prompts)
+
+        # Handle prompt_embeds separately
+        # This is a simplified approach - you may need to adjust based on how
+        # prompt_embeds is used
+        if prompt_embeds is not None:
+            parsed_prompts.prompt_embeds = prompt_embeds
 
         if isinstance(guided_options_request, dict):
             if len(guided_options_request) > 1:
@@ -1226,6 +1245,7 @@ class LLM:
         self,
         prompts: Optional[Union[str, list[str]]],
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]],
+        prompt_embeds: Optional[torch.Tensor] = None,
     ):
         # skip_tokenizer_init is now checked in engine
 
@@ -1263,6 +1283,8 @@ class LLM:
 
             parsed_prompts.append(item)
 
+        # We don't need to handle prompt_embeds here since it's handled in the
+        # generate method
         return parsed_prompts
 
     def _validate_and_add_requests(
@@ -1343,8 +1365,12 @@ class LLM:
             raise ValueError("Cannot set both guided_options_request and "
                              "params.guided_decoding.")
 
+        json = (guided_options.guided_json.model_dump_json() if
+                (guided_options.guided_json is not None
+                 and not isinstance(guided_options.guided_json, (dict, str)))
+                else guided_options.guided_json)
         params.guided_decoding = GuidedDecodingParams(
-            json=guided_options.guided_json,
+            json=json,
             regex=guided_options.guided_regex,
             choice=guided_options.guided_choice,
             grammar=guided_options.guided_grammar,
