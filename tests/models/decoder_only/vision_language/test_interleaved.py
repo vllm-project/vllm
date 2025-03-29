@@ -69,7 +69,7 @@ def test_models(vllm_runner, model, dtype: str, max_tokens: int) -> None:
     interleaved_prompt_len, noninterleaved_prompt_len = prompt_lengths
     interleaved_output_str, noninterleaved_output_str = generated_strs
 
-    # The two prompts are identical except for the modality tokens.
+    # The two prompts are identical except for the order of modality tokens.
     assert interleaved_prompt_len == noninterleaved_prompt_len
 
     # The two generated strings should be different because of the
