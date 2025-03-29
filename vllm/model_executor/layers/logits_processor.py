@@ -21,6 +21,27 @@ if envs.VLLM_LOGITS_PROCESSOR_THREADS is not None:
         envs.VLLM_LOGITS_PROCESSOR_THREADS)
 
 
+def accept_grammar(token_ids: torch.Tensor,
+                   sampling_metadata: SamplingMetadata,
+                   mask: torch.Tensor = None) -> torch.Tensor:
+    if mask is None:
+        mask = torch.ones_like(token_ids, dtype=torch.bool)
+
+    accept = torch.ones_like(token_ids, dtype=torch.bool)
+    for seq_group in sampling_metadata.seq_groups:
+        logits_processors = seq_group.sampling_params.logits_processors
+        if logits_processors:
+            for row_idx, logits_processor in zip(seq_group.sample_indices,
+                                                 logits_processors):
+                tkid = token_ids[row_idx].item()
+                tkmask = mask[row_idx].item()
+                # only when mask =1 , fsm accept the token
+                if tkmask:
+                    accept[row_idx] = accept[row_idx].item(
+                    ) and logits_processor.accept(tkid)
+    return accept
+
+
 class LogitsProcessor(nn.Module):
     """Process logits and apply logits processors from sampling metadata.
 
@@ -52,13 +73,12 @@ class LogitsProcessor(nn.Module):
         # Whether to use gather or all-gather to gather the logits.
         self.use_all_gather = current_platform.use_all_gather()
 
-    def forward(
-        self,
-        lm_head: VocabParallelEmbedding,
-        hidden_states: torch.Tensor,
-        sampling_metadata: Optional[SamplingMetadata] = None,
-        embedding_bias: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
+    def forward(self,
+                lm_head: VocabParallelEmbedding,
+                hidden_states: torch.Tensor,
+                sampling_metadata: Optional[SamplingMetadata] = None,
+                embedding_bias: Optional[torch.Tensor] = None,
+                skip_grammar: bool = False) -> Optional[torch.Tensor]:
         if self.logits_as_input:
             logits = hidden_states
         else:
@@ -76,6 +96,9 @@ class LogitsProcessor(nn.Module):
 
             if self.scale != 1.0:
                 logits *= self.scale
+
+            if skip_grammar:
+                return logits
 
             # Apply logits processors (if any).
             if sampling_metadata is not None and \
@@ -138,12 +161,15 @@ def _prune_hidden_states(
         return hidden_states
 
 
-def _apply_logits_processors(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> torch.Tensor:
+def _apply_logits_processors(logits: torch.Tensor,
+                             sampling_metadata: SamplingMetadata,
+                             mask: torch.Tensor = None,
+                             accept_last: bool = True) -> torch.Tensor:
     found_logits_processors = False
     logits_processed = 0
+
+    if mask is None:
+        mask = torch.ones(size=(logits.shape[0], ), dtype=torch.bool)
     logits_row_ids_and_logits_row_futures = []
     for seq_group in sampling_metadata.seq_groups:
         seq_ids = seq_group.seq_ids
@@ -154,6 +180,9 @@ def _apply_logits_processors(
 
             for seq_id, logits_row_idx in zip(seq_ids,
                                               seq_group.sample_indices):
+                if not mask[logits_row_idx].item():
+                    continue
+
                 logits_row = logits[logits_row_idx]
                 past_tokens_ids = seq_group.seq_data[seq_id].output_token_ids
                 prompt_tokens_ids = seq_group.seq_data[seq_id].prompt_token_ids
@@ -164,12 +193,12 @@ def _apply_logits_processors(
                          _logits_processor_threadpool.submit(
                              _apply_logits_processors_single_seq, logits_row,
                              logits_processors, past_tokens_ids,
-                             prompt_tokens_ids)))
+                             prompt_tokens_ids, accept_last)))
                 else:
                     logits[logits_row_idx] = \
                         _apply_logits_processors_single_seq(
                             logits_row, logits_processors, past_tokens_ids,
-                            prompt_tokens_ids)
+                            prompt_tokens_ids, accept_last)
 
         logits_processed += len(seq_group.sample_indices) + len(
             seq_group.prompt_logprob_indices)
@@ -184,13 +213,15 @@ def _apply_logits_processors(
 
 
 def _apply_logits_processors_single_seq(logits_row, logits_processors,
-                                        past_tokens_ids,
-                                        prompt_tokens_ids) -> torch.Tensor:
+                                        past_tokens_ids, prompt_tokens_ids,
+                                        accept_last) -> torch.Tensor:
     for logits_processor in logits_processors:
         parameters = inspect.signature(logits_processor).parameters
         if len(parameters) == 3:
             logits_row = logits_processor(prompt_tokens_ids, past_tokens_ids,
                                           logits_row)
         else:
+            if accept_last and len(past_tokens_ids) > 0:
+                logits_processor.accept(past_tokens_ids[-1])
             logits_row = logits_processor(past_tokens_ids, logits_row)
     return logits_row

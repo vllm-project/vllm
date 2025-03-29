@@ -325,6 +325,18 @@ class XGrammarLogitsProcessor:
                 raise ValueError(
                     "Invalid configuration for xgrammar logits processor")
 
+    def accept(self, token_ids: int) -> bool:
+        if self.ctx is None:
+            self._ensure_ctx()
+        if len(self.matchers) == 0:
+            self.matchers = [
+                xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
+            ]
+            self.token_bitmask = xgr.allocate_token_bitmask(
+                self.batch_size, self.tokenizer_info.vocab_size)
+        return self.matchers[0].accept_token(
+            token_ids) or self.matchers[0].is_terminated()
+
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
 
@@ -344,15 +356,6 @@ class XGrammarLogitsProcessor:
             ]
             self.token_bitmask = xgr.allocate_token_bitmask(
                 self.batch_size, self.tokenizer_info.vocab_size)
-
-        if not self.prefilled:
-            # Have not sampled a token yet
-            self.prefilled = True
-        else:
-            for i, matcher in enumerate(self.matchers):
-                if not matcher.is_terminated():
-                    sampled_token = input_ids[-1]
-                    assert self.matchers[i].accept_token(sampled_token)
 
         for i, matcher in enumerate(self.matchers):
             if not matcher.is_terminated():
@@ -402,5 +405,4 @@ class XGrammarLogitsProcessor:
         new_processor.batch_size = self.batch_size
         # Reset prefilled state for new sequence
         new_processor.prefilled = False
-
         return new_processor
