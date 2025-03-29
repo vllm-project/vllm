@@ -162,7 +162,7 @@ class OpenAIServingModels:
         except BaseException as e:
             error_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
-            if isinstance(e, ValueError) and "No adapter found" in str(e):
+            if "No adapter found" in str(e):
                 error_type = "NotFoundError"
                 status_code = HTTPStatus.NOT_FOUND
 
