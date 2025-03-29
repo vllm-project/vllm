@@ -104,12 +104,17 @@ class ChatCommand(CLISubcommand):
         if system_prompt is not None:
             conversation.append({"role": "system", "content": system_prompt})
 
-        print("Please enter a message for the chat model:")
+        print("Please enter a message for the chat model (type /bye to quit):")
         while True:
             try:
                 input_message = input("> ")
             except EOFError:
                 return
+
+            if input_message == "/bye":
+                print("Exit chat mode.")
+                return
+
             conversation.append({"role": "user", "content": input_message})
 
             chat_completion = client.chat.completions.create(
@@ -148,9 +153,14 @@ class CompleteCommand(CLISubcommand):
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
-        print("Please enter prompt to complete:")
+        print("Please enter prompt to complete (type /bye to quit):")
         while True:
             input_prompt = input("> ")
+
+            if input_prompt == "/bye":
+                print("Exit complete mode.")
+                return
+
             completion = client.completions.create(model=model_name,
                                                    prompt=input_prompt)
             output = completion.choices[0].text
