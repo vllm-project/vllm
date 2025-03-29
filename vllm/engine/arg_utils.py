@@ -102,6 +102,7 @@ class EngineArgs:
     allowed_local_media_path: str = ""
     download_dir: Optional[str] = None
     load_format: str = 'auto'
+    weights_load_device: Optional[str] = None
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
@@ -351,6 +352,12 @@ class EngineArgs:
             'specified in https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n'
             '* "mistral" will load weights from consolidated safetensors files '
             'used by Mistral models.\n')
+        parser.add_argument("--weights-load-device",
+                            type=str,
+                            default=EngineArgs.weights_load_device,
+                            choices=DEVICE_OPTIONS,
+                            help='Device to which model weights '
+                            'will be loaded.')
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -376,11 +383,12 @@ class EngineArgs:
         parser.add_argument(
             '--kv-cache-dtype',
             type=str,
-            choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
+            choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3', 'fp8_inc'],
             default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
-            'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
+            'ROCm (AMD GPU) supports fp8 (=fp8_e4m3). '
+            'Intel Gaudi (HPU) supports fp8 (using fp8_inc).')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=EngineArgs.max_model_len,
@@ -1203,6 +1211,7 @@ class EngineArgs:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
+            device=self.weights_load_device,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,

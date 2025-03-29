@@ -31,7 +31,8 @@ QUANTIZATION_METHODS: List[str] = [
     "neuron_quant",
     "ipex",
     "quark",
-    "moe_wna16"
+    "moe_wna16",
+    "inc",
 ]
 
 # The customized quantization methods which will be added to this dict.
@@ -96,6 +97,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .gptq_marlin import GPTQMarlinConfig
     from .gptq_marlin_24 import GPTQMarlin24Config
     from .hqq_marlin import HQQMarlinConfig
+    from .inc import INCConfig
     from .ipex_quant import IPEXConfig
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
@@ -132,6 +134,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "ipex": IPEXConfig,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
+        "inc": INCConfig,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
