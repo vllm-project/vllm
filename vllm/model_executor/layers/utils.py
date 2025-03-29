@@ -72,8 +72,8 @@ def apply_gemm_rocm(x: torch.Tensor,
     cu_count = current_platform.get_cu_count()
 
     use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM is True and \
-                    bias is None and \
-                    x.dtype is torch.float16 and k % 8 == 0)
+                    x.dtype in [torch.float16, torch.bfloat16] \
+                    and k % 8 == 0 and bias is None )
 
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)

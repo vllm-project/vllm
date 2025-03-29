@@ -29,15 +29,27 @@
 #endif
 
 template <typename T>
+struct scalar {};
+
+template <typename T>
 struct scalar2 {};
 
 template <typename T>
 __device__ __forceinline__ float2 __s22float2(T v);
 
 template <typename T>
+__device__ __forceinline__ T __float2s(float v);
+
+template <typename T>
 __device__ __forceinline__ T __float22s2_rn(float2 v);
 
 // Vector (size 2) definition and cvt functions for fp16
+
+template <>
+struct scalar<c10::Half> {
+  using type = half;
+};
+
 template <>
 struct scalar2<c10::Half> {
   using type = __half2;
@@ -49,11 +61,21 @@ __device__ __forceinline__ float2 __s22float2(__half2 v) {
 }
 
 template <>
+__device__ __forceinline__ half __float2s(float v) {
+  return __float2half(v);
+}
+
+template <>
 __device__ __forceinline__ __half2 __float22s2_rn(float2 v) {
   return __float22half2_rn(v);
 }
 
 // Vector (size 2) definition and cvt functions for bf16
+template <>
+struct scalar<c10::BFloat16> {
+  using type = __hip_bfloat16;
+};
+
 template <>
 struct scalar2<c10::BFloat16> {
   using type = __hip_bfloat162;
@@ -62,6 +84,11 @@ struct scalar2<c10::BFloat16> {
 template <>
 __device__ __forceinline__ float2 __s22float2(__hip_bfloat162 v) {
   return __bfloat1622float2(v);
+}
+
+template <>
+__device__ __forceinline__ __hip_bfloat16 __float2s(float v) {
+  return __float2bfloat16(v);
 }
 
 template <>
@@ -131,7 +158,7 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
 
 #pragma unroll
   for (int i = 0; i < NUM_A_ROWS_PER_BLOCK; i++) {
-    // Multiply-add on 8 half.
+    // Multiply-add on 8 scalar_t.
     ah2lptr = Ah2ptr + i * 4;
     Af2 = *(ah2lptr);
     acch2 = __hmul2(Af2, colB_elem4x);
@@ -229,23 +256,31 @@ void LLMM1(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
   });
 }
 
-#define DTYPE half
+#define DOT2C(V0, V2, V3)                                                     \
+  if (std::is_same_v<scalar_t, half>) {                                       \
+    asm("v_dot2c_f32_f16 %0, %2, %3" : "=v"(V0) : "0"(V0), "v"(V2), "v"(V3)); \
+  } else if (std::is_same_v<scalar_t, __hip_bfloat16>) {                      \
+    float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *             \
+               __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));              \
+    V0 += (s.x + s.y);                                                        \
+  }
 
 #if defined(__HIP__MI300_MI250__)  // TODO: Add NAVI support
 // This version targets cases where A[] fits LDS capacity
-template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int M>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitK_hf_sml_(const int K, const int N, const DTYPE* B,
-                     const DTYPE* __restrict__ A, DTYPE* C, const int _WvPrGrp,
-                     const int CuCount) {
-  using half8 =
+    wvSplitK_hf_sml_(const int K, const int N, const scalar_t* B,
+                     const scalar_t* __restrict__ A, scalar_t* C,
+                     const int _WvPrGrp, const int CuCount) {
+  using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
   union bigType {
-    DTYPE h[A_CHUNK];
+    scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
     float2 f2[A_CHUNK / 4];
     double d[A_CHUNK / 4];
-    half8 h8;
+    scalar8 h8;
   };
 
   //----------------------------------------------------
@@ -255,7 +290,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // TODO: When activation matrix is larger than 64 KB
   //	     then this is not goint to work!
   //----------------------------------------------------
-  __shared__ half s[1024 * 32];
+  __shared__ scalar_t s[1024 * 32];
 
   //----------------------------------------------------
   // Fetch the activation matrix to LDS
@@ -270,19 +305,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
        k += THRDS * WvPrGrp * A_CHUNK) {
     uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
 
-    // Transpose of A implementation
-    // uint32_t k_ot = (k_in / M) + (k_in % M) * K; // transopse for
-    // bank-conflict-free readback
-
     if (k_in >= min(K * M, 32 * 1024)) break;
 
-    //((bigType*)(&s[k_in]))->b128 = ((bigType*)(&A[k_in]))->b128;
     *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
-    //((bigType*)(&s[k_ot]))->b128 = ((bigType*)(&A[k_in]))->b128;
   }
   __syncthreads();
 
-  // int _WvPrGrp = mindiv(N, CuCount * YTILE, WvPrGrp);
   if (threadIdx.y >= _WvPrGrp) return;
 
   uint32_t n = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
@@ -350,18 +378,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
 
-        const half* B_ = &B[(n + 0) * K + k_];
-        bigB0[k2].h8 = (loadnt((half8*)(&B_[0 * K])));
+        const scalar_t* B_ = &B[(n + 0) * K + k_];
+        bigB0[k2].h8 = (loadnt((scalar8*)(&B_[0 * K])));
         //----------------------------------------------------
         // The following code with YTILE > 1 has to be deleted
         //----------------------------------------------------
-        if (YTILE >= 2) bigB1[k2].h8 = (loadnt((half8*)(&B_[1 * K])));
-        if (YTILE >= 3) bigB2[k2].h8 = (loadnt((half8*)(&B_[2 * K])));
-        if (YTILE >= 4) bigB3[k2].h8 = (loadnt((half8*)(&B_[3 * K])));
-        if (YTILE >= 5) bigB4[k2].h8 = (loadnt((half8*)(&B_[4 * K])));
-        if (YTILE >= 6) bigB5[k2].h8 = (loadnt((half8*)(&B_[5 * K])));
-        if (YTILE >= 7) bigB6[k2].h8 = (loadnt((half8*)(&B_[6 * K])));
-        if (YTILE >= 8) bigB7[k2].h8 = (loadnt((half8*)(&B_[7 * K])));
+        if (YTILE >= 2) bigB1[k2].h8 = (loadnt((scalar8*)(&B_[1 * K])));
+        if (YTILE >= 3) bigB2[k2].h8 = (loadnt((scalar8*)(&B_[2 * K])));
+        if (YTILE >= 4) bigB3[k2].h8 = (loadnt((scalar8*)(&B_[3 * K])));
+        if (YTILE >= 5) bigB4[k2].h8 = (loadnt((scalar8*)(&B_[4 * K])));
+        if (YTILE >= 6) bigB5[k2].h8 = (loadnt((scalar8*)(&B_[5 * K])));
+        if (YTILE >= 7) bigB6[k2].h8 = (loadnt((scalar8*)(&B_[6 * K])));
+        if (YTILE >= 8) bigB7[k2].h8 = (loadnt((scalar8*)(&B_[7 * K])));
       }
 
       // Fetch activation matrix from either just LDS or from both LDS / memory
@@ -374,10 +402,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         // Fetch A activation matrix in interleaved fashion from LDS or memory
 
         for (int m = 0; m < M; m++) {
-          // if (k_ + K * m < 32 * 1024)
           bigA[m][k2] = *((const bigType*)(&(s[k_ + K * m])));
-          // else
-          //   bigA[m][k2] = *((const bigType*)(&(A[k_ + K * m])));
         }
       }
 
@@ -393,41 +418,32 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (uint32_t m = 0; m < M; m++) {
   #pragma unroll
           for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
-            asm("v_dot2c_f32_f16 %0, %2, %3"
-                : "=v"(sum[m][0])
-                : "0"(sum[m][0]), "v"(bigA[m][k2].f[b]), "v"(bigB0[k2].f[b]));
+            DOT2C(sum[m][0], bigA[m][k2].f[b], bigB0[k2].f[b])
 
             //----------------------------------------------------
             // The following code with YTILE > 1
             //----------------------------------------------------
-            if (YTILE >= 2)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][1])
-                  : "0"(sum[m][1]), "v"(bigA[m][k2].f[b]), "v"(bigB1[k2].f[b]));
-            if (YTILE >= 3)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][2])
-                  : "0"(sum[m][2]), "v"(bigA[m][k2].f[b]), "v"(bigB2[k2].f[b]));
-            if (YTILE >= 4)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][3])
-                  : "0"(sum[m][3]), "v"(bigA[m][k2].f[b]), "v"(bigB3[k2].f[b]));
-            if (YTILE >= 5)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][4])
-                  : "0"(sum[m][4]), "v"(bigA[m][k2].f[b]), "v"(bigB4[k2].f[b]));
-            if (YTILE >= 6)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][5])
-                  : "0"(sum[m][5]), "v"(bigA[m][k2].f[b]), "v"(bigB5[k2].f[b]));
-            if (YTILE >= 7)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][6])
-                  : "0"(sum[m][6]), "v"(bigA[m][k2].f[b]), "v"(bigB6[k2].f[b]));
-            if (YTILE >= 8)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][7])
-                  : "0"(sum[m][7]), "v"(bigA[m][k2].f[b]), "v"(bigB7[k2].f[b]));
+            if (YTILE >= 2) {
+              DOT2C(sum[m][1], bigA[m][k2].f[b], bigB1[k2].f[b]);
+            }
+            if (YTILE >= 3) {
+              DOT2C(sum[m][2], bigA[m][k2].f[b], bigB2[k2].f[b]);
+            }
+            if (YTILE >= 4) {
+              DOT2C(sum[m][3], bigA[m][k2].f[b], bigB3[k2].f[b]);
+            }
+            if (YTILE >= 5) {
+              DOT2C(sum[m][4], bigA[m][k2].f[b], bigB4[k2].f[b]);
+            }
+            if (YTILE >= 6) {
+              DOT2C(sum[m][5], bigA[m][k2].f[b], bigB5[k2].f[b]);
+            }
+            if (YTILE >= 7) {
+              DOT2C(sum[m][6], bigA[m][k2].f[b], bigB6[k2].f[b]);
+            }
+            if (YTILE >= 8) {
+              DOT2C(sum[m][7], bigA[m][k2].f[b], bigB7[k2].f[b]);
+            }
           }
         }
       }
@@ -462,28 +478,19 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int m = 0; m < M; m++) {
         for (int i = 0; i < YTILE; i++) {
           // if (commitColumn[i]) C[n + i + m * N] = __float2half(sum[m][i]);
-          C[n + i + m * N] = __float2half(sum[m][i]);
+          C[n + i + m * N] = __float2s<scalar_t>(sum[m][i]);
         }
       }
     }
 
     n += CuCount * _WvPrGrp * YTILE;
-
-    // Check whether there will be fragmenation!
-    // This will happen only for the last wave!
-    // if (n < N && (n + YTILE) >= N) {
-    //  uint32_t startColumn = N - YTILE;
-    //  for (uint32_t i = 0; i < (n - startColumn); i++) {
-    //    commitColumn[i] = 0;
-    //  }
-    //  n = startColumn;
-    //}
   }
 }
 #else   // !defined(__HIP__MI300_MI250__) TODO: Add NAVI support
-template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
-__global__ void wvSplitK_hf_sml_(const int K, const int N, const DTYPE* B,
-                                 const DTYPE* __restrict__ A, DTYPE* C,
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int M>
+__global__ void wvSplitK_hf_sml_(const int K, const int N, const scalar_t* B,
+                                 const scalar_t* __restrict__ A, scalar_t* C,
                                  const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
@@ -491,19 +498,20 @@ __global__ void wvSplitK_hf_sml_(const int K, const int N, const DTYPE* B,
 
 #if defined(__HIP__MI300_MI250__)  // TODO: Add NAVI support
 // This version targets cases where A[] marginally exceeds LDS capacity
-template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int M>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitK_hf_(const int K, const int N, const DTYPE* B,
-                 const DTYPE* __restrict__ A, DTYPE* C, const int _WvPrGrp,
-                 const int CuCount) {
-  using half8 =
+    wvSplitK_hf_(const int K, const int N, const scalar_t* B,
+                 const scalar_t* __restrict__ A, scalar_t* C,
+                 const int _WvPrGrp, const int CuCount) {
+  using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
   union bigType {
-    DTYPE h[A_CHUNK];
+    scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
     float2 f2[A_CHUNK / 4];
     double d[A_CHUNK / 4];
-    half8 h8;
+    scalar8 h8;
   };
 
   //----------------------------------------------------
@@ -513,7 +521,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // TODO: When activation matrix is larger than 64 KB
   //	     then this is not goint to work!
   //----------------------------------------------------
-  __shared__ half s[1024 * 32];
+  __shared__ scalar_t s[1024 * 32];
 
   //----------------------------------------------------
   // Computation of columns that need to be committed to memory!
@@ -554,15 +562,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
        k += THRDS * WvPrGrp * A_CHUNK) {
     uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
 
-    // Transpose of A implementation
-    // uint32_t k_ot = (k_in / M) + (k_in % M) * K; // transopse for
-    // bank-conflict-free readback
-
     if (k_in >= min(K * M, 32 * 1024)) break;
 
-    //((bigType*)(&s[k_in]))->b128 = ((bigType*)(&A[k_in]))->b128;
     *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
-    //((bigType*)(&s[k_ot]))->b128 = ((bigType*)(&A[k_in]))->b128;
   }
 
   __syncthreads();
@@ -632,18 +634,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
 
-        const half* B_ = &B[(n + 0) * K + k_];
-        bigB0[k2].h8 = (loadnt((half8*)(&B_[0 * K])));
+        const scalar_t* B_ = &B[(n + 0) * K + k_];
+        bigB0[k2].h8 = (loadnt((scalar8*)(&B_[0 * K])));
         //----------------------------------------------------
         // The following code with YTILE > 1 has to be deleted
         //----------------------------------------------------
-        if (YTILE >= 2) bigB1[k2].h8 = (loadnt((half8*)(&B_[1 * K])));
-        if (YTILE >= 3) bigB2[k2].h8 = (loadnt((half8*)(&B_[2 * K])));
-        if (YTILE >= 4) bigB3[k2].h8 = (loadnt((half8*)(&B_[3 * K])));
-        if (YTILE >= 5) bigB4[k2].h8 = (loadnt((half8*)(&B_[4 * K])));
-        if (YTILE >= 6) bigB5[k2].h8 = (loadnt((half8*)(&B_[5 * K])));
-        if (YTILE >= 7) bigB6[k2].h8 = (loadnt((half8*)(&B_[6 * K])));
-        if (YTILE >= 8) bigB7[k2].h8 = (loadnt((half8*)(&B_[7 * K])));
+        if (YTILE >= 2) bigB1[k2].h8 = (loadnt((scalar8*)(&B_[1 * K])));
+        if (YTILE >= 3) bigB2[k2].h8 = (loadnt((scalar8*)(&B_[2 * K])));
+        if (YTILE >= 4) bigB3[k2].h8 = (loadnt((scalar8*)(&B_[3 * K])));
+        if (YTILE >= 5) bigB4[k2].h8 = (loadnt((scalar8*)(&B_[4 * K])));
+        if (YTILE >= 6) bigB5[k2].h8 = (loadnt((scalar8*)(&B_[5 * K])));
+        if (YTILE >= 7) bigB6[k2].h8 = (loadnt((scalar8*)(&B_[6 * K])));
+        if (YTILE >= 8) bigB7[k2].h8 = (loadnt((scalar8*)(&B_[7 * K])));
       }
 
       // Fetch activation matrix from either just LDS or from both LDS / memory
@@ -675,41 +677,32 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
           for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
-            asm("v_dot2c_f32_f16 %0, %2, %3"
-                : "=v"(sum[m][0])
-                : "0"(sum[m][0]), "v"(bigA[m][k2].f[b]), "v"(bigB0[k2].f[b]));
+            DOT2C(sum[m][0], bigA[m][k2].f[b], bigB0[k2].f[b]);
 
             //----------------------------------------------------
             // The following code with YTILE > 1
             //----------------------------------------------------
-            if (YTILE >= 2)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][1])
-                  : "0"(sum[m][1]), "v"(bigA[m][k2].f[b]), "v"(bigB1[k2].f[b]));
-            if (YTILE >= 3)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][2])
-                  : "0"(sum[m][2]), "v"(bigA[m][k2].f[b]), "v"(bigB2[k2].f[b]));
-            if (YTILE >= 4)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][3])
-                  : "0"(sum[m][3]), "v"(bigA[m][k2].f[b]), "v"(bigB3[k2].f[b]));
-            if (YTILE >= 5)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][4])
-                  : "0"(sum[m][4]), "v"(bigA[m][k2].f[b]), "v"(bigB4[k2].f[b]));
-            if (YTILE >= 6)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][5])
-                  : "0"(sum[m][5]), "v"(bigA[m][k2].f[b]), "v"(bigB5[k2].f[b]));
-            if (YTILE >= 7)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][6])
-                  : "0"(sum[m][6]), "v"(bigA[m][k2].f[b]), "v"(bigB6[k2].f[b]));
-            if (YTILE >= 8)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][7])
-                  : "0"(sum[m][7]), "v"(bigA[m][k2].f[b]), "v"(bigB7[k2].f[b]));
+            if (YTILE >= 2) {
+              DOT2C(sum[m][1], bigA[m][k2].f[b], bigB1[k2].f[b]);
+            }
+            if (YTILE >= 3) {
+              DOT2C(sum[m][2], bigA[m][k2].f[b], bigB2[k2].f[b]);
+            }
+            if (YTILE >= 4) {
+              DOT2C(sum[m][3], bigA[m][k2].f[b], bigB3[k2].f[b]);
+            }
+            if (YTILE >= 5) {
+              DOT2C(sum[m][4], bigA[m][k2].f[b], bigB4[k2].f[b]);
+            }
+            if (YTILE >= 6) {
+              DOT2C(sum[m][5], bigA[m][k2].f[b], bigB5[k2].f[b]);
+            }
+            if (YTILE >= 7) {
+              DOT2C(sum[m][6], bigA[m][k2].f[b], bigB6[k2].f[b]);
+            }
+            if (YTILE >= 8) {
+              DOT2C(sum[m][7], bigA[m][k2].f[b], bigB7[k2].f[b]);
+            }
           }
         }
       }
@@ -744,7 +737,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (threadIdx.x == 63) {
       for (int m = 0; m < M; m++) {
         for (int i = 0; i < YTILE; i++) {
-          if (commitColumn[i]) C[n + i + m * N] = __float2half(sum[m][i]);
+          if (commitColumn[i])
+            C[n + i + m * N] = __float2s<scalar_t>(sum[m][i]);
         }
       }
     }
@@ -764,9 +758,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 }
 
 #else   // !defined(__HIP__MI300_MI250__) TODO: Add NAVI support
-template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
-__global__ void wvSplitK_hf_(const int K, const int N, const DTYPE* B,
-                             const DTYPE* __restrict__ A, DTYPE* C,
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int M>
+__global__ void wvSplitK_hf_(const int K, const int N, const scalar_t* B,
+                             const scalar_t* __restrict__ A, scalar_t* C,
                              const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
@@ -774,20 +769,21 @@ __global__ void wvSplitK_hf_(const int K, const int N, const DTYPE* B,
 
 #if defined(__HIP__MI300_MI250__)  // TODO: Add NAVI support
 // This version targets big A[] cases, where it is much larger than LDS capacity
-template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int M>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitK_hf_big_(const int K, const int N, const DTYPE* B,
-                     const DTYPE* __restrict__ A, DTYPE* C, const int _WvPrGrp,
-                     const int CuCount) {
-  using half8 =
+    wvSplitK_hf_big_(const int K, const int N, const scalar_t* B,
+                     const scalar_t* __restrict__ A, scalar_t* C,
+                     const int _WvPrGrp, const int CuCount) {
+  using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
 
   union bigType {
-    DTYPE h[A_CHUNK];
+    scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
     float2 f2[A_CHUNK / 4];
     double d[A_CHUNK / 4];
-    half8 h8;
+    scalar8 h8;
   };
 
   //----------------------------------------------------
@@ -797,7 +793,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // TODO: When activation matrix is larger than 64 KB
   //	     then this is not goint to work!
   //----------------------------------------------------
-  __shared__ half s[1024 * 32];
+  __shared__ scalar_t s[1024 * 32];
 
   //----------------------------------------------------
   // Computation of columns that need to be committed to memory!
@@ -842,15 +838,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
        k += THRDS * WvPrGrp * A_CHUNK) {
     uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
 
-    // Transpose of A implementation
-    // uint32_t k_ot = (k_in / M) + (k_in % M) * K; // transopse for
-    // bank-conflict-free readback
-
     if (k_in >= min(K * M, 32 * 1024)) break;
 
-    //((bigType*)(&s[k_in]))->b128 = ((bigType*)(&A[k_in]))->b128;
     *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
-    //((bigType*)(&s[k_ot]))->b128 = ((bigType*)(&A[k_in]))->b128;
   }
   __syncthreads();
   #endif
@@ -957,18 +947,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
 
-        const half* B_ = &B[(n + 0) * K + k_];
-        bigB0[k2].h8 = (loadnt((half8*)(&B_[0 * K])));
+        const scalar_t* B_ = &B[(n + 0) * K + k_];
+        bigB0[k2].h8 = (loadnt((scalar8*)(&B_[0 * K])));
         //----------------------------------------------------
         // The following code with YTILE > 1 has to be deleted
         //----------------------------------------------------
-        if (YTILE >= 2) bigB1[k2].h8 = (loadnt((half8*)(&B_[1 * K])));
-        if (YTILE >= 3) bigB2[k2].h8 = (loadnt((half8*)(&B_[2 * K])));
-        if (YTILE >= 4) bigB3[k2].h8 = (loadnt((half8*)(&B_[3 * K])));
-        if (YTILE >= 5) bigB4[k2].h8 = (loadnt((half8*)(&B_[4 * K])));
-        if (YTILE >= 6) bigB5[k2].h8 = (loadnt((half8*)(&B_[5 * K])));
-        if (YTILE >= 7) bigB6[k2].h8 = (loadnt((half8*)(&B_[6 * K])));
-        if (YTILE >= 8) bigB7[k2].h8 = (loadnt((half8*)(&B_[7 * K])));
+        if (YTILE >= 2) bigB1[k2].h8 = (loadnt((scalar8*)(&B_[1 * K])));
+        if (YTILE >= 3) bigB2[k2].h8 = (loadnt((scalar8*)(&B_[2 * K])));
+        if (YTILE >= 4) bigB3[k2].h8 = (loadnt((scalar8*)(&B_[3 * K])));
+        if (YTILE >= 5) bigB4[k2].h8 = (loadnt((scalar8*)(&B_[4 * K])));
+        if (YTILE >= 6) bigB5[k2].h8 = (loadnt((scalar8*)(&B_[5 * K])));
+        if (YTILE >= 7) bigB6[k2].h8 = (loadnt((scalar8*)(&B_[6 * K])));
+        if (YTILE >= 8) bigB7[k2].h8 = (loadnt((scalar8*)(&B_[7 * K])));
       }
 
       // Fetch activation matrix from either just LDS or from both LDS / memory
@@ -1004,41 +994,32 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
           for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
-            asm("v_dot2c_f32_f16 %0, %2, %3"
-                : "=v"(sum[m][0])
-                : "0"(sum[m][0]), "v"(bigA[m][k2].f[b]), "v"(bigB0[k2].f[b]));
+            DOT2C(sum[m][0], bigA[m][k2].f[b], bigB0[k2].f[b]);
 
             //----------------------------------------------------
             // The following code with YTILE > 1
             //----------------------------------------------------
-            if (YTILE >= 2)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][1])
-                  : "0"(sum[m][1]), "v"(bigA[m][k2].f[b]), "v"(bigB1[k2].f[b]));
-            if (YTILE >= 3)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][2])
-                  : "0"(sum[m][2]), "v"(bigA[m][k2].f[b]), "v"(bigB2[k2].f[b]));
-            if (YTILE >= 4)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][3])
-                  : "0"(sum[m][3]), "v"(bigA[m][k2].f[b]), "v"(bigB3[k2].f[b]));
-            if (YTILE >= 5)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][4])
-                  : "0"(sum[m][4]), "v"(bigA[m][k2].f[b]), "v"(bigB4[k2].f[b]));
-            if (YTILE >= 6)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][5])
-                  : "0"(sum[m][5]), "v"(bigA[m][k2].f[b]), "v"(bigB5[k2].f[b]));
-            if (YTILE >= 7)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][6])
-                  : "0"(sum[m][6]), "v"(bigA[m][k2].f[b]), "v"(bigB6[k2].f[b]));
-            if (YTILE >= 8)
-              asm("v_dot2c_f32_f16 %0, %2, %3"
-                  : "=v"(sum[m][7])
-                  : "0"(sum[m][7]), "v"(bigA[m][k2].f[b]), "v"(bigB7[k2].f[b]));
+            if (YTILE >= 2) {
+              DOT2C(sum[m][1], bigA[m][k2].f[b], bigB1[k2].f[b]);
+            }
+            if (YTILE >= 3) {
+              DOT2C(sum[m][2], bigA[m][k2].f[b], bigB2[k2].f[b]);
+            }
+            if (YTILE >= 4) {
+              DOT2C(sum[m][3], bigA[m][k2].f[b], bigB3[k2].f[b]);
+            }
+            if (YTILE >= 5) {
+              DOT2C(sum[m][4], bigA[m][k2].f[b], bigB4[k2].f[b]);
+            }
+            if (YTILE >= 6) {
+              DOT2C(sum[m][5], bigA[m][k2].f[b], bigB5[k2].f[b]);
+            }
+            if (YTILE >= 7) {
+              DOT2C(sum[m][6], bigA[m][k2].f[b], bigB6[k2].f[b]);
+            }
+            if (YTILE >= 8) {
+              DOT2C(sum[m][7], bigA[m][k2].f[b], bigB7[k2].f[b]);
+            }
           }
         }
       }
@@ -1081,7 +1062,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (threadIdx.x == 63) {
       for (int m = 0; m < M; m++) {
         for (int i = 0; i < YTILE; i++) {
-          if (commitColumn[i]) C[n + i + m * N] = __float2half(sum[m][i]);
+          if (commitColumn[i])
+            C[n + i + m * N] = __float2s<scalar_t>(sum[m][i]);
         }
       }
     }
@@ -1101,9 +1083,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   }
 }
 #else   // !defined(__HIP__MI300_MI250__) TODO: Add NAVI support
-template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
-__global__ void wvSplitK_hf_big_(const int K, const int N, const DTYPE* B,
-                                 const DTYPE* __restrict__ A, DTYPE* C,
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int M>
+__global__ void wvSplitK_hf_big_(const int K, const int N, const scalar_t* B,
+                                 const scalar_t* __restrict__ A, scalar_t* C,
                                  const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
@@ -1138,13 +1121,19 @@ int mindiv(int N, int div1, int div2) {
   return rtn;
 }
 
-void wvSplitK_(void* in_a, void* in_b, void* out_c, const int M_in,
-               const int K_in, const int N_in, cudaStream_t stream,
-               const int CuCount = 0) {
+void wvSplitK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
+              const int64_t N_in, const int64_t CuCount) {
+  auto M_in = in_a.size(0);
+  auto K_in = in_a.size(1);
+
+  TORCH_CHECK(in_a.dtype() == in_b.dtype());
+  TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
+              in_a.dtype() == torch::kBFloat16);
+
   dim3 grid(CuCount);
-  half* af4 = reinterpret_cast<half*>(in_a);
-  const half* bf4 = reinterpret_cast<const half*>(in_b);
-  auto* c = reinterpret_cast<half*>(out_c);
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
 #define WVSPLITK(_WvPrGrp, _YTILEs, _YTILEm, _YTILEb, _UNRLs, _UNRLm, _UNRLb, \
                  _N)                                                          \
@@ -1152,52 +1141,44 @@ void wvSplitK_(void* in_a, void* in_b, void* out_c, const int M_in,
     dim3 block(64, _WvPrGrp);                                                 \
     if ((K_in * N_in <= 32 * 1024) && (M_in % _YTILEs == 0)) {                \
       int __wvPrGrp = mindiv(M_in, CuCount * _YTILEs, _WvPrGrp);              \
-      wvSplitK_hf_sml_<64, _YTILEs, _WvPrGrp, 8, _UNRLs, _N>                  \
+      wvSplitK_hf_sml_<fptype, 64, _YTILEs, _WvPrGrp, 8, _UNRLs, _N>          \
           <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,    \
                                        CuCount);                              \
     } else if (K_in * N_in <= 32 * 1024 * 1.2) {                              \
       int __wvPrGrp = mindiv(M_in, CuCount * _YTILEm, _WvPrGrp);              \
-      wvSplitK_hf_<64, _YTILEm, _WvPrGrp, 8, _UNRLm, _N>                      \
+      wvSplitK_hf_<fptype, 64, _YTILEm, _WvPrGrp, 8, _UNRLm, _N>              \
           <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,    \
                                        CuCount);                              \
     } else {                                                                  \
       int __wvPrGrp = mindiv(M_in, CuCount * _YTILEb, _WvPrGrp);              \
-      wvSplitK_hf_big_<64, _YTILEb, _WvPrGrp, 8, _UNRLb, _N>                  \
+      wvSplitK_hf_big_<fptype, 64, _YTILEb, _WvPrGrp, 8, _UNRLb, _N>          \
           <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,    \
                                        CuCount);                              \
     }                                                                         \
   }
 
-  switch (N_in) {
-    case 1:
-      WVSPLITK(16, 2, 2, 2, 2, 2, 2, 1)  // MI308
-      break;
-    case 2:
-      WVSPLITK(16, 2, 2, 2, 2, 2, 2, 2)  // MI308
-      break;
-    case 3:
-      WVSPLITK(16, 4, 7, 7, 1, 1, 1, 3)  // MI308
-      break;
-    case 4:
-      WVSPLITK(16, 4, 7, 7, 1, 1, 1, 4)  // MI308
-      break;
-    default:
-      throw std::runtime_error("Unsupported N value: " + std::to_string(M_in) +
-                               "," + std::to_string(K_in) + "," +
-                               std::to_string(N_in));
-  }
-
-  cudaError_t err = cudaGetLastError();
-  if (cudaSuccess != err) {
-    throw std::runtime_error("CUDA kernel failed : " + std::to_string(err));
-  }
-}
-
-void wvSplitK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
-              const int64_t N_in, const int64_t CuCount) {
-  auto M = in_a.size(0);
-  auto K = in_a.size(1);
-  int N = N_in;
-  wvSplitK_(in_a.data_ptr(), in_b.data_ptr(), out_c.data_ptr(), M, K, N,
-            at::cuda::getCurrentCUDAStream(), CuCount);
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitK", [&] {
+    using fptype = typename scalar<scalar_t>::type;
+    fptype* af4 = reinterpret_cast<fptype*>(in_a.data_ptr());
+    const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.data_ptr());
+    fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
+    switch (N_in) {
+      case 1:
+        WVSPLITK(16, 2, 2, 2, 2, 2, 2, 1)  // MI308
+        break;
+      case 2:
+        WVSPLITK(16, 2, 2, 2, 2, 2, 2, 2)  // MI308
+        break;
+      case 3:
+        WVSPLITK(16, 4, 7, 7, 1, 1, 1, 3)  // MI308
+        break;
+      case 4:
+        WVSPLITK(16, 4, 7, 7, 1, 1, 1, 4)  // MI308
+        break;
+      default:
+        throw std::runtime_error(
+            "Unsupported N value: " + std::to_string(M_in) + "," +
+            std::to_string(K_in) + "," + std::to_string(N_in));
+    }
+  });
 }
