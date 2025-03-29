@@ -39,8 +39,10 @@ class PythonicToolParser(ToolParser):
     # Neither of these are necessary for e.g. ToolACE, but both would help make
     # Llama3.2 models more reliable.
 
+    TOOL_NAME_PAT = r"([a-zA-Z_]+[\w-]*)\("
+    TOOL_NAME_REGEX = re.compile(TOOL_NAME_PAT)
     TOOL_CALL_REGEX = re.compile(
-        r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
+        fr"\[({TOOL_NAME_PAT}([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*({TOOL_NAME_PAT}([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
         re.DOTALL)
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
@@ -68,14 +70,15 @@ class PythonicToolParser(ToolParser):
                                                 content=model_output)
 
         try:
-            module = ast.parse(model_output)
+            remapped_output, name_map = _remap_names(model_output)
+            module = ast.parse(remapped_output)
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                     isinstance(e, ast.Call) for e in parsed.elts):
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=[
-                        _handle_single_tool(e)  # type: ignore
+                        _handle_single_tool(e, name_map)  # type: ignore
                         for e in parsed.elts
                     ],
                     content=None)
@@ -109,14 +112,15 @@ class PythonicToolParser(ToolParser):
                 return None
             valid_text, added_text = valid_and_added_text
 
-            module = ast.parse(valid_text)
+            remapped_text, name_map = _remap_names(valid_text)
+            module = ast.parse(remapped_text)
             parsed = getattr(module.body[0], "value", None)
             if not isinstance(parsed, ast.List) or not all(
                     isinstance(e, ast.Call) for e in parsed.elts):
                 raise _UnexpectedAstError(
                     "Tool output must be a list of function calls")
             tool_calls = [
-                _handle_single_tool(e)  # type: ignore
+                _handle_single_tool(e, name_map)  # type: ignore
                 for e in parsed.elts
             ]
 
@@ -170,10 +174,31 @@ class PythonicToolParser(ToolParser):
                 return None
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
+            logger.exception(current_text)
             logger.debug(
                 "Skipping chunk as a result of tool streaming extraction "
                 "error")
             return None
+
+
+def _remap_names(text: str) -> (str, dict[str, str]):
+    # remap all function names to func0..n so that the API
+    # caller is not limited to valid python function names,
+    # and instead only has to match TOOL_NAME_REGEX
+    name_map = {}
+    counter = 0
+
+    def _replacer(match):
+        nonlocal counter
+        original_name = match.group(1)
+        placeholder = f"func{counter}"
+        name_map[placeholder] = original_name
+        counter += 1
+        return f"{placeholder}("
+
+    # Apply the replacement function to the entire string.
+    remapped_output = PythonicToolParser.TOOL_NAME_REGEX.sub(_replacer, text)
+    return remapped_output, name_map
 
 
 def _get_parameter_value(val: ast.expr) -> Any:
@@ -193,10 +218,14 @@ def _get_parameter_value(val: ast.expr) -> Any:
         raise _UnexpectedAstError("Tool call arguments must be literals")
 
 
-def _handle_single_tool(call: ast.Call) -> ToolCall:
+def _handle_single_tool(call: ast.Call, name_map: dict[str, str]) -> ToolCall:
     if not isinstance(call.func, ast.Name):
         raise _UnexpectedAstError("Invalid tool call name")
     function_name = call.func.id
+    try:
+        function_name = name_map[function_name]
+    except KeyError:
+        pass
     arguments = {}
     for keyword in call.keywords:
         arguments[keyword.arg] = _get_parameter_value(keyword.value)
