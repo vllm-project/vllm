@@ -2,12 +2,13 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, AbstractSet, Type, Optional
+from typing import AbstractSet, Dict, Optional, Type
 
-from vllm.logger import init_logger
 from vllm.entrypoints.openai.protocol import LoadLoRAAdapterRequest
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
 
 class LoRAResolver(ABC):
     """Base class for LoRA adapter resolvers.
@@ -19,10 +20,8 @@ class LoRAResolver(ABC):
     """
 
     @abstractmethod
-    async def resolve_lora(
-        self,
-        lora_name: str
-    ) -> Optional[LoadLoRAAdapterRequest]:
+    async def resolve_lora(self,
+                           lora_name: str) -> Optional[LoadLoRAAdapterRequest]:
         """Abstract method to resolve and fetch a LoRA model adapter.
         
         This method should implement the logic to locate and download LoRA 
@@ -60,24 +59,22 @@ class _LoRAResolverRegistry:
             resolver_cls: The LoRA resolver class to register.
         """
         if not isinstance(resolver_name, str):
-            raise TypeError(
-                f"`resolver_name` should be a string, not a {type(resolver_name)}")
+            raise TypeError(f"`resolver_name` should be a string, "
+                            f"not a {type(resolver_name)}")
 
         if resolver_name in self.resolvers:
             logger.warning(
                 "LoRA resolver %s is already registered, and will be "
-                "overwritten by the new resolver class %s.",
-                resolver_name,
+                "overwritten by the new resolver class %s.", resolver_name,
                 resolver_cls)
 
-        if not (isinstance(resolver_cls, type) and 
-                issubclass(resolver_cls, LoRAResolver)):
+        if not (isinstance(resolver_cls, type)
+                and issubclass(resolver_cls, LoRAResolver)):
             raise TypeError(
                 f"`resolver_cls` should be a LoRAResolver subclass, "
                 f"not a {type(resolver_cls)}")
 
         self.resolvers[resolver_name] = resolver_cls
-
 
     def get_resolver(self, resolver_name: str) -> Type[LoRAResolver]:
         """Get a registered resolver class by name.
@@ -89,8 +86,9 @@ class _LoRAResolverRegistry:
             KeyError: If the resolver is not found in the registry.
         """
         if resolver_name not in self.resolvers:
-            raise KeyError(f"LoRA resolver '{resolver_name}' not found. "
-                         f"Available resolvers: {list(self.resolvers.keys())}")
+            raise KeyError(
+                f"LoRA resolver '{resolver_name}' not found. "
+                f"Available resolvers: {list(self.resolvers.keys())}")
         return self.resolvers[resolver_name]
 
 
