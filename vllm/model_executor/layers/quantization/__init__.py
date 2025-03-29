@@ -31,7 +31,8 @@ QUANTIZATION_METHODS: List[str] = [
     "neuron_quant",
     "ipex",
     "quark",
-    "moe_wna16"
+    "moe_wna16",
+    "flute",
 ]
 
 # The customized quantization methods which will be added to this dict.
@@ -90,6 +91,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .deepspeedfp import DeepSpeedFPConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
+    from .flute import FluteConfig
     from .fp8 import Fp8Config
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
@@ -132,6 +134,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "ipex": IPEXConfig,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
+        "flute": FluteConfig,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
