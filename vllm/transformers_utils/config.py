@@ -220,13 +220,26 @@ def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
-def uses_mrope(config: PretrainedConfig) -> bool:
-    """Detect if the model with this config uses M-ROPE."""
+def _uses_mrope(config: PretrainedConfig) -> bool:
     rope_scaling = getattr(config, "rope_scaling", None)
     if rope_scaling is None:
         return False
 
     return "mrope_section" in rope_scaling
+
+
+def uses_mrope(config: PretrainedConfig) -> bool:
+    """Detect if the model with this config uses M-ROPE."""
+    return _uses_mrope(config) or thinker_uses_mrope(config)
+
+
+def thinker_uses_mrope(config: PretrainedConfig) -> bool:
+    """Detect if the model contains a thinker config and it uses M-ROPE."""
+    thinker_config = getattr(config, "thinker_config", None)
+    if thinker_config is None:
+        return False
+
+    return uses_mrope(thinker_config)
 
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:

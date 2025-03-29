@@ -712,7 +712,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 token_ids = seq_data.get_token_ids()
 
                 mrope_input_positions, mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions(
+                    MRotaryEmbedding.get_input_positions_and_delta(
                         token_ids,
                         hf_config=hf_config,
                         image_grid_thw=image_grid_thw,
@@ -721,6 +721,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                         context_len=inter_data.context_lens[seq_idx],
                         seq_len=inter_data.seq_lens[seq_idx],
                     )
+                mrope_input_positions = mrope_input_positions.tolist()
 
                 seq_data.mrope_position_delta = mrope_position_delta
                 inter_data.mrope_input_positions[
