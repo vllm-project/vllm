@@ -1508,6 +1508,14 @@ def _resize_cache(x: torch.Tensor, v: Tuple[int, ...]) -> torch.Tensor:
     return x.flatten()[:prod(v)].view(*v)
 
 
+def find_contiguous_segments(t: torch.Tensor):
+    non_matching = t[:-1] != t[1:]
+    ends = non_matching.nonzero().flatten() + 1
+    starts = torch.concat((torch.tensor([0], device=t.device), ends))
+    ends = torch.concat((ends, torch.tensor([t.numel()], device=t.device)))
+    return starts, ends
+
+
 def fused_experts_impl(hidden_states: torch.Tensor,
                        w1: torch.Tensor,
                        w2: torch.Tensor,
