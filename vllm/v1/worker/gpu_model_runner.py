@@ -150,18 +150,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
-            assert self.speculative_config.method == "ngram", \
-                    "Currently, only ngram spec decode is supported in V1."
             if get_pp_group().is_last_rank:
-                self.drafter = NgramProposer()
-                # Trigger Numba JIT compilation for N-gram proposer.
-                # This usually takes less than 1 second.
-                self.drafter.propose(
-                    np.zeros(1024, dtype=np.int32),
-                    self.speculative_config.prompt_lookup_min,
-                    self.speculative_config.prompt_lookup_max,
-                    self.speculative_config.num_speculative_tokens,
-                )
+                if self.speculative_config.method == "ngram":
+                    self.drafter = NgramProposer(self.vllm_config)
+                else:
+                    raise ValueError("Unknown speculative decoding method: "
+                                     f"{self.speculative_config.method}")
                 self.rejection_sampler = RejectionSampler()
 
         # Request states.
@@ -1172,11 +1166,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             end_idx = start_idx + num_sampled_ids
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             drafter_output = self.drafter.propose(
-                self.input_batch.token_ids_cpu[i, :end_idx],
-                self.speculative_config.prompt_lookup_min,
-                self.speculative_config.prompt_lookup_max,
-                self.speculative_config.num_speculative_tokens,
-            )
+                self.input_batch.token_ids_cpu[i, :end_idx])
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:
