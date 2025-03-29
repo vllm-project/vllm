@@ -391,7 +391,7 @@ class EngineArgs:
         parser.add_argument(
             '--guided-decoding-backend',
             type=str,
-            default="xgrammar" if envs.VLLM_USE_V1 == "0" else "auto",
+            default="xgrammar" if not envs.VLLM_USE_V1 else "auto",
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
             'https://github.com/mlc-ai/xgrammar and '
