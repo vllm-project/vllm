@@ -34,7 +34,6 @@ class EagleProposer:
         next_token_ids: torch.Tensor,
         # [batch_size + 1] starting with 0
         cu_num_tokens: torch.Tensor,
-        max_num_tokens: int,
         # [batch_size, max_num_blocks_per_req]
         block_table: torch.Tensor,
         sampling_metadata: SamplingMetadata,
@@ -43,7 +42,7 @@ class EagleProposer:
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
 
-        input_ids = target_token_ids
+        input_ids = torch.empty_like(target_token_ids)
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
         input_ids[:-1] = target_token_ids[1:]
@@ -52,7 +51,9 @@ class EagleProposer:
         input_ids[last_token_indices] = next_token_ids
 
         seq_lens = target_positions[last_token_indices] + 1
-        max_seq_len = seq_lens.max().item()  # FIXME: Avoid synchronization.
+        # FIXME(woosuk): The below two ops cause synchronization. Optimize.
+        max_seq_len = seq_lens.max().item()
+        max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
         slot_mapping = compute_slot_mapping(
             positions=target_positions,
             block_table=block_table,

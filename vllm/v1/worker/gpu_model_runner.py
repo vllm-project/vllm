@@ -36,6 +36,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -150,18 +151,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
-            assert self.speculative_config.method == "ngram", \
-                    "Currently, only ngram spec decode is supported in V1."
             if get_pp_group().is_last_rank:
-                self.drafter = NgramProposer()
-                # Trigger Numba JIT compilation for N-gram proposer.
-                # This usually takes less than 1 second.
-                self.drafter.propose(
-                    np.zeros(1024, dtype=np.int32),
-                    self.speculative_config.prompt_lookup_min,
-                    self.speculative_config.prompt_lookup_max,
-                    self.speculative_config.num_speculative_tokens,
-                )
+                if self.speculative_config.method == "ngram":
+                    self.drafter = NgramProposer(self.vllm_config)
+                elif self.speculative_config.method == "eagle":
+                    self.drafter = EagleProposer(self.vllm_config, self.device)
+                else:
+                    raise ValueError("Unknown speculative decoding method: "
+                                     f"{self.speculative_config.method}")
                 self.rejection_sampler = RejectionSampler()
 
         # Request states.
@@ -1127,6 +1124,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampled_token_ids,
                 self.input_batch.vocab_size,
             )
+
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
@@ -1134,8 +1132,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.use_spec_decode:
             spec_token_ids = None
         else:
-            spec_token_ids = self.generate_draft_token_ids(
-                valid_sampled_token_ids, sampling_metadata)
+            token_indices = None
+            cu_num_tokens = None
+            next_token_ids = None  # Sampled, Bonus, or Recovered
+            input_ids = self.input_ids[:num_scheduled_tokens]
+            spec_token_ids = self.drafter.propose(
+                target_token_ids=input_ids[token_indices],
+                target_positions=positions[token_indices],
+                target_hidden_states=hidden_states[token_indices],
+                next_token_ids=next_token_ids,
+                cu_num_tokens=cu_num_tokens,
+                block_table=attn_metadata.block_table,
+                sampling_metadata=sampling_metadata,
+            )
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
