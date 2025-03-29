@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               UnloadLoRAAdapterRequest)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.utils import AtomicCounter
 
@@ -67,6 +68,12 @@ class OpenAIServingModels:
         self.static_lora_modules = lora_modules
         self.lora_requests: list[LoRARequest] = []
         self.lora_id_counter = AtomicCounter(0)
+
+        self.lora_resolvers: list[LoRAResolver] = []
+        for lora_resolver_name in LoRAResolverRegistry.get_supported_resolvers(
+        ):
+            self.lora_resolvers.append(
+                LoRAResolverRegistry.get_resolver(lora_resolver_name))
 
         self.prompt_adapter_requests = []
         if prompt_adapters is not None:
@@ -233,6 +240,26 @@ class OpenAIServingModels:
                 status_code=HTTPStatus.NOT_FOUND)
 
         return None
+
+    async def resolve_lora(self, lora_name: str) -> Union[ErrorResponse, str]:
+        """Attempt to resolve a LoRA adapter using available resolvers.
+
+        Args:
+            lora_name: Name/identifier of the LoRA adapter
+
+        Returns:
+            Success message if successful, ErrorResponse otherwise.
+        """
+        for resolver in self.lora_resolvers:
+            lora_adapter_request = await resolver.resolve_lora(lora_name)
+            if lora_adapter_request is not None:
+                return await self.load_lora_adapter(lora_adapter_request)
+
+        return create_error_response(
+            message=(f"Failed to resolve LoRA adapter '{lora_name}' with any "
+                     "available resolver"),
+            err_type="NotFoundError",
+            status_code=HTTPStatus.NOT_FOUND)
 
 
 def create_error_response(
