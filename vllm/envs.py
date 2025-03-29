@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import sys
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     S3_ACCESS_KEY_ID: Optional[str] = None
     S3_SECRET_ACCESS_KEY: Optional[str] = None
     S3_ENDPOINT_URL: Optional[str] = None
+    VLLM_MODEL_REDIRECT_PATH: Optional[str] = None
     VLLM_CACHE_ROOT: str = os.path.expanduser("~/.cache/vllm")
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
@@ -78,6 +80,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
+    VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -93,6 +96,7 @@ if TYPE_CHECKING:
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_DP_RANK: int = 0
+    VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
@@ -267,6 +271,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # API key for vLLM API server
     "VLLM_API_KEY":
     lambda: os.environ.get("VLLM_API_KEY", None),
+
+    # Whether to log responses from API Server for debugging
+    "VLLM_DEBUG_LOG_API_SERVER_RESPONSE":
+    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").
+    lower() == "true",
 
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
@@ -541,6 +550,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MOE_PADDING":
     lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
 
+    # custom paged attention kernel for MI3* cards
+    "VLLM_ROCM_CUSTOM_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
+             ("true", "1")),
+
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
     lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
@@ -613,6 +627,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_RANK":
     lambda: int(os.getenv("VLLM_DP_RANK", "0")),
 
+    # Rank of the process in the data parallel setting.
+    # Defaults to VLLM_DP_RANK when not set.
+    "VLLM_DP_RANK_LOCAL":
+    lambda: int(
+        os.getenv("VLLM_DP_RANK_LOCAL", sys.modules[__name__].VLLM_DP_RANK)),
+
     # World size of the data parallel setting
     "VLLM_DP_SIZE":
     lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
@@ -628,6 +648,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
+
+    # Use model_redirect to redirect the model name to a local folder.
+    "VLLM_MODEL_REDIRECT_PATH":
+    lambda: os.environ.get("VLLM_MODEL_REDIRECT_PATH", None),
 
     # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
     "VLLM_MARLIN_USE_ATOMIC_ADD":
