@@ -40,8 +40,7 @@ class P2pNcclPipe:
         self._hostname = hostname
         self._port = port
         self.zmq_address = f"{self._hostname}:{self._port}"
-        # TODO: 换成 --port
-        self.http_address = f"{self._hostname}:{self.config.kv_port}"
+        self.http_address = f"{self._hostname}:{self.config.http_port}"
         self.proxy_address = f"{self.config.proxy_ip}:{self.config.proxy_port}"
 
         self.context = zmq.Context()
