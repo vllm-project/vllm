@@ -140,7 +140,10 @@ class EngineArgs:
     rope_theta: Optional[float] = None
     hf_overrides: Optional[HfOverrides] = None
     tokenizer_revision: Optional[str] = None
+
     quantization: Optional[str] = None
+    torchao_config: Optional[str] = None
+
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
@@ -605,6 +608,12 @@ class EngineArgs:
                             'None, we assume the model weights are not '
                             'quantized and use `dtype` to determine the data '
                             'type of the weights.')
+        parser.add_argument('--torchao-config',
+                            type=nullable_str,
+                            default=EngineArgs.torchao_config,
+                            help='string configuration for torchao, encodes '
+                            'the type of quantization and all relevant '
+                            'arguments, for example: int4wo-128.')
         parser.add_argument(
             '--rope-scaling',
             default=None,
@@ -1169,6 +1178,7 @@ class EngineArgs:
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
+            torchao_config=self.torchao_config,
             enforce_eager=self.enforce_eager,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
