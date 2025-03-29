@@ -13,11 +13,11 @@ traffic will stay high for a long period of time, verifying we do not increase o
 memory usage over time is essential to prevent possible CUDA ooms. 
 """
 
-import vllm 
-import torch 
+import torch
 
-from vllm.sequence import ( SequenceGroup)
+import vllm
 from tests.core.utils import create_dummy_prompt
+from vllm.sequence import SequenceGroup
 
 ITERATIONS = 100
 MAIN_MODEL = "JackFram/llama-68m"
@@ -30,14 +30,18 @@ SPEC_DISABLE_BATCH_SIZE = 2
 
 previous_memory_allocated = None
 
+
 def add_seq_group_to_engine(engine: vllm.LLMEngine, seq_group: SequenceGroup):
     scheduler = engine.scheduler[0]
     scheduler.add_seq_group(seq_group)
+
 
 """
 Since we are using a batch size greater than the disabled batch size, 
 we can ensure we go through the _no_spec codepath for most of our engine steps.
 """
+
+
 def test_memory_usage_no_spec():
     llm = vllm.LLM(
         model=MAIN_MODEL,
@@ -51,37 +55,36 @@ def test_memory_usage_no_spec():
 
     for i in range(ITERATIONS):
         seq, seq_group = create_dummy_prompt(request_id=str(i),
-                                            prompt_length=10,
-                                            min_tokens=10,
-                                            max_tokens=10)
+                                             prompt_length=10,
+                                             min_tokens=10,
+                                             max_tokens=10)
 
         add_seq_group_to_engine(engine, seq_group)
-        
+
         batch_sequences.add(seq)
         engine.step()
         for seq in list(batch_sequences):
             if seq.is_finished():
                 batch_sequences.remove(seq)
-        
-        # If we aren't at our batch size yet, continue 
-        if len(batch_sequences) <= BATCH_SIZE:
-            continue 
 
-        # Otherwise, loop until at least one request is done 
+        # If we aren't at our batch size yet, continue
+        if len(batch_sequences) <= BATCH_SIZE:
+            continue
+
+        # Otherwise, loop until at least one request is done
         while not any(seq.is_finished() for seq in batch_sequences):
             engine.step()
 
-        # Remove it from the set 
+        # Remove it from the set
         for seq in list(batch_sequences):
             if seq.is_finished():
                 batch_sequences.remove(seq)
-        
-        # At this point, we are always at the case where we have finished processing 
+
+        # At this point, we are always at the case where we have finished processing
         # some number of requests from the batch after running several _no_spec
-        # executions. The memory should not have increased between the previous time this was recorded 
-        # and the current time. 
+        # executions. The memory should not have increased between the previous time this was recorded
+        # and the current time.
         if previous_memory_allocated is None:
             previous_memory_allocated = torch.cuda.memory_allocated()
-        else: 
+        else:
             assert previous_memory_allocated == torch.cuda.memory_allocated()
-
