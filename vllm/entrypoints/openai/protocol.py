@@ -80,6 +80,13 @@ class ErrorResponse(OpenAIBaseModel):
     type: str
     param: Optional[str] = None
     code: int
+    # In case of error OpenAI sends message in error field
+    error: Optional[dict] = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # In case of error OpenAI sends message in error field
+        self.error = {"message": self.message}
 
 
 class ModelPermission(OpenAIBaseModel):
