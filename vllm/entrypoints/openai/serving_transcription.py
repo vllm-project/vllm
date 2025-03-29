@@ -153,11 +153,13 @@ class OpenAIServingTranscription(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
+        lora_cache_dir: Optional[str] = None,
         return_tokens_as_token_ids: bool = False,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
+                         lora_cache_dir=lora_cache_dir,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
@@ -257,7 +259,7 @@ class OpenAIServingTranscription(OpenAIServing):
             (
                 lora_request,
                 prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            ) = await self._maybe_get_adapters(request)
 
             if lora_request:
                 return self.create_error_response(

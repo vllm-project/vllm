@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import random
 import shutil
 from contextlib import suppress
 
@@ -53,7 +54,12 @@ def zephyr_lora_files():
 
 
 @pytest.fixture(scope="module")
-def server_with_lora_modules_json(zephyr_lora_files):
+def zephyr_model_files():
+    return snapshot_download(repo_id=MODEL_NAME)
+
+
+@pytest.fixture(scope="module")
+def server_with_lora_modules_json(zephyr_lora_files, adapter_cache):
     # Define the json format LoRA module configurations
     lora_module_1 = {
         "name": "zephyr-lora",
@@ -85,12 +91,16 @@ def server_with_lora_modules_json(zephyr_lora_files):
         "2",
         "--max-num-seqs",
         "64",
+        "--lora-cache-dir",
+        str(adapter_cache),
     ]
 
-    # Enable the /v1/load_lora_adapter endpoint
-    envs = {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
+    lora_env = {
+        "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
+    }
 
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=envs) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args,
+                            env_dict=lora_env) as remote_server:
         yield remote_server
 
 
@@ -116,6 +126,68 @@ async def test_static_lora_lineage(client: openai.AsyncOpenAI,
     assert all(lora_model.parent == MODEL_NAME for lora_model in lora_models)
     assert lora_models[0].id == "zephyr-lora"
     assert lora_models[1].id == "zephyr-lora2"
+
+
+@pytest.mark.asyncio
+async def test_cached_non_lora_adapter(client: openai.AsyncOpenAI, tmp_path,
+                                       zephyr_model_files, adapter_cache):
+    """Validate that a cached model that isn't a lora adapter will not be
+    loaded from the cache directory"""
+    cached_nonlora_name = f"zephyr-7b-beta-{random.random()}"
+    model_files = adapter_cache / cached_nonlora_name
+    shutil.copytree(zephyr_model_files, model_files)
+
+    models = await client.models.list()
+    models = models.data
+    lora_models = models[1:]
+    assert len(lora_models) == 2
+
+    with pytest.raises(openai.NotFoundError):
+        await client.completions.create(
+            model=cached_nonlora_name,
+            prompt=["Hello there", "Foo bar bazz buzz"],
+            max_tokens=5,
+        )
+
+    models = await client.models.list()
+    models = models.data
+    lora_models = models[1:]
+    assert len(lora_models) == 2
+    assert lora_models[0].id != cached_nonlora_name
+    assert lora_models[1].id != cached_nonlora_name
+
+
+@pytest.mark.asyncio
+async def test_cached_lora_adapter(client: openai.AsyncOpenAI, tmp_path,
+                                   zephyr_lora_files, adapter_cache):
+    """Validate that a lora adapter can be dynamically discovered and loaded
+    from the cache directory"""
+    cached_lora_name = "zephyr-7b-beta-lora-{random.random()}"
+    model_files = adapter_cache / cached_lora_name
+    shutil.copytree(zephyr_lora_files, model_files)
+
+    models = await client.models.list()
+    models = models.data
+    lora_models = models[1:]
+    assert len(lora_models) == 2
+    assert lora_models[0].id != cached_lora_name
+    assert lora_models[1].id != cached_lora_name
+
+    result = await client.completions.create(
+        model=cached_lora_name,
+        prompt=["Hello there", "Foo bar bazz buzz"],
+        max_tokens=5,
+    )
+
+    assert not isinstance(result, Exception), f"Got exception {result}"
+    assert isinstance(result, openai.types.Completion)
+    assert result.model == cached_lora_name
+
+    models = await client.models.list()
+    models = models.data
+    lora_models = models[1:]
+    assert len(lora_models) == 3
+    assert lora_models[2].id == cached_lora_name
 
 
 @pytest.mark.asyncio
