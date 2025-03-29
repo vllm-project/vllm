@@ -1212,7 +1212,7 @@ class StoreBoolean(argparse.Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(argparse.HelpFormatter):
+class SortedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def add_arguments(self, actions):

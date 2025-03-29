@@ -48,7 +48,10 @@ def test_models(
 
         with vllm_runner(
                 model,
-                max_model_len=8192,
+                # Note: max_num_batched_tokens == 1024 is needed here to
+                # actually test chunked prompt
+                max_num_batched_tokens=1024,
+                max_model_len=8196,
                 gpu_memory_utilization=0.7,
                 max_num_seqs=16,
                 tensor_parallel_size=tensor_parallel_size) as vllm_model:
