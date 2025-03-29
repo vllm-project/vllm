@@ -33,6 +33,10 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
+from vllm.utils import (aiter_moe_enabled, aiter_fp8_block_moe_enabled)
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+     expand_weights, shuffle_weights)
+
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
@@ -583,6 +587,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
+
+            if aiter_fp8_block_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight.data, layer.w2_weight.data)
+ 
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
+
             return
 
         # If checkpoint is fp16, quantize in place.
@@ -610,6 +625,27 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
+
+            if aiter_moe_enabled():
+                 # reshaping weights is required for aiter moe kernel.
+                w13_scales, w2_scales = expand_weights(
+                    layer.w13_weight_scale.data,
+                    layer.w2_weight_scale.data,
+                    expansion_dims=[
+                        layer.w13_weight.shape[1], layer.w2_weight.shape[1]
+                    ])
+                layer.w13_weight_scale = torch.nn.Parameter(
+                    w13_scales.contiguous(), requires_grad=False)
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales.contiguous(), requires_grad=False)
+ 
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
+ 
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
             return
 
         # If checkpoint is fp8, we need to handle that the
@@ -676,6 +712,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         start:start + shard_size, :], _ = ops.scaled_fp8_quant(
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
+
+            if aiter_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
+                expansion_dims = [
+                    layer.w13_weight.shape[1], layer.w2_weight.shape[1]
+                ]
+                max_w13_scales, w2_scales = expand_weights(
+                    max_w13_scales,
+                    layer.w2_weight_scale.data,
+                    expansion_dims=expansion_dims)
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales.contiguous(), requires_grad=False)
+ 
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
+ 
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
 
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)

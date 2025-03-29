@@ -1746,6 +1746,27 @@ def is_navi3() -> bool:
     return archName is not None and "gfx11" in archName
 
 
+@cache
+def is_rocm() -> bool:
+    from vllm.platforms import current_platform
+    return current_platform.is_rocm()
+
+
+@cache
+def aiter_enabled() -> bool:
+    return is_rocm() and envs.VLLM_ROCM_USE_AITER
+
+
+@cache
+def aiter_moe_enabled() -> bool:
+    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_MOE
+
+
+@cache
+def aiter_fp8_block_moe_enabled() -> bool:
+    return aiter_moe_enabled() and envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_MOE
+
+
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
 ) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:

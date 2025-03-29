@@ -21,7 +21,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import direct_register_custom_op
+from vllm.utils import (direct_register_custom_op, aiter_moe_enabled)
+from .rocm_aiter_fused_moe import shuffle_weights
 
 if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
@@ -99,6 +100,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+
+        if aiter_moe_enabled():
+            # reshaping weights is required for aiter moe kernel.
+            shuffled_w13, shuffled_w2 = shuffle_weights(
+                layer.w13_weight.data, layer.w2_weight.data)
+            layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                  requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                 requires_grad=False)
 
         if envs.VLLM_MOE_PADDING:
             layer.w13_weight = torch.nn.Parameter(F.pad(
