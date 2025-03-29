@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib
 import random
 from copy import deepcopy
 from dataclasses import dataclass
@@ -81,10 +80,6 @@ def v1(run_with_both_engines_lora):
     # Simple autouse wrapper to run both engines for each test
     # This can be promoted up to conftest.py to run for every
     # test in a package
-
-    # Reload punica_gpu as the kernels used are tied to engine type.
-    from vllm.lora.punica_wrapper import punica_gpu
-    importlib.reload(punica_gpu)
 
     # Release any memory we might be holding on to. CI runs OOMs otherwise.
     from vllm.lora.ops.triton_ops.utils import (_LORA_A_PTR_DICT,
