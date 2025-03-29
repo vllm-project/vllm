@@ -33,7 +33,7 @@ class AiterMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "AITER_MLA"
+        return "ROCM_AITER_MLA"
 
     @staticmethod
     def get_impl_cls() -> Type["AiterMLAImpl"]:
@@ -367,8 +367,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          blocksparse_params, logits_soft_cap, attn_type,
                          **mla_args)
-        assert is_aiter_mla_enabled(
-        ), "Aiter MLA is initialized without being enabled properly."
 
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap

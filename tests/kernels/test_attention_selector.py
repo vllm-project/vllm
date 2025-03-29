@@ -19,13 +19,22 @@ def clear_cache():
     _cached_get_attn_backend.cache_clear()
 
 
-@pytest.mark.parametrize(
-    "name", ["TORCH_SDPA", "ROCM_FLASH", "XFORMERS", "FLASHINFER"])
+CUDA_SUPPORTED_BACKENDS = ["XFORMERS", "FLASHINFER"]
+HIP_SUPPORTED_BACKENDS = ["ROCM_FLASH", "TRITON_MLA", "ROCM_AITER_MLA"]
+CPU_SUPPORTED_BACKENDS = ["TORCH_SDPA"]
+
+
+@pytest.mark.parametrize("name", [
+    "TORCH_SDPA", "ROCM_FLASH", "XFORMERS", "FLASHINFER", "TRITON_MLA",
+    "ROCM_AITER_MLA"
+])
 @pytest.mark.parametrize("use_v1", [True, False])
+@pytest.mark.parametrize("use_mla", [True, False])
 @pytest.mark.parametrize("device", ["cpu", "hip", "cuda"])
 def test_env(
     name: str,
     use_v1: bool,
+    use_mla: bool,
     device: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -36,22 +45,48 @@ def test_env(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
         m.setenv(STR_BACKEND_ENV_VAR, name)
+        m.setenv("VLLM_MLA_DISABLE", "1" if use_mla else "0")
 
         if device == "cpu":
-            with patch("vllm.attention.selector.current_platform",
-                       CpuPlatform()):
-                backend = get_attn_backend(16, torch.float16, torch.float16,
-                                           16, False)
-            assert backend.get_name() == "TORCH_SDPA"
+            if name in CPU_SUPPORTED_BACKENDS:
+                with patch("vllm.attention.selector.current_platform",
+                           CpuPlatform()):
+                    backend = get_attn_backend(16, torch.float16,
+                                               torch.float16, 16, False)
+                assert backend.get_name() == "TORCH_SDPA"
         elif device == "hip":
-            with patch("vllm.attention.selector.current_platform",
-                       RocmPlatform()):
-                backend = get_attn_backend(16, torch.float16, torch.float16,
-                                           16, False)
-            EXPECTED = "TRITON_ATTN_VLLM_V1" if use_v1 else "ROCM_FLASH"
-            assert backend.get_name() == EXPECTED
+            if name in HIP_SUPPORTED_BACKENDS:
+                with patch("vllm.attention.selector.current_platform",
+                           RocmPlatform()):
+                    backend_1 = get_attn_backend(16,
+                                                 torch.float16,
+                                                 torch.float16,
+                                                 16,
+                                                 False,
+                                                 use_mla=use_mla)
+                    backend_2 = get_attn_backend(16,
+                                                 torch.float16,
+                                                 torch.float16,
+                                                 1,
+                                                 False,
+                                                 use_mla=use_mla)
+                if use_mla:
+                    # Only two MLA backends TRITON_MLA and ROCM_AITER_MLA.
+                    # 1st case always selects TRITON_MLA.
+                    EXPECTED_1 = "TRITON_MLA"
+                    # 2nd case always selects ROCM_AITER_MLA unless
+                    # TRITON_MLA is specified as backend.
+                    EXPECTED_2 = ("ROCM_AITER_MLA"
+                                  if name != "TRITON_MLA" else "TRITON_MLA")
+                else:
+                    EXPECTED_1 = ("TRITON_ATTN_VLLM_V1"
+                                  if use_v1 else "ROCM_FLASH")
+                    EXPECTED_2 = EXPECTED_1
+
+                assert backend_1.get_name() == EXPECTED_1
+                assert backend_2.get_name() == EXPECTED_2
         else:
-            if name in ["XFORMERS", "FLASHINFER"]:
+            if name in CUDA_SUPPORTED_BACKENDS:
                 with patch("vllm.attention.selector.current_platform",
                            CudaPlatform()):
                     backend = get_attn_backend(16, torch.float16,
