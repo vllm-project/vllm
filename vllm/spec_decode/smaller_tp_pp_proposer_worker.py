@@ -5,9 +5,9 @@ from typing import List, Optional, Set, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.distributed.parallel_state import (get_tp_group,
+from vllm.distributed.parallel_state import (get_pp_group, get_tp_group,
                                              init_model_parallel_group,
-                                             patch_tensor_parallel_group)
+                                             patch_model_parallel_group)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -23,9 +23,9 @@ class _DummyModel(nn.Module):
     pass
 
 
-class SmallerTpProposerWorker(ProposerWorkerBase):
+class SmallerTpPpProposerWorker(ProposerWorkerBase):
     """Class which allows a speculative draft model to run with smaller tensor
-    parallel degree than target model.
+    parallel degree and pipeline parallel degree than target model.
     This reduces the communication overhead of small draft models.
 
     To implement this feature, this class differs behavior based on is_dummy
@@ -36,53 +36,68 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
     @classmethod
     def maybe_wrap_worker(cls, worker, draft_tensor_parallel_size: int,
-                          target_tensor_parallel_size: int):
+                          target_tensor_parallel_size: int,
+                          draft_pipeline_parallel_size: int,
+                          target_pipeline_parallel_size: int):
         """Wrap the worker in a SmallerTpProposerWorker if necessary.
         """
-        if draft_tensor_parallel_size == target_tensor_parallel_size:
+        if draft_tensor_parallel_size == target_tensor_parallel_size and \
+                draft_pipeline_parallel_size == target_pipeline_parallel_size:
             return worker
 
         # gpu ranks that will generate draft tokens together
-        draft_ranks = list(range(draft_tensor_parallel_size))
+        draft_tp_ranks = list(range(draft_tensor_parallel_size))
+        draft_pp_ranks = list(range(draft_pipeline_parallel_size))
 
         logger.info("Wrapping {%s} in {%s}", type(worker), cls)
-        return cls(worker, draft_ranks)
+        return cls(worker, draft_tp_ranks, draft_pp_ranks)
 
-    def __init__(self, worker: MultiStepWorker, draft_ranks: List[int]):
-        """Create a SmallerTpProposerWorker.
+    def __init__(self, worker: MultiStepWorker, draft_tp_ranks: List[int],
+                 draft_pp_ranks: List[int]):
+        """Create a SmallerTpPpProposerWorker.
 
         Args:
             worker (MultiStepWorker): an actual worker wrapped with this class
-            draft_ranks (List[int]): if this value is given, only the GPU ranks
-            written in this value participate in draft generation
+            draft_tp_ranks (List[int]): if this value is given, only the GPU tp
+             ranks written in this value participate in draft generation
+            draft_pp_ranks (List[int]): if this value is given, only the GPU pp
+             ranks written in this value participate in draft generation
         """
         self._worker = worker
-        self._draft_ranks = draft_ranks
+        self._draft_tp_ranks = draft_tp_ranks
+        self._draft_pp_ranks = draft_pp_ranks
 
         # init during init_device
         self._is_dummy = False
         self._tp_group = None
+        self._pp_group = None
 
-    def _patch_tensor_parallel_group(self):
-        """Temporarily patch the global tp group state with its own tp group
+    def _patch_model_parallel_group(self):
+        """Temporarily patch the global pp group state with its own pp group
         state.
         """
-        return patch_tensor_parallel_group(self._tp_group)
+        return patch_model_parallel_group(self._tp_group, self._pp_group)
 
     def init_device(self) -> None:
-        self._is_dummy = get_tp_group().rank not in self._draft_ranks
+        # The non-driver workers need to be dummy
+        self._is_dummy = get_tp_group().rank not in self._draft_tp_ranks \
+                         or get_pp_group().rank not in self._draft_pp_ranks
 
         # dummy workers do nothing
         if self._is_dummy:
             return
 
-        # creates tp process group containing only a subset of gpu ranks
-        local_rank = get_tp_group().local_rank
+        # creates tp and pp process group containing only a subset of gpu ranks
+        local_tp_rank = get_tp_group().local_rank
+        local_pp_rank = get_pp_group().local_rank
         tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
-        self._tp_group = init_model_parallel_group([self._draft_ranks],
-                                                   local_rank, tp_backend)
+        pp_backend = torch.distributed.get_backend(get_pp_group().device_group)
+        self._tp_group = init_model_parallel_group([self._draft_tp_ranks],
+                                                   local_tp_rank, tp_backend)
+        self._pp_group = init_model_parallel_group([self._draft_pp_ranks],
+                                                   local_pp_rank, pp_backend)
 
-        with self._patch_tensor_parallel_group():
+        with self._patch_model_parallel_group():
             self._worker.init_device()
 
     def set_include_gpu_probs_tensor(self) -> None:
@@ -102,7 +117,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         if self._is_dummy:
             return
 
-        with self._patch_tensor_parallel_group():
+        with self._patch_model_parallel_group():
             self._worker.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -110,7 +125,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             # this case is not used now
             return -1, -1
 
-        with self._patch_tensor_parallel_group():
+        with self._patch_model_parallel_group():
             return self._worker.determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -118,7 +133,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         if self._is_dummy:
             return
 
-        with self._patch_tensor_parallel_group():
+        with self._patch_model_parallel_group():
             self._worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def sampler_output(
@@ -143,7 +158,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         if self._is_dummy:
             return SpeculativeProposals(None, None, None)
 
-        with self._patch_tensor_parallel_group():
+        with self._patch_model_parallel_group():
             return self._worker.get_spec_proposals(
                 execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
@@ -151,7 +166,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         if self._is_dummy:
             return _DummyModel()
 
-        with self._patch_tensor_parallel_group():
+        with self._patch_model_parallel_group():
             return self._worker.get_model()
 
     def execute_model(
@@ -161,7 +176,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         if self._is_dummy:
             return []
 
-        with self._patch_tensor_parallel_group():
+        with self._patch_model_parallel_group():
             return self._worker.execute_model(execute_model_req)
 
     def get_cache_block_size_bytes(self) -> int:
@@ -182,7 +197,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         if self._is_dummy:
             return
 
-        with self._patch_tensor_parallel_group():
+        with self._patch_model_parallel_group():
             weight_loader = getattr(
                 self._worker.worker.model_runner.model_runner.model.\
                     lm_head.weight,

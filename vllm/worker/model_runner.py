@@ -2038,7 +2038,8 @@ class CUDAGraphRunner(nn.Module):
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
 
-        if "previous_hidden_states" in self.input_buffers:
+        if "previous_hidden_states" in self.input_buffers and \
+                "previous_hidden_states" in kwargs:
             self.input_buffers["previous_hidden_states"].copy_(
                 kwargs["previous_hidden_states"], non_blocking=True)
 

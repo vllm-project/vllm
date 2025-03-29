@@ -42,7 +42,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         self,
         execute_model_req: ExecuteModelRequest,
         proposals: SpeculativeProposals,
-    ) -> SpeculativeScores:
+    ) -> Optional[SpeculativeScores]:
         """Score the proposed tokens via the scorer model.
 
         This converts each input sequence to a set of k+1 target sequences. The
@@ -82,6 +82,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 seq_group_metadata_list=target_seq_group_metadata_list))
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
+        if target_sampler_output is None:
+            return None
 
         if not non_spec_indices:
             # All sequence groups in batch have spec decoding enabled
