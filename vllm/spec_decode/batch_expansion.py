@@ -149,6 +149,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             For the latter, prefills are further separated into terminal and 
             non-terminal chunks (from which no token is sampled).
         """
+        scores.prefill_hidden_states = non_spec_outputs.prefill_hidden_states
         if not non_spec_indices:
             return scores
 
@@ -272,7 +273,9 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             probs=non_spec_target_probs,
             token_ids=non_spec_target_token_ids,
             logprobs=non_spec_target_logprobs,
-            hidden_states=non_spec_target_hidden_states)
+            hidden_states=non_spec_target_hidden_states,
+            prefill_hidden_states=target_sampler_output.
+            prefill_hidden_states[:-num_scoring_tokens])
         # Contract remaining nonspec entries based on non_spec_indices, if any.
         return self._contract_non_speculative(
             spec_scores, contracted_seq_group_metadata_list, non_spec_indices,
