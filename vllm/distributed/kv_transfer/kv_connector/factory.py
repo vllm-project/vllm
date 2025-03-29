@@ -29,11 +29,29 @@ class KVConnectorFactory:
     def create_connector(cls, rank: int, local_rank: int,
                          config: "VllmConfig") -> KVConnectorBase:
         connector_name = config.kv_transfer_config.kv_connector
-        if connector_name not in cls._registry:
-            raise ValueError(f"Unsupported connector type: {connector_name}")
+        if connector_name in cls._registry:
+            connector_cls = cls._registry[connector_name]()
+            return connector_cls(rank, local_rank, config)
+        if ":" in connector_name:
+            # style 2: module_path:class_name
+            module_path, class_name = connector_name.split(":")
+        else:
+            # style 1: connector_name
+            module_path = ("vllm.distributed.kv_transfer.kv_connector."
+                           f"{connector_name.lower()}_connector")
+            class_name = f"{connector_name}Connector"
 
-        connector_cls = cls._registry[connector_name]()
-        return connector_cls(rank, local_rank, config)
+        try:
+            # dynamic import and instantiation
+            module = importlib.import_module(module_path)
+            connector_cls = getattr(module, class_name)
+
+            # create instance
+            return connector_cls(rank, local_rank, config)
+        except (ImportError, AttributeError) as e:
+            raise ValueError(f"cannot create connector '{connector_name}'."
+                             f"reason: {str(e)}"
+            )
 
 
 # Register various connectors here.
