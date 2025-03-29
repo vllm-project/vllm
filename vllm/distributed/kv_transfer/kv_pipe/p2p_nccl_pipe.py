@@ -3,6 +3,7 @@ import logging
 import pickle
 import socket
 import threading
+import time
 import typing
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
@@ -38,11 +39,12 @@ class P2pNcclPipe:
             raise ValueError("Port cannot be 0")
         self._hostname = hostname
         self._port = port
-        self.local_address = f"{self._hostname}:{self._port}"
+        self.zmq_address = f"{self._hostname}:{self._port}"
+        self.http_address = f"{self._hostname}:{self.config.kv_port}"  #TODO: 换成 --port
 
         self.context = zmq.Context()
         self.router_socket = self.context.socket(zmq.ROUTER)
-        self.router_socket.bind(f"tcp://{self.local_address}")
+        self.router_socket.bind(f"tcp://{self.zmq_address}")
 
         self.poller = zmq.Poller()
         self.poller.register(self.router_socket, zmq.POLLIN)
@@ -68,11 +70,17 @@ class P2pNcclPipe:
                                              daemon=True)
         self._send_thread.start()
 
+        if port_offset == 0:
+            self.proxy_address = f"{self.config.proxy_ip}:{self.config.proxy_port}"
+            self._ping_thread = threading.Thread(target=self._ping,
+                                                 daemon=True)
+            self._ping_thread.start()
+
     def _create_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
         if remote_address not in self.socks:
             sock = self.context.socket(zmq.DEALER)
-            sock.setsockopt_string(zmq.IDENTITY, self.local_address)
+            sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
             sock.connect(f"tcp://{remote_address}")
             self.socks[remote_address] = sock
             if remote_address in self.comms:
@@ -89,7 +97,7 @@ class P2pNcclPipe:
                     2, unique_id, rank)
                 self.comms[remote_address] = (comm, rank)
                 logger.info("ncclCommInitRank Success, %s 👉 %s, MyRank: %s",
-                            self.local_address, remote_address, rank)
+                            self.zmq_address, remote_address, rank)
 
         return self.socks[remote_address], self.comms[remote_address]
 
@@ -159,7 +167,7 @@ class P2pNcclPipe:
                         self.comms[remote_address] = (comm, rank)
                         logger.info(
                             "ncclCommInitRank Success, %s 👈 %s, MyRank: %s",
-                            self.local_address, remote_address.decode(), rank)
+                            self.zmq_address, remote_address.decode(), rank)
                 elif data["cmd"] == "PUT":
                     tensor_id = data["tensor_id"]
                     self.router_socket.send_multipart([remote_address, b"0"])
@@ -173,8 +181,8 @@ class P2pNcclPipe:
                         self.recv_store_cv.notify()
                     logger.info(
                         "Recv Tensor, %s 👈 %s, rank: %s, data: %s, tensor: %s",
-                        self.local_address, remote_address.decode(), rank,
-                        data, tensor)
+                        self.zmq_address, remote_address.decode(), rank, data,
+                        tensor)
                 elif data["cmd"] == "GET":
                     tensor_id = data["tensor_id"]
                     with self.send_store_cv:
@@ -228,7 +236,20 @@ class P2pNcclPipe:
                 self._send(comm, tensor.to(self.device), rank ^ 1)
                 logger.info(
                     "Send Tensor, %s 👉 %s, MyRank: %s, data: %s, tensor: %s",
-                    self.local_address, remote_address, rank, data, tensor)
+                    self.zmq_address, remote_address, rank, data, tensor)
+
+    def _ping(self):
+        sock = self.context.socket(zmq.DEALER)
+        sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
+        sock.connect(f"tcp://{self.proxy_address}")
+        data = {
+            "type": "P" if self.config.is_kv_producer else "D",
+            "http_address": self.http_address,
+            "zmq_address": self.zmq_address
+        }
+        while True:
+            sock.send(pickle.dumps(data))
+            time.sleep(1)
 
     def _send(self, comm, tensor: torch.Tensor, dst: int, stream=None):
         assert tensor.device == self.device, (

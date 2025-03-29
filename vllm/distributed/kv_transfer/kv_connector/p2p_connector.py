@@ -8,10 +8,10 @@ MooncakePipe.
 
 But the logic can be extended to support other pipe and lookup buffer.
 """
+import re
 from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
-import re
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -35,7 +35,7 @@ class P2pConnector(KVConnectorBase):
         local_rank: int,
         config: VllmConfig,
     ):
-
+        self.rank = rank
         self.config = config.kv_transfer_config
         self.tp_size = config.parallel_config.tensor_parallel_size
         self.is_deepseek_mla = config.model_config.is_deepseek_mla
@@ -61,7 +61,7 @@ class P2pConnector(KVConnectorBase):
                                              IntermediateTensors],
     ) -> None:
 
-        input_tokens_tensor = model_input.input_tokens
+        # input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
@@ -109,7 +109,7 @@ class P2pConnector(KVConnectorBase):
                                "SimpleConnector. Their KVCache won't be sent.")
                 break
 
-            current_tokens = input_tokens_tensor[start_pos:end_pos]
+            # current_tokens = input_tokens_tensor[start_pos:end_pos]
 
             keys, values = [], []
 
@@ -209,7 +209,7 @@ class P2pConnector(KVConnectorBase):
             hidden = self.p2p_nccl_pipe.recv_tensor(request_id + "hidden",
                                                     remote_address)
 
-            num_computed_tokens = roi.shape[0]
+            num_computed_tokens = current_tokens.shape[0]
             num_computed_tokens_list.append(num_computed_tokens)
 
             # check if both KV cache and the hidden states are received
@@ -292,9 +292,12 @@ class P2pConnector(KVConnectorBase):
             decode_host = match.group(1)
             decode_port = int(match.group(2))
 
-            logger.info(f"parse_request_id, {request_id=}, {decode_host=}, {decode_port=}")
+            logger.info(
+                f"parse_request_id, {request_id=}, {decode_host=}, {decode_port=}"
+            )
             return decode_host, decode_port
-        raise ValueError(f"Request id {request_id} does not contain hostname and port")
+        raise ValueError(
+            f"Request id {request_id} does not contain hostname and port")
 
     def close(self):
         self.p2p_nccl_pipe.close()
