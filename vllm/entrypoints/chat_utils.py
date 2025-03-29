@@ -1154,7 +1154,7 @@ def apply_hf_chat_template(
     tools: Optional[list[dict[str, Any]]],
     *,
     trust_remote_code: bool = False,
-    tokenize: bool = False,  # Different from HF's default
+    tokenize: bool = True,
     **kwargs: Any,
 ) -> str:
     hf_chat_template = resolve_hf_chat_template(
