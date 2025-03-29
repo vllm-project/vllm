@@ -119,6 +119,9 @@ class EngineCoreClient(ABC):
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
+    async def get_gpu_blocks(self) -> int:
+        raise NotImplementedError
+
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
@@ -226,6 +229,9 @@ class InprocClient(EngineCoreClient):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.engine_core.pin_lora(lora_id)
+
+    async def get_gpu_blocks(self) -> int:
+        return self.engine_core.get_gpu_blocks()
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
@@ -529,6 +535,9 @@ class SyncMPClient(MPClient):
     def execute_dummy_batch(self) -> None:
         self.call_utility("execute_dummy_batch")
 
+    async def get_gpu_blocks(self) -> int:
+        return self.call_utility("get_gpu_blocks")
+
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
@@ -676,6 +685,9 @@ class AsyncMPClient(MPClient):
             kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return await self.call_utility_async("collective_rpc", method, timeout,
                                              args, kwargs)
+
+    async def get_gpu_blocks(self) -> int:
+        return await self.call_utility_async("get_gpu_blocks")
 
 
 class DPAsyncMPClient(AsyncMPClient):
