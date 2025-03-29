@@ -322,9 +322,7 @@ class EngineArgs:
         parser.add_argument('--download-dir',
                             type=nullable_str,
                             default=EngineArgs.download_dir,
-                            help='Directory to download and load the weights, '
-                            'default to the default cache dir of '
-                            'huggingface.')
+                            help='Directory to download and load the weights.')
         parser.add_argument(
             '--load-format',
             type=str,
@@ -399,8 +397,7 @@ class EngineArgs:
             'Valid backend values are "xgrammar", "guidance", and "auto". '
             'With "auto", we will make opinionated choices based on request'
             'contents and what the backend libraries currently support, so '
-            'the behavior is subject to change in each release. '
-            'The default is xgrammar.')
+            'the behavior is subject to change in each release.')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,
@@ -493,8 +490,7 @@ class EngineArgs:
             default=EngineArgs.prefix_caching_hash_algo,
             help="Set the hash algorithm for prefix caching. "
             "Options are 'builtin' (Python's built-in hash) or 'sha256' "
-            "(collision resistant but with certain overheads). Defaults "
-            "to 'builtin'.",
+            "(collision resistant but with certain overheads).",
         )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
@@ -568,9 +564,7 @@ class EngineArgs:
             type=int,
             default=EngineArgs.max_num_partial_prefills,
             help="For chunked prefill, the max number of concurrent \
-            partial prefills."
-            "Defaults to 1",
-        )
+            partial prefills.")
         parser.add_argument(
             "--max-long-partial-prefills",
             type=int,
@@ -579,15 +573,13 @@ class EngineArgs:
             "than --long-prefill-token-threshold that will be prefilled "
             "concurrently. Setting this less than --max-num-partial-prefills "
             "will allow shorter prompts to jump the queue in front of longer "
-            "prompts in some cases, improving latency. Defaults to 1.")
+            "prompts in some cases, improving latency.")
         parser.add_argument(
             "--long-prefill-token-threshold",
             type=float,
             default=EngineArgs.long_prefill_token_threshold,
             help="For chunked prefill, a request is considered long if the "
-            "prompt is longer than this number of tokens. Defaults to 4%% of "
-            "the model's context length.",
-        )
+            "prompt is longer than this number of tokens.")
         parser.add_argument('--max-num-seqs',
                             type=int,
                             default=EngineArgs.max_num_seqs,
@@ -739,8 +731,7 @@ class EngineArgs:
             type=int,
             default=EngineArgs.max_cpu_loras,
             help=('Maximum number of LoRAs to store in CPU memory. '
-                  'Must be >= than max_loras. '
-                  'Defaults to max_loras.'))
+                  'Must be >= than max_loras.'))
         parser.add_argument(
             '--fully-sharded-loras',
             action='store_true',
@@ -894,7 +885,7 @@ class EngineArgs:
             help='Set the lower bound threshold for the posterior '
             'probability of a token to be accepted. This threshold is '
             'used by the TypicalAcceptanceSampler to make sampling decisions '
-            'during speculative decoding. Defaults to 0.09')
+            'during speculative decoding.')
 
         parser.add_argument(
             '--typical-acceptance-sampler-posterior-alpha',
@@ -1561,7 +1552,8 @@ class EngineArgs:
 
         # Xgrammar and Guidance are supported.
         SUPPORTED_GUIDED_DECODING = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance", "auto"
+            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
+            "guidance:disable-any-whitespace", "auto"
         ]
         if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
             _raise_or_fallback(feature_name="--guided-decoding-backend",

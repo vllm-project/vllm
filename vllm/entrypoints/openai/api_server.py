@@ -311,6 +311,7 @@ def mount_metrics(app: FastAPI):
     # See https://prometheus.github.io/client_python/multiprocess/
     from prometheus_client import (CollectorRegistry, make_asgi_app,
                                    multiprocess)
+    from prometheus_fastapi_instrumentator import Instrumentator
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
@@ -318,6 +319,16 @@ def mount_metrics(app: FastAPI):
                      prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
+        Instrumentator(
+            excluded_handlers=[
+                "/metrics",
+                "/health",
+                "/load",
+                "/ping",
+                "/version",
+            ],
+            registry=registry,
+        ).add().instrument(app).expose(app)
 
         # Add prometheus asgi middleware to route /metrics requests
         metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
@@ -818,7 +829,8 @@ def build_app(args: Namespace) -> FastAPI:
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
-    if token := envs.VLLM_API_KEY or args.api_key:
+    # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
+    if token := args.api_key or envs.VLLM_API_KEY:
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):
