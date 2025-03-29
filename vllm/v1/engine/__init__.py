@@ -12,6 +12,7 @@ from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.utils import BlockHashType
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -52,6 +53,7 @@ class EngineCoreRequest(
     # Detokenizer, but set to None when it is added to EngineCoreClient.
     prompt: Optional[str]
     prompt_token_ids: list[int]
+    prompt_kv_block_hashes: Optional[list[BlockHashType]]
     mm_inputs: Optional[list[MultiModalKwargs]]
     mm_hashes: Optional[list[str]]
     mm_placeholders: Optional[list[PlaceholderRange]]
