@@ -28,16 +28,14 @@ docker run --privileged --net host --shm-size=16G -it \
     && echo TEST_3 \
     && pytest -v -s /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine \
     && echo TEST_4 \
-    && python3 /workspace/vllm/examples/offline_inference/tpu.py \
+    && pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py \
     && echo TEST_5 \
-    && pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py \
+    && python3 /workspace/vllm/examples/offline_inference/tpu.py \
     && echo TEST_6 \
+    && pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py \
+    && echo TEST_7 \
     && pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py" \
 
 
 # TODO: This test fails because it uses RANDOM_SEED sampling
 # && VLLM_USE_V1=1 pytest -v -s /workspace/vllm/tests/tpu/test_custom_dispatcher.py \
-
-# TODO: Re-enable this after fixing recompilation in quantization.
-# && echo TEST_4 \
-# && pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py \

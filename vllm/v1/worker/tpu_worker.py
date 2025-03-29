@@ -105,8 +105,8 @@ class TPUWorker:
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
-        # NOTE(woosuk): Usually, we compile 10-15 graphs for prefill and
-        # 30-40 graphs for decode. 128 is an arbitrary safe number.
+        # TODO (NickLucche) On gsm we compile 80+ graphs.
+        # Re-evaluate limit, with MM we may get close to this limit.
         torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): Set per-rank cache path since different ranks
