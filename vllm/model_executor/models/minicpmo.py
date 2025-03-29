@@ -43,7 +43,8 @@ from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.profiling import ProcessorInputs
 
-from .minicpmv import (MiniCPMV2_6, MiniCPMVDummyInputsBuilder,
+from .minicpmv import (_MAX_FRAMES_PER_VIDEO, MiniCPMV2_6,
+                       MiniCPMVDummyInputsBuilder,
                        MiniCPMVMultiModalDataParser,
                        MiniCPMVMultiModalProcessor, MiniCPMVProcessingInfo,
                        _minicpmv_field_config)
@@ -226,10 +227,10 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         max_total_frames = self.get_max_video_frames(seq_len -
                                                      max_image_tokens -
                                                      max_audio_tokens)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   _MAX_FRAMES_PER_VIDEO)
 
-        num_frames = max(max_total_frames // max(max_videos, 1), 1)
-
-        return num_frames
+        return max(max_frames_per_video, 1)
 
 
 class MiniCPMODummyInputsBuilder(

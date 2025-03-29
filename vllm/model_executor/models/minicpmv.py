@@ -69,6 +69,9 @@ from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 from .vision import scatter_patch_features, select_patch_features
 
+# For profile run
+_MAX_FRAMES_PER_VIDEO = 16
+
 
 class MiniCPMVImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
@@ -439,7 +442,8 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
-        return self.get_max_video_frame_tokens() * num_frames
+        num_video_tokens_total = self.get_max_video_frame_tokens() * num_frames
+        return num_video_tokens_total
 
     def get_video_max_slice_num(self) -> int:
         return 1
@@ -465,10 +469,10 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self.get_max_video_frames(seq_len -
                                                      max_image_tokens)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   _MAX_FRAMES_PER_VIDEO)
 
-        num_frames = max(max_total_frames // max(max_videos, 1), 1)
-
-        return num_frames
+        return max(max_frames_per_video, 1)
 
 
 _I = TypeVar("_I",
