@@ -1320,6 +1320,20 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         if has_context:
             # ROCm flash_attn_varlen_func will return 3 objects instead of 2
             suffix_output, suffix_lse, *rest = output
+            # FA2 and FA3 have different behavior for when the sum-exp is 0,
+            # this namely arises with 0 len seqlens (max_seqlen_k == 0).
+            # FA3 returns -inf here  while FA2 returns inf. If we see an
+            # inf assume FA2 and convert inf to -inf for consistency and
+            # correctness. Inf generally doesn't make sense in this context
+            # outside of undefined-behavior/FA2-case, so, force inf to -inf.
+            # flash-attention/blob/main/csrc/flash_attn/flash_api.cpp#L737
+            # FIXME(DefTruth): dynamically checking each value for infinity
+            # within the `merge_attn_states_kernel` might impact the execution
+            # efficiency of the generated Triton kernel (L20, etc.). To avoid
+            # affecting the generation of the Triton kernel, I have try to
+            # handle this processing outside the kernel.
+            if prefill_metadata.max_prefill_seq_len == 0:
+                suffix_lse.fill_(-torch.inf)
             context_output, context_lse = self._compute_prefill_context( \
                 q, kv_c_and_k_pe_cache, attn_metadata)
 
