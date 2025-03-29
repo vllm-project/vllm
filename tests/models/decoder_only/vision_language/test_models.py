@@ -181,7 +181,7 @@ VLM_TEST_SETTINGS = {
         max_tokens=64,
         marks=[large_gpu_mark(min_gb=64)],
     ),
-    "aya_vision": VLMTestInfo(
+    "ayavision": VLMTestInfo(
         models=["CohereForAI/aya-vision-8b"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>\n{img_prompt}<|END_OF_TURN_TOKEN|>", # noqa: E501
