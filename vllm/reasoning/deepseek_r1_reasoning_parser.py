@@ -150,20 +150,19 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
         """
-        if not token_ids:
-            return model_output, None
         # DeepSeek R1 doesn't generate <think> now.
         # Thus we assume the reasoning content is always at the start.
         # Ref https://huggingface.co/deepseek-ai/DeepSeek-R1/commit/8a58a132790c9935686eb97f042afa8013451c9f
+        if self.start_token_id in token_ids:
+            start_index = token_ids.index(self.start_token_id)
+            token_ids = token_ids[start_index + 1:]
+
+        if not token_ids:
+            return model_output, None
+
         if self.end_token_id not in token_ids:
             return model_output, None
         else:
-            if token_ids[0] == self.start_token_id:
-                token_ids = token_ids[1:]
-
-            if not token_ids:
-                return model_output, None
-
             idx = token_ids.index(self.end_token_id)
             reasoning_content = self.model_tokenizer.decode(token_ids[:idx])
             final_output = self.model_tokenizer.decode(token_ids[idx + 1:])

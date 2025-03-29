@@ -328,11 +328,6 @@ TEST_CASES = [
         id="new_line_streaming",
     ),
     pytest.param(
-        True,
-        NEW_LINE_STREAMING,
-        id="new_line_streaming",
-    ),
-    pytest.param(
         False,
         SPECIAL_CASE_FOR_NO_STREAMING,
         id="special_case_for_no_streaming",
