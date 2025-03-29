@@ -836,14 +836,14 @@ See [this page](#generative-models) for more information on how to use generativ
   * `openbmb/MiniCPM-o-2_6`, etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `MiniCPMV`
   * MiniCPM-V
   * T + I<sup>E+</sup> + V<sup>E+</sup>
   * `openbmb/MiniCPM-V-2` (see note), `openbmb/MiniCPM-Llama3-V-2_5`, `openbmb/MiniCPM-V-2_6`, etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `MllamaForConditionalGeneration`
   * Llama 3.2
   * T + I<sup>+</sup>
@@ -919,6 +919,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * T + I<sup>E+</sup> + V<sup>E+</sup>
   * `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc.
   * ✅︎
+  * ✅︎
+  * ✅︎
+- * `SkyworkR1VChatModel`
+  * Skywork-R1V-38B
+  * T + I
+  * `Skywork/Skywork-R1V-38B`
+  *
   * ✅︎
   * ✅︎
 - * `UltravoxModel`
