@@ -25,10 +25,6 @@ class MarlinLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
-        if c.zero_points:
-            return False, "Zero points currently not supported by "\
-                          " MarlinLinearKernel. Will be added when AWQMarlin "\
-                          "is migrated over to using MPLinearKernel backend"
 
         quant_types = query_marlin_supported_quant_types(c.zero_points)
         if c.weight_type not in quant_types:
