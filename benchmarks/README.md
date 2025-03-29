@@ -41,29 +41,33 @@ become available.
       <td><code>synthetic</code></td>
     </tr>
     <tr>
-      <td><strong>HuggingFace</strong></td>
-      <td style="text-align: center;">🟡</td>
-      <td style="text-align: center;">🟡</td>
-      <td>Specify your dataset path on HuggingFace</td>
+      <td><strong>HuggingFace-VisionArena</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>lmarena-ai/VisionArena-Chat</code></td>
     </tr>
     <tr>
-      <td><strong>VisionArena</strong></td>
+      <td><strong>HuggingFace-InstructCoder</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
-      <td><code>lmarena-ai/vision-arena-bench-v0.1</code> (a HuggingFace dataset)</td>
+      <td><code>likaixin/InstructCoder</code></td>
+    </tr>
+    <tr>
+      <td><strong>HuggingFace-Other</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>lmms-lab/LLaVA-OneVision-Data</code>, <code>Aeala/ShareGPT_Vicuna_unfiltered</code></td>
     </tr>
   </tbody>
 </table>
 
 ✅: supported
 
+🟡: Partial support
+
 🚧: to be supported
 
-🟡: Partial support. Currently, HuggingFaceDataset only supports dataset formats
-similar to `lmms-lab/LLaVA-OneVision-Data` and `Aeala/ShareGPT_Vicuna_unfiltered`.
-If you need support for other dataset formats, please consider contributing.
-
-**Note**: VisionArena’s `dataset-name` should be set to `hf`
+**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`
 
 ---
 ## Example - Online Benchmark
@@ -126,7 +130,7 @@ MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
 NUM_PROMPTS=10
 BACKEND="openai-chat"
 DATASET_NAME="hf"
-DATASET_PATH="lmarena-ai/vision-arena-bench-v0.1"
+DATASET_PATH="lmarena-ai/VisionArena-Chat"
 DATASET_SPLIT='train'
 
 python3 vllm/benchmarks/benchmark_serving.py \
@@ -141,12 +145,7 @@ python3 vllm/benchmarks/benchmark_serving.py \
 
 ### HuggingFaceDataset Examples
 
-Currently, HuggingFaceDataset only supports dataset formats
-similar to `lmms-lab/LLaVA-OneVision-Data` and `Aeala/ShareGPT_Vicuna_unfiltered`. If you need support for other dataset
-formats, please consider contributing.
-
 ```bash
-# need a model with vision capability here
 vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
 ```
 
@@ -220,7 +219,7 @@ Total num output tokens:  1500
 MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
 NUM_PROMPTS=10
 DATASET_NAME="hf"
-DATASET_PATH="lmarena-ai/vision-arena-bench-v0.1"
+DATASET_PATH="lmarena-ai/VisionArena-Chat"
 DATASET_SPLIT="train"
 
 python3 vllm/benchmarks/benchmark_throughput.py \
@@ -238,6 +237,31 @@ The `num prompt tokens` now includes image token counts
 Throughput: 2.55 requests/s, 4036.92 total tokens/s, 326.90 output tokens/s
 Total num prompt tokens:  14527
 Total num output tokens:  1280
+```
+
+### InstructCoder Benchmark with Speculative Decoding
+
+``` bash
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+VLLM_USE_V1=1 \
+python3 vllm/benchmarks/benchmark_throughput.py \
+    --dataset-name=hf \
+    --dataset-path=likaixin/InstructCoder \
+    --model=meta-llama/Meta-Llama-3-8B-Instruct \
+    --input-len=1000 \
+    --output-len=100 \
+    --num-prompts=2048 \
+    --async-engine \
+    --speculative-model="[ngram]" \
+    --ngram_prompt_lookup_min=2 \
+    --ngram-prompt-lookup-max=5 \
+    --num_speculative_tokens=5
+```
+
+```
+Throughput: 104.77 requests/s, 23836.22 total tokens/s, 10477.10 output tokens/s
+Total num prompt tokens:  261136
+Total num output tokens:  204800
 ```
 
 ### Benchmark with LoRA Adapters
