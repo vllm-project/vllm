@@ -41,8 +41,8 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings,
                     merge_multimodal_embeddings_from_map)
 
-_AUDIO_PLACEHOLDER_OVERRIDE = "<|reserved_special_token_0|>"
-_AUDIO_PLACEHOLDER_TOKEN = 128002
+_AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
+_AUDIO_PLACEHOLDER_TOKEN = 0
 _AUDIO_TOKENS_PER_SECOND = 6.25
 _MAX_ENCODER_BATCH_SIZE = 16
 
@@ -83,6 +83,16 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         **kwargs: object,
     ) -> ProcessorMixin:
         hf_processor = self.ctx.get_hf_processor(**kwargs)
+
+        if (_AUDIO_PLACEHOLDER_OVERRIDE
+                not in hf_processor.tokenizer.additional_special_tokens):
+            hf_processor.tokenizer.add_special_tokens(
+                {'additional_special_tokens': [_AUDIO_PLACEHOLDER_OVERRIDE]})
+            hf_processor.vocab = hf_processor.tokenizer.get_vocab()
+
+        global _AUDIO_PLACEHOLDER_TOKEN
+        _AUDIO_PLACEHOLDER_TOKEN = hf_processor.tokenizer.encode(
+            _AUDIO_PLACEHOLDER_OVERRIDE, add_special_tokens=False)[0]
 
         # NOTE: Ultravox processing definition uses '<|eot_id|>' as the
         # placeholder that will cause confusion with the actual end of turn
@@ -411,8 +421,16 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
+        "audio_tower.model.encoder.":
+        "audio_tower.",
+        "language_model.vision_tower.":
+        None,
+        "language_model.multi_modal_projector.":
+        None,
+        "language_model.language_model.":
+        "language_model."
+    }, )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -576,7 +594,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        safe_input_ids = input_ids.clone()
+        safe_input_ids[safe_input_ids == _AUDIO_PLACEHOLDER_TOKEN] = 0
+        inputs_embeds = self.language_model.get_input_embeddings(
+            safe_input_ids)
         if multimodal_embeddings is not None:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
