@@ -208,10 +208,15 @@ class SimpleConnector(KVConnectorBase):
 
             current_tokens = input_tokens_tensor[start_pos:end_pos]
 
-            keys, values = [], []
+            # Preallocate the tensors
+            keys = kv_caches[0].new_empty(
+                (end_layer - start_layer, end_pos - start_pos, num_heads,
+                 head_size))
+            values = torch.empty_like(keys)
 
-            for layer_id in range(start_layer, end_layer):
-                kv_cache = kv_caches[layer_id - start_layer]
+            # Copy the relevant parts from kvcache
+            for layer_idx in range(end_layer - start_layer):
+                kv_cache = kv_caches[layer_idx]
 
                 if self.is_deepseek_mla and self.use_mla_opt:
                     key_cache = kv_cache.reshape(-1, num_heads, head_size)
@@ -222,11 +227,8 @@ class SimpleConnector(KVConnectorBase):
 
                 current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
-                keys.append(key_cache[current_slot_mapping].unsqueeze(0))
-                values.append(value_cache[current_slot_mapping].unsqueeze(0))
-
-            keys = torch.cat(keys, dim=0)
-            values = torch.cat(values, dim=0)
+                keys[layer_idx].copy_(key_cache[current_slot_mapping])
+                values[layer_idx].copy_(value_cache[current_slot_mapping])
 
             self.insert(current_tokens,
                         torch.ones_like(current_tokens,
