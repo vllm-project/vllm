@@ -388,8 +388,34 @@ def test_guided_json_schema_complex(llm):
                 generated_text
                 is not None), f"Generated output {i} text should not be None"
 
+            # Ensure we still have schema compliance
+            Zoo.model_validate_json(generated_text)
+
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
             assert isinstance(
                 parsed_json,
                 dict), f"Generated output {i} must be a valid JSON object"
+
+
+@pytest.mark.skip_global_cleanup
+def test_guided_json_schema_complex_recursion_error(llm):
+    """Verify that the recursion error is raised when the
+    VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP is set to a low value."""
+
+    os.environ["VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP"] = "2"
+
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        max_tokens=100,
+        n=2,
+        guided_decoding=GuidedDecodingParams(json=Zoo.model_json_schema(),
+                                             backend="outlines"),
+    )
+
+    with pytest.raises(RecursionError):
+        llm.generate(
+            prompts="Generate a JSON-formatted Zoo object",
+            sampling_params=sampling_params,
+            use_tqdm=True,
+        )
