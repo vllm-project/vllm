@@ -115,6 +115,12 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
+        # Speculative decoding related.
+        self.num_lookahead_slots = 0
+        if self.speculative_config and self.speculative_config.type == "eagle":
+            self.num_lookahead_slots = \
+                self.speculative_config.num_speculative_tokens
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -161,7 +167,8 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            num_new_tokens = (request.num_tokens_with_spec -
+            num_new_tokens = (request.num_tokens_with_spec +
+                              self.num_lookahead_slots -
                               request.num_computed_tokens)
             if (0 < self.scheduler_config.long_prefill_token_threshold <
                     num_new_tokens):
