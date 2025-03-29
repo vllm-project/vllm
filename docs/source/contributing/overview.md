@@ -80,13 +80,14 @@ appropriately to indicate the type of change. Please use one of the following:
 - `[Doc]` for documentation fixes and improvements.
 - `[Model]` for adding a new model or improving an existing model. Model name
   should appear in the title.
-- `[Frontend]` For changes on the vLLM frontend (e.g., OpenAI API server,
+- `[Frontend]` for changes on the vLLM frontend (e.g., OpenAI API server,
   `LLM` class, etc.)
 - `[Kernel]` for changes affecting CUDA kernels or other compute kernels.
 - `[Core]` for changes in the core vLLM logic (e.g., `LLMEngine`,
   `AsyncLLMEngine`, `Scheduler`, etc.)
 - `[Hardware][Vendor]` for hardware-specific changes. Vendor name should
   appear in the prefix (e.g., `[Hardware][AMD]`).
+- `[CLI]` for changes in vllm command-line.
 - `[Misc]` for PRs that do not fit the above categories. Please use this
   sparingly.
 
