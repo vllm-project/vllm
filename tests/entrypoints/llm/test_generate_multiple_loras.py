@@ -23,7 +23,19 @@ LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 
 @pytest.fixture(scope="module")
-def llm():
+def monkeypatch_module():
+    from _pytest.monkeypatch import MonkeyPatch
+    mpatch = MonkeyPatch()
+    yield mpatch
+    mpatch.undo()
+
+
+@pytest.fixture(scope="module", params=[False, True])
+def llm(request, monkeypatch_module):
+
+    use_v1 = request.param
+    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
+
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(model=MODEL_NAME,
