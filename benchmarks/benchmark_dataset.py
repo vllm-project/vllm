@@ -17,6 +17,7 @@ SampleRequest instances, similar to the approach used in ShareGPT.
 import base64
 import io
 import json
+import logging
 import random
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -34,6 +35,8 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
+
+logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # Data Classes
@@ -61,9 +64,6 @@ class SampleRequest:
 class BenchmarkDataset(ABC):
     DEFAULT_SEED = 0
 
-    # num_requests has default 1000 in both the benchmark_serving.py and
-    # benchmark_throughput.py
-
     def __init__(
         self,
         dataset_path: Optional[str] = None,
@@ -90,8 +90,8 @@ class BenchmarkDataset(ABC):
             mm_content: Optional[MultiModalDataDict] = None) -> list[dict]:
         """
         Transform a prompt and optional multimodal content into a chat format.
-        This method is used for chat models that expect a specific 
-        conversation format.
+        This method is used for chat models that expect a specific conversation
+        format.
         """
         content = [{"text": prompt, "type": "text"}]
         if mm_content is not None:
@@ -101,10 +101,10 @@ class BenchmarkDataset(ABC):
     def load_data(self) -> None:
         """
         Load data from the dataset path into self.data.
-        
+
         This method must be overridden by subclasses since the method to load
         data will vary depending on the dataset format and source.
-        
+
         Raises:
             NotImplementedError: If a subclass does not implement this method.
         """
@@ -121,18 +121,18 @@ class BenchmarkDataset(ABC):
         """
         Optionally select a random LoRA request and return its associated
         tokenizer.
-        
+
         This method is used when LoRA parameters are provided.  It randomly
         selects a LoRA based on max_loras and retrieves a cached tokenizer for
         that LoRA if available. Otherwise, it returns the base tokenizer.
-        
+
         Args:
             tokenizer (PreTrainedTokenizerBase): The base tokenizer to use if no
             LoRA is selected.  max_loras (Optional[int]): The maximum number of
             LoRAs available. If None, LoRA is not used.  lora_path
             (Optional[str]): Path to the LoRA parameters on disk. If None, LoRA
             is not used.
-        
+
         Returns:
             tuple[Optional[LoRARequest], AnyTokenizer]: A tuple where the first
             element is a LoRARequest (or None if not applicable) and the second
@@ -160,20 +160,38 @@ class BenchmarkDataset(ABC):
                num_requests: int) -> list[SampleRequest]:
         """
         Abstract method to generate sample requests from the dataset.
-        
+
         Subclasses must override this method to implement dataset-specific logic
         for generating a list of SampleRequest objects.
-        
+
         Args:
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
              for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
-        
+
         Returns:
             list[SampleRequest]: A list of sample requests generated from the
             dataset.
         """
         raise NotImplementedError("sample must be implemented in subclasses.")
+
+    def maybe_oversample_requests(self, requests: list[SampleRequest],
+                                  num_requests: int) -> None:
+        """
+        Oversamples the list of requests if its size is less than the desired
+        number.
+
+        Args:
+            requests (List[SampleRequest]): The current list of sampled
+            requests.  num_requests (int): The target number of requests.
+        """
+        if len(requests) < num_requests:
+            random.seed(self.random_seed)
+            additional = random.choices(requests,
+                                        k=num_requests - len(requests))
+            requests.extend(additional)
+            logger.info("Oversampled requests to reach %d total samples.",
+                        num_requests)
 
 
 # -----------------------------------------------------------------------------
@@ -276,15 +294,16 @@ class RandomDataset(BenchmarkDataset):
     ) -> None:
         super().__init__(**kwargs)
 
-    def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
-               num_requests: int,
-               prefix_len: int = DEFAULT_PREFIX_LEN,
-               range_ratio: float = DEFAULT_RANGE_RATIO,
-               input_len: int = DEFAULT_INPUT_LEN,
-               output_len: int = DEFAULT_OUTPUT_LEN,
-               **kwargs) -> list[SampleRequest]:
-
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        prefix_len: int = DEFAULT_PREFIX_LEN,
+        range_ratio: float = DEFAULT_RANGE_RATIO,
+        input_len: int = DEFAULT_INPUT_LEN,
+        output_len: int = DEFAULT_OUTPUT_LEN,
+        **kwargs,
+    ) -> list[SampleRequest]:
         vocab_size = tokenizer.vocab_size
 
         prefix_token_ids = (np.random.randint(
@@ -346,20 +365,24 @@ class ShareGPTDataset(BenchmarkDataset):
         random.seed(self.random_seed)
         random.shuffle(self.data)
 
-    def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
-               num_requests: int,
-               lora_path: Optional[str] = None,
-               max_loras: Optional[int] = None,
-               output_len: Optional[int] = None,
-               enable_multimodal_chat: bool = False,
-               **kwargs) -> list:
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        lora_path: Optional[str] = None,
+        max_loras: Optional[int] = None,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list:
         samples: list = []
         for entry in self.data:
             if len(samples) >= num_requests:
                 break
-            prompt, completion = entry["conversations"][0]["value"],\
-                entry["conversations"][1]["value"]
+            prompt, completion = (
+                entry["conversations"][0]["value"],
+                entry["conversations"][1]["value"],
+            )
 
             lora_request, tokenizer = self.get_random_lora_request(
                 tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path)
@@ -383,6 +406,7 @@ class ShareGPTDataset(BenchmarkDataset):
                     expected_output_len=new_output_len,
                     lora_request=lora_request,
                 ))
+        self.maybe_oversample_requests(samples, num_requests)
         return samples
 
 
@@ -415,19 +439,20 @@ class SonnetDataset(BenchmarkDataset):
         with open(self.dataset_path, encoding="utf-8") as f:
             self.data = f.readlines()
 
-    def sample(self,
-               tokenizer,
-               num_requests: int,
-               prefix_len: int = DEFAULT_PREFIX_LEN,
-               input_len: int = DEFAULT_INPUT_LEN,
-               output_len: int = DEFAULT_OUTPUT_LEN,
-               return_prompt_formatted: bool = False,
-               **kwargs) -> list:
+    def sample(
+        self,
+        tokenizer,
+        num_requests: int,
+        prefix_len: int = DEFAULT_PREFIX_LEN,
+        input_len: int = DEFAULT_INPUT_LEN,
+        output_len: int = DEFAULT_OUTPUT_LEN,
+        return_prompt_formatted: bool = False,
+        **kwargs,
+    ) -> list:
         # Calculate average token length for a poem line.
         tokenized_lines = [tokenizer(line).input_ids for line in self.data]
         avg_len = sum(len(tokens)
-                      for tokens in \
-                        tokenized_lines) / len(tokenized_lines)
+                      for tokens in tokenized_lines) / len(tokenized_lines)
 
         # Build the base prompt.
         base_prompt = "Pick as many lines as you can from these poem lines:\n"
@@ -506,12 +531,14 @@ class BurstGPTDataset(BenchmarkDataset):
         # Convert the dataframe to a list of lists.
         return data.values.tolist()
 
-    def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
-               num_requests: int,
-               max_loras: Optional[int] = None,
-               lora_path: Optional[str] = None,
-               **kwargs) -> list[SampleRequest]:
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        max_loras: Optional[int] = None,
+        lora_path: Optional[str] = None,
+        **kwargs,
+    ) -> list[SampleRequest]:
         samples = []
         data = self._sample_loaded_data(num_requests=num_requests)
         for i in range(num_requests):
@@ -544,7 +571,6 @@ class HuggingFaceDataset(BenchmarkDataset):
     Dataset class for processing a HuggingFace dataset with conversation data
     and optional images.
     """
-    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(
         self,
@@ -618,6 +644,7 @@ class HuggingFaceDataset(BenchmarkDataset):
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
                 ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
 
 
@@ -632,7 +659,6 @@ class VisionArenaDataset(HuggingFaceDataset):
     """
 
     DEFAULT_OUTPUT_LEN = 128
-    DEFAULT_NUM_REQUESTS = 1000
     VISION_ARENA_DATASET_PATH = "lmarena-ai/vision-arena-bench-v0.1"
 
     def __init__(
@@ -657,12 +683,14 @@ class VisionArenaDataset(HuggingFaceDataset):
         )
         self.data = dataset.shuffle(seed=self.random_seed)
 
-    def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
-               num_requests: int,
-               output_len: Optional[int] = None,
-               enable_multimodal_chat: bool = False,
-               **kwargs) -> list:
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list:
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
@@ -685,4 +713,68 @@ class VisionArenaDataset(HuggingFaceDataset):
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
                 ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Instruct Coder Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class InstructCoderDataset(HuggingFaceDataset):
+    """
+    InstructCoder Dataset.
+    https://huggingface.co/datasets/likaixin/InstructCoder
+
+    InstructCoder is the dataset designed for general code editing.
+    It consists of 114,239 instruction-input-output triplets,
+    and covers multiple distinct code editing scenario.
+    """
+
+    DEFAULT_OUTPUT_LEN = 200  # this is the average default output length
+    DEFAULT_NUM_REQUESTS = 1000
+    INSTRUCT_CODER_DATASET_PATH = "likaixin/InstructCoder"
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        if self.dataset_path != self.INSTRUCT_CODER_DATASET_PATH:
+            raise ValueError(f"Only support likaixin/InstructCoder dataset.\
+                    This data path {self.dataset_path} is not valid.")
+        if self.dataset_subset is None and self.dataset_split != "train":
+            raise ValueError("Dataset split must be 'train'.")
+
+    def load_data(self) -> None:
+        dataset = load_dataset(
+            self.dataset_path,
+            name=self.dataset_subset,
+            split=self.dataset_split,
+            streaming=True,
+        )
+        self.data = dataset.shuffle(seed=self.random_seed)
+
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
+               output_len: Optional[int] = None,
+               enable_multimodal_chat: bool = False,
+               **kwargs) -> list:
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        sampled_requests = []
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = f"{item['instruction']}:\n{item['input']}"
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests

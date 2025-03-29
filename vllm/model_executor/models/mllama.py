@@ -21,7 +21,6 @@ from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.utils.checkpoint
 import transformers.models.mllama.configuration_mllama as config_mllama
 from PIL.Image import Image
 from torch import nn
@@ -1070,8 +1069,8 @@ class MllamaTextModel(nn.Module):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
-        for decoder_layer in self.layers:
-            if isinstance(decoder_layer, MllamaCrossAttentionDecoderLayer):
+        for idx, decoder_layer in enumerate(self.layers):
+            if idx in self.cross_attention_layers:
                 if not skip_cross_attention:
                     hidden_states = decoder_layer(
                         hidden_states=hidden_states,
@@ -1081,16 +1080,13 @@ class MllamaTextModel(nn.Module):
                         full_text_row_masked_out_mask=
                         full_text_row_masked_out_mask,
                     )
-            elif isinstance(decoder_layer, LlamaDecoderLayer):
+            else:
                 hidden_states, residual = decoder_layer(
                     positions=positions,
                     hidden_states=hidden_states,
                     residual=None,
                 )
                 hidden_states = hidden_states + residual
-            else:
-                raise ValueError(
-                    f"Unknown decoder layer type {type(decoder_layer)}")
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
@@ -1371,7 +1367,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
             full_text_row_masked_out_mask = (
                 attn_metadata.encoder_seq_lens_tensor
                 != 0).reshape(-1, 1).to(input_ids.device)
-            skip_cross_attention = max(attn_metadata.encoder_seq_lens) == 0
+            skip_cross_attention = attn_metadata.max_encoder_seq_len == 0
 
         # For image-present prefill.
         else:
@@ -1381,7 +1377,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
             # Because attn_metadata.encoder_seq_lens only counts the last
             # group of images for each sample, which is used to cheat the
             # block manager to allocate blocks for those images only.
-            # See input_processor_for_mllama() for more details.
+            # See MllamaMultiModalProcessor for more details.
             num_tiles_tensor = kwargs.pop("num_tiles")
             num_tiles = [t.tolist() for t in num_tiles_tensor]
             num_tokens_per_tile = calc_token_per_chunk(self.image_size)

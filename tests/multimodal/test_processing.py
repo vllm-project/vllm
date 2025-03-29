@@ -7,23 +7,28 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import torch
 from transformers import ProcessorMixin
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargs,
+                                    MultiModalKwargsItem,
+                                    MultiModalSharedField)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
-                                        PromptIndexTargets, PromptInsertion,
-                                        PromptReplacement, apply_text_matches,
+                                        ProcessingCache, PromptIndexTargets,
+                                        PromptInsertion, PromptReplacement,
+                                        apply_text_matches,
                                         apply_token_matches,
                                         find_mm_placeholders,
                                         find_text_matches, find_token_matches,
-                                        iter_token_matches)
+                                        iter_token_matches,
+                                        replace_token_matches)
 # yapf: enable
 from vllm.multimodal.profiling import MultiModalProfiler
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               cached_tokenizer_from_config)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import full_groupby
 
 from .utils import random_image
@@ -87,6 +92,58 @@ def test_iter_token_matches(token_ids, match_ids, expected):
     match_lens = [end - start for start, end in result]
     print("match_lens:", match_lens)  # Only displayed on error
     assert all(match_len == len(match_ids) for match_len in match_lens)
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    ("token_ids", "match_ids", "new_ids", "expected"),
+    [
+        ([], [], [-1], []),
+        ([], [32000], [-1], []),
+        (
+            [32000, 32000, 32000],
+            [32000],
+            [-1],
+            [-1, -1, -1],
+        ),
+        (
+            [32000, 32000, 32000],
+            [32000, 32000],
+            [-1],
+            [-1, 32000],
+        ),
+        (
+            [32000, 32000, 32000],
+            [32000, 32000, 32000],
+            [-1],
+            [-1],
+        ),
+        (
+            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
+            [28747, 32000],
+            [-1],
+            [9833, -1, 32000, 32000, 9833, -1, 32000, 918],
+        ),
+        (
+            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
+            [28747, 32000, 32000, 32000],
+            [-1],
+            [9833, -1, 9833, 28747, 32000, 32000, 918],
+        ),
+        (
+            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
+            [28747, 0, 32000],
+            [-1],
+            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
+        ),
+    ],
+)
+# yapf: enable
+def test_replace_token_matches(token_ids, match_ids, new_ids, expected):
+    result = replace_token_matches(token_ids, match_ids, new_ids)
+
+    # Manually constructed results
+    assert result == expected
 
 
 # yapf: disable
@@ -837,6 +894,45 @@ def test_find_mm_placeholders(
     assert result == expected
 
 
+def _dummy_elem(modality: str, key: str, size: int):
+    return MultiModalFieldElem(
+        modality=modality,
+        key=key,
+        data=torch.empty((size, ), dtype=torch.int8),
+        field=MultiModalSharedField(1),
+    )
+
+
+def _dummy_item(modality: str, size_by_key: dict[str, int]):
+    return MultiModalKwargsItem.from_elems([
+        _dummy_elem(modality, key, size) for key, size in size_by_key.items()
+    ])
+
+
+def _dummy_kw(size_by_key_modality: dict[str, dict[str, int]]):
+    return MultiModalKwargs.from_items([
+        _dummy_item(modality, size_by_key)
+        for modality, size_by_key in size_by_key_modality.items()
+    ])
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    ("item", "expected_size"),
+    [
+        (_dummy_item("a", {"a1": 100}), 100),
+        (_dummy_item("a", {"a1": 100, "a2": 110}), 210),
+        (_dummy_kw({"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}), 460),  # noqa: E501
+    ],
+)
+# yapf: enable
+def test_cache_item_size(item, expected_size):
+    cache = ProcessingCache.get_lru_cache(2048, type(item))
+    cache[""] = item
+
+    assert cache.currsize == expected_size
+
+
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize(
     ("limit", "num_supported", "is_valid"),
@@ -853,15 +949,12 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
         tokenizer_mode="auto",
         trust_remote_code=False,
         seed=0,
-        dtype="half",
+        dtype="auto",
         revision=None,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
 
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     profiler = MultiModalProfiler(processor)
 
     mock_supported_mm_limits = MagicMock(return_value={"image": num_supported})
@@ -892,15 +985,12 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
         tokenizer_mode="auto",
         trust_remote_code=False,
         seed=0,
-        dtype="half",
+        dtype="auto",
         revision=None,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
 
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
     rng = np.random.RandomState(0)
     image = random_image(rng, min_wh=128, max_wh=256)
@@ -965,14 +1055,11 @@ def test_hf_processor_kwargs(model_id, call_kwargs, expected_kwargs):
         tokenizer_mode="auto",
         trust_remote_code=False,
         seed=0,
-        dtype="half",
+        dtype="auto",
         revision=None,
     )
 
-    processor = MULTIMODAL_REGISTRY.create_processor(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     orig_get_hf_processor = processor.info.get_hf_processor
 
     def get_hf_processor(self, **kwargs):

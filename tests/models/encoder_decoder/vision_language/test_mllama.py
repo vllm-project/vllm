@@ -4,8 +4,7 @@ from typing import Optional, overload
 
 import pytest
 import torch
-from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
-                          BatchEncoding)
+from transformers import AutoConfig, AutoModelForImageTextToText, AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
@@ -216,7 +215,6 @@ def _run_test(
                      max_num_seqs=2,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True,
                      limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
                                           }) as vllm_model:
         vllm_outputs_per_image = [
@@ -227,14 +225,10 @@ def _run_test(
             for prompts, images in inputs
         ]
 
-    def process(hf_inputs: BatchEncoding, **kwargs):
-        return hf_inputs
-
     with hf_runner(model,
                    dtype=dtype,
                    model_kwargs={"device_map": "auto"},
-                   postprocess_inputs=process,
-                   auto_cls=AutoModelForVision2Seq) as hf_model:
+                   auto_cls=AutoModelForImageTextToText) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
@@ -430,9 +424,7 @@ def test_bnb_regression(
         dtype=dtype,
         max_model_len=4096,
         max_num_seqs=2,
-        enforce_eager=True,
         quantization="bitsandbytes",
-        load_format="bitsandbytes",
     )
     sampling_params = SamplingParams(
         temperature=0,
@@ -486,7 +478,6 @@ def test_explicit_implicit_prompt(
         max_model_len=4096,
         max_num_seqs=2,
         tensor_parallel_size=1,
-        enforce_eager=True,
     )
     sampling_params = SamplingParams(
         temperature=0,
@@ -518,7 +509,6 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
             max_model_len=4096,
             max_num_seqs=2,
             tensor_parallel_size=1,
-            enforce_eager=True,
             limit_mm_per_prompt={"image":
                                  _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
 
