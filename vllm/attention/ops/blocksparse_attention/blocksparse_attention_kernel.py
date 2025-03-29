@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+
+from vllm.triton_utils import triton_heuristics_decorator, triton_jit_decorator
 
 
 def blocksparse_flash_attn_varlen_fwd(
@@ -122,7 +128,7 @@ def blocksparse_flash_attn_varlen_fwd(
     return out
 
 
-@triton.jit
+@triton_jit_decorator
 def _fwd_kernel_inner(
     acc,
     l_i,
@@ -227,11 +233,11 @@ def _fwd_kernel_inner(
     return acc, l_i, m_i
 
 
-@triton.heuristics({
+@triton_heuristics_decorator({
     "M_LT_N":
     lambda kwargs: kwargs["BLOCK_M"] < kwargs["BLOCK_N"],
 })
-@triton.jit
+@triton_jit_decorator
 def _fwd_kernel_batch_inference(
     Q,
     K,
