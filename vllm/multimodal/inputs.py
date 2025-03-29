@@ -131,6 +131,12 @@ class PlaceholderRange(TypedDict):
     length: int
     """The length of the placeholder."""
 
+    is_embed: NotRequired[Optional[torch.Tensor]]
+    """
+    A boolean mask of shape `(length,)` indicating which positions
+    between `offset` and `offset + length` to assign embeddings to.
+    """
+
 
 NestedTensors = Union[list["NestedTensors"], list[torch.Tensor], torch.Tensor,
                       tuple[torch.Tensor, ...]]
