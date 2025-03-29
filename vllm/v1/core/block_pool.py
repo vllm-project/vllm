@@ -251,7 +251,7 @@ class BlockPool:
         if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(
                 "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet", num_used_blocks)
+                "blocks (%d) are not freed yet", num_used_blocks - 1)
             return False
 
         # Remove all hashes so that no new blocks will hit.
