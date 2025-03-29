@@ -702,6 +702,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             use_alibi=self.use_alibi,
             use_sliding_window=self.window_size is not None,
             num_sms=self.num_sms,
+            sliding_window=self.window_size,
         )
         return common_prefix_len if use_cascade else 0
 
