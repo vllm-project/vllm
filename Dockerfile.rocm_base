@@ -23,7 +23,7 @@ ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
 ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.13
 
 RUN mkdir -p /app
 WORKDIR /app
@@ -138,7 +138,7 @@ RUN cd aiter \
     && git checkout ${AITER_BRANCH} \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt \
-    && PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py develop && pip show aiter 
+    && PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py develop && pip show aiter
 
 ARG BASE_IMAGE
 ARG HIPBLASLT_BRANCH

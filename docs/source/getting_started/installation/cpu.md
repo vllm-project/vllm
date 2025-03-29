@@ -50,7 +50,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ## Requirements
 
-- Python: 3.9 -- 3.12
+- Python: 3.9 -- 3.13
 
 :::::{tab-set}
 :sync-group: device
@@ -179,7 +179,7 @@ Currently, there are no pre-built CPU wheels.
 ```console
 $ docker build -f Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
 
-# Launching OpenAI server 
+# Launching OpenAI server
 $ docker run --rm \
              --privileged=true \
              --shm-size=4g \
