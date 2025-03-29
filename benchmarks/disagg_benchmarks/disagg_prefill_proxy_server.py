@@ -1,19 +1,91 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import pickle
+import random
+import socket
+import threading
+import uuid
 
 import aiohttp
+import zmq
 from quart import Quart, make_response, request
+
+from vllm.logger import init_logger
+
+prefill_instances: dict[str, str] = {}  # http_address: zmq_address
+decode_instances: dict[str, str] = {}  # http_address: zmq_address
+
+prefill_instances["0.0.0.0:20001"] = "0.0.0.0:50000"
+decode_instances["0.0.0.0:20002"] = "0.0.0.0:51000"
+
+prefill_cv = threading.Condition()
+decode_cv = threading.Condition()
+
+logger = init_logger(__name__)
+
+
+def _listen_for_register(poller, router_socket):
+    while True:
+        socks = dict(poller.poll())
+        if router_socket in socks:
+            remote_address, message = router_socket.recv_multipart()
+            # data: {"type": "P", "http_address": "ip:port",
+            #        "zmq_address": "ip:port"}
+            data = pickle.loads(message)
+            logger.debug("Received message from %s, data: %s",
+                         remote_address.decode(), data)
+            if data["type"] == "P":
+                global prefill_instances
+                global prefill_cv
+                with prefill_cv:
+                    prefill_instances[
+                        data["http_address"]] = data["zmq_address"]
+            elif data["type"] == "D":
+                global decode_instances
+                global decode_cv
+                with decode_cv:
+                    decode_instances[
+                        data["http_address"]] = data["zmq_address"]
+            else:
+                logger.info("Unexpected, Received message from %s, data: %s",
+                            remote_address, data)
+
+
+def start_service_discovery(hostname, port):
+    if not hostname:
+        hostname = socket.gethostname()
+    if port == 0:
+        raise ValueError("Port cannot be 0")
+
+    context = zmq.Context()
+    router_socket = context.socket(zmq.ROUTER)
+    router_socket.bind(f"tcp://{hostname}:{port}")
+
+    poller = zmq.Poller()
+    poller.register(router_socket, zmq.POLLIN)
+
+    _listener_thread = threading.Thread(target=_listen_for_register,
+                                        args=[poller, router_socket],
+                                        daemon=True)
+    _listener_thread.start()
+    return _listener_thread
+
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 app = Quart(__name__)
 
 
-async def forward_request(url, data):
+def random_uuid() -> str:
+    return str(uuid.uuid4().hex)
+
+
+async def forward_request(url, data, request_id):
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+            "X-Request-Id": request_id
         }
         async with session.post(url=url, json=data,
                                 headers=headers) as response:
@@ -37,14 +109,31 @@ async def handle_request():
         # change max_tokens = 1 to let it only do prefill
         prefill_request['max_tokens'] = 1
 
+        global prefill_instances
+        global prefill_cv
+        with prefill_cv:
+            prefill_address = random.choice(list(prefill_instances.items()))
+            logger.info("prefill_address: %s", prefill_address)
+
+        global decode_instances
+        global decode_cv
+        with decode_cv:
+            decode_address = random.choice(list(decode_instances.items()))
+            zmq_address = decode_instances[decode_address]
+            logger.info("decode_address: %s, zmq_address: %s", decode_address,
+                        zmq_address)
+
+        request_id = f"___decode_address_{zmq_address}_{random_uuid()}"
+
         # finish prefill
-        async for _ in forward_request('http://localhost:8100/v1/completions',
-                                       prefill_request):
+        async for _ in forward_request(
+            f'http://{prefill_address}/v1/completions', prefill_request,
+            request_id):
             continue
 
         # return decode
-        generator = forward_request('http://localhost:8200/v1/completions',
-                                    original_request_data)
+        generator = forward_request(f'http://{decode_address}/v1/completions',
+                                    original_request_data, request_id)
         response = await make_response(generator)
         response.timeout = None
 
@@ -60,4 +149,6 @@ async def handle_request():
 
 
 if __name__ == '__main__':
-    app.run(port=8000)
+    t = start_service_discovery("0.0.0.0", 30001)
+    app.run(host='0.0.0.0', port=10001)
+    t.join()
