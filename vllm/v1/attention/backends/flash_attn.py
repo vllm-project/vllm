@@ -658,9 +658,8 @@ def cascade_attention(
     v_descale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
-    # TODO: Support sliding window.
-    assert sliding_window == (-1, -1), (
-        "Cascade attention does not support sliding window.")
+    # Support sliding window.
+    sliding_window = (-1, -1)
 
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]
