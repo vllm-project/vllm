@@ -330,6 +330,11 @@ class InputRegistry:
         from vllm.multimodal.profiling import MultiModalProfiler
         from vllm.sequence import SequenceData
 
+        if seq_len > model_config.max_model_len:
+            raise AssertionError(
+                f"Profiling attempted with sequence length ({seq_len}) "
+                f"greater than model length ({model_config.max_model_len})")
+
         if mm_registry.has_processor(model_config):
             processor = mm_registry.create_processor(model_config,
                                                      disable_cache=True)
