@@ -44,6 +44,7 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
@@ -401,6 +402,13 @@ class LLMEngine:
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
 
+        # Initialize reasoning parser if reasoning backend is set.
+        if self.decoding_config.reasoning_backend is not None:
+            reasoner_class = ReasoningParserManager.get_reasoning_parser(
+                self.decoding_config.reasoning_backend)
+            self.reasoner: ReasoningParser = reasoner_class(
+                self.tokenizer.get_lora_tokenizer())
+
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
@@ -413,6 +421,8 @@ class LLMEngine:
                 stop_checker=StopChecker(
                     self.scheduler_config.max_model_len,
                     get_tokenizer_for_seq,
+                    self.reasoner if self.decoding_config.reasoning_backend
+                    is not None else None,
                 ),
             ))
 
