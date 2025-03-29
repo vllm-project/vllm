@@ -833,6 +833,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     decode_meta.seq_lens_tensor
                     if self.attn_type != AttentionType.ENCODER_DECODER else
                     decode_meta.encoder_seq_lens_tensor,
+                    None,
                     block_size,
                     max_seq_len,
                     self.alibi_slopes,
