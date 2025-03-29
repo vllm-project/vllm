@@ -75,8 +75,7 @@ become available.
 First start serving your model
 
 ```bash
-MODEL_NAME="NousResearch/Hermes-3-Llama-3.1-8B"
-vllm serve ${MODEL_NAME} --disable-log-requests
+vllm serve NousResearch/Hermes-3-Llama-3.1-8B --disable-log-requests
 ```
 
 Then run the benchmarking script
@@ -84,12 +83,13 @@ Then run the benchmarking script
 ```bash
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-MODEL_NAME="NousResearch/Hermes-3-Llama-3.1-8B"
-NUM_PROMPTS=10
-BACKEND="vllm"
-DATASET_NAME="sharegpt"
-DATASET_PATH="<your data path>/ShareGPT_V3_unfiltered_cleaned_split.json"
-python3 vllm/benchmarks/benchmark_serving.py --backend ${BACKEND} --model ${MODEL_NAME} --endpoint /v1/completions --dataset-name ${DATASET_NAME} --dataset-path ${DATASET_PATH} --num-prompts ${NUM_PROMPTS}
+python3 vllm/benchmarks/benchmark_serving.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --endpoint /v1/completions \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --num-prompts 10
 ```
 
 If successful, you will see the following output
@@ -126,21 +126,14 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
 ```
 
 ```bash
-MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
-NUM_PROMPTS=10
-BACKEND="openai-chat"
-DATASET_NAME="hf"
-DATASET_PATH="lmarena-ai/VisionArena-Chat"
-DATASET_SPLIT='train'
-
 python3 vllm/benchmarks/benchmark_serving.py \
-  --backend "${BACKEND}" \
-  --model "${MODEL_NAME}" \
-  --endpoint "/v1/chat/completions" \
-  --dataset-name "${DATASET_NAME}" \
-  --dataset-path "${DATASET_PATH}" \
-  --hf-split "${DATASET_SPLIT}" \
-  --num-prompts "${NUM_PROMPTS}"
+  --backend openai-chat \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name hf \
+  --dataset-path lmarena-ai/VisionArena-Chat \
+  --hf-split train \
+  --num-prompts 1000
 ```
 
 ### InstructCoder Benchmark with Speculative Decoding
@@ -198,16 +191,11 @@ python3 vllm/benchmarks/benchmark_serving.py \
 ## Example - Offline Throughput Benchmark
 
 ```bash
-MODEL_NAME="NousResearch/Hermes-3-Llama-3.1-8B"
-NUM_PROMPTS=10
-DATASET_NAME="sonnet"
-DATASET_PATH="vllm/benchmarks/sonnet.txt"
-
 python3 vllm/benchmarks/benchmark_throughput.py \
-  --model "${MODEL_NAME}" \
-  --dataset-name "${DATASET_NAME}" \
-  --dataset-path "${DATASET_PATH}" \
-  --num-prompts "${NUM_PROMPTS}"
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset-name sonnet \
+  --dataset-path vllm/benchmarks/sonnet.txt \
+  --num-prompts 10
 ```
 
 If successful, you will see the following output
@@ -221,19 +209,13 @@ Total num output tokens:  1500
 ### VisionArena Benchmark for Vision Language Models
 
 ``` bash
-MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
-NUM_PROMPTS=10
-DATASET_NAME="hf"
-DATASET_PATH="lmarena-ai/VisionArena-Chat"
-DATASET_SPLIT="train"
-
 python3 vllm/benchmarks/benchmark_throughput.py \
-  --model "${MODEL_NAME}" \
-  --backend "vllm-chat" \
-  --dataset-name "${DATASET_NAME}" \
-  --dataset-path "${DATASET_PATH}" \
-  --num-prompts "${NUM_PROMPTS}" \
-  --hf-split "${DATASET_SPLIT}"
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --backend vllm-chat \
+  --dataset-name hf \
+  --dataset-path lmarena-ai/VisionArena-Chat \
+  --num-prompts 1000 \
+  --hf-split train
 ```
 
 The `num prompt tokens` now includes image token counts
@@ -301,24 +283,14 @@ python3 vllm/benchmarks/benchmark_throughput.py \
 ``` bash
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-MODEL_NAME="meta-llama/Llama-2-7b-hf"
-BACKEND="vllm"
-DATASET_NAME="sharegpt"
-DATASET_PATH="<your data path>/ShareGPT_V3_unfiltered_cleaned_split.json"
-NUM_PROMPTS=10
-MAX_LORAS=2
-MAX_LORA_RANK=8
-ENABLE_LORA="--enable-lora"
-LORA_PATH="yard1/llama-2-7b-sql-lora-test"
-
 python3 vllm/benchmarks/benchmark_throughput.py \
-  --model "${MODEL_NAME}" \
-  --backend "${BACKEND}" \
-  --dataset_path "${DATASET_PATH}" \
-  --dataset_name "${DATASET_NAME}" \
-  --num-prompts "${NUM_PROMPTS}" \
-  --max-loras "${MAX_LORAS}" \
-  --max-lora-rank "${MAX_LORA_RANK}" \
-  ${ENABLE_LORA} \
-  --lora-path "${LORA_PATH}"
+  --model meta-llama/Llama-2-7b-hf \
+  --backend vllm \
+  --dataset_path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --dataset_name sharegpt \
+  --num-prompts 10 \
+  --max-loras 2 \
+  --max-lora-rank 8 \
+  --enable-lora \
+  --lora-path yard1/llama-2-7b-sql-lora-test
   ```
