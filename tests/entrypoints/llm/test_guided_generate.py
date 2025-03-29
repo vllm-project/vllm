@@ -2,9 +2,12 @@
 
 import json
 import re
+from typing import List
 import weakref
+import os
 
 import jsonschema
+from pydantic import BaseModel, Field
 import pytest
 
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -330,3 +333,66 @@ def test_guided_json_object(llm, guided_decoding_backend: str):
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
             assert isinstance(parsed_json, dict)
+
+
+class Animal(BaseModel):
+    """Animal object"""
+
+    name: str = Field(..., description="Name of the animal")
+
+
+class Location(BaseModel):
+    """Location object"""
+
+    latitude: float = Field(..., description="Latitude of the location")
+    longitude: float = Field(..., description="Longitude of the location")
+
+
+class Zoo(BaseModel):
+    """A zoo with animals"""
+
+    location: Location = Field(..., description="Location of the zoo")
+    animals: List[Animal] = Field(
+        default_factory=list, description="List of animals in the zoo"
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_guided_json_schema_complex(llm):
+    """Test generating a complex JSON schema with sub-schema references.
+    Currently only supported by outlines backend."""
+
+    os.environ["VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP"] = "20"
+
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        max_tokens=100,
+        n=2,
+        guided_decoding=GuidedDecodingParams(
+            json=Zoo.model_json_schema(), backend="outlines"
+        ),
+    )
+
+    outputs = llm.generate(
+        prompts="Generate a JSON-formatted Zoo object",
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
+
+    assert outputs is not None, "Generate outputs should not be None"
+    for output in outputs:
+        assert output is not None, "Generate output should not be None"
+        assert isinstance(output, RequestOutput)
+
+        for i in range(2):
+            generated_text = output.outputs[i].text
+            print(generated_text)
+            assert (
+                generated_text is not None
+            ), f"Generated output {i} text should not be None"
+
+            # Parse to verify it is valid JSON
+            parsed_json = json.loads(generated_text)
+            assert isinstance(
+                parsed_json, dict
+            ), f"Generated output {i} must be a valid JSON object"

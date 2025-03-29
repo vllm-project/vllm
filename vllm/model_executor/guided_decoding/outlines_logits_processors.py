@@ -19,7 +19,7 @@ import copy
 import json
 from collections import defaultdict
 from functools import lru_cache
-from typing import Any, Callable, DefaultDict, Dict, List, Optional, Union
+from typing import Any, Callable, DefaultDict, Dict, List, Optional, Set, Union
 
 import numpy as np
 import torch
@@ -195,7 +195,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
             denormalized_schema = JSONLogitsProcessor._denormalize_schema(
                 schema_str,
                 max_depth=envs.VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP,
-            ),
+            )
 
             logger.debug("Denormalized schema: %s", denormalized_schema)
 
@@ -215,8 +215,13 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
     def _denormalize_schema(schema_str: str, max_depth: int) -> str:
         """
         De-normalizes a JSON schema string by inlining $defs references and
-        removing them
+        removing them.
+
+        Note that external schema references are not supported.
         """
+
+        recursion_limit_help = "Maximum recursion depth of {} reached while de-normalizing {} in the JSON schema. This is triggered when a JSON schema contains too many nested elements. The recursion limit can be adjusted via the VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP environment variable."
+
         # Parse the input string into a dictionary
         schema: Dict[str, Any] = json.loads(schema_str)
 
@@ -225,38 +230,58 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
             defs: Dict[str, Any],
             depth: int = 0,
         ) -> None:
-            """
-            Recursively extracts all $defs from the schema and removes them.
-            """
+            """Recursively collects all $defs into defs dict and removes
+            them from schema"""
+
+            # Prevent stack overflow from excessive nesting
             if depth > max_depth:
-                raise RecursionError(f"Maximum recursion depth {max_depth} "
-                                     "exceeded while extracting $defs")
+                raise RecursionError(
+                    recursion_limit_help.format(max_depth, "$defs")
+                )
 
             if isinstance(obj, dict):
+
                 if "$defs" in obj:
+
+                    # Check for duplicate keys to avoid silent overwrites
+                    for key in obj["$defs"]:
+                        if key in defs:
+                            raise ValueError(
+                                f"Duplicate definition key '{key}' found "
+                                "in $defs"
+                            )
+
+                    # Add $defs to accumulator and remove from schema
                     defs.update(obj["$defs"])
                     del obj["$defs"]
+
+                # Recurse into all values (e.g., properties, nested objects)
                 for value in obj.values():
                     find_and_extract_defs(value, defs, depth + 1)
+
             elif isinstance(obj, list):
+
+                # Recurse into list items (e.g., array elements)
                 for item in obj:
                     find_and_extract_defs(item, defs, depth + 1)
 
-            # Implied else - complete
-            logger.debug("Final find_and_extract_defs() recursion depth: %i",
-                         depth)
+            logger.debug("find_and_extract_defs() recursion depth: %i", depth)
 
         def resolve_refs(
             obj: Union[Dict[str, Any], List[Any], Any],
             defs: Dict[str, Any],
             depth: int = 0,
+            visited: Optional[Set[str]] = None,  # Add visited set to track refs
         ) -> Union[Dict[str, Any], List[Any], Any]:
-            """
-            Recursively resolves $ref references by inlining their definitions.
-            """
+            """Recursively resolves $ref by inlining $defs definitions, raising an error on circular references"""
             if depth > max_depth:
-                raise RecursionError(f"Maximum recursion depth of {max_depth} "
-                                     "exceeded while resolving $refs")
+                raise RecursionError(
+                    recursion_limit_help.format(max_depth, "$refs")
+                )
+
+            # Initialize visited set on first call
+            if visited is None:
+                visited = set()
 
             if isinstance(obj, dict):
                 if "$ref" in obj:
@@ -264,27 +289,43 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
                     if ref_path.startswith("#/$defs/"):
                         def_key = ref_path.split("/")[-1]
                         if def_key in defs:
+                            # Check for circular reference
+                            if ref_path in visited:
+                                raise ValueError(
+                                    f"Circular reference detected: '{ref_path}'"
+                                )
+                            # Add current ref to visited set
+                            visited.add(ref_path)
+                            # Resolve the reference, passing the updated visited set
                             resolved = resolve_refs(
                                 copy.deepcopy(defs[def_key]),
                                 defs,
                                 depth + 1,
+                                visited,
                             )
-                            # Remove all keys, including $ref
                             obj.clear()
-
-                            # Inline the resolved definition
                             obj.update(resolved)
+                        else:
+                            raise ValueError(
+                                f"Reference '{ref_path}' not found in $defs"
+                            )
+                    elif ref_path.startswith(("http://", "https://")):
+                        logger.warning(
+                            "Ignoring external reference: '%s'", ref_path
+                        )
                     return obj
+                # Recurse into all key-value pairs
                 return {
-                    k: resolve_refs(v, defs, depth + 1)
+                    k: resolve_refs(v, defs, depth + 1, visited)
                     for k, v in obj.items()
                 }
             elif isinstance(obj, list):
-                return [resolve_refs(item, defs, depth + 1) for item in obj]
+                # Recurse into list items
+                return [
+                    resolve_refs(item, defs, depth + 1, visited) for item in obj
+                ]
 
-            # Implied else - complete
-            logger.debug("Final resolve_refs() recursion depth: %i", depth)
-
+            # Base case: return primitives unchanged
             return obj
 
         # Extract all $defs from the schema
