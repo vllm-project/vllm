@@ -220,7 +220,11 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
         Note that external schema references are not supported.
         """
 
-        recursion_limit_help = "Maximum recursion depth of {} reached while de-normalizing {} in the JSON schema. This is triggered when a JSON schema contains too many nested elements. The recursion limit can be adjusted via the VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP environment variable."
+        recursion_limit_help = "Maximum recursion depth of {} reached while "
+        "de-normalizing {} in the JSON schema. This is triggered when a JSON "
+        "schema contains too many nested elements. The recursion limit can be "
+        "adjusted via the VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP environment "
+        "variable."
 
         # Parse the input string into a dictionary
         schema: Dict[str, Any] = json.loads(schema_str)
@@ -236,8 +240,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
             # Prevent stack overflow from excessive nesting
             if depth > max_depth:
                 raise RecursionError(
-                    recursion_limit_help.format(max_depth, "$defs")
-                )
+                    recursion_limit_help.format(max_depth, "$defs"))
 
             if isinstance(obj, dict):
 
@@ -248,8 +251,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
                         if key in defs:
                             raise ValueError(
                                 f"Duplicate definition key '{key}' found "
-                                "in $defs"
-                            )
+                                "in $defs")
 
                     # Add $defs to accumulator and remove from schema
                     defs.update(obj["$defs"])
@@ -271,13 +273,15 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
             obj: Union[Dict[str, Any], List[Any], Any],
             defs: Dict[str, Any],
             depth: int = 0,
-            visited: Optional[Set[str]] = None,  # Add visited set to track refs
+            visited: Optional[
+                Set[str]] = None,  # Add visited set to track refs
         ) -> Union[Dict[str, Any], List[Any], Any]:
-            """Recursively resolves $ref by inlining $defs definitions, raising an error on circular references"""
+            """Recursively resolves $ref by inlining $defs definitions, 
+            raising an error on circular references"""
+
             if depth > max_depth:
                 raise RecursionError(
-                    recursion_limit_help.format(max_depth, "$refs")
-                )
+                    recursion_limit_help.format(max_depth, "$refs"))
 
             # Initialize visited set on first call
             if visited is None:
@@ -296,7 +300,8 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
                                 )
                             # Add current ref to visited set
                             visited.add(ref_path)
-                            # Resolve the reference, passing the updated visited set
+                            # Resolve the reference, passing the updated
+                            # visited set
                             resolved = resolve_refs(
                                 copy.deepcopy(defs[def_key]),
                                 defs,
@@ -307,12 +312,10 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
                             obj.update(resolved)
                         else:
                             raise ValueError(
-                                f"Reference '{ref_path}' not found in $defs"
-                            )
+                                f"Reference '{ref_path}' not found in $defs")
                     elif ref_path.startswith(("http://", "https://")):
-                        logger.warning(
-                            "Ignoring external reference: '%s'", ref_path
-                        )
+                        logger.warning("Ignoring external reference: '%s'",
+                                       ref_path)
                     return obj
                 # Recurse into all key-value pairs
                 return {
@@ -322,7 +325,8 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
             elif isinstance(obj, list):
                 # Recurse into list items
                 return [
-                    resolve_refs(item, defs, depth + 1, visited) for item in obj
+                    resolve_refs(item, defs, depth + 1, visited)
+                    for item in obj
                 ]
 
             # Base case: return primitives unchanged

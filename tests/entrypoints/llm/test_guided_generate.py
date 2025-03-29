@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import re
-from typing import List
-import weakref
 import os
+import re
+import weakref
 
 import jsonschema
-from pydantic import BaseModel, Field
 import pytest
+from pydantic import BaseModel, Field
 
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
@@ -352,9 +351,8 @@ class Zoo(BaseModel):
     """A zoo with animals"""
 
     location: Location = Field(..., description="Location of the zoo")
-    animals: List[Animal] = Field(
-        default_factory=list, description="List of animals in the zoo"
-    )
+    animals: list[Animal] = Field(default_factory=list,
+                                  description="List of animals in the zoo")
 
 
 @pytest.mark.skip_global_cleanup
@@ -368,9 +366,8 @@ def test_guided_json_schema_complex(llm):
         temperature=1.0,
         max_tokens=100,
         n=2,
-        guided_decoding=GuidedDecodingParams(
-            json=Zoo.model_json_schema(), backend="outlines"
-        ),
+        guided_decoding=GuidedDecodingParams(json=Zoo.model_json_schema(),
+                                             backend="outlines"),
     )
 
     outputs = llm.generate(
@@ -388,11 +385,11 @@ def test_guided_json_schema_complex(llm):
             generated_text = output.outputs[i].text
             print(generated_text)
             assert (
-                generated_text is not None
-            ), f"Generated output {i} text should not be None"
+                generated_text
+                is not None), f"Generated output {i} text should not be None"
 
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
             assert isinstance(
-                parsed_json, dict
-            ), f"Generated output {i} must be a valid JSON object"
+                parsed_json,
+                dict), f"Generated output {i} must be a valid JSON object"

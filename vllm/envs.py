@@ -688,7 +688,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # recursive operation and the number of recursion levels is controlled by
     # this cap. When set <= 0, the denormalization will be disabled.
     "VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP":
-    lambda: int(os.environ.get("VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP", 200)),
+    lambda: int(os.environ.get("VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP", 200)
+                ),
 }
 
 # end-env-vars-definition
