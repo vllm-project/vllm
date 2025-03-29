@@ -303,14 +303,10 @@ def merge_and_sort_multimodal_metadata(
 
     Optionally if a MultiModalHashDict is given, same operation will be 
     applied to the object and the sorted list of hashes will be returned.
-
-    Raises:
-        ValueError: If the input prompt has interleaved placeholders from
-            different modalities (e.g, "<image><audio><image> Describe the 
-            content.")
     
     Returns:
-        list[str]: Sorted list of involved modalities.
+        list[str]: List of item modalities in order of their positions in
+            the input sequence.
         list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from 
             mm_positions.
         Optional[list[str]]: Sorted list of all hashes from mm_hashes if 
@@ -324,50 +320,33 @@ def merge_and_sort_multimodal_metadata(
     # For single modality, placeholder ranges and hashes are already sorted
     # so we can return the list directly.
     if len(modalities) == 1:
-        if mm_hashes is None:
-            return modalities, list(mm_positions[modalities[0]]), None
-        else:
-            return modalities, list(mm_positions[modalities[0]]), list(
-                mm_hashes[modalities[0]])
+        modality = modalities[0]
+        placeholder_list = list(mm_positions[modality])
 
-    placeholder_lists_with_modality = [(modality, mm_positions[modality])
-                                       for modality in modalities]
+        return [modality] * len(
+            placeholder_list
+        ), placeholder_list, None if not mm_hashes else mm_hashes[modality]
 
-    if mm_hashes is None:
-        sorted_placeholder_lists = sorted(placeholder_lists_with_modality,
-                                          key=lambda x: x[1][0]['offset'])
-        sorted_hash_lists = None
-    else:
-        hashes_lists = [
-            mm_hashes[modality] for modality in modalities
-            if modality in mm_hashes
-        ]
-        sorted_pairs = sorted(zip(placeholder_lists_with_modality,
-                                  hashes_lists),
-                              key=lambda x: x[0][1][0]['offset'])
-        sorted_placeholder_tuple, sorted_hash_tuple = zip(*sorted_pairs)
-        sorted_placeholder_lists = list(sorted_placeholder_tuple)
-        sorted_hash_lists = list(sorted_hash_tuple)
+    # Create a list of (modality, placeholder, hash) tuples for all placeholders
+    all_items = []
+    for modality in modalities:
+        placeholder_list = list(mm_positions[modality])
+        hash_list: list[Optional[str]] = list(
+            mm_hashes[modality]) if mm_hashes and modality in mm_hashes else [
+                None
+            ] * len(placeholder_list)
 
-    sorted_modalities = [modality for modality, _ in sorted_placeholder_lists]
+        for placeholder, hash_value in zip(placeholder_list, hash_list):
+            all_items.append((modality, placeholder, hash_value))
 
-    # Flatten sorted list of lists to a single list and verify there is no
-    # interleaving of placeholders from different modalities.
-    merged_placeholders: list[PlaceholderRange] = []
-    for modality, placeholder_list in sorted_placeholder_lists:
-        if merged_placeholders and placeholder_list[0][
-                'offset'] < merged_placeholders[-1]['offset']:
-            raise ValueError(
-                "Interleaved mixed-modality inference is currently not "
-                "supported.")
-        merged_placeholders.extend(placeholder_list)
+    # Sort all items by offset
+    all_items.sort(key=lambda x: x[1]['offset'])
 
-    if sorted_hash_lists is not None:
-        merged_hashes = []
-        for hash_list in sorted_hash_lists:
-            merged_hashes.extend(hash_list)
-    else:
-        merged_hashes = None
+    # Split into separate lists
+    sorted_modalities = [item[0] for item in all_items]
+    merged_placeholders = [item[1] for item in all_items]
+    merged_hashes = [str(item[2])
+                     for item in all_items] if mm_hashes is not None else None
 
     return sorted_modalities, merged_placeholders, merged_hashes
 
@@ -383,8 +362,7 @@ def group_mm_inputs_by_modality(
 
     Returns:
         list[list[MultiModalKwargs]]: List of list of MultiModalKwargs, each 
-        inner list contains consecutive MultiModalKwargs with same modality, or
-        one with multimodal modalities.
+        inner list contains consecutive MultiModalKwargs with same modality.
     """
     if not mm_inputs:
         return []
