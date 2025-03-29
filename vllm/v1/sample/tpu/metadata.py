@@ -118,3 +118,8 @@ class TPUSupportedSamplingMetadata:
             min_p=input_batch.min_p[:padded_num_reqs],
             generators=input_batch.generators,
             indices_do_sample=indices_do_sample)
+
+    def _mark_dynamic(self):
+        torch._dynamo.mark_dynamic(self.temperature, 0)
+        torch._dynamo.mark_dynamic(self.min_p, 0)
+        torch._dynamo.mark_dynamic(self.indices_do_sample, 0)
