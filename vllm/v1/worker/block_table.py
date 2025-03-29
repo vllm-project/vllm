@@ -9,6 +9,7 @@ logger = init_logger(__name__)
 
 
 class BlockTable:
+    """Device-agnostic block table for storing block IDs for each request."""
 
     def __init__(
         self,

@@ -14,7 +14,7 @@ from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
-from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.worker.gpu_block_table import GPUBlockTable
 
 _SAMPLING_EPS = 1e-5
 
@@ -89,7 +89,7 @@ class InputBatch:
             self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
-        self.block_table = BlockTable(
+        self.block_table = GPUBlockTable(
             max_num_reqs=max_num_reqs,
             max_num_blocks_per_req=max_num_blocks_per_req,
             pin_memory=pin_memory,

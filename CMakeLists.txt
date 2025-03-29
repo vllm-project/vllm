@@ -228,6 +228,7 @@ endif()
 
 set(VLLM_EXT_SRC
   "csrc/cache_kernels.cu"
+  "csrc/block_table.cu"
   "csrc/attention/paged_attention_v1.cu"
   "csrc/attention/paged_attention_v2.cu"
   "csrc/pos_encoding_kernels.cu"
