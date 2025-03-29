@@ -40,7 +40,9 @@ class P2pNcclPipe:
         self._hostname = hostname
         self._port = port
         self.zmq_address = f"{self._hostname}:{self._port}"
-        self.http_address = f"{self._hostname}:{self.config.kv_port}"  #TODO: 换成 --port
+        # TODO: 换成 --port
+        self.http_address = f"{self._hostname}:{self.config.kv_port}"
+        self.proxy_address = f"{self.config.proxy_ip}:{self.config.proxy_port}"
 
         self.context = zmq.Context()
         self.router_socket = self.context.socket(zmq.ROUTER)
@@ -71,7 +73,6 @@ class P2pNcclPipe:
         self._send_thread.start()
 
         if port_offset == 0:
-            self.proxy_address = f"{self.config.proxy_ip}:{self.config.proxy_port}"
             self._ping_thread = threading.Thread(target=self._ping,
                                                  daemon=True)
             self._ping_thread.start()
@@ -276,4 +277,6 @@ class P2pNcclPipe:
                                comm, cudaStream_t(stream.cuda_stream))
 
     def close(self) -> None:
+        self._listener_thread.join()
+        self._ping_thread.join()
         pass
