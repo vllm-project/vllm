@@ -757,20 +757,17 @@ class VllmRunner:
             assert len(prompts) == len(audios)
 
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
-        if images is not None:
-            for i, image in enumerate(images):
-                if image is not None:
-                    inputs[i]["multi_modal_data"] = {"image": image}
 
-        if videos is not None:
-            for i, video in enumerate(videos):
-                if video is not None:
-                    inputs[i]["multi_modal_data"] = {"video": video}
+        for i in range(len(inputs)):
+            inputs[i]["multi_modal_data"] = {}
+            if images is not None and (image := images[i]) is not None:
+                inputs[i]["multi_modal_data"]["image"] = image
 
-        if audios is not None:
-            for i, audio in enumerate(audios):
-                if audio is not None:
-                    inputs[i]["multi_modal_data"] = {"audio": audio}
+            if videos is not None and (video := videos[i]) is not None:
+                inputs[i]["multi_modal_data"]["video"] = video
+
+            if audios is not None and (audio := audios[i]) is not None:
+                inputs[i]["multi_modal_data"]["audio"] = audio
 
         return inputs
 
