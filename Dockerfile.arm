@@ -1,6 +1,6 @@
 # This vLLM Dockerfile is used to construct an image that can build and run vLLM on ARM CPU platform.
 
-FROM ubuntu:22.04 AS cpu-test-arm
+FROM ubuntu:24.04 AS cpu-test-arm
 
 ENV CCACHE_DIR=/root/.cache/ccache
 
