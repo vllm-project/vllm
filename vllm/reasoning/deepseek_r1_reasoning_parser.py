@@ -157,11 +157,11 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
             start_index = token_ids.index(self.start_token_id)
             token_ids = token_ids[start_index + 1:]
 
-        if not token_ids:
-            return model_output, None
-
         if self.end_token_id not in token_ids:
-            return model_output, None
+            reasoning_content = self.model_tokenizer.decode(token_ids)
+            if reasoning_content is None:
+                reasoning_content = ""
+            return reasoning_content, None
         else:
             idx = token_ids.index(self.end_token_id)
             reasoning_content = self.model_tokenizer.decode(token_ids[:idx])
