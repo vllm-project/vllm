@@ -38,7 +38,7 @@ ENV VLLM_TARGET_DEVICE=xpu
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
-    python3 setup.py install
+    python3 -m pip install .
 
 CMD ["/bin/bash"]
 

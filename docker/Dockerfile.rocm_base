@@ -90,7 +90,7 @@ RUN mkdir -p /app/install && cp /app/triton/python/dist/*.whl /app/install
 
 FROM base AS build_amdsmi
 RUN cd /opt/rocm/share/amd_smi \
-    && pip wheel . --wheel-dir=dist
+    && pip wheel . --wheel-dir=dist --no-deps
 RUN mkdir -p /app/install && cp /opt/rocm/share/amd_smi/dist/*.whl /app/install
 
 FROM base AS build_pytorch

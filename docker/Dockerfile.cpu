@@ -68,10 +68,6 @@ ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 
 WORKDIR /workspace/vllm
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/build.txt,target=requirements/build.txt \
-    uv pip install -r requirements/build.txt
-
 COPY . .
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
@@ -79,7 +75,7 @@ RUN --mount=type=bind,source=.git,target=.git \
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel 
+    VLLM_TARGET_DEVICE=cpu python3 -m pip wheel --no-deps --wheel-dir dist --verbose .
 
 ######################### DEV IMAGE #########################
 FROM vllm-build AS vllm-dev
@@ -97,7 +93,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py develop 
+    VLLM_TARGET_DEVICE=cpu python3 -m pip install -e .
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/dev.txt && \

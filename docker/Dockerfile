@@ -88,17 +88,13 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 FROM base AS build
 ARG TARGETPLATFORM
 
-# install build dependencies
-COPY requirements/build.txt requirements/build.txt
-
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    uv pip install --system torch==2.7.0 --extra-index-url https://download.pytorch.org/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -131,7 +127,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
-        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
+        && python3 -m pip wheel --no-deps --wheel-dir dist --verbose . \
         && sccache --show-stats; \
     fi
 
@@ -140,10 +136,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git  \
     if [ "$USE_SCCACHE" != "1" ]; then \
-        # Clean any existing CMake artifacts
-        rm -rf .deps && \
-        mkdir -p .deps && \
-        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+        python3 -m pip wheel --no-deps --wheel-dir dist --verbose . ; \
     fi
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
@@ -266,15 +259,6 @@ COPY ./vllm/collect_env.py .
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
-
-# Although we build Flashinfer with AOT mode, there's still
-# some issues w.r.t. JIT compilation. Therefore we need to
-# install build dependencies for JIT compilation.
-# TODO: Remove this once FlashInfer AOT wheel is fixed
-COPY requirements/build.txt requirements/build.txt
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 #################### vLLM installation IMAGE ####################
 

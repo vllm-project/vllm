@@ -25,10 +25,6 @@ WORKDIR /workspace
 
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=bind,src=requirements/build.txt,target=requirements/build.txt \
-    pip install --upgrade pip && \
-    pip install -r requirements/build.txt
 
 FROM cpu-test-arm AS build
 
@@ -51,7 +47,7 @@ ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel && \
+    VLLM_TARGET_DEVICE=cpu python3 -m pip wheel --no-deps --verbose --wheel-dir=dist . && \
     pip install dist/*.whl && \
     rm -rf dist
 
