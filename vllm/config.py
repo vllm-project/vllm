@@ -41,7 +41,7 @@ from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         get_cpu_memory, is_mi250, is_navi, random_uuid,
-                        resolve_obj_by_qualname)
+                        resolve_obj_by_qualname, aiter_mla_enabled)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -1162,6 +1162,12 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+
+        if aiter_mla_enabled() and not self.block_size == 1:
+            raise ValueError(
+                "AITER MLA currently requires --block-size=1, "
+                f"but got '{self.block_size}'"
+            )
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
