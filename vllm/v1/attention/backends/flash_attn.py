@@ -573,9 +573,10 @@ def use_cascade_attention(
     if common_prefix_len < 256:
         return False
     # Cascade attention is currently not supported with these variants.
-    # For sliding window, we could support it if the query length does not exceed
-    # the sliding window size.
-    def get_sliding_window(sliding_window: Optional[Union[int, list[Optional[int]]]]) -> int:
+    # For sliding window, we could support it if the query length does not
+    # exceed sliding window size.
+    def get_sliding_window(
+            sliding_window: Optional[Union[int, list[Optional[int]]]]) -> int:
         if sliding_window is None:
             return 0
         if isinstance(sliding_window, int):
@@ -585,7 +586,10 @@ def use_cascade_attention(
             return sum(x for x in sliding_window if x is not None)
         return 0
 
-    if use_alibi or (use_sliding_window and np.any(query_lens > get_sliding_window(sliding_window))):
+    if use_alibi:
+        return False
+    if use_sliding_window and np.any(
+            query_lens > get_sliding_window(sliding_window)):
         return False
     # Too few queries. Probably not worth using cascade attention.
     # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
