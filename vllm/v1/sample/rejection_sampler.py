@@ -107,7 +107,6 @@ class RejectionSampler(nn.Module):
     @staticmethod
     def parse_output(
         output_token_ids: torch.Tensor,
-        ignored_req_idxs: list[int],
         vocab_size: int,
     ) -> list[list[int]]:
         """Parse the output of the rejection sampler.
@@ -117,9 +116,6 @@ class RejectionSampler(nn.Module):
                 [batch_size, max_spec_len + 1]. The rejected tokens are
                 replaced with `PLACEHOLDER_TOKEN_ID` by the rejection sampler
                 and will be filtered out in this function.
-            ignored_req_idxs: The indices of the requests that should not be
-                sampled. This is usually because the request is still in the
-                prefill phase.
             vocab_size: The size of the vocabulary.
 
         Returns:
@@ -129,11 +125,8 @@ class RejectionSampler(nn.Module):
         # Create mask for valid tokens.
         valid_mask = ((output_token_ids_np != PLACEHOLDER_TOKEN_ID) &
                       (output_token_ids_np < vocab_size))
-
-        ignored_req_idx_set = set(ignored_req_idxs)
         outputs = [
             row[valid_mask[i]].tolist()
-            if i not in ignored_req_idx_set else []
             for i, row in enumerate(output_token_ids_np)
         ]
         return outputs
