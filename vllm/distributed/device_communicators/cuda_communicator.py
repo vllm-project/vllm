@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from typing import Optional
 
 import torch
@@ -44,10 +45,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.ca_comm: Optional[CustomAllreduce] = None
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
-            self.ca_comm = CustomAllreduce(
-                group=self.cpu_group,
-                device=self.device,
-            )
+            max_size = 8192 * 1024
+            if int(os.environ.get(
+                    "VLLM_CA_2STAGE_COMPRESS_TYPE", "0")) > 0 or int(
+                        os.environ.get("VLLM_CA_SYNT_COMPRESSION_FACTOR",
+                                       "1")) > 1:
+                # increase max_size to force using CA
+                max_size *= 256
+            self.ca_comm = CustomAllreduce(group=self.cpu_group,
+                                           device=self.device,
+                                           max_size=max_size)
 
     def all_reduce(self, input_):
         # always try custom allreduce first,

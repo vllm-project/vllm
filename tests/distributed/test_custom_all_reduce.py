@@ -99,25 +99,25 @@ def eager_allreduce(
         init_test_distributed_environment(tp_size, pp_size, rank,
                                           distributed_init_port)
 
-        # we use the first group to communicate once
-        # and the second group to communicate twice
-        # and so on
-        # this is used to demonstrate that each group can
-        # communicate independently
-        num_communication = rank // tp_size + 1
-        sz = 1024
-        fa = get_tp_group().ca_comm
-        inp = torch.ones(sz, dtype=torch.float32, device=device)
-        out = inp
-        for _ in range(num_communication):
-            out = fa.all_reduce(out, registered=False)
-        torch.testing.assert_close(out, inp * (tp_size**num_communication))
+    # we use the first group to communicate once
+    # and the second group to communicate twice
+    # and so on
+    # this is used to demonstrate that each group can
+    # communicate independently
+    num_communication = rank // tp_size + 1
+    sz = 1024
+    fa = get_tp_group().device_communicator.ca_comm
+    inp = torch.ones(sz, dtype=torch.float32, device=device)
+    out = inp
+    for _ in range(num_communication):
+        out = fa.all_reduce(out, registered=False)
+    torch.testing.assert_close(out, inp * (tp_size**num_communication))
 
-        inp = torch.ones(sz * 4, dtype=torch.bfloat16, device=device)
-        out = inp
-        for _ in range(num_communication):
-            out = fa.all_reduce(out, registered=False)
-        torch.testing.assert_close(out, inp * (tp_size**num_communication))
+    inp = torch.ones(sz * 4, dtype=torch.bfloat16, device=device)
+    out = inp
+    for _ in range(num_communication):
+        out = fa.all_reduce(out, registered=False)
+    torch.testing.assert_close(out, inp * (tp_size**num_communication))
 
 
 @pytest.mark.parametrize("tp_size", [2])
