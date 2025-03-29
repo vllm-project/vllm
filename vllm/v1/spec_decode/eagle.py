@@ -66,7 +66,7 @@ class EagleProposer:
             seq_lens=seq_lens,
             block_table=block_table,
             slot_mapping=slot_mapping,
-            # TODO(woosuk): Add cascade attention.
+            # TODO(woosuk): Support cascade attention.
             use_cascade=False,
             common_prefix_len=0,
             cu_prefix_query_lens=None,
@@ -124,6 +124,8 @@ class EagleProposer:
         return torch.stack(draft_token_ids_list, dim=1)
 
 
+# TODO(woosuk): The logic here is duplicated with the main sampling code.
+# We should refactor this to reuse the same sampling implementation.
 def sample_token_ids(
     logits: torch.Tensor,  # [batch_size, vocab_size]
     sampling_metadata: SamplingMetadata,
@@ -157,7 +159,6 @@ def compute_slot_mapping(
     block_table: torch.Tensor,  # [batch_size, max_num_blocks_per_req]
     block_size: int,
 ) -> torch.Tensor:  # [num_tokens]
-    # [num_tokens]
     block_numbers = positions // block_size
     block_ids = block_table.gather(dim=1, index=block_numbers)
     slot_mapping = block_ids * block_size + positions % block_size
