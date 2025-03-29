@@ -15,7 +15,7 @@ from typing_extensions import deprecated
 from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
-from vllm import PoolingParams
+from vllm.pooling_params import PoolingParams
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 # yapf conflicts with isort for this block
