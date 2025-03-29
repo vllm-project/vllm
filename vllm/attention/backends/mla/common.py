@@ -220,7 +220,8 @@ try:
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
-    from flash_attn import flash_attn_varlen_func
+    #from flash_attn import flash_attn_varlen_func
+    from aiter import flash_attn_varlen_func
     is_vllm_fa = False
 
 from vllm.attention.ops.triton_flash_attention import triton_attention
@@ -1190,7 +1191,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     return_softmax_lse=True,
                 )
             else:
-                attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
+                attn_output, attn_softmax_lse, *rest = self.flash_attn_varlen_func(
                     q=q,
                     k=k,
                     v=v_padded,
@@ -1201,7 +1202,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     context_chunk_max_seq_lens[i],
                     softmax_scale=self.scale,
                     causal=False,  # Context is unmasked
-                    return_attn_probs=True,
+                    return_lse=True,
                 )
 
             if output is None:
@@ -1291,7 +1292,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 max_seqlen_k=prefill_metadata.max_prefill_seq_len,
                 softmax_scale=self.scale,
                 causal=True,
-                return_attn_probs=has_context,
+                return_lse=has_context,
             )
 
         if has_context:

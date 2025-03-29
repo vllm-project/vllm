@@ -23,6 +23,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (direct_register_custom_op, aiter_moe_enabled)
 from .rocm_aiter_fused_moe import shuffle_weights
+from aiter import biased_grouped_topk
 
 if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
@@ -762,15 +763,30 @@ class FusedMoE(torch.nn.Module):
         if use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
-            topk_weights, topk_ids = grouped_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+            if aiter_moe_enabled() and not e_score_correction_bias is None:
+                token = hidden_states.shape[0]
+                device = hidden_states.device
+                topk_ids = torch.empty((token, top_k), dtype=torch.int32, device=device)
+                topk_weights = torch.empty((token, top_k), dtype=torch.float32, device=device)
+                biased_grouped_topk(
+                    router_logits,
+                    e_score_correction_bias,
+                    topk_weights,
+                    topk_ids,
+                    num_expert_group,
+                    topk_group,
+                    renormalize,
+                )
+            else:
+                topk_weights, topk_ids = grouped_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    scoring_func=scoring_func,
+                    e_score_correction_bias=e_score_correction_bias)
         elif custom_routing_function is None:
             topk_weights, topk_ids = fused_topk(hidden_states=hidden_states,
                                                 gating_output=router_logits,
