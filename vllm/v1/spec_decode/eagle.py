@@ -12,12 +12,12 @@ class EagleProposer:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        num_speculative_tokens: int,
         device: torch.device,
     ):
         self.model = ...
         self.vllm_config = vllm_config
-        self.num_speculative_tokens = num_speculative_tokens
+        self.num_speculative_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
         self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs,
                                    device=device)
