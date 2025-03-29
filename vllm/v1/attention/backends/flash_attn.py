@@ -379,8 +379,8 @@ def use_cascade_attention(
     num_tokens = num_reqs
     # NOTE(woosuk): These are default tile sizes. flash-attn might use
     # different tile sizes (e.g., 64 or 256) depending on the configuration.
-    q_tile_size = 128
-    kv_tile_size = 128
+    q_tile_size = 256
+    kv_tile_size = 256
     num_prefix_tiles = cdiv(common_prefix_len, kv_tile_size)
 
     cascade_ctas = num_query_heads * cdiv(num_tokens, q_tile_size)
