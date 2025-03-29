@@ -276,12 +276,20 @@ def get_vllm_version():
 
     if __version__ == "dev":
         return "N/A (dev)"
-
-    if len(__version_tuple__) == 4: # dev build
-        git_sha = __version_tuple__[-1][1:] # type: ignore
-        return f"{__version__} (git sha: {git_sha}"
-
+    version_str = __version_tuple__[-1]
+    if version_str.startswith('g'):
+        # it's a dev build
+        if '.' in version_str:
+            # it's a dev build containing local changes
+            git_sha = version_str.split('.')[0][1:]
+            date = version_str.split('.')[-1][1:]
+            return f"{__version__} (git sha: {git_sha}, date: {date})"
+        else:
+            # it's a dev build without local changes
+            git_sha = version_str[1:]  # type: ignore
+            return f"{__version__} (git sha: {git_sha})"
     return __version__
+
 
 def summarize_vllm_build_flags():
     # This could be a static method if the flags are constant, or dynamic if you need to check environment variables, etc.
