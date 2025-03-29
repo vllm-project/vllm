@@ -5,12 +5,12 @@
 # docs/source/contributing/dockerfile/dockerfile.md and
 # docs/source/assets/contributing/dockerfile-stages-dependency.png
 
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.6.3
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
-ARG CUDA_VERSION=12.4.1
-ARG PYTHON_VERSION=3.12
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS base
+ARG CUDA_VERSION=12.6.3
+ARG PYTHON_VERSION=3.13
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -21,11 +21,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y ccache software-properties-common git curl sudo \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -171,7 +170,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # TODO: Restore to base image after FlashInfer AOT wheel fixed
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
 ARG CUDA_VERSION=12.4.1
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.13
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
@@ -276,7 +275,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
 # Copy in the v1 package for testing (it isn't distributed yet)
-COPY vllm/v1 /usr/local/lib/python3.12/dist-packages/vllm/v1
+COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
