@@ -42,7 +42,7 @@ class LoRAResolver(ABC):
 
 @dataclass
 class _LoRAResolverRegistry:
-    resolvers: Dict[str, Type[LoRAResolver]] = field(default_factory=dict)
+    resolvers: Dict[str, LoRAResolver] = field(default_factory=dict)
 
     def get_supported_resolvers(self) -> AbstractSet[str]:
         """Get all registered resolver names."""
