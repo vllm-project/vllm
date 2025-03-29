@@ -20,7 +20,7 @@ from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import GPUCacheStats, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -432,6 +432,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            num_gpu_blocks=self.cache_config.num_gpu_blocks,
         )
 
         # Advance the number of computed tokens for the request AFTER
@@ -663,7 +664,8 @@ class Scheduler(SchedulerInterface):
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
-            scheduler_stats=self.make_stats(spec_decoding_stats),
+            scheduler_stats=self.make_stats(spec_decoding_stats,
+                                            scheduler_output),
         )
         if self.include_finished_set:
             #TODO currently sending duplicates here, improve this
@@ -733,16 +735,21 @@ class Scheduler(SchedulerInterface):
     def make_stats(
         self,
         spec_decoding_stats: Optional[SpecDecodingStats] = None,
+        scheduler_output: Optional[SchedulerOutput] = None,
     ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
-        return SchedulerStats(
+        schedulerStats = SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             gpu_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=self.kv_cache_manager.make_prefix_cache_stats(),
             spec_decoding_stats=spec_decoding_stats,
         )
+        if scheduler_output is not None:
+            schedulerStats.gpu_cache_stats = GPUCacheStats(
+                num_gpu_blocks=scheduler_output.num_gpu_blocks)
+        return schedulerStats
 
     def make_spec_decoding_stats(
         self,

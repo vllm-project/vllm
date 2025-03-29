@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
+from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING, Optional
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -26,6 +28,11 @@ class PrefixCacheStats:
 
 
 @dataclass
+class GPUCacheStats:
+    num_gpu_blocks: int = 0
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -38,6 +45,9 @@ class SchedulerStats:
         default_factory=PrefixCacheStats)
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
+
+    gpu_cache_stats: GPUCacheStats = dataclass_field(
+        default_factory=GPUCacheStats)
 
 
 @dataclass

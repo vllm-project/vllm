@@ -34,9 +34,8 @@ from vllm.v1.engine.output_processor import (OutputProcessor,
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
-                                     StatLoggerBase)
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
+from vllm.v1.metrics.stats import GPUCacheStats, IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
 
@@ -76,7 +75,7 @@ class AsyncLLM(EngineClient):
                 if logger.isEnabledFor(logging.INFO):
                     loggers.append(LoggingStatLogger(engine_index=i))
                 loggers.append(
-                    PrometheusStatLogger(vllm_config, engine_index=i))
+                    self.PrometheusStatLogger(vllm_config, engine_index=i))
                 self.stat_loggers.append(loggers)
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -445,6 +444,14 @@ class AsyncLLM(EngineClient):
     async def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
         return await self.engine_core.pin_lora_async(lora_id)
+
+    async def set_vllmcache_metric(self) -> None:
+        """Set the metric for the engine."""
+        gpu_blocks = await self.engine_core.get_gpu_blocks()
+        self._record_stats(scheduler_stats=SchedulerStats(
+            gpu_cache_stats=GPUCacheStats(num_gpu_blocks=gpu_blocks)),
+                           iteration_stats=None)
+        return None
 
     @property
     def is_running(self) -> bool:

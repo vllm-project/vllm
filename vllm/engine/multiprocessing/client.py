@@ -740,3 +740,7 @@ class MQLLMEngineClient(EngineClient):
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
+
+    async def set_vllmcache_metric(self) -> None:
+        # onle vllm v1 vllmcache metric is supported
+        pass

@@ -108,7 +108,8 @@ class PrometheusStatLogger(StatLoggerBase):
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self._unregister_vllm_metrics()
-
+        self.vllm_config = vllm_config
+        self.cache_metric_init = False
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
         self.show_hidden_metrics = \
@@ -330,11 +331,6 @@ class PrometheusStatLogger(StatLoggerBase):
                 documentation="Number of accepted tokens.",
                 labelnames=labelnames).labels(*labelvalues)
 
-        #
-        # Cache config info metric
-        #
-        self.log_metrics_info("cache_config", vllm_config.cache_config)
-
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
 
@@ -356,6 +352,14 @@ class PrometheusStatLogger(StatLoggerBase):
     def record(self, scheduler_stats: SchedulerStats,
                iteration_stats: Optional[IterationStats]):
         """Log to prometheus."""
+        if scheduler_stats.gpu_cache_stats is not None and \
+            not self.cache_metric_init:
+            self.cache_metric_init = True
+            self.vllm_config.cache_config.num_gpu_blocks \
+                = scheduler_stats.gpu_cache_stats.num_gpu_blocks
+            self.log_metrics_info("cache_config",
+                                  self.vllm_config.cache_config)
+
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
