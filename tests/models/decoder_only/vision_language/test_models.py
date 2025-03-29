@@ -474,6 +474,20 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
     ),
+    "skywork_r1v": VLMTestInfo(
+        models=["Skywork/Skywork-R1V-38B"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<｜begin▁of▁sentence｜><｜User｜>\n{img_prompt}<｜Assistant｜><think>\n", # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<image>\nWhat's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "<image>\nWhat is the season?",
+        }),
+        multi_image_prompt="<image>\n<image>\nDescribe the two images in short.",  # noqa: E501
+        max_model_len=4096,
+        use_tokenizer_eos=True,
+        patch_hf_runner=model_utils.skyworkr1v_patch_hf_runner,
+        marks=[large_gpu_mark(min_gb=80)],
+    ),
     ### Tensor parallel / multi-gpu broadcast tests
     "chameleon-broadcast": VLMTestInfo(
         models=["facebook/chameleon-7b"],

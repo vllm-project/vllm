@@ -921,6 +921,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `SkyworkR1VChatModel`
+  * Skywork-R1V-38B
+  * T + I
+  * `Skywork/Skywork-R1V-38B`
+  *
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
