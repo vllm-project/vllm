@@ -150,8 +150,8 @@ steps:
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
-  - VLLM_ENABLE_V1_MULTIPROCESSING=0 python3 rlhf.py
-  - VLLM_ENABLE_V1_MULTIPROCESSING=0 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  - python3 rlhf.py
+  - RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
 
 - label: Metrics, Tracing Test # 10min
@@ -431,6 +431,7 @@ steps:
     - pytest -v -s models/encoder_decoder/audio_language -m core_model
     - pytest -v -s models/encoder_decoder/language -m core_model
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
+    - pytest -v -s models/decoder_only/vision_language/test_interleaved.py
 
 - label: Multi-Modal Models Test (Extended) 1 # 48m
   optional: true
@@ -520,7 +521,7 @@ steps:
   - vllm/v1/engine/
   commands:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
-  - VLLM_ENABLE_V1_MULTIPROCESSING=0 pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
