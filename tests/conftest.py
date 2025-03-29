@@ -747,27 +747,27 @@ class VllmRunner:
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
     ) -> list[TextPrompt]:
-        if images is not None:
-            assert len(prompts) == len(images)
 
-        if videos is not None:
-            assert len(prompts) == len(videos)
+        if any(x is not None and len(x) != len(prompts)
+               for x in [images, videos, audios]):
+            raise ValueError(
+                "All non-None multimodal inputs must have the same length as "
+                "prompts")
 
-        if audios is not None:
-            assert len(prompts) == len(audios)
-
-        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
-
-        for i in range(len(inputs)):
-            inputs[i]["multi_modal_data"] = {}
+        inputs = []
+        for i, prompt in enumerate(prompts):
+            multi_modal_data = {}
             if images is not None and (image := images[i]) is not None:
-                inputs[i]["multi_modal_data"]["image"] = image
-
+                multi_modal_data["image"] = image
             if videos is not None and (video := videos[i]) is not None:
-                inputs[i]["multi_modal_data"]["video"] = video
-
+                multi_modal_data["video"] = video
             if audios is not None and (audio := audios[i]) is not None:
-                inputs[i]["multi_modal_data"]["audio"] = audio
+                multi_modal_data["audio"] = audio
+
+            inputs.append(
+                TextPrompt(prompt=prompt,
+                           multi_modal_data=multi_modal_data
+                           if multi_modal_data else None))
 
         return inputs
 
