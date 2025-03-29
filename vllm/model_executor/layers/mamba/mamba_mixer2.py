@@ -468,15 +468,13 @@ class MambaMixer2(CustomOp):
 
         # 3. State Space Model sequence transformation
         if has_prefill:
-
             initial_states = None
-            if has_initial_states is not None and torch.any(
-                    has_initial_states):
-                zero_init_indices = mamba_cache_params.state_indices_tensor[
-                    ~has_initial_states]
-                mamba_cache_params.ssm_state[zero_init_indices] = 0
-                initial_states = mamba_cache_params.ssm_state[
-                    mamba_cache_params.state_indices_tensor]
+            if has_initial_states is not None:
+                # making a copy of the states
+                initial_states = torch.where(
+                    has_initial_states[:, None, None, None],
+                    mamba_cache_params.ssm_state[
+                        mamba_cache_params.state_indices_tensor], 0)
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
                 hidden_states.view(1, seq_len, self.num_heads // self.tp_size,
