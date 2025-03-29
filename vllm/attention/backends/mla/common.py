@@ -1327,11 +1327,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             # correctness. Inf generally doesn't make sense in this context
             # outside of undefined-behavior/FA2-case, so, force inf to -inf.
             # flash-attention/blob/main/csrc/flash_attn/flash_api.cpp#L737
-            # FIXME(DefTruth): dynamically checking each value for infinity
-            # within the `merge_attn_states_kernel` might impact the execution
-            # efficiency of the generated Triton kernel (L20, etc.). To avoid
-            # affecting the generation of the Triton kernel, I have try to
-            # handle this processing outside the kernel.
             if prefill_metadata.max_prefill_seq_len == 0:
                 suffix_lse.fill_(-torch.inf)
             context_output, context_lse = self._compute_prefill_context( \
