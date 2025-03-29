@@ -93,9 +93,11 @@ class Request:
         token_ids: Union[int, list[int]],
     ) -> None:
         if isinstance(token_ids, int):
-            token_ids = [token_ids]
-        self._output_token_ids.extend(token_ids)
-        self._all_token_ids.extend(token_ids)
+            self._output_token_ids.append(token_ids)
+            self._all_token_ids.append(token_ids)
+        else:
+            self._output_token_ids.extend(token_ids)
+            self._all_token_ids.extend(token_ids)
 
     @property
     def num_tokens(self) -> int:
