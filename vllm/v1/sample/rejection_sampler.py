@@ -127,7 +127,8 @@ class RejectionSampler(nn.Module):
         """
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Mask out the ignored requests.
-        output_token_ids_np[ignored_req_indices] = PLACEHOLDER_TOKEN_ID
+        if ignored_req_indices:
+            output_token_ids_np[ignored_req_indices] = PLACEHOLDER_TOKEN_ID
         # Create mask for valid tokens.
         valid_mask = ((output_token_ids_np != PLACEHOLDER_TOKEN_ID) &
                       (output_token_ids_np < vocab_size))
