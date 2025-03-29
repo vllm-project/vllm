@@ -833,6 +833,7 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
 
 model_example_map = {
     "aria": run_aria,
+    "aya_vision": run_aya_vision,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
     "deepseek_vl_v2": run_deepseek_vl2,
