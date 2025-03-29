@@ -416,9 +416,9 @@ class SyncMPClient(MPClient):
 
         def process_outputs_socket():
             shutdown_socket = ctx.socket(zmq.PAIR)
-            shutdown_socket.bind(shutdown_path)
             out_socket = make_zmq_socket(ctx, output_path, zmq.constants.PULL)
             try:
+                shutdown_socket.bind(shutdown_path)
                 poller = zmq.Poller()
                 poller.register(shutdown_socket)
                 poller.register(out_socket)
