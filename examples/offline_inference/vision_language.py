@@ -60,6 +60,33 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Aya Vision
+def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
+    # aya vision is currently under transformers model-based releases
+    # please install transformers from the source repository
+    # that includes the necessary changes for this model
+    assert modality == "image"
+    model_name = "CohereForAI/aya-vision-8b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=2048,
+        max_num_seqs=2,
+        mm_processor_kwargs={"crop_to_patches": True},
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
+
+    prompts = [
+        f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>\n{question}<|END_OF_TURN_TOKEN|>"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # BLIP-2
 def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -841,6 +868,7 @@ def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
 
 model_example_map = {
     "aria": run_aria,
+    "aya_vision": run_aya_vision,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
     "deepseek_vl_v2": run_deepseek_vl2,
