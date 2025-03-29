@@ -118,6 +118,7 @@ class SamplingParams(
 
     Args:
         n: Number of output sequences to return for the given prompt.
+        num_bros: Number of children of the parent request.
         best_of: Number of output sequences that are generated from the prompt.
             From these `best_of` sequences, the top `n` sequences are returned.
             `best_of` must be greater than or equal to `n`. By default,
@@ -192,6 +193,7 @@ class SamplingParams(
     """
 
     n: int = 1
+    num_bros: Optional[int] = None
     best_of: Optional[int] = None
     _real_n: Optional[int] = None
     presence_penalty: float = 0.0

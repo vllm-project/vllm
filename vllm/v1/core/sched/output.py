@@ -107,7 +107,7 @@ class SchedulerOutput:
     scheduled_encoder_inputs: dict[str, list[int]]
     # Number of common prefix blocks for all requests.
     # This can be used for cascade attention.
-    num_common_prefix_blocks: int
+    num_common_prefix_blocks: list[tuple[int, int]]
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests

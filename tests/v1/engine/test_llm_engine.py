@@ -20,7 +20,7 @@ def _vllm_model(apc: bool, vllm_runner, monkeypatch):
         max_model_len=128,
         enforce_eager=True,
         enable_prefix_caching=apc,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.95,
     )
 
 

@@ -389,12 +389,37 @@ class Scheduler(SchedulerInterface):
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = 0
-        if self.running:
-            any_request = self.running[0]
-            num_common_prefix_blocks = (
-                self.kv_cache_manager.get_num_common_prefix_blocks(
-                    any_request, len(self.running)))
+        num_common_prefix_blocks = [
+        ]  # [(group_psumLen/one_parent_psumLen(endpos + 1), num_common_prefix_blocks_one_parent)]
+        if self.running:  # (TODO: darren): optimization
+            # Processing(darren): Group by parent's req_id and
+            # get the corresponding num_common_prefix_blocks for each group
+            # and "continuous childless parents are considered a group"
+            num_running_reqs = len(self.running)
+            now_req = 0
+            flag_childless_parent = False
+            while (now_req < num_running_reqs):
+                request = self.running[now_req]
+                num_bros = request.sampling_params.num_bros
+                if (num_bros):
+                    if (flag_childless_parent):
+                        flag_childless_parent = False
+                        num_common_prefix_blocks.append((now_req, 0))
+                    now_req += num_bros
+                    if (now_req > num_running_reqs):
+                        num_common_prefix_blocks_last_parent = self.kv_cache_manager.get_num_common_prefix_blocks(
+                            request, num_bros - (now_req - num_running_reqs))
+                        now_req = num_running_reqs
+                    else:
+                        num_common_prefix_blocks_last_parent = self.kv_cache_manager.get_num_common_prefix_blocks(
+                            request, num_bros)
+                    num_common_prefix_blocks.append(
+                        (now_req, num_common_prefix_blocks_last_parent))
+                else:
+                    flag_childless_parent = True
+                    now_req += 1
+            if flag_childless_parent:
+                num_common_prefix_blocks.append((num_running_reqs, 0))
 
         grammar_bitmask = self.structured_output_manager.grammar_bitmask(
             self.requests,

@@ -79,16 +79,16 @@ class FlashAttentionMetadata:
     #                                   |-- query_len ---|
 
     num_actual_tokens: int  # Number of tokens excluding padding.
-    max_query_len: int
+    max_query_len: list[int]
     query_start_loc: torch.Tensor
-    max_seq_len: int
+    max_seq_len: list[int]
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
     # For cascade attention.
-    use_cascade: bool
-    common_prefix_len: int
+    use_cascade: list[bool]
+    common_prefix_len: list[tuple[int, int]]
     cu_prefix_query_lens: Optional[torch.Tensor]
     prefix_kv_lens: Optional[torch.Tensor]
     suffix_kv_lens: Optional[torch.Tensor]
@@ -106,9 +106,13 @@ class FlashAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
-        max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
+    def build(
+            self, num_reqs: int, num_actual_tokens: int, num_query_lens,
+            common_prefix_len: list[tuple[int,
+                                          int]]) -> FlashAttentionMetadata:
+        assert num_reqs == common_prefix_len[-1][0], (
+            "Number of requests must be equal to the number of latest_parent_psumLen blocks."
+        )
         query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
             self.runner.device, non_blocking=True)
         seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
@@ -118,20 +122,40 @@ class FlashAttentionMetadataBuilder:
         slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
             self.runner.device, non_blocking=True).long()
 
-        use_cascade = common_prefix_len > 0
-        if use_cascade:
-            # TODO: Optimize.
-            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
-                                                dtype=torch.int32,
-                                                device=self.runner.device)
-            prefix_kv_lens = torch.tensor([common_prefix_len],
+        use_cascade = [c > 0 for _, c in common_prefix_len
+                       ]  # (TODO: darren) optimization
+        if max(use_cascade):  # (TODO: darren) optimization
+            cu_prefix_query_lens = torch.tensor(
+                [query_start_loc[0]] +
+                [query_start_loc[i] for i, _ in common_prefix_len],
+                dtype=torch.int32,
+                device=self.runner.device)
+            prefix_kv_lens = torch.tensor([
+                common_prefix_len_parent
+                for _, common_prefix_len_parent in common_prefix_len
+            ],
                                           dtype=torch.int32,
                                           device=self.runner.device)
-            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
-                              common_prefix_len)
+            suffix_kv_lens: list[int] = []
+            current_parent_bgpos = 0
+            max_seq_len = []  # reduce operation need to be done
+            max_query_len = []
+            for parent_psumLen, common_prefix_len_parent in common_prefix_len:
+                suffix_kv_lens = np.concatenate(
+                    (suffix_kv_lens, self.runner.
+                     seq_lens_np[current_parent_bgpos:parent_psumLen] -
+                     common_prefix_len_parent))
+                max_seq_len.append(
+                    self.runner.
+                    seq_lens_np[current_parent_bgpos:parent_psumLen].max())
+                max_query_len.append(
+                    num_query_lens[current_parent_bgpos:parent_psumLen].max())
+                current_parent_bgpos = parent_psumLen
             suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
-                self.runner.device)
+                self.runner.device).to(torch.int32)
         else:
+            max_seq_len = [self.runner.seq_lens_np[:num_reqs].max()]
+            max_query_len = [num_query_lens.max()]
             cu_prefix_query_lens = None
             prefix_kv_lens = None
             suffix_kv_lens = None
@@ -265,8 +289,8 @@ class FlashAttentionImpl(AttentionImpl):
             layer._k_scale,
             layer._v_scale,
         )
-        descale_shape = (attn_metadata.query_start_loc.shape[0] - 1,
-                         key.shape[1])
+        # descale_shape = (attn_metadata.query_start_loc.shape[0] - 1,
+        #                  key.shape[1])
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(torch.float8_e4m3fn)
             value_cache = value_cache.view(torch.float8_e4m3fn)
@@ -277,54 +301,76 @@ class FlashAttentionImpl(AttentionImpl):
                 layer._q_scale)
             query = query.reshape((num_tokens, num_heads, head_size))
 
-        # Compute attention and update output up to `num_actual_tokens`.
-        if not attn_metadata.use_cascade:
-            # Regular attention (common case).
-            flash_attn_varlen_func(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=attn_metadata.query_start_loc,
-                max_seqlen_q=attn_metadata.max_query_len,
-                seqused_k=attn_metadata.seq_lens,
-                max_seqlen_k=attn_metadata.max_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=attn_metadata.block_table,
-                softcap=self.logits_soft_cap,
-                fa_version=self.vllm_flash_attn_version,
-                q_descale=layer._q_scale.expand(descale_shape),
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-            )
-            return output
+        current_parent_bgpos = 0
+        for i in range(len(attn_metadata.common_prefix_len)
+                       ):  # (TODO: darren) optimization
+            parent_psumLen = attn_metadata.common_prefix_len[i][0]
+            common_prefix_len_parent = attn_metadata.common_prefix_len[i][1]
 
-        # Cascade attention (rare case).
-        cascade_attention(
-            output[:num_actual_tokens],
-            query[:num_actual_tokens],
-            key_cache,
-            value_cache,
-            cu_query_lens=attn_metadata.query_start_loc,
-            max_query_len=attn_metadata.max_query_len,
-            cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
-            prefix_kv_lens=attn_metadata.prefix_kv_lens,
-            suffix_kv_lens=attn_metadata.suffix_kv_lens,
-            max_kv_len=attn_metadata.max_seq_len,
-            softmax_scale=self.scale,
-            alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window,
-            logits_soft_cap=self.logits_soft_cap,
-            block_table=attn_metadata.block_table,
-            common_prefix_len=attn_metadata.common_prefix_len,
-            fa_version=self.vllm_flash_attn_version,
-            q_descale=layer._q_scale,
-            k_descale=layer._k_scale,
-            v_descale=layer._v_scale,
-        )
+            actual_tokens_bg = attn_metadata.query_start_loc[
+                current_parent_bgpos]
+            actual_tokens_nd = attn_metadata.query_start_loc[parent_psumLen]
+
+            descale_shape = (parent_psumLen - current_parent_bgpos,
+                             key.shape[1])
+            # Compute attention and update output up to `num_actual_tokens`.
+            if not attn_metadata.use_cascade[i]:
+                # Regular attention (common case).
+                flash_attn_varlen_func(
+                    q=query[actual_tokens_bg:actual_tokens_nd],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[actual_tokens_bg:actual_tokens_nd],
+                    cu_seqlens_q=attn_metadata.
+                    query_start_loc[current_parent_bgpos:parent_psumLen + 1] -
+                    attn_metadata.query_start_loc[current_parent_bgpos],
+                    max_seqlen_q=attn_metadata.max_query_len[i],
+                    seqused_k=attn_metadata.
+                    seq_lens[current_parent_bgpos:parent_psumLen],
+                    max_seqlen_k=attn_metadata.max_seq_len[i],
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=attn_metadata.
+                    block_table[current_parent_bgpos:parent_psumLen],
+                    softcap=self.logits_soft_cap,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                )
+                return output
+
+            # Cascade attention (rare case).
+            cascade_attention(
+                output[actual_tokens_bg:actual_tokens_nd],
+                query[actual_tokens_bg:actual_tokens_nd],
+                key_cache,
+                value_cache,
+                cu_query_lens=attn_metadata.
+                query_start_loc[current_parent_bgpos:parent_psumLen + 1] -
+                attn_metadata.query_start_loc[current_parent_bgpos],
+                max_query_len=attn_metadata.max_query_len[i],
+                cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens[i:i + 2] -
+                                        attn_metadata.cu_prefix_query_lens[i],
+                prefix_kv_lens=attn_metadata.prefix_kv_lens[i:i + 1],
+                suffix_kv_lens=attn_metadata.
+                suffix_kv_lens[current_parent_bgpos:parent_psumLen],
+                max_kv_len=attn_metadata.max_seq_len[i],
+                softmax_scale=self.scale,
+                alibi_slopes=self.alibi_slopes,
+                sliding_window=self.sliding_window,
+                logits_soft_cap=self.logits_soft_cap,
+                block_table=attn_metadata.
+                block_table[current_parent_bgpos:parent_psumLen],
+                common_prefix_len=common_prefix_len_parent,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=layer._q_scale,
+                k_descale=layer._k_scale,
+                v_descale=layer._v_scale,
+            )
+            current_parent_bgpos = parent_psumLen
         return output
 
 
