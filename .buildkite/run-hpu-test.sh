@@ -21,4 +21,8 @@ remove_docker_container
 
 # Run the image and launch offline inference
 docker run --runtime=habana --name=hpu-test --network=host -e HABANA_VISIBLE_DEVICES=all -e VLLM_SKIP_WARMUP=true --entrypoint="" hpu-test-env python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m
+
+# Launch offline inference with tensor-parallel-size 2
+docker exec hpu-test bash -c "python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --tensor-parallel-size 2"
+
 EXITCODE=$?
