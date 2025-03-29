@@ -105,6 +105,7 @@ if TYPE_CHECKING:
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    VLLM_ENABLE_SHARE_EXPERT_FUSION: bool = False
 
 
 def get_default_cache_root():
@@ -675,12 +676,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
     if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
-
     # Gap between padding buckets for the forward pass. So we have
     # 8, we will run forward pass with [16, 24, 32, ...].
     "VLLM_TPU_BUCKET_PADDING_GAP":
     lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
     if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
+    ## Enable Share Expert Fusion
+    "VLLM_ENABLE_SHARE_EXPERT_FUSION":
+    lambda: int(os.environ["VLLM_ENABLE_SHARE_EXPERT_FUSION"])
+    if "VLLM_ENABLE_SHARE_EXPERT_FUSION" in os.environ else 0
 }
 
 # end-env-vars-definition

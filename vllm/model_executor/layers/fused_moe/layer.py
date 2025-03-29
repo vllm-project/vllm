@@ -437,7 +437,14 @@ class FusedMoE(torch.nn.Module):
             self.tp_rank = 0
             self.ep_size = self.tp_size * self.dp_size
             self.tp_size = 1
-
+            if (envs.VLLM_ENABLE_SHARE_EXPERT_FUSION > 0
+                    and self.ep_size != envs.VLLM_ENABLE_SHARE_EXPERT_FUSION):
+                logger.warning(
+                    "With EP enabled and share expert fusion enabled"
+                    ", share expert replica should be same as ep_size"
+                    "got share expert replica = %d"
+                    "and ep_size = %d", envs.VLLM_ENABLE_SHARE_EXPERT_FUSION,
+                    ep_size)
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
@@ -764,7 +771,8 @@ class FusedMoE(torch.nn.Module):
                        num_expert_group: Optional[int] = None,
                        custom_routing_function: Optional[Callable] = None,
                        scoring_func: str = "softmax",
-                       e_score_correction_bias: Optional[torch.Tensor] = None):
+                       e_score_correction_bias: Optional[torch.Tensor] = None,
+                       share_fusion: int = 0):
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_topk, grouped_topk)
 
@@ -780,7 +788,8 @@ class FusedMoE(torch.nn.Module):
                 num_expert_group=num_expert_group,
                 topk_group=topk_group,
                 scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+                e_score_correction_bias=e_score_correction_bias,
+                share_fusion=share_fusion)
         elif custom_routing_function is None:
             topk_weights, topk_ids = fused_topk(hidden_states=hidden_states,
                                                 gating_output=router_logits,

@@ -639,7 +639,8 @@ def moe_align_block_size(
                                       dtype=torch.int32,
                                       device=topk_ids.device)
     if num_experts >= 224:
-        if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts != 256:
+        if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts not in (
+                256, 256 + envs.VLLM_ENABLE_SHARE_EXPERT_FUSION):
             moe_align_block_size_triton(
                 topk_ids,
                 num_experts,
@@ -649,7 +650,7 @@ def moe_align_block_size(
                 num_tokens_post_pad,
             )
         else:
-            # Currently requires num_experts=256
+            # Currently requires num_experts>256
             ops.sgl_moe_align_block_size(
                 topk_ids,
                 num_experts,
@@ -1098,15 +1099,17 @@ def fused_topk(
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def grouped_topk(hidden_states: torch.Tensor,
-                 gating_output: torch.Tensor,
-                 topk: int,
-                 renormalize: bool,
-                 num_expert_group: int = 0,
-                 topk_group: int = 0,
-                 scoring_func: str = "softmax",
-                 e_score_correction_bias: Optional[torch.Tensor] = None):
-
+def grouped_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int = 0,
+    topk_group: int = 0,
+    scoring_func: str = "softmax",
+    e_score_correction_bias: Optional[torch.Tensor] = None,
+    share_fusion: int = 0,
+):
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
@@ -1118,6 +1121,7 @@ def grouped_topk(hidden_states: torch.Tensor,
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     num_token = scores.shape[0]
+    num_experts = scores.shape[1]
     if e_score_correction_bias is not None:
         # Store original scores before applying correction bias. We use biased
         # scores for expert selection but original scores for routing weights
@@ -1148,8 +1152,20 @@ def grouped_topk(hidden_states: torch.Tensor,
                                             dim=-1,
                                             sorted=False)
 
+    if share_fusion:
+        topk_ids[:, -1] = torch.randint(low=num_experts,
+                                        high=num_experts + share_fusion,
+                                        size=(topk_ids.size(0), ),
+                                        dtype=topk_ids.dtype,
+                                        device=topk_ids.device)
+        topk_weights[:, -1] = topk_weights[:, :-1].sum(dim=-1) * 1.0 / 2.5
+
     if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        topk_weights_sum = topk_weights.sum(
+            dim=-1,
+            keepdim=True) if share_fusion == 0 else topk_weights[:, :-1].sum(
+                dim=-1, keepdim=True)
+        topk_weights = topk_weights / topk_weights_sum
 
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
@@ -1586,9 +1602,14 @@ def fused_moe(
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None
-        topk_weights, topk_ids = grouped_topk(hidden_states, gating_output,
-                                              topk, renormalize,
-                                              num_expert_group, topk_group)
+        topk_weights, topk_ids = grouped_topk(
+            hidden_states,
+            gating_output,
+            topk,
+            renormalize,
+            num_expert_group,
+            topk_group,
+            share_fusion=envs.VLLM_ENABLE_SHARE_EXPERT_FUSION)
     elif custom_routing_function is None:
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)
