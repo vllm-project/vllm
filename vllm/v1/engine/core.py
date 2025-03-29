@@ -117,6 +117,7 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+        self.vllm_config = vllm_config
 
     def _initialize_kv_caches(self,
                               vllm_config: VllmConfig) -> tuple[int, int]:
@@ -281,6 +282,9 @@ class EngineCore:
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
+
+    def get_gpu_blocks(self) -> int:
+        return self.vllm_config.cache_config.num_gpu_blocks
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
