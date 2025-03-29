@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
@@ -522,6 +523,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1")),
+
+    # use aiter linear op if aiter ops are enabled
+    # The following list of related ops
+    # - scaled_mm (per-tensor / rowwise)
+    "VLLM_ROCM_USE_AITER_LINEAR":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in
              ("true", "1")),
 
     # Whether to use aiter moe ops.
