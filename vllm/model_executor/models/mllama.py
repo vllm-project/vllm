@@ -214,7 +214,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         if mm_data:
             # Since only the last group of consecutive images
             # are attended by the decoded tokens, we only need to
-            # get the number of tiles for those images.
+            # get the number of tokens for those images.
             token_per_chunk = self.info.get_token_per_chunk_from_config()
             num_decode_images = self._get_num_image_in_last_group(
                 mm_inputs["prompt_token_ids"])
