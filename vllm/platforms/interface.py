@@ -379,6 +379,16 @@ class Platform:
         """
         return False
 
+    def __getitem__(self, key: str):
+        if hasattr(self, key):
+            return getattr(self, key)
+        elif hasattr(getattr(torch, self.device_name), key):
+            return getattr(getattr(torch, self.device_name), key)
+        else:
+            logger.warning("Current platform %s doesn't has '%s' attribute.",
+                           self.device_name, key)
+            return None
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
