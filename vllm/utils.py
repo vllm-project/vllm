@@ -1767,6 +1767,11 @@ def aiter_fp8_block_moe_enabled() -> bool:
     return aiter_moe_enabled() and envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_MOE
 
 
+@cache
+def aiter_block_gemm_enabled() -> bool:
+    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_BLOCK_GEMM
+
+
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
 ) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:

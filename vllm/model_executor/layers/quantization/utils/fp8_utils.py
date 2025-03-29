@@ -17,7 +17,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import (direct_register_custom_op,
+                        aiter_block_gemm_enabled)
 
 logger = init_logger(__name__)
 
@@ -70,12 +71,22 @@ def apply_w8a8_block_fp8_linear(
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
                                                      column_major_scales=False)
-        output = w8a8_block_fp8_matmul(q_input,
-                                       weight,
-                                       x_scale,
-                                       weight_scale,
-                                       block_size,
-                                       output_dtype=input.dtype)
+
+        if aiter_block_gemm_enabled():
+            from aiter import gemm_a8w8_blockscale_CK
+            output = gemm_a8w8_blockscale_CK(q_input,
+                                             weight,
+                                             x_scale,
+                                             weight_scale,
+                                             dtype=input.dtype)
+        else:
+            output = w8a8_block_fp8_matmul(q_input,
+                                           weight,
+                                           x_scale,
+                                           weight_scale,
+                                           block_size,
+                                           output_dtype=input.dtype)
+
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)
