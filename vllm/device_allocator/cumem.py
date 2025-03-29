@@ -53,7 +53,7 @@ try:
     libcudart = CudaRTLibrary()
     cumem_available = True
 except ModuleNotFoundError:
-    # rocm platform does not support cumem allocator
+    # only cuda and rocm platforms support cumem allocator
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None
@@ -62,7 +62,7 @@ except ModuleNotFoundError:
     libcudart = None
 
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = Tuple[int, int, int, int]
+HandleType = Tuple[int, int, int, Any]
 
 
 @dataclasses.dataclass
@@ -98,7 +98,9 @@ def use_memory_pool_with_allocator(
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
     mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
     with torch.cuda.memory.use_mem_pool(mem_pool):
-        yield mem_pool, new_alloc
+        # Force the allocator to have longer lifetime than mempool
+        yield
+    del mem_pool
 
 
 class CuMemAllocator:
@@ -149,7 +151,6 @@ class CuMemAllocator:
 
         self.pointer_to_data: Dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
-        self.allocator_and_pools: Dict[str, Any] = {}
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
@@ -239,13 +240,12 @@ class CuMemAllocator:
         old_tag = self.current_tag
         self.current_tag = tag
         with use_memory_pool_with_allocator(self.python_malloc_callback,
-                                            self.python_free_callback) as data:
+                                            self.python_free_callback):
             # start to hit another PyTorch bug in PyTorch 2.6,
             # possibly because of gc-related issue w.r.t. the allocator and
             # the memory pool.
             # to avoid the issue, we keep a reference of the data.
             # see https://github.com/pytorch/pytorch/issues/146431 .
-            self.allocator_and_pools[tag] = data
             yield
             # PyTorch's bug, calling torch.cuda.empty_cache() will error
             # when using pluggable allocator, see

@@ -634,6 +634,7 @@ ext_modules = []
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+    ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
