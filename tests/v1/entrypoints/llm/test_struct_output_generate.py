@@ -28,7 +28,6 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
 
 PARAMS_MODELS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "mistral"),
     ("Qwen/Qwen2.5-1.5B-Instruct", "auto"),
 ]
 
