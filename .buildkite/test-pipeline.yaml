@@ -431,6 +431,7 @@ steps:
     - pytest -v -s models/encoder_decoder/audio_language -m core_model
     - pytest -v -s models/encoder_decoder/language -m core_model
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
+    - pytest -v -s models/decoder_only/vision_language/test_interleaved.py
 
 - label: Multi-Modal Models Test (Extended) 1 # 48m
   optional: true
