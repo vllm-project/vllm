@@ -546,11 +546,13 @@ class RayDistributedExecutor(DistributedExecutorBase):
                              "Run `pip install ray[cgraph]` to install it.")
 
         cupy_spec = importlib.util.find_spec("cupy")
-        if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
-            raise ValueError(
-                "cupy is not installed but required since "
-                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set. "
-                "Run `pip install ray[cgraph]` and check cupy installation.")
+        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if cuda_visible_devices:
+            if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
+                raise ValueError(
+                    "cupy is not installed but required since "
+                    "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set. "
+                    "Run `pip install ray[cgraph]` and check cupy installation.")
 
     def _compiled_ray_dag(self, enable_asyncio: bool):
         assert self.parallel_config.use_ray
@@ -609,9 +611,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     # Specify how intermediate tensors should be passed
                     # between pp stages, no need to specify for the last
                     # pp stage.
-                    transport = "nccl" \
-                        if envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL \
-                        else "auto"
+                    if envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
+                        transport = "nccl"
+                    elif envs.ASCEND_RT_VISIBLE_DEVICES:
+                        transport = "hccl"
+                    else:
+                        transport = "auto"
                     outputs = [
                         output.with_tensor_transport(transport=transport)
                         for output in outputs
