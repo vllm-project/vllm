@@ -1777,6 +1777,11 @@ def aiter_linear_enabled() -> bool:
     return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_LINEAR
 
 
+@cache
+def aiter_mla_enabled() -> bool:
+    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_MLA
+
+
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
 ) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:

@@ -643,16 +643,11 @@ class MLACommonMetadata(AttentionMetadata):
             is_profile_run=self.is_profile_run)
         return self._cached_decode_metadata
 
-    def advance_step(self,
-                     model_input: "ModelInputForGPUWithSamplingMetadata",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int,
-                     num_seqs: int,
-                     num_queries: int,
-                     turn_prefills_into_decodes: bool = False):
-        """
-        Update metadata in-place to advance one decode step.
-        """
+    def advance_step_assertions(
+            self,
+            num_seqs: int,
+            num_queries: int,
+            turn_prefills_into_decodes: bool = False) -> None:
         # When using cudagraph, the num_seqs is padded to the next captured
         # batch sized, but num_queries tracks the actual number of requests in
         # the batch. For --enforce-eager mode, num_seqs == num_queries
@@ -705,6 +700,21 @@ class MLACommonMetadata(AttentionMetadata):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
 
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
+        """
+        Update metadata in-place to advance one decode step.
+        """
+        self.advance_step_assertions(
+            num_seqs=num_seqs,
+            num_queries=num_queries,
+            turn_prefills_into_decodes=turn_prefills_into_decodes)
+ 
         ops.advance_step_flashattn(num_seqs=num_seqs,
                                    num_queries=num_queries,
                                    block_size=block_size,
@@ -832,6 +842,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         return torch.from_numpy(graph_block_tables).to(
             device=self.runner.device, non_blocking=True)
 
+    def get_block_tables_with_captured_graph(self, cuda_graph_pad_size: int,
+                                             num_seqs: int) -> torch.Tensor:
+        self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
+        self.block_tables.extend([] * cuda_graph_pad_size)
+        block_tables = self._get_graph_runner_block_tables(
+            num_seqs, self.block_tables)
+        return block_tables
+
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
@@ -870,11 +888,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
 
         num_seqs = len(seq_lens)
         if use_captured_graph:
-            self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
-            block_tables = self._get_graph_runner_block_tables(
-                num_seqs, self.block_tables)
+            block_tables = self.get_block_tables_with_captured_graph(
+                cuda_graph_pad_size, num_seqs)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
