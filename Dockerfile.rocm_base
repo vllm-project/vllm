@@ -42,7 +42,7 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging cmake ninja wheel setuptools pybind11 Cython
+RUN pip install -U packaging 'cmake<4' ninja wheel setuptools pybind11 Cython
 
 FROM base AS build_hipblaslt
 ARG HIPBLASLT_BRANCH
