@@ -265,10 +265,26 @@ class Sampler(nn.Module):
                                      sampling_tensors.frequency_penalties,
                                      sampling_tensors.repetition_penalties)
 
-        # Use float32 to apply temperature scaling.
-        # Use in-place division to avoid creating a new tensor.
+        # Apply temperature scaling, special handling for zero-temperature case.
+        # Use float32 to apply temperature scaling in all cases.
         logits = logits.to(torch.float)
-        logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
+        temperature = sampling_tensors.temperatures.unsqueeze(dim=1)
+        is_zero = (temperature == 0)
+
+        # Positive temperature path.
+        # Need to adjust denominator to avoid division by zero causing problems.
+        # Any zero temperature entries are multiplied by False (0).
+        # This means denominator adjustment never messes with things.
+        logits_p = (~is_zero) * logits / (temperature + is_zero)
+
+        # Zero temperature path.
+        # Any positive temperature entries are multiplied by False (0).
+        logits_z = is_zero * 1e9 * (logits == logits.max(dim=1,
+                                                         keepdim=True)[0])
+
+        # Final logits is sum of both cases.
+        # Always one of them is zero since mutually exclusive.
+        logits = logits_p + logits_z
 
         if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
             logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
