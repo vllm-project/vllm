@@ -3,6 +3,9 @@
 import openai
 import pytest
 import pytest_asyncio
+import requests
+from PIL import Image
+from transformers import AutoProcessor
 
 from vllm.multimodal.utils import encode_image_base64, fetch_image
 
@@ -53,11 +56,31 @@ def base64_encoded_image() -> dict[str, str]:
     }
 
 
+def get_hf_prompt_tokens(model_name, content, image_url):
+    processor = AutoProcessor.from_pretrained(model_name,
+                                              trust_remote_code=True,
+                                              num_crops=4)
+
+    placeholder = "<|image_1|>\n"
+    messages = [{
+        "role": "user",
+        "content": f"{placeholder}{content}",
+    }]
+    images = [Image.open(requests.get(image_url, stream=True).raw)]
+
+    prompt = processor.tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True)
+    inputs = processor(prompt, images, return_tensors="pt")
+
+    return inputs.input_ids.shape[1]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image(client: openai.AsyncOpenAI,
                                          model_name: str, image_url: str):
+    content_text = "What's in this image?"
     messages = [{
         "role":
         "user",
@@ -70,16 +93,17 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
             },
             {
                 "type": "text",
-                "text": "What's in this image?"
+                "text": content_text
             },
         ],
     }]
 
+    max_completion_tokens = 10
     # test single completion
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=max_completion_tokens,
         logprobs=True,
         temperature=0.0,
         top_logprobs=5)
@@ -87,8 +111,12 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
 
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
+    hf_prompt_tokens = get_hf_prompt_tokens(model_name, content_text,
+                                            image_url)
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=774, total_tokens=784)
+        completion_tokens=max_completion_tokens,
+        prompt_tokens=hf_prompt_tokens,
+        total_tokens=hf_prompt_tokens + max_completion_tokens)
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -150,6 +178,7 @@ async def test_single_chat_session_image_base64encoded(
         client: openai.AsyncOpenAI, model_name: str, image_url: str,
         base64_encoded_image: dict[str, str]):
 
+    content_text = "What's in this image?"
     messages = [{
         "role":
         "user",
@@ -163,16 +192,17 @@ async def test_single_chat_session_image_base64encoded(
             },
             {
                 "type": "text",
-                "text": "What's in this image?"
+                "text": content_text
             },
         ],
     }]
 
+    max_completion_tokens = 10
     # test single completion
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=max_completion_tokens,
         logprobs=True,
         temperature=0.0,
         top_logprobs=5)
@@ -180,8 +210,12 @@ async def test_single_chat_session_image_base64encoded(
 
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
+    hf_prompt_tokens = get_hf_prompt_tokens(model_name, content_text,
+                                            image_url)
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=774, total_tokens=784)
+        completion_tokens=max_completion_tokens,
+        prompt_tokens=hf_prompt_tokens,
+        total_tokens=hf_prompt_tokens + max_completion_tokens)
 
     message = choice.message
     message = chat_completion.choices[0].message
