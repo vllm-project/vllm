@@ -708,9 +708,6 @@ class Phi4MMAudioFeatureInputs(TypedDict):
     data: Tuple[NestedTensors]
     """Shape: `((batch_size * num_audios, 80, M), )"""
 
-    audio_embed_sizes: torch.Tensor
-    """Shape: `(batch_size * num_audios)`"""
-
 
 class Phi4MMAudioEmbeddingInputs(TypedDict):
     type: Literal["audio_embeds"]
@@ -1621,6 +1618,10 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             ]
             processed_outputs["num_img_tokens"] = num_img_tokens
             processed_outputs["pixel_values"] = processed_outputs.pop('input_image_embeds')
+            if "audios" in mm_data:
+                feature_sizes = [size.item() * 8 for size in processed_outputs['audio_embed_sizes']]
+                audio_features = processed_outputs['input_audio_embeds']
+                processed_outputs['input_audio_embeds'] = [audio_features[idx, :size] for idx, size in enumerate(feature_sizes)]
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -1874,10 +1875,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                 raise ValueError("Incorrect type of audio features. "
                                  f"Got type: {type(audio_features)}")
 
-
             return Phi4MMAudioFeatureInputs(type="audio_features",
-                                            data=flatten_bn(audio_features, concat=True),
-                                            audio_embed_sizes=flatten_bn(audio_embed_sizes, concat=True))
+                                            data=flatten_bn(audio_features))
 
         if audio_embeds is not None:
             if not isinstance(audio_embeds, (torch.Tensor, list)):
@@ -1907,17 +1906,14 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             return audio_input["data"]
 
         audio_features = audio_input["data"]
-        audio_sizes = audio_input["audio_embed_sizes"]
         # (e.g. multiple examples) and the second dim is the multi-audio dim
         # (e.g. multiple audios in the same example)
 
         dtype = next(self.embed_tokens_extend.parameters()).dtype
-        audio_padded_embeds = self.embed_tokens_extend.get_audio_features(
-            audio_features.to(dtype),
+        audio_embeds = [self.embed_tokens_extend.get_audio_features(
+            features.unsqueeze(0).to(dtype),
             audio_projection_mode=audio_projection_mode,
-        )
-        audio_embeds = [audio_padded_embeds[idx, :size]
-                        for idx, size in enumerate(audio_sizes)]
+        ).squeeze(0) for features in audio_features]
         return audio_embeds
 
     def _parse_and_validate_image_input(self,
