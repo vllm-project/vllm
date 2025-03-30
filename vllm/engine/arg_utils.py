@@ -1477,7 +1477,6 @@ class EngineArgs:
                 ("model" in self.speculative_config and
                  self.speculative_config["model"] in ("ngram", "[ngram]"))):
                 is_ngram_enabled = True
-                pass
             else:
                 _raise_or_fallback(feature_name="Speculative Decoding",
                                    recommend_to_remove=False)
