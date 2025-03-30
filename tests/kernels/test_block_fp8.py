@@ -283,7 +283,7 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, 
     e_ids: List[Optional[torch.Tensor]] = [None] * ep_size
 
     for ep_rank in range(ep_size):
-        n_local_experts[ep_rank], expert_map[ep_rank] = determine_expert_map(ep_size, ep_rank, E)
+        n_local_experts[ep_rank], expert_map[ep_rank], _ = determine_expert_map(ep_size, ep_rank, E)
         e_map = expert_map[ep_rank]
         if e_map is not None:
             e_ids[ep_rank] = e_map[e_map >= 0]
@@ -528,19 +528,25 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
 
     n_local_experts: List[int] = [-1] * ep_size
     expert_map: List[Optional[torch.Tensor]] = [None] * ep_size
+    expert_starts: List[Optional[torch.Tensor]] = [None] * ep_size
+    expert_ends: List[Optional[torch.Tensor]] = [None] * ep_size
+    expert_valid: List[Optional[torch.Tensor]] = [None] * ep_size
     e_ids: List[Optional[torch.Tensor]] = [None] * ep_size
 
     for ep_rank in range(ep_size):
-        n_local_experts[ep_rank], expert_map[ep_rank] = determine_expert_map(ep_size, ep_rank, E)
+        (n_local_experts[ep_rank],
+         expert_map[ep_rank],
+         expert_starts[ep_rank],
+         expert_ends[ep_rank],
+         expert_valid[ep_rank]) = determine_expert_map(ep_size, ep_rank, E)
         e_map = expert_map[ep_rank]
         if e_map is not None:
             e_ids[ep_rank] = e_map[e_map >= 0]
 
-    # Set the context to avoid lots of warning spam.
-
     ref_out: Optional[torch.Tensor] = None
     out: Optional[torch.Tensor] = None
 
+    # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         for ep_rank in range(ep_size):
             if M >= 128 and ep_size == 1:

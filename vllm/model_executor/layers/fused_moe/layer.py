@@ -312,9 +312,24 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     forward_native = forward_tpu if current_platform.is_tpu else forward_cuda
 
 
+def find_contiguous_segments(t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    non_matching = t[:-1] != t[1:]
+    ends = non_matching.nonzero().flatten() + 1
+    #index_range = torch.arange(1, t.numel()).flatten()
+    #ends = index_range[non_matching]
+    starts = torch.concat((torch.tensor([0], device=t.device), ends))
+    ends = torch.concat((ends, torch.tensor([t.numel()], device=t.device)))
+    return starts, ends
+
+
 def determine_expert_map(
         ep_size: int, ep_rank: int,
-        global_num_experts: int) -> Tuple[int, Optional[torch.Tensor]]:
+        global_num_experts: int) -> Tuple[int,
+                                          Optional[torch.Tensor],
+                                          Optional[torch.Tensor],
+                                          Optional[torch.Tensor],
+                                          Optional[torch.Tensor]]:
+
     """
         Calculates how many experts should be assigned to each rank for EP and
         creates a mapping from global to local expert index. Experts are
@@ -336,7 +351,7 @@ def determine_expert_map(
         """
     assert ep_size > 0
     if ep_size == 1:
-        return (global_num_experts, None)
+        return (global_num_experts, None, None, None, None)
 
     local_num_experts = global_num_experts // ep_size
 
@@ -354,7 +369,11 @@ def determine_expert_map(
 
         expert_map[-local_num_experts:] = \
             torch.arange(0, local_num_experts, dtype=torch.int32)
-    return (local_num_experts, expert_map)
+
+    starts, ends = find_contiguous_segments(expert_map)
+    valid = expert_map >= 0
+
+    return (local_num_experts, expert_map, starts, ends, valid)
 
 
 class FusedMoE(torch.nn.Module):
