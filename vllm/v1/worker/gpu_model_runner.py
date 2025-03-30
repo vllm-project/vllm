@@ -1191,7 +1191,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cu_num_tokens=cu_num_tokens,
                 block_table=attn_metadata.block_table,
                 sampling_metadata=sampling_metadata,
-            )
+            ).tolist()
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1249,6 +1249,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                   self.scheduler_config,
                                                   self.lora_config,
                                                   self.device)
+            if (hasattr(self, "drafter")
+                    and self.speculative_config.method != "ngram"):
+                logger.info("Loading drafter model...")
+                self.drafter.load_model(self.model)
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
         logger.info("Model loading took %.4f GB and %.6f seconds",
