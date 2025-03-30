@@ -15,11 +15,20 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
-GUIDED_DECODING_BACKENDS_V1 = [
-    "xgrammar:disable-any-whitespace", "guidance:disable-any-whitespace"
+PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
+     "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance:disable-any-whitespace",
+     "auto"),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
+     "mistral"),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar:disable-any-whitespace", "auto"),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "guidance:disable-any-whitespace", "auto"),
 ]
-MODELS_TO_TEST = [
-    "Qwen/Qwen2.5-1.5B-Instruct", "mistralai/Ministral-8B-Instruct-2410"
+
+PARAMS_MODELS_TOKENIZER_MODE = [
+    ("mistralai/Ministral-8B-Instruct-2410", "auto"),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "auto"),
 ]
 
 
@@ -37,9 +46,8 @@ class CarDescription(BaseModel):
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend",
-                         GUIDED_DECODING_BACKENDS_V1)
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         PARAMS_MODELS_BACKENDS_TOKENIZER_MODE)
 def test_structured_output(
     monkeypatch: pytest.MonkeyPatch,
     sample_json_schema: dict[str, Any],
@@ -49,6 +57,7 @@ def test_structured_output(
     sample_regex: str,
     sample_guided_choice: str,
     guided_decoding_backend: str,
+    tokenizer_mode: str,
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
@@ -58,7 +67,8 @@ def test_structured_output(
     llm = LLM(model=model_name,
               enforce_eager=True,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend)
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
 
     #
     # Test 1: Generate JSON output based on a provided schema
@@ -324,17 +334,20 @@ def test_structured_output(
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+@pytest.mark.parametrize("model_name, tokenizer_mode",
+                         PARAMS_MODELS_TOKENIZER_MODE)
 def test_structured_output_auto_mode(
     monkeypatch: pytest.MonkeyPatch,
     unsupported_json_schema: dict[str, Any],
     model_name: str,
+    tokenizer_mode: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
     llm = LLM(model=model_name,
               max_model_len=1024,
-              guided_decoding_backend="auto")
+              guided_decoding_backend="auto",
+              tokenizer_mode=tokenizer_mode)
 
     sampling_params = SamplingParams(
         temperature=1.0,
