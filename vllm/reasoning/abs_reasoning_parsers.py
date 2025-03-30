@@ -73,8 +73,11 @@ class ReasoningParser:
         available before sending to the client.
 
         Parameters:
-        token_ids: str
+        token_ids: list[int] 
             The model-generated token_ids to extract reasoning content from.
+
+        model_output: str
+            The model-generated output to extract reasoning content from.
 
         request: ChatCompletionRequest
             The request object that was used to generate the model_output.
