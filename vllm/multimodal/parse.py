@@ -368,7 +368,7 @@ class MultiModalDataParser:
                         "Audio resampling is not supported when "
                         "`target_sr` is not provided")
 
-                new_audio = resample_audio(audio,
+                new_audio = self.audio_resampler(audio,
                                            orig_sr=orig_sr,
                                            target_sr=target_sr)
 
