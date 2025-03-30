@@ -76,10 +76,15 @@ def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    prompts = [
-        f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>\n{question}<|END_OF_TURN_TOKEN|>"
-        for question in questions
-    ]
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    messages = [[{
+        'role': 'user',
+        'content': f"<image>\n{question}"
+    }] for question in questions]
+    prompts = tokenizer.apply_chat_template(messages,
+                                            tokenize=False,
+                                            add_generation_prompt=True)
 
     return ModelRequestData(
         engine_args=engine_args,
