@@ -34,7 +34,7 @@ class SpecializedManager(ABC):
             self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
         """
         Get the longest cache hit prefix of the blocks. If no cache hit is 
-        found, returns an empty list.
+        found, return an empty list.
 
         Args:
             block_hashes: The block hashes of the request.
@@ -51,9 +51,10 @@ class SpecializedManager(ABC):
     def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
                               num_computed_tokens: int) -> list[KVCacheBlock]:
         """
-        Remove the blocks that are no longer needed from. The removed blocks 
-        should be replaced by null_blocks. Return the removed blocks in eviction
-        order, where the first returned block should be evicted first.
+        Remove the blocks that are no longer needed from `blocks`. The removed 
+        blocks should be replaced by null_block. Return the removed blocks in 
+        eviction order, where the first returned block should be evicted first.
+        Don't free the removed blocks in this function.
 
         Args:
             blocks: The list of blocks to be updated.
@@ -120,7 +121,8 @@ class SlidingWindowManager(SpecializedManager):
 
     def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
                               num_computed_tokens: int) -> list[KVCacheBlock]:
-        # Remove the blocks that are no longer be in the sliding window.
+        # Remove the blocks that are no longer be in the sliding window and
+        # skipped during the attention computation.
         last_useful_token = num_computed_tokens - self.sliding_window
         last_useful_block = last_useful_token // self.block_size
 

@@ -195,7 +195,6 @@ class KVCacheManager:
                                len(new_computed_blocks) * self.block_size)
         num_required_blocks = cdiv(num_computed_tokens + num_tokens,
                                    self.block_size)
-
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
 
@@ -358,26 +357,3 @@ class KVCacheManager:
         is finished, not when it is preempted.
         """
         self.req_to_block_hashes.pop(request.request_id, None)
-
-    def _free_useless_blocks(self, req_blocks: list[KVCacheBlock],
-                             num_computed_tokens: int, touched: bool) -> None:
-        """
-        Frees memory blocks that are not needed. E.g., the blocks that are 
-        outside of the sliding window. The freed blocks will be replaced with
-        null blocks in req_blocks.
-        NOTE: Due to the append-only design of block_table in model 
-        runner, we don't change these blocks into null blocks in model runner.
-        This implementation is correct as model runner doesn't access the 
-        freed blocks.
-
-        Args:
-            req_blocks: The KV cache blocks of one request.
-            num_computed_tokens: The number of computed tokens.
-            touched: Whether the blocks are touched.
-        """
-        # The first call always comes from `get_computed_blocks` which
-        # passes `touched=False`.
-        removed_blocks = self.specialized_manager.remove_skipped_blocks(
-            req_blocks, num_computed_tokens)
-        if touched:
-            self.block_pool.free_blocks(removed_blocks)
