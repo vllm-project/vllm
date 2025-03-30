@@ -160,6 +160,10 @@ def supported_schema():
                     "type": "number"
                 }
             },
+            "car_type": {
+                "type": "string",
+                "enum": ["sedan", "suv", "truck"]
+            },
             "address": {
                 "type": "object",
                 "properties": {
