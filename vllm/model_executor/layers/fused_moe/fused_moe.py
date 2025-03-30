@@ -989,7 +989,7 @@ def get_default_config(
         else:
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
     elif is_marlin:
-        for block_size_m in [16, 32, 48, 64]:
+        for block_size_m in [8, 16, 32, 48, 64]:
             if M * topk / E / block_size_m < 0.9:
                 break
         return {"BLOCK_SIZE_M": block_size_m}
