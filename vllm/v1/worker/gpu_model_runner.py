@@ -1124,7 +1124,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampled_token_ids,
                 self.input_batch.vocab_size,
             )
-
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
@@ -1133,7 +1132,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Speculative decoding is not enabled.
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
-            pass
+            spec_token_ids = self.generate_draft_token_ids(
+                valid_sampled_token_ids, sampling_metadata)
         elif self.speculative_config.method == "eagle":
             # TODO(woosuk): Refactor the loop.
             next_token_ids: list[int] = []
