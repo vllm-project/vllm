@@ -1838,7 +1838,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         Returns:
             Optional[Phi4MMAudioInputs]: Parsed and validated audio inputs.
         """
-        audio_features = kwargs.pop("audio_features", None)
+        audio_features = kwargs.pop("input_audio_embeds", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
 
         if audio_features is None and audio_embeds is None:
@@ -1862,7 +1862,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_audio_input(self, input_ids: torch.Tensor,
+    def _process_audio_input(self,
                              audio_input: Phi4MMAudioInputs,
                              audio_projection_mode: str) -> NestedTensors:
         """
@@ -2015,7 +2015,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                 multimodal_embeddings += tuple(vision_embeddings)
             if modality == "audios":
                 audio_input = modalities["audios"]
-                audio_embeddings = self._process_audio_input(audio_input)
+                audio_embeddings = self._process_audio_input(audio_input, audio_projection_mode=audio_projection_mode)
                 multimodal_embeddings += audio_embeddings
 
         return multimodal_embeddings
@@ -2038,6 +2038,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         image_input: Optional[Phi4MMImagePixelInputs] = None,
         audio_input: Optional[Phi4MMAudioFeatureInputs] = None,
     ) -> torch.Tensor:
+        audio_projection_mode = 'speech'
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)
@@ -2047,15 +2048,16 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                 image_embeds,
                 placeholder_token_id=_IMAGE_PLACEHOLDER_TOKEN_ID,
             )
+            audio_projection_mode = 'vision'
 
-        # if audio_input is not None:
-        #     audio_embeds = self._process_audio_input(audio_input)
-        #     inputs_embeds = merge_multimodal_embeddings(
-        #         input_ids,
-        #         inputs_embeds,
-        #         audio_embeds,
-        #         placeholder_token_id=_AUDIO_PLACEHOLDER_TOKEN_ID,
-        #     )
+        if audio_input is not None:
+            audio_embeds = self._process_audio_input(audio_input, audio_projection_mode=audio_projection_mode)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                audio_embeds,
+                placeholder_token_id=_AUDIO_PLACEHOLDER_TOKEN_ID,
+            )
         return inputs_embeds
 
     def forward(
