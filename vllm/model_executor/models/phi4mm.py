@@ -44,7 +44,7 @@ from vllm.utils import is_list_of
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import SupportsLoRA, SupportsMultiModal, MultiModalEmbeddings
 from .phi4mm_audio import AudioEmbedding
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix, merge_multimodal_embeddings
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix, merge_multimodal_embeddings, flatten_bn
 
 # <|endoftext10|> (see vocab.json in hf model)
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
@@ -705,7 +705,10 @@ class Phi4MMImageEmbeddingInputs(TypedDict):
 class Phi4MMAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
     data: Tuple[NestedTensors]
-    """Shape: `((batch_size, num_audios, 80, M), )"""
+    """Shape: `((batch_size * num_audios, 80, M), )"""
+
+    audio_embed_sizes: torch.Tensor
+    """Shape: `(batch_size * num_audios)`"""
 
 
 class Phi4MMAudioEmbeddingInputs(TypedDict):
@@ -1839,18 +1842,28 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             Optional[Phi4MMAudioInputs]: Parsed and validated audio inputs.
         """
         audio_features = kwargs.pop("input_audio_embeds", None)
+        audio_embed_sizes = kwargs.pop("audio_embed_sizes", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
 
         if audio_features is None and audio_embeds is None:
             return None
 
         if audio_features is not None:
-            if not isinstance(audio_features, (torch.Tensor, list)):
+            assert isinstance(audio_embed_sizes, torch.Tensor)
+            if isinstance(audio_features, torch.Tensor):
+                assert audio_features.size(0) == len(audio_embed_sizes), (
+                    "audio_features and audio_embed_sizes must have the same length")
+            elif is_list_of(audio_features, list):
+                assert len(audio_features) == len(audio_embed_sizes), (
+                    "audio_features and audio_embed_sizes must have the same length")
+            else:
                 raise ValueError("Incorrect type of audio features. "
                                  f"Got type: {type(audio_features)}")
 
+
             return Phi4MMAudioFeatureInputs(type="audio_features",
-                                            data=audio_features)
+                                            data=flatten_bn(audio_features, concat=True),
+                                            audio_embed_sizes=flatten_bn(audio_embed_sizes, concat=True))
 
         if audio_embeds is not None:
             if not isinstance(audio_embeds, (torch.Tensor, list)):
@@ -1880,15 +1893,18 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             return audio_input["data"]
 
         audio_features = audio_input["data"]
+        audio_sizes = audio_input["audio_embed_sizes"]
         # (e.g. multiple examples) and the second dim is the multi-audio dim
         # (e.g. multiple audios in the same example)
 
         dtype = next(self.embed_tokens_extend.parameters()).dtype
-        audio_set_tensor = [self.embed_tokens_extend.get_audio_features(
-                feature.to(dtype), audio_projection_mode=audio_projection_mode)
-            for feature in audio_features
-        ]
-        return audio_set_tensor
+        audio_padded_embeds = self.embed_tokens_extend.get_audio_features(
+            audio_features.to(dtype),
+            audio_projection_mode=audio_projection_mode,
+        )
+        audio_embeds = [audio_padded_embeds[idx, :size]
+                        for idx, size in enumerate(audio_sizes)]
+        return audio_embeds
 
     def _parse_and_validate_image_input(self,
                                         **kwargs: object) -> Optional[Dict]:
