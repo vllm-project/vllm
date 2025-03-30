@@ -1871,8 +1871,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         created by `input_mapper_for_phi4mm_audio`.
 
         Args:
-            input_ids (torch.Tensor): Input IDs (the prompt in this case, 
-            before the audio token replication).
             audio_input (Phi4MMAudioInputs): Audio input.
 
         Returns:
@@ -1884,20 +1882,11 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         audio_features = audio_input["data"]
         # (e.g. multiple examples) and the second dim is the multi-audio dim
         # (e.g. multiple audios in the same example)
-        audio_feature = [i[0] for j in audio_features for i in j]
-        # audio_feature_len = [i[1].item() for j in audio_features for i in j]
-        # Add the batch dim via `squeeze`
 
-        # return self._audio_features_to_embeddings(
-        #     input_ids.unsqueeze(0),
-        #     audio_feature,
-        #     audio_feature_len,
-        #     audio_projection_mode,
-        # ).squeeze(0)
-        audio_set_tensor = [
-            self.embed_tokens_extend.get_audio_features(
-                audio_feature, audio_projection_mode=audio_projection_mode)
-            for audio_feature in audio_feature
+        dtype = next(self.embed_tokens_extend.parameters()).dtype
+        audio_set_tensor = [self.embed_tokens_extend.get_audio_features(
+                feature.to(dtype), audio_projection_mode=audio_projection_mode)
+            for feature in audio_features
         ]
         return audio_set_tensor
 
