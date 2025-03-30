@@ -33,14 +33,16 @@ class StreamingReasoningReconstructor:
 
 def run_reasoning_extraction(
     reasoning_parser: ReasoningParser,
-    model_output: list[str],
+    model_output: str,
+    output_tokens: list[str],
+    token_ids: list[int],
     request: Union[ChatCompletionRequest, None] = None,
     streaming: bool = False,
 ) -> tuple[Optional[str], Optional[str]]:
     if streaming:
         reconstructor = run_reasoning_extraction_streaming(
             reasoning_parser,
-            model_output,
+            output_tokens,
             request,
         )
         return (
@@ -49,47 +51,47 @@ def run_reasoning_extraction(
         )
     else:
         reasoning, content = run_reasoning_extraction_nonstreaming(
-            reasoning_parser, model_output, request)
+            reasoning_parser, model_output, token_ids, request)
         return reasoning, content
 
 
 def run_reasoning_extraction_nonstreaming(
     reasoning_parser: ReasoningParser,
-    model_output: list[str],
+    model_output: str,
+    token_ids: list[int],
     request: Union[ChatCompletionRequest, None] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     return reasoning_parser.extract_reasoning_content(
-        model_output=''.join(model_output), request=request)
+        token_ids=token_ids, model_output=model_output, request=request)
 
 
 def run_reasoning_extraction_streaming(
     reasoning_parser: ReasoningParser,
-    model_deltas: list[str],
+    output_tokens: list[str],
     request: Union[ChatCompletionRequest, None] = None,
 ) -> StreamingReasoningReconstructor:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     reconstructor = StreamingReasoningReconstructor()
     previous_text = ""
-    previous_tokens: list[int] = []
-    for delta in model_deltas:
-        token_delta = [
-            reasoning_parser.vocab.get(token)
-            for token in reasoning_parser.model_tokenizer.tokenize(delta)
-            if token in reasoning_parser.vocab
-        ]
-        current_text = previous_text + delta
-        current_tokens = previous_tokens + token_delta
+    previous_token_ids: list[int] = []
+    for token in output_tokens:
+        delta_token_ids = reasoning_parser.model_tokenizer.\
+            convert_tokens_to_ids([token])
+        delta_text = reasoning_parser.model_tokenizer.convert_tokens_to_string(
+            [token])
+        current_text = previous_text + delta_text
+        current_token_ids = previous_token_ids + delta_token_ids
         delta_message = reasoning_parser.extract_reasoning_content_streaming(
             previous_text,
             current_text,
-            delta,
-            previous_tokens,
-            current_tokens,
-            token_delta,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
         )
         if delta_message is not None:
             reconstructor.append_delta(delta_message)
         previous_text = current_text
-        previous_tokens = current_tokens
+        previous_token_ids = current_token_ids
     return reconstructor

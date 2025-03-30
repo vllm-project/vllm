@@ -137,7 +137,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 return DeltaMessage(reasoning_content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+            self, token_ids: list[int], model_output: str,
+            request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.
@@ -149,24 +150,24 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
         """
-
-        # Check if the start token is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.start_token)
-        model_output = model_output_parts[2] if model_output_parts[
-            1] else model_output_parts[0]
-
+        if not token_ids:
+            return model_output, None
         # DeepSeek R1 doesn't generate <think> now.
         # Thus we assume the reasoning content is always at the start.
         # Ref https://huggingface.co/deepseek-ai/DeepSeek-R1/commit/8a58a132790c9935686eb97f042afa8013451c9f
-        if self.end_token not in model_output:
+        if self.end_token_id not in token_ids:
             return model_output, None
         else:
-            reasoning_content, _, content = model_output.partition(
-                self.end_token)
-            # If the end token is not found, return the model output as is.
-            # It should not happen since we already checked for the presence
-            # of the end token.
-            # If generation stops right after end-of-think, return null content
-            final_content = content or None
-            return reasoning_content, final_content
+            if token_ids[0] == self.start_token_id:
+                token_ids = token_ids[1:]
+
+            if not token_ids:
+                return model_output, None
+
+            idx = token_ids.index(self.end_token_id)
+            reasoning_content = self.model_tokenizer.decode(token_ids[:idx])
+            final_output = self.model_tokenizer.decode(token_ids[idx + 1:])
+            if reasoning_content is None:
+                reasoning_content = ""
+            final_output = final_output or None
+            return reasoning_content, final_output

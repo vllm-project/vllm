@@ -63,17 +63,18 @@ class ReasoningParser:
 
     @abstractmethod
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+            self, token_ids: list[int], model_output: str,
+            request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         """
-        Extract reasoning content from a complete model-generated string.
+        Extract reasoning content from a complete model-generated token ids.
 
         Used for non-streaming responses where we have the entire model response
         available before sending to the client.
 
         Parameters:
-        model_output: str
-            The model-generated string to extract reasoning content from.
+        token_ids: str
+            The model-generated token_ids to extract reasoning content from.
 
         request: ChatCompletionRequest
             The request object that was used to generate the model_output.
