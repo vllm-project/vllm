@@ -34,9 +34,9 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -1130,16 +1130,63 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             valid_sampled_token_ids[i].clear()
 
         if not self.use_spec_decode:
+            # Speculative decoding is not enabled.
             spec_token_ids = None
-        else:
-            token_indices = None
-            cu_num_tokens = None
-            next_token_ids = None  # Sampled, Bonus, or Recovered
-            input_ids = self.input_ids[:num_scheduled_tokens]
+        elif self.speculative_config.method == "ngram":
+            pass
+        elif self.speculative_config.method == "eagle":
+            # TODO(woosuk): Refactor the loop.
+            next_token_ids: list[int] = []
+            for i, token_ids in enumerate(valid_sampled_token_ids):
+                if token_ids:
+                    # Common case.
+                    next_token_id = token_ids[-1]
+                else:
+                    # Partial prefill (rare case).
+                    # Get the next token id from the request state.
+                    req_id = self.input_batch.req_ids[i]
+                    req_state = self.requests[req_id]
+                    seq_len = (req_state.num_computed_tokens +
+                               scheduler_output.num_scheduled_tokens[req_id])
+                    next_token_id = req_state.get_token_id(seq_len)
+                next_token_ids.append(next_token_id)
+            next_token_ids = torch.tensor(next_token_ids,
+                                          dtype=torch.int32,
+                                          device=self.device)
+
+            if spec_decode_metadata is None:
+                # input_ids can be None for multimodal models.
+                target_token_ids = self.input_ids[:num_scheduled_tokens]
+                target_positions = positions
+                target_hidden_states = hidden_states
+                target_slot_mapping = attn_metadata.slot_mapping
+                cu_num_tokens = attn_metadata.query_start_loc
+            else:
+                # TODO(woosuk): Refactor this.
+                num_draft_tokens = spec_decode_metadata.num_draft_tokens
+                num_rejected_tokens = [
+                    n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+                    for i, n in enumerate(num_draft_tokens)
+                ]
+                num_rejected_tokens = torch.tensor(
+                    num_rejected_tokens,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                cu_num_tokens, token_indices = self.drafter.prepare_inputs(
+                    attn_metadata.query_start_loc,
+                    num_rejected_tokens,
+                )
+                target_token_ids = self.input_ids[token_indices]
+                target_positions = positions[token_indices]
+                target_hidden_states = hidden_states[token_indices]
+                target_slot_mapping = attn_metadata.slot_mapping[token_indices]
+
             spec_token_ids = self.drafter.propose(
-                target_token_ids=input_ids[token_indices],
-                target_positions=positions[token_indices],
-                target_hidden_states=hidden_states[token_indices],
+                target_token_ids=target_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                target_slot_mapping=target_slot_mapping,
                 next_token_ids=next_token_ids,
                 cu_num_tokens=cu_num_tokens,
                 block_table=attn_metadata.block_table,

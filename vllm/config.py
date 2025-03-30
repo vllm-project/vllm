@@ -2133,9 +2133,9 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method == "eagle":
-                    if self.enable_chunked_prefill:
-                        raise ValueError(
-                            "Chunked prefill and EAGLE are not compatible.")
+                    # if self.enable_chunked_prefill:
+                    #     raise ValueError(
+                    #         "Chunked prefill and EAGLE are not compatible.")
 
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)

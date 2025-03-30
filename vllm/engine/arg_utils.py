@@ -1647,7 +1647,9 @@ class EngineArgs:
         if (self.speculative_model is not None
                 or self.num_speculative_tokens is not None):
             # This is supported but experimental (handled below).
-            if self.speculative_model in ("ngram", "[ngram]"):
+            supported_methods = ["ngram", "eagle"]
+            if any(method in self.speculative_model.lower()
+                   for method in supported_methods):
                 pass
             else:
                 _raise_or_fallback(feature_name="Speculative Decoding",

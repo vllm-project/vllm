@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
+import triton
+import triton.language as tl
 
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
@@ -14,7 +16,7 @@ class EagleProposer:
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.model = ...
+        self.model = None
         self.vllm_config = vllm_config
         self.num_speculative_tokens = (
             vllm_config.speculative_config.num_speculative_tokens)
@@ -30,6 +32,8 @@ class EagleProposer:
         target_positions: torch.Tensor,
         # [num_tokens, hidden_size]
         target_hidden_states: torch.Tensor,
+        # [num_tokens]
+        target_slot_mapping: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
         # [batch_size + 1] starting with 0
@@ -54,11 +58,6 @@ class EagleProposer:
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         max_seq_len = seq_lens.max().item()
         max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
-        slot_mapping = compute_slot_mapping(
-            positions=target_positions,
-            block_table=block_table,
-            block_size=self.block_size,
-        )
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_tokens,
             max_query_len=max_num_tokens,
@@ -66,7 +65,7 @@ class EagleProposer:
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
             block_table=block_table,
-            slot_mapping=slot_mapping,
+            slot_mapping=target_slot_mapping,
             # TODO(woosuk): Support cascade attention.
             use_cascade=False,
             common_prefix_len=0,
@@ -104,11 +103,13 @@ class EagleProposer:
             positions += 1
             attn_metadata.max_seq_len += 1
             attn_metadata.seq_lens += 1
-            attn_metadata.slot_mapping = compute_slot_mapping(
-                positions=positions,
-                block_table=block_table,
-                block_size=self.block_size,
-            )
+            # Compute the slot mapping.
+            block_numbers = positions // self.block_size
+            block_ids = block_table.gather(dim=1,
+                                           index=block_numbers.view(-1, 1))
+            block_ids = block_ids.view(-1)
+            attn_metadata.slot_mapping = (block_ids * self.block_size +
+                                          positions % self.block_size)
 
             # Run the model.
             with set_forward_context(attn_metadata, self.vllm_config):
@@ -123,6 +124,49 @@ class EagleProposer:
 
         # [batch_size, num_speculative_tokens]
         return torch.stack(draft_token_ids_list, dim=1)
+
+    @staticmethod
+    def prepare_inputs(
+        # [batch_size + 1]
+        cu_target_query_lens: torch.Tensor,
+        # [batch_size]
+        num_rejected_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # cu_target_query_lens: [0, a, a + b, a + b + c]
+        # num_rejected_tokens: [n1, n2, n3]
+        # num_tokens_per_req: [a - n1, b - n2, c - n3]
+        # cu_num_tokens: [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
+        # token_indices: [0, 1, ..., a - n1 - 1,
+        #                 a, a + 1, ..., a + b - n2 - 1,
+        #                 a + b, a + b + 1, ..., a + b + c - n3 - 1]
+
+        # [0, a, a + b, a + b + c] -> [a, b, c]
+        query_len_per_req = (cu_target_query_lens[1:] -
+                             cu_target_query_lens[:-1])
+        # [a, b, c] -> [a - n1, b - n2, c - n3]
+        num_tokens_per_req = query_len_per_req - num_rejected_tokens
+
+        cu_num_tokens = torch.empty_like(cu_target_query_lens)
+        torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
+        cu_num_tokens[0] = 0
+
+        # FIXME(woosuk): Avoid synchronization.
+        num_tokens = cu_num_tokens[-1].item()
+        token_indices = torch.empty(
+            num_tokens,
+            dtype=torch.int32,
+            device=cu_num_tokens.device,
+        )
+
+        batch_size = num_rejected_tokens.shape[0]
+        BLOCK_SIZE = 1024
+        prepare_input_kernel[(batch_size, )](
+            token_indices,
+            cu_target_query_lens,
+            cu_num_tokens,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
+        return cu_num_tokens, token_indices
 
 
 # TODO(woosuk): The logic here is duplicated with the main sampling code.
@@ -155,12 +199,28 @@ def sample_token_ids(
     return next_token_ids
 
 
-def compute_slot_mapping(
-    positions: torch.Tensor,  # [num_tokens]
-    block_table: torch.Tensor,  # [batch_size, max_num_blocks_per_req]
-    block_size: int,
-) -> torch.Tensor:  # [num_tokens]
-    block_numbers = positions // block_size
-    block_ids = block_table.gather(dim=1, index=block_numbers)
-    slot_mapping = block_ids * block_size + positions % block_size
-    return slot_mapping
+@triton.jit
+def prepare_input_kernel(
+    out_ptr,
+    cu_query_lens_ptr,
+    cu_num_tokens_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    # [start_pos, end_pos)
+    start_pos = tl.load(cu_num_tokens_ptr + pid)
+    end_pos = tl.load(cu_num_tokens_ptr + pid + 1)
+    num_tokens = end_pos - start_pos
+
+    index_start = tl.load(cu_query_lens_ptr + pid)
+    indices = index_start + tl.arange(0, BLOCK_SIZE)
+
+    num_blocks = tl.cdiv(num_tokens, BLOCK_SIZE)
+    for i in tl.range(num_blocks):
+        offset = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        tl.store(
+            out_ptr + start_pos + offset,
+            indices,
+            mask=offset < num_tokens,
+        )
