@@ -218,7 +218,6 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         1] == w1.shape[1] * 16, "Hidden size mismatch w1"
     assert hidden_states.shape[1] == w2.shape[2] // (
         num_bits // 2), "Hidden size mismatch w2"
-    assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"

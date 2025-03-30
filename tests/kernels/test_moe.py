@@ -335,6 +335,16 @@ def test_fused_marlin_moe(
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
 
+    if ep_size > 1:
+        local_e = e // ep_size
+        e_ids = torch.randperm(e, device="cuda", dtype=torch.int32)[:local_e]
+        e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
+        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
+        w1 = w1[e_ids]
+        w2 = w2[e_ids]
+    else:
+        e_map = None
+
     w_ref1_l = []
     qweight1_l = []
     scales1_l = []
@@ -408,16 +418,6 @@ def test_fused_marlin_moe(
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
     topk_weights, topk_ids = fused_topk(a, score, topk, False)
-
-    if ep_size > 1:
-        local_e = e // ep_size
-        e_ids = torch.randperm(e, device="cuda", dtype=torch.int32)[:local_e]
-        e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
-        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
-        w1 = w1[e_ids]
-        w2 = w2[e_ids]
-    else:
-        e_map = None
 
     torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, e_map)
 
