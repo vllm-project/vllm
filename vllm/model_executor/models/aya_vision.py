@@ -35,8 +35,7 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import (get_vision_encoder_info, scatter_patch_features,
-                     select_patch_features)
+from .vision import scatter_patch_features, select_patch_features
 
 
 class AyaVisionImagePixelInputs(TypedDict):
@@ -85,7 +84,7 @@ class AyaVisionMultiModalProjector(nn.Module):
                                   config.text_config.hidden_size,
                                   bias=True)
 
-    def forward(self, image_features):
+    def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         image_features = self.pixel_shuffle(image_features)
         image_features = self.layernorm(image_features)
         hidden_states = self.linear_1(image_features)
@@ -97,7 +96,8 @@ class AyaVisionMultiModalProjector(nn.Module):
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
 
-    def pixel_shuffle(self, image_features):  # B, S, D
+    def pixel_shuffle(self,
+                      image_features: torch.Tensor) -> torch.Tensor:  # B, S, D
         batch_size, seq_length, _ = image_features.shape
         height = width = int(seq_length**0.5)
         image_features = image_features.reshape(image_features.shape[0], width,
@@ -116,11 +116,8 @@ class AyaVisionMultiModalProjector(nn.Module):
 
 class AyaVisionProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self):
+    def get_hf_config(self) -> AyaVisionConfig:
         return self.ctx.get_hf_config(AyaVisionConfig)
-
-    def get_vision_encoder_info(self):
-        return get_vision_encoder_info(self.get_hf_config())
 
     def get_hf_processor(self, **kwargs: object) -> AyaVisionProcessor:
         return self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
