@@ -36,10 +36,10 @@ def test_sliding_window_possible_cached_prefix():
                     i: block_pool.blocks[i + 10]
                 }
 
-        computed_blocks = manager.get_longest_cached_prefix(block_hash_list)
+        computed_blocks = manager.find_longest_cache_hit(block_hash_list)
         assert len(computed_blocks) == expect_length
 
-        assert all(block == block_pool.get_null_block()
+        assert all(block == block_pool.null_block
                    for block in computed_blocks[:expect_length - 2])
         for i in range(2):
             if i < expect_length:
@@ -67,7 +67,7 @@ def test_sliding_window_possible_cached_prefix():
     ], 8)
 
 
-def test_sliding_window_remove_useless_blocks():
+def test_sliding_window_remove_skipped_blocks():
     sliding_window_spec = SlidingWindowSpec(
         block_size=2,
         num_kv_heads=1,
@@ -81,19 +81,18 @@ def test_sliding_window_remove_useless_blocks():
 
     manager = SlidingWindowManager(sliding_window_spec, block_pool)
 
-    null_block_id = block_pool.get_null_block().block_id
+    null_block_id = block_pool.null_block.block_id
 
     def id_to_block_table(ids):
         return [
             KVCacheBlock(id_)
-            if id_ != null_block_id else block_pool.get_null_block()
-            for id_ in ids
+            if id_ != null_block_id else block_pool.null_block for id_ in ids
         ]
 
     def assert_block_id(block_table, ids):
         for block, id_ in zip(block_table, ids):
             if id_ == null_block_id:
-                assert block == block_pool.get_null_block()
+                assert block == block_pool.null_block
             else:
                 assert block.block_id == id_
 
@@ -101,32 +100,32 @@ def test_sliding_window_remove_useless_blocks():
         1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010
     ]
     block_table = id_to_block_table(original_block_ids)
-    removed = manager.remove_useless_blocks(block_table, 0)
+    removed = manager.remove_skipped_blocks(block_table, 0)
     assert_block_id(removed, [])
     assert_block_id(block_table, original_block_ids)
 
     # 5 tokens are computed. Only token 0 is out of the sliding window. As
     # block 1000 also contains token 1 that is in the sliding window, block 1000
     # cannot be removed.
-    removed = manager.remove_useless_blocks(block_table, 5)
+    removed = manager.remove_skipped_blocks(block_table, 5)
     assert_block_id(removed, [])
     assert_block_id(block_table, original_block_ids)
 
     # 6 tokens are computed. Token 0 & 1 are out of the sliding window.
     # Block 1000 can be removed.
-    removed = manager.remove_useless_blocks(block_table, 6)
+    removed = manager.remove_skipped_blocks(block_table, 6)
     assert_block_id(removed, [original_block_ids[0]])
     assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
 
     # 7 tokens are computed. Token 0-2 are out of the sliding window.
     # Cannot remove new block as the block 1001 is still used by token 3.
-    removed = manager.remove_useless_blocks(block_table, 7)
+    removed = manager.remove_skipped_blocks(block_table, 7)
     assert_block_id(removed, [])
     assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
 
     # 8 tokens are computed. Token 0-3 are out of the sliding window.
     # Block 1001 can be removed and block 1000 is already removed.
-    removed = manager.remove_useless_blocks(block_table, 8)
+    removed = manager.remove_skipped_blocks(block_table, 8)
     assert_block_id(removed, [original_block_ids[1]])
     assert_block_id(block_table, [null_block_id] * 2 + original_block_ids[2:])
 
@@ -134,6 +133,6 @@ def test_sliding_window_remove_useless_blocks():
     # Block 1002 & 1003 can be removed now. Block 1003 represents a longer
     # sequence, and is expected to be evicted earlier than 1002, so the order
     # of removed blocks should be [1003, 1002].
-    removed = manager.remove_useless_blocks(block_table, 12)
+    removed = manager.remove_skipped_blocks(block_table, 12)
     assert_block_id(removed, [original_block_ids[3], original_block_ids[2]])
     assert_block_id(block_table, [null_block_id] * 4 + original_block_ids[4:])

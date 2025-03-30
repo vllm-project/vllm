@@ -127,13 +127,16 @@ class KVCacheManager:
 
         self.prefix_cache_stats.requests += 1
         if request.sampling_params.prompt_logprobs is None:
-            computed_blocks = (self.specialized_manager.
-                               get_longest_cached_prefix(block_hashes))
-            num_computed_tokens = len(computed_blocks) * self.block_size
+            computed_blocks = (
+                self.specialized_manager.find_longest_cache_hit(block_hashes))
 
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)
 
+            # NOTE(woosuk): Since incomplete blocks are not eligible for
+            # sharing, `num_computed_tokens` is always a multiple of
+            # `block_size`.
+            num_computed_tokens = len(computed_blocks) * self.block_size
             return computed_blocks, num_computed_tokens
         else:
             # Skip cache hits for prompt logprobs
@@ -176,11 +179,13 @@ class KVCacheManager:
 
         req_blocks = self.req_to_blocks[request.request_id]
 
-        # We can free blocks that are no longer needed even if we cannot
-        # schedule this request due to the limit of free blocks.
+        # Free the blocks that are skipped during the attention computation
+        # (e.g., tokens outside the sliding window).
+        # We can do this even if we cannot schedule this request due to
+        # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
-        removed_blocks = self.specialized_manager.remove_useless_blocks(
+        removed_blocks = self.specialized_manager.remove_skipped_blocks(
             req_blocks, request.num_computed_tokens)
         self.block_pool.free_blocks(removed_blocks)
 
@@ -372,7 +377,7 @@ class KVCacheManager:
         """
         # The first call always comes from `get_computed_blocks` which
         # passes `touched=False`.
-        removed_blocks = self.specialized_manager.remove_useless_blocks(
+        removed_blocks = self.specialized_manager.remove_skipped_blocks(
             req_blocks, num_computed_tokens)
         if touched:
             self.block_pool.free_blocks(removed_blocks)

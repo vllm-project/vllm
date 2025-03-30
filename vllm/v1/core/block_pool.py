@@ -54,7 +54,7 @@ class BlockPool:
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
         # avoid freeing it.
-        self._null_block = self.free_block_queue.popleft()
+        self.null_block = self.free_block_queue.popleft()
 
     def get_cached_block(self,
                          block_hash: BlockHashType) -> Optional[KVCacheBlock]:
@@ -220,7 +220,7 @@ class BlockPool:
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
-            if block.ref_cnt == 0 and block != self._null_block:
+            if block.ref_cnt == 0 and block != self.null_block:
                 self.free_block_queue.remove(block)
             block.incr_ref()
 
@@ -235,7 +235,7 @@ class BlockPool:
         for block in ordered_blocks:
             block.decr_ref()
             # null_block should not be added to the free list.
-            if block.ref_cnt == 0 and block != self._null_block:
+            if block.ref_cnt == 0 and block != self.null_block:
                 self.free_block_queue.append(block)
 
     def reset_prefix_cache(self) -> bool:
@@ -279,11 +279,3 @@ class BlockPool:
             The KV cache usage (between 0.0 and 1.0).
         """
         return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
-
-    def get_null_block(self) -> KVCacheBlock:
-        """Get the null block.
-
-        Returns:
-            The null block.
-        """
-        return self._null_block

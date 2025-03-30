@@ -30,10 +30,10 @@ class SpecializedManager(ABC):
         self.block_pool = block_pool
 
     @abstractmethod
-    def get_longest_cached_prefix(
+    def find_longest_cache_hit(
             self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
         """
-        Get the longest cached prefix of the blocks. If no cached prefix is 
+        Get the longest cache hit prefix of the blocks. If no cache hit is 
         found, returns an empty list.
 
         Args:
@@ -48,7 +48,7 @@ class SpecializedManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def remove_useless_blocks(self, blocks: list[KVCacheBlock],
+    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
                               num_computed_tokens: int) -> list[KVCacheBlock]:
         """
         Remove the blocks that are no longer needed from. The removed blocks 
@@ -66,7 +66,7 @@ class SpecializedManager(ABC):
 
 class FullAttentionManager(SpecializedManager):
 
-    def get_longest_cached_prefix(
+    def find_longest_cache_hit(
             self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
         computed_blocks: list[KVCacheBlock] = []
         for block_hash in block_hashes:
@@ -79,7 +79,7 @@ class FullAttentionManager(SpecializedManager):
                 break
         return computed_blocks
 
-    def remove_useless_blocks(self, blocks: list[KVCacheBlock],
+    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
                               num_computed_tokens: int) -> list[KVCacheBlock]:
         # No need to remove blocks for full attention.
         return []
@@ -91,9 +91,9 @@ class SlidingWindowManager(SpecializedManager):
                  block_pool: BlockPool):
         super().__init__(kv_cache_spec, block_pool)
         self.sliding_window = kv_cache_spec.sliding_window
-        self._null_block = block_pool.get_null_block()
+        self._null_block = block_pool.null_block
 
-    def get_longest_cached_prefix(
+    def find_longest_cache_hit(
             self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
         # TODO: reduce i by num_block_sliding_window when cache miss, to
         # optimize the time complexity from O(len(block_hashes)) to
@@ -102,22 +102,23 @@ class SlidingWindowManager(SpecializedManager):
         # which is good for low cache hit rate scenarios.
         computed_blocks: list[KVCacheBlock] = [self._null_block
                                                ] * len(block_hashes)
-        num_computed_blocks = 0
+        num_contiguous_blocks = 0
 
         for i in range(len(block_hashes) - 1, -1, -1):
             if cached_block := self.block_pool.get_cached_block(
                     block_hashes[i]):
                 computed_blocks[i] = cached_block
-                num_computed_blocks += 1
-                if num_computed_blocks * self.block_size >= self.sliding_window:
-                    del computed_blocks[i + num_computed_blocks:]
+                num_contiguous_blocks += 1
+                if (num_contiguous_blocks * self.block_size
+                        >= self.sliding_window):
+                    del computed_blocks[i + num_contiguous_blocks:]
                     return computed_blocks
             else:
-                num_computed_blocks = 0
-        del computed_blocks[num_computed_blocks:]
+                num_contiguous_blocks = 0
+        del computed_blocks[num_contiguous_blocks:]
         return computed_blocks
 
-    def remove_useless_blocks(self, blocks: list[KVCacheBlock],
+    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
                               num_computed_tokens: int) -> list[KVCacheBlock]:
         # Remove the blocks that are no longer be in the sliding window.
         last_useful_token = num_computed_tokens - self.sliding_window
@@ -137,7 +138,7 @@ class SlidingWindowManager(SpecializedManager):
 
 spec_manager_map: dict[type[KVCacheSpec], type[SpecializedManager]] = {
     FullAttentionSpec: FullAttentionManager,
-    SlidingWindowSpec: SlidingWindowManager
+    SlidingWindowSpec: SlidingWindowManager,
 }
 
 
