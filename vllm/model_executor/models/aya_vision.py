@@ -31,7 +31,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -330,7 +330,8 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     AyaVisionMultiModalProcessor,
     info=AyaVisionProcessingInfo,
     dummy_inputs=AyaVisionDummyInputsBuilder)
-class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
+class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                        SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -485,9 +486,15 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError(
-                "You must specify exactly one of input_ids or inputs_embeds")
+
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
+
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
