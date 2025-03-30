@@ -1471,12 +1471,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 encoder_budget, max_num_mm_items, dummy_data_modality)
 
             # Create dummy batch of multimodal inputs.
-            dummy_request_data = self.mm_registry.get_decoder_dummy_data(
+            dummy_mm_kwargs = self.mm_registry.get_decoder_dummy_data(
                 model_config=self.model_config,
                 seq_len=self.max_num_tokens,
-                mm_counts={dummy_data_modality: 1},
-            )
-            dummy_mm_kwargs = dummy_request_data.multi_modal_data
+                mm_counts={
+                    dummy_data_modality: 1
+                },
+            ).multi_modal_data
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
