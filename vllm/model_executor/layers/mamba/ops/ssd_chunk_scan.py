@@ -511,8 +511,9 @@ def _chunk_scan_fwd(
             # with initial states, we need to take care of how
             # seq_idx crosses the boundaries
             assert batch == 1, "chunk scan only supports initial states with batch 1"
-            assert initial_states.shape == (seq_idx[0].max() + 1, nheads,
-                                            headdim, dstate)
+            # The following assertion causes D2H copy - removing for now
+            # assert initial_states.shape == (seq_idx[0].max() + 1, nheads,
+            #                                 headdim, dstate)
 
             if initial_states.shape[0] == 1:
                 # no in this case no point to use initial states
