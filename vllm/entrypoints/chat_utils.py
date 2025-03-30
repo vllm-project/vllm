@@ -495,7 +495,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("ayavision", "chameleon", "deepseek_vl_v2",
+            if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
                               "internvl_chat", "skywork_chat", "NVLM_D",
                               "h2ovl_chat"):
                 return "<image>"
