@@ -624,7 +624,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Pad the weight for moe kernel or not
     "VLLM_MOE_PADDING":
-    lambda: bool(int(os.getenv("VLLM_MOE_PADDING", "0"))),
+    lambda: (os.getenv("VLLM_MOE_PADDING", "False").lower() in ("true", "1")),
 
     # Divisor for dynamic query scale factor calculation for FP8 attention
     "Q_SCALE_CONSTANT":

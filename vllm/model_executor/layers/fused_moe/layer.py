@@ -101,8 +101,26 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
+    def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        # Pad the weight tensor. This is an optimization on ROCm platform, which
+        # can benefit from tensors located far enough from one another in memory
+        if (envs.VLLM_MOE_PADDING and current_platform.is_rocm()
+                and weight.stride(-1) == 1
+                and (weight.stride(-2) * weight.element_size()) % 512 == 0):
+            num_pad = 256 // weight.element_size()
+            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
+            torch.cuda.empty_cache()
+        return weight
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+
+        layer.w13_weight = torch.nn.Parameter(self._maybe_pad_weight(
+            layer.w13_weight.data),
+                                              requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(self._maybe_pad_weight(
+            layer.w2_weight.data),
+                                             requires_grad=False)
 
         if aiter_moe_enabled():
             layout = (32, 32) if aiter_2stage_moe_enabled() else (16, 16)
@@ -114,17 +132,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                  requires_grad=False)
-
-        if envs.VLLM_MOE_PADDING:
-            layer.w13_weight = torch.nn.Parameter(F.pad(
-                layer.w13_weight.data, (0, 128), "constant", 0),
-                                                  requires_grad=False)
-            torch.cuda.empty_cache()
-            layer.w2_weight = torch.nn.Parameter(F.pad(layer.w2_weight.data,
-                                                       (0, 128), "constant",
-                                                       0),
-                                                 requires_grad=False)
-            torch.cuda.empty_cache()
 
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
