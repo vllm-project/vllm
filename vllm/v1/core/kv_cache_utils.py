@@ -118,6 +118,13 @@ class KVCacheBlock:
     # It is only available when the block is full.
     _block_hash: Optional[BlockHashType] = None
 
+    # TODO: (Jayanth) Verify correctness
+
+    # If all requests from begin_req_id to end_req_id are present prefix_cnt == end_req_id - begin_req_id + 1
+    begin_req_id: int
+    end_req_id: int
+    prefix_cnt: int
+
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
     prev_free_block: Optional["KVCacheBlock"] = None
@@ -142,6 +149,18 @@ class KVCacheBlock:
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
+
+    # TODO: Change by Jayanth
+    def append_req_with_prefix(self, req_id: int):
+        if req_id < self.begin_req_id:
+            self.begin_req_id = req_id
+        elif req_id > self.end_req_id:
+            self.end_req_id = req_id
+        self.prefix_cnt += 1
+
+    # TODO: Change by Jayanth
+    def remove_req_with_prefix(self, req_id: int):
+        self.prefix_cnt -= 1
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
