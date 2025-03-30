@@ -50,7 +50,7 @@ class KVConnectorFactory:
             return connector_cls(rank, local_rank, config)
         except (ImportError, AttributeError) as e:
             raise ValueError(f"cannot create connector '{connector_name}'."
-                             f"reason: {str(e)}")
+                             f"reason: {str(e)}") from e
 
 
 # Register various connectors here.
