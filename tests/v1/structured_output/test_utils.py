@@ -15,10 +15,6 @@ def unsupported_string_schemas():
         },
         {
             "type": "string",
-            "enum": ["active", "inactive", "pending"]
-        },
-        {
-            "type": "string",
             "minLength": 1
         },
         {
@@ -163,6 +159,10 @@ def supported_schema():
                 "items": {
                     "type": "number"
                 }
+            },
+            "car_type": {
+                "type": "string",
+                "enum": ["sedan", "suv", "truck"]
             },
             "address": {
                 "type": "object",
