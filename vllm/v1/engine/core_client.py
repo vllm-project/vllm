@@ -113,6 +113,12 @@ class EngineCoreClient(ABC):
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
+    def save_sharded_state(self,
+                           path: str,
+                           pattern: Optional[str] = None,
+                           max_size: Optional[int] = None) -> None:
+        raise NotImplementedError
+
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
@@ -147,6 +153,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def pin_lora_async(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    async def save_sharded_state_async(self,
+                                       path: str,
+                                       pattern: Optional[str] = None,
+                                       max_size: Optional[int] = None) -> None:
         raise NotImplementedError
 
 
@@ -205,6 +217,12 @@ class InprocClient(EngineCoreClient):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.engine_core.pin_lora(lora_id)
+
+    def save_sharded_state(self,
+                           path: str,
+                           pattern: Optional[str] = None,
+                           max_size: Optional[int] = None) -> None:
+        self.engine_core.save_sharded_state(path, pattern, max_size)
 
 
 @dataclass
@@ -558,3 +576,10 @@ class AsyncMPClient(MPClient):
 
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self._call_utility_async("pin_lora", lora_id)
+
+    async def save_sharded_state_async(self,
+                                       path: str,
+                                       pattern: Optional[str] = None,
+                                       max_size: Optional[int] = None) -> None:
+        await self._call_utility_async("save_sharded_state", path, pattern,
+                                       max_size)
