@@ -62,9 +62,7 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
 
 # Aya Vision
 def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
-    # aya vision is currently under transformers model-based releases
-    # please install transformers from the source repository
-    # that includes the necessary changes for this model
+    # Requires transformers>=4.50.0
     assert modality == "image"
     model_name = "CohereForAI/aya-vision-8b"
 
