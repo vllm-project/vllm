@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import os
+import sys
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
     S3_ACCESS_KEY_ID: Optional[str] = None
     S3_SECRET_ACCESS_KEY: Optional[str] = None
     S3_ENDPOINT_URL: Optional[str] = None
+    VLLM_MODEL_REDIRECT_PATH: Optional[str] = None
     VLLM_CACHE_ROOT: str = os.path.expanduser("~/.cache/vllm")
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
@@ -72,8 +75,13 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_LINEAR: bool = True
+    VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
+    VLLM_ROCM_MOE_PADDING: bool = True
+    VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -89,12 +97,14 @@ if TYPE_CHECKING:
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_DP_RANK: int = 0
+    VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
+    VLLM_TPU_BUCKET_PADDING_GAP: int = 0
 
 
 def get_default_cache_root():
@@ -263,6 +273,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_API_KEY":
     lambda: os.environ.get("VLLM_API_KEY", None),
 
+    # Whether to log responses from API Server for debugging
+    "VLLM_DEBUG_LOG_API_SERVER_RESPONSE":
+    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").
+    lower() == "true",
+
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
     lambda: os.environ.get("S3_ACCESS_KEY_ID", None),
@@ -293,7 +308,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # this is used for configuring the default logging level
     "VLLM_LOGGING_LEVEL":
-    lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO"),
+    lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
 
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX":
@@ -339,7 +354,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
 
     # (CPU backend only) CPU key-value cache space.
-    # default is 4GB
+    # default is 4 GiB
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
 
@@ -411,9 +426,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
     # Cache size (in GiB) for multimodal input cache
-    # Default is 8GiB
+    # Default is 4 GiB
     "VLLM_MM_INPUT_CACHE_GIB":
-    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "8")),
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -510,6 +525,26 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1")),
 
+    # use aiter linear op if aiter ops are enabled
+    # The following list of related ops
+    # - scaled_mm (per-tensor / rowwise)
+    "VLLM_ROCM_USE_AITER_LINEAR":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in
+             ("true", "1")),
+
+    # Whether to use aiter moe ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_MOE":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
+             ("true", "1")),
+
+    # Whether to use aiter block scaled moe kernel.
+    # By default this is disabled.
+    "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE":
+    lambda:
+    (os.getenv("VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE", "false").lower() in
+     ("true", "1")),
+
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
@@ -518,6 +553,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
     lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
+
+    # Pad the weights for the moe kernel
+    "VLLM_ROCM_MOE_PADDING":
+    lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
+
+    # custom paged attention kernel for MI3* cards
+    "VLLM_ROCM_CUSTOM_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
+             ("true", "1")),
 
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
@@ -591,6 +635,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_RANK":
     lambda: int(os.getenv("VLLM_DP_RANK", "0")),
 
+    # Rank of the process in the data parallel setting.
+    # Defaults to VLLM_DP_RANK when not set.
+    "VLLM_DP_RANK_LOCAL":
+    lambda: int(
+        os.getenv("VLLM_DP_RANK_LOCAL", sys.modules[__name__].VLLM_DP_RANK)),
+
     # World size of the data parallel setting
     "VLLM_DP_SIZE":
     lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
@@ -607,6 +657,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
 
+    # Use model_redirect to redirect the model name to a local folder.
+    "VLLM_MODEL_REDIRECT_PATH":
+    lambda: os.environ.get("VLLM_MODEL_REDIRECT_PATH", None),
+
     # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
     "VLLM_MARLIN_USE_ATOMIC_ADD":
     lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
@@ -621,6 +675,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
     if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
+
+    # Gap between padding buckets for the forward pass. So we have
+    # 8, we will run forward pass with [16, 24, 32, ...].
+    "VLLM_TPU_BUCKET_PADDING_GAP":
+    lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
+    if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
 }
 
 # end-env-vars-definition
@@ -651,3 +711,43 @@ def set_vllm_use_v1(use_v1: bool):
             "explicitly by the user. Please raise this as a Github "
             "Issue and explicitly set VLLM_USE_V1=0 or 1.")
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
+
+
+def compute_hash() -> str:
+    """
+    WARNING: Whenever a new key is added to this environment
+    variables, ensure that it is included in the factors list if
+    it affects the computation graph. For example, different values
+    of VLLM_PP_LAYER_PARTITION will generate different computation
+    graphs, so it is included in the factors list. The env vars that 
+    affect the choice of different kernels or attention backends should
+    also be included in the factors list.
+    """
+    factors: list[Any] = []
+
+    # summarize environment variables
+    def factorize(name: str):
+        if __getattr__(name):
+            factors.append(__getattr__(name))
+        else:
+            factors.append("None")
+
+    # The values of envs may affects the computation graph.
+    # TODO(DefTruth): hash all environment variables?
+    # for key in environment_variables:
+    #     factorize(key)
+    environment_variables_to_hash = [
+        "VLLM_PP_LAYER_PARTITION",
+        "VLLM_MLA_DISABLE",
+        "VLLM_USE_TRITON_FLASH_ATTN",
+        "VLLM_USE_TRITON_AWQ",
+        "VLLM_DP_RANK",
+        "VLLM_DP_SIZE",
+    ]
+    for key in environment_variables_to_hash:
+        if key in environment_variables:
+            factorize(key)
+
+    hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+
+    return hash_str

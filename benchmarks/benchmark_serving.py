@@ -7,9 +7,6 @@ On the server side, run one of the following commands:
         --swap-space 16 \
         --disable-log-requests
 
-    (TGI backend)
-    ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
-
 On the client side, run:
     python benchmarks/benchmark_serving.py \
         --backend <backend> \
@@ -53,8 +50,9 @@ except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
 from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
-                               RandomDataset, SampleRequest, ShareGPTDataset,
-                               SonnetDataset, VisionArenaDataset)
+                               InstructCoderDataset, RandomDataset,
+                               SampleRequest, ShareGPTDataset, SonnetDataset,
+                               VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -588,9 +586,14 @@ def main(args: argparse.Namespace):
     elif args.dataset_name == "hf":
         # Choose between VisionArenaDataset
         # and HuggingFaceDataset based on provided parameters.
-        dataset_class = (VisionArenaDataset if args.dataset_path
-                         == VisionArenaDataset.VISION_ARENA_DATASET_PATH
-                         and args.hf_subset is None else HuggingFaceDataset)
+        dataset_class = HuggingFaceDataset
+        if args.dataset_path == VisionArenaDataset.VISION_ARENA_DATASET_PATH:
+            assert args.hf_subset is None, "VisionArenaDataset needs hf_subset to be None."  #noqa: E501
+            dataset_class = VisionArenaDataset
+        elif args.dataset_path == "likaixin/InstructCoder":
+            dataset_class = InstructCoderDataset
+            args.hf_split = "train"
+
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
