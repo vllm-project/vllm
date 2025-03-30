@@ -308,10 +308,11 @@ class MultiModalDataParser:
             items to the model's expected sampling rate.
     """
 
-    def __init__(self, *, target_sr: Optional[float] = None) -> None:
+    def __init__(self, *, target_sr: Optional[float] = None, resample_func: Optional[Callable] = None,) -> None:
         super().__init__()
 
         self.target_sr = target_sr
+        self.audio_resampler = resample_audio if resample_func is None else resample_func
 
     def _is_embeddings(
             self, data: object
