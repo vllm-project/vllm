@@ -59,6 +59,8 @@ class Request:
         self.mm_positions = multi_modal_placeholders or []
         self.mm_inputs = multi_modal_inputs or []
         self.mm_hashes: list[str] = multi_modal_hashes or []
+        self.num_encoder_inputs = len(self.mm_inputs)
+        self.has_encoder_inputs = self.num_encoder_inputs > 0
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
@@ -116,13 +118,6 @@ class Request:
 
     def get_finished_reason(self) -> Union[FinishReason, None]:
         return RequestStatus.get_finished_reason(self.status)
-
-    def has_encoder_inputs(self) -> bool:
-        return len(self.mm_inputs) > 0
-
-    @property
-    def num_encoder_inputs(self) -> int:
-        return len(self.mm_positions)
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
         assert input_id < len(self.mm_positions)
