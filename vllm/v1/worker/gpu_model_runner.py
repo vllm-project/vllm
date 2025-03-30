@@ -1470,19 +1470,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 encoder_budget, max_num_mm_items, dummy_data_modality)
 
             # Create dummy batch of multimodal inputs.
-            dummy_request_data = self.mm_registry.get_decoder_dummy_data(
+            dummy_mm_kwargs = self.mm_registry.get_decoder_dummy_data(
                 model_config=self.model_config,
                 seq_len=self.max_num_tokens,
-            )
-            dummy_mm_data = dummy_request_data.multi_modal_data
-
-            # Dummy data definition may contain multiple multimodal items
-            # (e.g, multiple images) for a single request, therefore here we
-            # always replicate first item by max_num_mm_items times since in V1
-            # they are scheduled to be processed separately.
-            dummy_mm_item = dummy_mm_data.get_item(
-                modality=dummy_data_modality, item_index=0)
-            dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
+                mm_counts={
+                    dummy_data_modality: 1
+                },
+            ).multi_modal_data
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)

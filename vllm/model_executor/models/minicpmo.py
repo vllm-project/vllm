@@ -43,7 +43,8 @@ from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.profiling import ProcessorInputs
 
-from .minicpmv import (MiniCPMV2_6, MiniCPMVDummyInputsBuilder,
+from .minicpmv import (_MAX_FRAMES_PER_VIDEO, MiniCPMV2_6,
+                       MiniCPMVDummyInputsBuilder,
                        MiniCPMVMultiModalDataParser,
                        MiniCPMVMultiModalProcessor, MiniCPMVProcessingInfo,
                        _minicpmv_field_config)
@@ -203,8 +204,8 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         return 30
 
     def get_max_audio_tokens(self) -> int:
-        return self.get_max_audio_tokens_per_chunk(
-        ) * self.get_max_audio_chunks_with_most_features()
+        num_chunks = self.get_max_audio_chunks_with_most_features()
+        return self.get_max_audio_tokens_per_chunk() * num_chunks
 
     def get_audio_len_by_num_chunks(self, num_chunks: int) -> int:
         sampling_rate = self.get_default_audio_sampling_rate()
@@ -212,21 +213,24 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         num_tokens_per_chunk = self.get_max_audio_tokens_per_chunk() - 2
         return int(num_chunks * sampling_rate / num_tokens_per_chunk) + 1
 
-    def get_num_frames_with_most_features(self, seq_len: int) -> int:
-        mm_config = self.ctx.get_mm_config()
-        max_images = mm_config.get_limit_per_prompt("image")
-        max_videos = mm_config.get_limit_per_prompt("video")
-        max_audios = mm_config.get_limit_per_prompt("audio")
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        max_images = mm_counts.get("image", 0)
+        max_videos = mm_counts.get("video", 0)
+        max_audios = mm_counts.get("audio", 0)
 
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_audio_tokens = self.get_max_audio_tokens() * max_audios
         max_total_frames = self.get_max_video_frames(seq_len -
                                                      max_image_tokens -
                                                      max_audio_tokens)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   _MAX_FRAMES_PER_VIDEO)
 
-        num_frames = max(max_total_frames // max(max_videos, 1), 1)
-
-        return num_frames
+        return max(max_frames_per_video, 1)
 
 
 class MiniCPMODummyInputsBuilder(
