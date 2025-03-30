@@ -15,10 +15,6 @@ def unsupported_string_schemas():
         },
         {
             "type": "string",
-            "enum": ["active", "inactive", "pending"]
-        },
-        {
-            "type": "string",
             "minLength": 1
         },
         {
