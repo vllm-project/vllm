@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
-from itertools import chain
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
-                                         PrefixLengthRange)
+from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         SlidingWindowSpec)
 
@@ -32,30 +30,26 @@ class SpecializedManager(ABC):
         self.block_pool = block_pool
 
     @abstractmethod
-    def get_possible_cached_prefix(
-        self, block_hashes: list[BlockHashType]
-    ) -> tuple[list[PrefixLengthRange], list[KVCacheBlock]]:
+    def get_longest_cached_prefix(
+            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
         """
-        Get the possible cached prefixes of a request based on its block hashes.
-        If no cached prefixes are found, returns a tuple with a prefix length 
-        range of [0, 0] and an empty list of blocks.
+        Get the longest cached prefix of the blocks. If no cached prefix is 
+        found, returns an empty list.
 
         Args:
             block_hashes: The block hashes of the request.
         Returns:
-            A tuple containing:
-                - A list of all possible cached prefix lengths.
-                - A list of cached blocks for each block hash. Use the null 
-                block for blocks that are not cached. Can skip the last blocks
-                that are not cached.
+            A list of cached blocks with skipped blocks replaced by null block.
+            For example, sliding window manager should return a list like
+            [NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)] for block size 4 and 
+            sliding window 8. 
         """
 
         raise NotImplementedError
 
     @abstractmethod
     def remove_useless_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int,
-                              is_first_call: bool) -> list[KVCacheBlock]:
+                              num_computed_tokens: int) -> list[KVCacheBlock]:
         """
         Remove the blocks that are no longer needed from. The removed blocks 
         should be replaced by null_blocks. Return the removed blocks in eviction
@@ -64,9 +58,6 @@ class SpecializedManager(ABC):
         Args:
             blocks: The list of blocks to be updated.
             num_computed_tokens: The number of tokens that have been computed.
-            is_first_call: Whether this is the first call to this function
-            for the `blocks`. Some managers like SlidingWindowManager need
-            it to accelerate this function.
         Returns:
             The removed blocks in eviction order.
         """
@@ -75,9 +66,8 @@ class SpecializedManager(ABC):
 
 class FullAttentionManager(SpecializedManager):
 
-    def get_possible_cached_prefix(
-        self, block_hashes: list[BlockHashType]
-    ) -> tuple[list[PrefixLengthRange], list[KVCacheBlock]]:
+    def get_longest_cached_prefix(
+            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
         computed_blocks: list[KVCacheBlock] = []
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -87,13 +77,10 @@ class FullAttentionManager(SpecializedManager):
                 computed_blocks.append(cached_block)
             else:
                 break
-        return [PrefixLengthRange(0,
-                                  len(computed_blocks) * self.block_size)
-                ], computed_blocks
+        return computed_blocks
 
     def remove_useless_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int,
-                              is_first_call: bool) -> list[KVCacheBlock]:
+                              num_computed_tokens: int) -> list[KVCacheBlock]:
         # No need to remove blocks for full attention.
         return []
 
@@ -106,57 +93,39 @@ class SlidingWindowManager(SpecializedManager):
         self.sliding_window = kv_cache_spec.sliding_window
         self._null_block = block_pool.get_null_block()
 
-    def get_possible_cached_prefix(
-        self, block_hashes: list[BlockHashType]
-    ) -> tuple[list[PrefixLengthRange], list[KVCacheBlock]]:
-        # TODO: check the hit every num_block_sliding_window blocks, to optimize
-        # the time complexity from O(num_block) to
-        # O(num_block / num_block_sliding_window) + O(num_computed_block),
+    def get_longest_cached_prefix(
+            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+        # TODO: reduce i by num_block_sliding_window when cache miss, to
+        # optimize the time complexity from O(len(block_hashes)) to
+        # O(len(block_hashes) / num_block_sliding_window +
+        #   sliding_window / block_size)
         # which is good for low cache hit rate scenarios.
-        start = 0
-        ranges = []
-        computed_blocks: list[KVCacheBlock] = []
+        computed_blocks: list[KVCacheBlock] = [self._null_block
+                                               ] * len(block_hashes)
+        num_computed_blocks = 0
 
-        dummy_block_hash = BlockHashType(-1, (), -1)
-        # Add a dummy block hash to support the case that the last block is
-        # cached.
-        for i, block_hash in enumerate(chain(block_hashes,
-                                             [dummy_block_hash])):
-            if cached_block := self.block_pool.get_cached_block(block_hash):
-                computed_blocks.append(cached_block)
+        for i in range(len(block_hashes) - 1, -1, -1):
+            if cached_block := self.block_pool.get_cached_block(
+                    block_hashes[i]):
+                computed_blocks[i] = cached_block
+                num_computed_blocks += 1
+                if num_computed_blocks * self.block_size >= self.sliding_window:
+                    del computed_blocks[i + num_computed_blocks:]
+                    return computed_blocks
             else:
-                if start == 0:
-                    # All tokens between [0, i * block_size] are cached.
-                    # All of them are possible cached prefix.
-                    ranges.append(PrefixLengthRange(0, i * self.block_size))
-                elif (i - start) * self.block_size >= self.sliding_window:
-                    # All tokens with index between [start * block_size,
-                    # i * block_size) are cached. These tokens except the
-                    # first `self.sliding_window - 1` ones are possible cached
-                    # prefix.
-                    first_cached_token = start * self.block_size
-                    # should be first_cached_token + self.sliding_window - 1 + 1
-                    # +1 is for converting the token index to the prefix length.
-                    first_possible_length = (first_cached_token +
-                                             self.sliding_window)
-                    ranges.append(
-                        PrefixLengthRange(first_possible_length,
-                                          i * self.block_size))
-                computed_blocks.append(self._null_block)
-                start = i + 1
-        computed_blocks.pop()  # remove the dummy block
-        return ranges, computed_blocks
+                num_computed_blocks = 0
+        del computed_blocks[num_computed_blocks:]
+        return computed_blocks
 
     def remove_useless_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int,
-                              is_first_call: bool) -> list[KVCacheBlock]:
+                              num_computed_tokens: int) -> list[KVCacheBlock]:
         # Remove the blocks that are no longer be in the sliding window.
         last_useful_token = num_computed_tokens - self.sliding_window
         last_useful_block = last_useful_token // self.block_size
 
         removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
-            if blocks[i] == self._null_block and not is_first_call:
+            if blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.

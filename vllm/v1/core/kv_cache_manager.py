@@ -127,31 +127,9 @@ class KVCacheManager:
 
         self.prefix_cache_stats.requests += 1
         if request.sampling_params.prompt_logprobs is None:
-            # Check for cache hits
-            # E.g., for a model with sliding window size 32 (2 * block_size)
-            # computed_blocks = [NULL, 5, 2, NULL, 9, 7, 3, NULL]
-            # We can have the first 3 blocks, 5 blocks, or 6 blocks as
-            # the cached prefix, so the prefix_length should be:
-            # prefix_length = [
-            #   PrefixLengthRange(3 * 16, 3 * 16),
-            #   PrefixLengthRange(6 * 16, 7 * 16)
-            # ]
-            prefix_length, computed_blocks = \
-                self.specialized_manager.get_possible_cached_prefix(
-                    block_hashes)
-            # E.g., num_computed_tokens = 7 * 16
-            num_computed_tokens = prefix_length[-1].end
-            # NOTE(woosuk): Since incomplete blocks are not eligible for
-            # sharing, `num_computed_tokens` should always be a multiple of
-            # `block_size`.
-            assert num_computed_tokens % self.block_size == 0
-            # E.g., computed_blocks = [NULL, 5, 2, NULL, 9, 7, 3]
-            computed_blocks = computed_blocks[:num_computed_tokens //
-                                              self.block_size]
-            # E.g., computed_blocks = [NULL, NULL, NULL, NULL, 9, 7, 3]
-            self._free_useless_blocks(computed_blocks,
-                                      num_computed_tokens,
-                                      touched=False)
+            computed_blocks = (self.specialized_manager.
+                               get_longest_cached_prefix(block_hashes))
+            num_computed_tokens = len(computed_blocks) * self.block_size
 
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)
@@ -196,20 +174,23 @@ class KVCacheManager:
 
         new_computed_blocks = new_computed_blocks or []
 
+        req_blocks = self.req_to_blocks[request.request_id]
+
+        # We can free blocks that are no longer needed even if we cannot
+        # schedule this request due to the limit of free blocks.
+        # Should call this function before allocating new blocks to reduce
+        # the number of evicted blocks.
+        removed_blocks = self.specialized_manager.remove_useless_blocks(
+            req_blocks, request.num_computed_tokens)
+        self.block_pool.free_blocks(removed_blocks)
+
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                len(new_computed_blocks) * self.block_size)
         num_required_blocks = cdiv(num_computed_tokens + num_tokens,
                                    self.block_size)
-        req_blocks = self.req_to_blocks[request.request_id]
-        # We can free blocks that are no longer needed even if we cannot
-        # schedule this request due to the limit of free blocks.
-        # Should call this function before allocating new blocks to reduce
-        # the number of evicted blocks.
-        self._free_useless_blocks(req_blocks,
-                                  request.num_computed_tokens,
-                                  touched=True)
+
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
 
@@ -230,12 +211,6 @@ class KVCacheManager:
             assert not new_computed_blocks, (
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
-
-        # Should call this function before allocating new blocks to reduce
-        # the number of evicted blocks.
-        self._free_useless_blocks(req_blocks,
-                                  request.num_computed_tokens,
-                                  touched=True)
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
@@ -398,6 +373,6 @@ class KVCacheManager:
         # The first call always comes from `get_computed_blocks` which
         # passes `touched=False`.
         removed_blocks = self.specialized_manager.remove_useless_blocks(
-            req_blocks, num_computed_tokens, is_first_call=not touched)
+            req_blocks, num_computed_tokens)
         if touched:
             self.block_pool.free_blocks(removed_blocks)

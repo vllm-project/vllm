@@ -686,11 +686,3 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
         kv_cache_config.num_blocks = min_num_blocks
 
     return kv_cache_configs
-
-
-class PrefixLengthRange(NamedTuple):
-    """
-    A closed interval [start, end] representing a range of valid prefix lengths.
-    """
-    start: int
-    end: int
