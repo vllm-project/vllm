@@ -439,19 +439,18 @@ You should see some performance improvement about the e2e latency.
 
 ### AITER use cases
 
-`rocm/vllm-dev:main` image has experimental [AITER](https://github.com/ROCm/aiter) support, and can yield siginficant performance increase for some model/input/output/batch size configurations. To enable the feature make sure the following environment is set: `VLLM_USE_AITER=1`, the default value is `0`. When building your own image follow the [Docker build steps](#Docker-manifest) using the [aiter_integration_final](https://github.com/ROCm/vllm/tree/aiter_integration_final) branch.
+`rocm/vllm-dev:main` image has experimental [AITER](https://github.com/ROCm/aiter) support, and can yield siginficant performance increase for some model/input/output/batch size configurations. To enable the feature make sure the following environment is set: `VLLM_ROCM_USE_AITER=1`, the default value is `0`. When building your own image follow the [Docker build steps](#Docker-manifest) using the [aiter_integration_final](https://github.com/ROCm/vllm/tree/aiter_integration_final) branch.
 
 Some use cases include:
 - amd/Mixtral-8x7B-Instruct-v0.1-FP8-KV
 - amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV
 
 ```bash
-export VLLM_USE_AITER=1
+export VLLM_ROCM_USE_AITER=1
 python3 /app/vllm/benchmarks/benchmark_latency.py --model amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV -tp 8 --batch-size 256 --input-len 128 --output-len 2048
 ```
 
-Specifically, if you set `VLLM_USE_AITER_MLA=1` to use AITER MLA kernel instead of triton MLA kernel, you must also set `--block-size=1`.
-
+Specifically, if you set `VLLM_ROCM_USE_AITER_MLA=1` to use AITER MLA kernel instead of triton MLA kernel, you must also set `--block-size=1`.
 
 ## MMLU_PRO_Biology Accuracy Evaluation
 

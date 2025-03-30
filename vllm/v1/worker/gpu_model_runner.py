@@ -29,14 +29,15 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
+from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -44,7 +45,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 if TYPE_CHECKING:
     import xgrammar as xgr
 
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -82,8 +83,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
-        self.is_multimodal_model = model_config.is_multimodal_model
+        # NOTE(woosuk): sliding_window is None for models with interleaved
+        # attention. Use interleaved_sliding_window instead.
         self.sliding_window = model_config.get_sliding_window()
+        self.interleaved_sliding_window = getattr(
+            model_config.hf_text_config, "interleaved_sliding_window", None)
+        self.window_size = (self.sliding_window
+                            or self.interleaved_sliding_window)
+
+        self.is_multimodal_model = model_config.is_multimodal_model
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
@@ -119,19 +127,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
+        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-
-        if self.is_multimodal_model:
-            # NOTE: Initialized client is only used for processing dummy
-            # multimodal data into multimodal kwargs for GPU memory profiling.
-            # Only applicable to multimodal models with legacy input mapper.
-            self.mm_input_mapper_profiling = MMInputCacheClient(
-                self.model_config)
-            self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
@@ -150,9 +151,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
-            self.rejection_sampler = RejectionSampler()
-            # TODO: find a better way to check if we are using ngram.
-            assert self.speculative_config.ngram_prompt_lookup_min, \
+            assert self.speculative_config.method == "ngram", \
                     "Currently, only ngram spec decode is supported in V1."
             if get_pp_group().is_last_rank:
                 self.drafter = NgramProposer()
@@ -160,9 +159,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # This usually takes less than 1 second.
                 self.drafter.propose(
                     np.zeros(1024, dtype=np.int32),
-                    self.speculative_config.ngram_prompt_lookup_min,
+                    self.speculative_config.prompt_lookup_min,
+                    self.speculative_config.prompt_lookup_max,
                     self.speculative_config.num_speculative_tokens,
                 )
+                self.rejection_sampler = RejectionSampler()
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -453,7 +454,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[FlashAttentionMetadata, torch.Tensor]:
+    ) -> tuple[FlashAttentionMetadata, torch.Tensor,
+               Optional[SpecDecodeMetadata]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -564,11 +566,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.positions_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
 
-        # Prepare for cascade attention if needed.
-        common_prefix_len = self._compute_cascade_attn_prefix_len(
-            num_scheduled_tokens,
-            scheduler_output.num_common_prefix_blocks,
-        )
+        # Prepare for cascade attention if enabled & beneficial.
+        common_prefix_len = 0
+        if self.cascade_attn_enabled:
+            common_prefix_len = self._compute_cascade_attn_prefix_len(
+                num_scheduled_tokens,
+                scheduler_output.num_common_prefix_blocks,
+            )
+
         attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
@@ -578,22 +583,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
-        if use_spec_decode:
-            logits_indices = self._calc_spec_decode_metadata(
-                scheduler_output, cu_num_tokens)
-        else:
+        if not use_spec_decode:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
             # partial requests. While we should not sample any token
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             logits_indices = attn_metadata.query_start_loc[1:] - 1
+            spec_decode_metadata = None
+        else:
+            # Get the number of draft tokens for each request.
+            # Iterate over the dictionary rather than all requests since not all
+            # requests have draft tokens.
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
+            spec_decode_metadata = self._calc_spec_decode_metadata(
+                num_draft_tokens, cu_num_tokens)
+            logits_indices = spec_decode_metadata.logits_indices
 
         # Hot-Swap lora model
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return attn_metadata, logits_indices
+        return attn_metadata, logits_indices, spec_decode_metadata
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -674,7 +690,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_query_heads=self.num_query_heads,
             num_kv_heads=self.num_kv_heads,
             use_alibi=False,  # FIXME
-            use_sliding_window=self.sliding_window is not None,
+            use_sliding_window=self.window_size is not None,
             num_sms=self.num_sms,
         )
         return common_prefix_len if use_cascade else 0
@@ -733,49 +749,78 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _calc_spec_decode_metadata(
         self,
-        scheduler_output: "SchedulerOutput",
-        cu_num_tokens: np.ndarray,
-    ) -> torch.Tensor:
-        # Get the number of spec decode tokens for each request.
-        num_reqs = self.input_batch.num_reqs
-        num_spec_decode_tokens = np.empty(num_reqs, dtype=np.int32)
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            num_spec_decode_tokens[i] = len(
-                scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
+        num_draft_tokens: np.ndarray,
+        cu_num_scheduled_tokens: np.ndarray,
+    ) -> SpecDecodeMetadata:
+        # Inputs:
+        # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
+        # num_draft_tokens:         [  3,   0,   2,   0,   1]
+        # Outputs:
+        # cu_num_draft_tokens:      [  3,   3,   5,   5,   6]
+        # logits_indices:           [  0,   1,   2,   3, 103, 104, 105, 106,
+        #                            206, 207, 208]
+        # target_logits_indices:    [  0,   1,   2,   5,   6,   9]
+        # bonus_logits_indices:     [  3,   4,   7,   8,  10]
 
-        # Get spec decode logits indices.
-        # E.g.,   num_scheduled_tokens: [4, 100, 3,   100, 2]
-        #         cu_num_tokens:        [4, 104, 107, 207, 209]
-        #         num_spec_tokens_list: [3, 0,   2,   0,   1]
-        #         num_sampled_tokens:   [4, 1,   3,   1,   2]
-        #         spec_decode_logits_indices:
-        #                 [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
-        num_sampled_tokens = num_spec_decode_tokens + 1
-        # logits_start_loc: [0, 103, 104, 206, 207]
-        logits_start_loc = cu_num_tokens - num_sampled_tokens
-        # [0, 103, 104, 206, 207] ->
-        #               [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
-        logits_start_loc = np.repeat(logits_start_loc, num_sampled_tokens)
-        # The following three lines:
-        # [4, 1,   3,   1,   2] -> [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
-        # Step 1. [4, 1, 3, 1, 2] -> [4, 5, 8, 9, 11]
-        cu_num_sampled_tokens = np.cumsum(num_sampled_tokens)
-        # Step 2. [4, 5, 8, 9, 11] -> [0, 4, 5, 8, 9]
-        #         -> [0, 0, 0, 0, 4, 5, 5, 5, 8, 9, 9]
-        cumsums_sampled_offsets = np.repeat(
-            cu_num_sampled_tokens - num_sampled_tokens, num_sampled_tokens)
-        # Step 3.  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        #       -  [0, 0, 0, 0, 4, 5, 5, 5, 8, 9, 9]
-        #      -> [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
-        total_num_sampled_tokens = num_sampled_tokens.sum()
-        sampled_arange = (self.arange_np[:total_num_sampled_tokens] -
-                          cumsums_sampled_offsets)
+        # Compute the logits indices.
+        # [4, 1, 3, 1, 2]
+        num_sampled_tokens = num_draft_tokens + 1
+        # Step 1. [4, 5, 8, 9, 11]
+        cu_num_sampled_tokens = np.cumsum(num_sampled_tokens, dtype=np.int32)
+        total_num_sampled_tokens = cu_num_sampled_tokens[-1]
+        # Step 2. [0, 0, 0, 0, 4, 5, 5, 5, 8, 9, 9]
+        cumsums_offsets = np.repeat(cu_num_sampled_tokens - num_sampled_tokens,
+                                    num_sampled_tokens)
+        # Step 3. [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
+        arange = self.arange_np[:total_num_sampled_tokens] - cumsums_offsets
+        # Step 4. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
+        logits_indices = np.repeat(
+            cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
+        # Step 5. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
+        logits_indices += arange
 
-        # [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207] ->
-        # [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
-        spec_decode_logits_indices = logits_start_loc + sampled_arange
-        return torch.from_numpy(spec_decode_logits_indices).to(
+        # Compute the bonus logits indices.
+        bonus_logits_indices = cu_num_sampled_tokens - 1
+
+        # Compute the draft logits indices.
+        # [3, 3, 5, 5, 6]
+        cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
+        total_num_draft_tokens = cu_num_draft_tokens[-1]
+        # [0, 0, 0, 3, 3, 5]
+        cumsums_offsets = np.repeat(cu_num_draft_tokens - num_draft_tokens,
+                                    num_draft_tokens)
+        # [0, 1, 2, 0, 1, 0]
+        arange = self.arange_np[:total_num_draft_tokens] - cumsums_offsets
+        # [0, 0, 0, 5, 5, 9]
+        target_logits_indices = np.repeat(
+            cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
+        # [0, 1, 2, 5, 6, 9]
+        target_logits_indices += arange
+
+        # TODO: Optimize the CPU -> GPU copy.
+        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
             self.device, non_blocking=True)
+        logits_indices = torch.from_numpy(logits_indices).to(self.device,
+                                                             non_blocking=True)
+        target_logits_indices = torch.from_numpy(target_logits_indices).to(
+            self.device, non_blocking=True)
+        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
+            self.device, non_blocking=True)
+
+        # Compute the draft token ids.
+        # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
+        draft_token_ids = self.input_ids[logits_indices]
+        draft_token_ids = draft_token_ids[target_logits_indices + 1]
+
+        metadata = SpecDecodeMetadata(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens.tolist(),
+            cu_num_draft_tokens=cu_num_draft_tokens,
+            target_logits_indices=target_logits_indices,
+            bonus_logits_indices=bonus_logits_indices,
+            logits_indices=logits_indices,
+        )
+        return metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -932,7 +977,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+        attn_metadata, logits_indices, spec_decode_metadata = (
+            self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1007,35 +1053,43 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
-        if not self.use_spec_decode:
+        if spec_decode_metadata is None:
             sampler_output = self.model.sample(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
         else:
-            target_probs = self.model.sampler.compute_probs(
-                logits, sampling_metadata)
-            draft_token_ids = [
-                scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-                for req_id in self.input_batch.req_ids
-            ]
-            sampler_output = self.rejection_sampler(draft_token_ids,
-                                                    target_probs,
-                                                    sampling_metadata)
+            # TODO(woosuk): Optimize the memory usage.
+            bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
+            sampler_output = self.model.sample(
+                logits=bonus_logits,
+                sampling_metadata=sampling_metadata,
+            )
+            bonus_token_ids = sampler_output.sampled_token_ids
+
+            # TODO(woosuk): Optimize the memory usage.
+            target_logits = logits[spec_decode_metadata.target_logits_indices]
+            output_token_ids = self.rejection_sampler(
+                spec_decode_metadata,
+                None,  # draft_probs
+                target_logits,
+                bonus_token_ids,
+                sampling_metadata,
+            )
+            sampler_output.sampled_token_ids = output_token_ids
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
-        for i, req_id in enumerate(self.input_batch.req_ids):
+        for i, generator in self.input_batch.generators.items():
+            req_id = self.input_batch.req_ids[i]
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
             if seq_len < req_state.num_tokens:
-                # Ignore the sampled token.
+                # Ignore the sampled token for partial prefills.
                 # Rewind the generator state as if the token was not sampled.
-                generator = self.input_batch.generators.get(i)
-                if generator is not None:
-                    # This relies on cuda-specific torch-internal impl details
-                    generator.set_offset(generator.get_offset() - 4)
+                # This relies on cuda-specific torch-internal impl details
+                generator.set_offset(generator.get_offset() - 4)
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -1057,19 +1111,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             valid_sampled_token_ids = sampled_token_ids.tolist()
         else:
             # Includes spec decode tokens.
-            valid_mask = sampled_token_ids != INVALID_TOKEN_ID
-            gen_lens = valid_mask.sum(dim=1).tolist()
-            # TODO(woosuk): Optimize this.
-            valid_sampled_token_ids = [
-                seq.tolist()
-                for seq in sampled_token_ids[valid_mask].split(gen_lens)
-            ]
+            valid_sampled_token_ids = self.rejection_sampler.parse_output(
+                sampled_token_ids, self.input_batch.vocab_size)
 
         if not self.use_spec_decode:
             spec_token_ids = None
         else:
             spec_token_ids = self.generate_draft_token_ids(
-                valid_sampled_token_ids)
+                valid_sampled_token_ids, sampling_metadata)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1083,6 +1132,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def generate_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
+        sampling_metadata: SamplingMetadata,
     ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
         draft_token_ids: list[list[int]] = []
@@ -1093,13 +1143,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append([])
                 continue
 
+            # Skip requests that require top-p, top-k, etc.
+            req_id = self.input_batch.req_ids[i]
+            if not is_spec_decode_supported(req_id, self.input_batch):
+                draft_token_ids.append([])
+                continue
+
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             drafter_output = self.drafter.propose(
                 self.input_batch.token_ids_cpu[i, :end_idx],
-                self.speculative_config.ngram_prompt_lookup_min,
+                self.speculative_config.prompt_lookup_min,
+                self.speculative_config.prompt_lookup_max,
                 self.speculative_config.num_speculative_tokens,
             )
             if drafter_output is None or len(drafter_output) == 0:
@@ -1134,6 +1191,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not num_prompt_logprobs_dict:
             return {}
 
+        in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
@@ -1149,16 +1207,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
                 self.device, non_blocking=True)
 
+            # Set up target LogprobsTensors object.
+            logprobs_tensors = in_progress_dict.get(req_id)
+            if not logprobs_tensors:
+                # Create empty logprobs CPU tensors for the entire prompt.
+                # If chunked, we'll copy in slice by slice.
+                logprobs_tensors = LogprobsTensors.empty_cpu(
+                    num_prompt_tokens - 1, num_prompt_logprobs + 1)
+                in_progress_dict[req_id] = logprobs_tensors
+
             # Determine number of logits to retrieve.
-            start_tok = request.num_computed_tokens + 1
+            start_idx = request.num_computed_tokens
+            start_tok = start_idx + 1
             num_remaining_tokens = num_prompt_tokens - start_tok
-            if num_tokens < num_remaining_tokens:
+            if num_tokens <= num_remaining_tokens:
                 # This is a chunk, more tokens remain.
+                # In the == case, there are no more prompt logprobs to produce
+                # but we want to defer returning them to the next step where we
+                # have new generated tokens to return.
                 num_logits = num_tokens
             else:
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
+                prompt_logprobs_dict[req_id] = logprobs_tensors
+
+            if num_logits <= 0:
+                # This can happen for the final chunk if we prefilled exactly
+                # (num_prompt_tokens - 1) tokens for this request in the prior
+                # step. There are no more prompt logprobs to produce.
+                continue
 
             # Get the logits corresponding to this req's prompt tokens.
             # If this is a partial request (i.e. chunked prefill),
@@ -1179,19 +1257,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logprobs, num_prompt_logprobs, tgt_token_ids)
 
             # Transfer GPU->CPU async.
-            prompt_logprobs_dict[req_id] = LogprobsTensors(
-                token_ids.to("cpu", non_blocking=True),
-                logprobs.to("cpu", non_blocking=True),
-                ranks.to("cpu", non_blocking=True),
-            )
+            chunk_slice = slice(start_idx, start_idx + num_logits)
+            logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
+                token_ids, non_blocking=True)
+            logprobs_tensors.logprobs[chunk_slice].copy_(logprobs,
+                                                         non_blocking=True)
+            logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
+                ranks, non_blocking=True)
 
         # Remove requests that have completed prefill from the batch
         # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
             del num_prompt_logprobs_dict[req_id]
+            del in_progress_dict[req_id]
 
         # Must synchronize the non-blocking GPU->CPU transfers.
-        torch.cuda.synchronize()
+        if prompt_logprobs_dict:
+            torch.cuda.synchronize()
 
         return prompt_logprobs_dict
 
@@ -1288,9 +1370,45 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
         )
-        sampler_output = self.model.sample(logits=logits,
-                                           sampling_metadata=dummy_metadata)
+        try:
+            sampler_output = self.model.sample(
+                logits=logits, sampling_metadata=dummy_metadata)
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                raise RuntimeError(
+                    "CUDA out of memory occurred when warming up sampler with "
+                    f"{num_reqs} dummy requests. Please try lowering "
+                    "`max_num_seqs` or `gpu_memory_utilization` when "
+                    "initializing the engine.") from e
+            else:
+                raise e
+        if self.use_spec_decode:
+            draft_token_ids = [[0] for _ in range(num_reqs)]
+            dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+                draft_token_ids, self.device)
 
+            num_tokens = sum(len(ids) for ids in draft_token_ids)
+            # draft_probs = torch.randn(
+            #     num_tokens, logits.shape[-1], device=self.device,
+            #     dtype=logits.dtype)
+            draft_probs = None
+            target_logits = torch.randn(num_tokens,
+                                        logits.shape[-1],
+                                        device=self.device,
+                                        dtype=logits.dtype)
+            # NOTE(woosuk): Here, we should use int32 because the sampler uses
+            # int32 for bonus_token_ids. If the dtype mismatches, re-compilation
+            # will occur at runtime.
+            bonus_token_ids = torch.zeros(num_reqs,
+                                          device=self.device,
+                                          dtype=torch.int32)
+            self.rejection_sampler(
+                dummy_spec_decode_metadata,
+                draft_probs,
+                target_logits,
+                bonus_token_ids,
+                dummy_metadata,
+            )
         return sampler_output
 
     def profile_run(self) -> None:
@@ -1342,32 +1460,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_registry=self.mm_registry,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
+            if not isinstance(dummy_mm_data, MultiModalKwargs):
+                # TODO: Delete this check once input mapper is fully removed.
+                raise RuntimeError(
+                    "Legacy input mapper is not supported in V1")
 
-            # Dummy data definition in V0 may contain multiple multimodal items
+            # Dummy data definition may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we
             # always replicate first item by max_num_mm_items times since in V1
             # they are scheduled to be processed separately.
-
-            # Case when models have a merged processor, their dummy data is
-            # already batched `MultiModalKwargs`, therefore we take the first
-            # `MultiModalKwargsItem` from the desired modality to profile on.
-            if isinstance(dummy_mm_data, MultiModalKwargs):
-                dummy_mm_item = dummy_mm_data.get_item(
-                    modality=dummy_data_modality, item_index=0)
-                dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
-
-            # Case when models have dummy data explicitly defined as
-            # `MultiModalDataDict`, so they need to be processed through input
-            # mapper.
-            # TODO (ywang96): deprecate this path once merged processor is
-            # supported on all models.
-            else:
-                mm_kwargs_list = self.mm_input_mapper_profiling.process_inputs(
-                    mm_data=dummy_mm_data,
-                    mm_hashes=None,
-                    mm_processor_kwargs=None,
-                    precomputed_mm_inputs=None)
-                dummy_mm_kwargs = mm_kwargs_list[0]
+            dummy_mm_item = dummy_mm_data.get_item(
+                modality=dummy_data_modality, item_index=0)
+            dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
@@ -1432,34 +1536,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        if len(kv_cache_config.groups) > 1:
+        if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
         kv_caches: dict[str, torch.Tensor] = {}
 
-        for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
-            tensor_config = kv_cache_config.tensors[layer_name]
-            assert tensor_config.size % layer_spec.page_size_bytes == 0
-            num_blocks = tensor_config.size // layer_spec.page_size_bytes
-            if isinstance(layer_spec, FullAttentionSpec):
-                kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
-                    layer_spec.head_size)
-                dtype = layer_spec.dtype
-                kv_caches[layer_name] = torch.zeros(kv_cache_shape,
-                                                    dtype=dtype,
-                                                    device=self.device)
-            else:
-                raise NotImplementedError
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            for layer_name in kv_cache_group.layer_names:
+                tensor_config = kv_cache_config.tensors[layer_name]
+                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                # `num_blocks` is the number of blocks the model runner can use.
+                # `kv_cache_config.num_blocks` is the number of blocks that
+                # KVCacheManager may allocate.
+                # Since different GPUs may have different number of layers and
+                # different memory capacities, `num_blocks` can be different on
+                # different GPUs, and `kv_cache_config.num_blocks` is set to
+                # the min of all `num_blocks`. Verify it here.
+                assert num_blocks >= kv_cache_config.num_blocks
+                if isinstance(kv_cache_spec, FullAttentionSpec):
+                    kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
+                    kv_caches[layer_name] = torch.zeros(kv_cache_shape,
+                                                        dtype=dtype,
+                                                        device=self.device)
+                else:
+                    # TODO: add new branches when introducing more types of
+                    # KV cache specs.
+                    raise ValueError("Unknown KV cache spec type.")
 
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
@@ -1471,7 +1587,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
-        kv_cache_spec: KVCacheSpec = {}
+        kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
                 continue
@@ -1484,7 +1600,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
-                    dtype=attn_module.dtype,
+                    dtype=self.kv_cache_dtype,
                     use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):

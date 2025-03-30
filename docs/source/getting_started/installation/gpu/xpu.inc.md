@@ -1,6 +1,6 @@
 # Installation
 
-vLLM initially supports basic model inferencing and serving on Intel GPU platform.
+vLLM initially supports basic model inference and serving on Intel GPU platform.
 
 :::{attention}
 There are no pre-built wheels or images for this device, so you must build vLLM from source.
@@ -65,7 +65,7 @@ $ docker run -it \
 
 ## Supported features
 
-XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. We requires Ray as the distributed runtime backend. For example, a reference execution likes following:
+XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. We require Ray as the distributed runtime backend. For example, a reference execution like following:
 
 ```console
 python -m vllm.entrypoints.openai.api_server \
@@ -78,6 +78,6 @@ python -m vllm.entrypoints.openai.api_server \
      -tp=8
 ```
 
-By default, a ray instance will be launched automatically if no existing one is detected in system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the <gh-file:examples/online_serving/run_cluster.sh> helper script.
+By default, a ray instance will be launched automatically if no existing one is detected in the system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the <gh-file:examples/online_serving/run_cluster.sh> helper script.
 
-There are some new features coming with ipex-xpu 2.6, eg: **chunked prefill**, **V1 engine support**, **lora**, **MoE**, etc.
+There are some new features coming with ipex-xpu 2.6, e.g. **chunked prefill**, **V1 engine support**, **lora**, **MoE**, etc.

@@ -13,7 +13,7 @@ Ensure the v1 LLM Engine exposes a superset of the metrics available in v0.
 Metrics in vLLM can be categorized as follows:
 
 1. Server-level metrics: these are global metrics that track the state and performance of the LLM engine. These are typically exposed as Gauges or Counters in Prometheus.
-2. Request-level metrics: these are metrics that track the characteristics - e.g. size and timing - of individual requests. These are typically exposed as Histrograms in Prometheus, and are often the SLO that an SRE monitoring vLLM will be tracking.
+2. Request-level metrics: these are metrics that track the characteristics - e.g. size and timing - of individual requests. These are typically exposed as Histograms in Prometheus, and are often the SLO that an SRE monitoring vLLM will be tracking.
 
 The mental model is that the "Server-level Metrics" explain why the "Request-level Metrics" are what they are.
 
@@ -47,7 +47,7 @@ In v0, the following metrics are exposed via a Prometheus-compatible `/metrics` 
 - `vllm:tokens_total` (Counter)
 - `vllm:iteration_tokens_total` (Histogram)
 - `vllm:time_in_queue_requests` (Histogram)
-- `vllm:model_forward_time_milliseconds` (Histogram
+- `vllm:model_forward_time_milliseconds` (Histogram)
 - `vllm:model_execute_time_milliseconds` (Histogram)
 - `vllm:request_params_n` (Histogram)
 - `vllm:request_params_max_tokens` (Histogram)

@@ -2,7 +2,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -16,13 +16,8 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.utils import aiter_linear_enabled
-
-if aiter_linear_enabled():
-    from aiter.tuned_gemm import tgemm
-else:
-    from vllm.model_executor.layers.tuned_gemm import tgemm
-
+from vllm.model_executor.layers.tuned_gemm import tgemm
+# yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
                                            PackedColumnParameter,
@@ -31,6 +26,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            RowvLLMParameter)
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import aiter_linear_enabled
 
 logger = init_logger(__name__)
 
@@ -53,6 +49,18 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
 ]
+
+
+def rocm_aiter_tgemm_mm(x: torch.Tensor, weight: torch.Tensor,
+                        bias: torch.Tensor) -> torch.Tensor:
+    from aiter.tuned_gemm import tgemm as aiter_tgemm
+    return aiter_tgemm.mm(x, weight, bias)
+
+
+def dipsatch_unquantized_linear_func() -> Callable[..., torch.Tensor]:
+    if aiter_linear_enabled():
+        return rocm_aiter_tgemm_mm
+    return tgemm.mm
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
@@ -192,7 +200,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return tgemm.mm(x, layer.weight, bias)
+        return dipsatch_unquantized_linear_func()(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):
@@ -1363,6 +1371,7 @@ class QKVCrossParallelLinear(LinearBase):
             prefix=f"{prefix}.kv_proj_encoder")
 
         # `kv_proj_encoder.num_kv_heads` accounts for sharding with tp>1.
+        self.q_size = self.q_proj_decoder.output_size_per_partition
         self.kv_size = self.kv_proj_encoder.num_kv_heads * head_size
 
         if bias:
@@ -1374,20 +1383,31 @@ class QKVCrossParallelLinear(LinearBase):
         else:
             self.bias = None
 
+    def process_weights_after_loading(self):
+        for layer in self.proj.values():
+            if self.quant_method is not None:
+                self.quant_method.process_weights_after_loading(layer)
+
     @property
     def q_proj_decoder(self) -> ColumnParallelLinear:
         layer = self.proj["q_proj_decoder"]
         for name, param in self.named_parameters():
-            target_param = getattr(layer, name)
-            self.sync_weight_attrs(param, target_param, mode="q_proj_decoder")
+            target_param = getattr(layer, name, None)
+            if target_param is not None:
+                self.sync_weight_attrs(param,
+                                       target_param,
+                                       mode="q_proj_decoder")
         return layer
 
     @property
     def kv_proj_encoder(self) -> QKVParallelLinear:
         layer = self.proj["kv_proj_encoder"]
         for name, param in self.named_parameters():
-            target_param = getattr(layer, name)
-            self.sync_weight_attrs(param, target_param, mode="kv_proj_encoder")
+            target_param = getattr(layer, name, None)
+            if target_param is not None:
+                self.sync_weight_attrs(param,
+                                       target_param,
+                                       mode="kv_proj_encoder")
         return layer
 
     def sync_weight_attrs(
@@ -1476,11 +1496,14 @@ class QKVCrossParallelLinear(LinearBase):
                  if loaded_shard_id == "q" else self.kv_proj_encoder)
         target_param = self.select_proj_params(layer, param)
         shard_id_args = (loaded_shard_id, ) if loaded_shard_id != "q" else ()
-        layer.weight_loader(target_param, loaded_weight, *shard_id_args)
+        if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED:
+            layer.weight_loader_v2(target_param, loaded_weight, *shard_id_args)
+        else:
+            layer.weight_loader(target_param, loaded_weight, *shard_id_args)
 
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"
-        s += f", q_size={self.q_proj_decoder.output_size_per_partition}"
+        s += f", q_size={self.q_size}"
         s += f", kv_size={self.kv_size}"
         s += f", bias={self.bias is not None}"
         s += f", tp_size={get_tensor_model_parallel_world_size()}"

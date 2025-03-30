@@ -153,6 +153,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8": torch.uint8,
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
+    "int8": torch.int8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -560,6 +561,11 @@ async def merge_async_iterators(
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
     """
+    if len(iterators) == 1:
+        # Fast-path single iterator case.
+        async for item in iterators[0]:
+            yield 0, item
+        return
 
     loop = asyncio.get_running_loop()
 
@@ -976,12 +982,6 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
-def align_to_256bytes(extent: int, dtype: torch.dtype) -> int:
-    dtype_size = get_dtype_size(dtype)
-    eles_per_256bytes = 256 // dtype_size
-    return round_up(extent, eles_per_256bytes)
-
-
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1000,23 +1000,7 @@ def is_list_of(
     assert_never(check)
 
 
-JSONTree = Union[dict[str, "JSONTree[T]"], list["JSONTree[T]"],
-                 tuple["JSONTree[T]", ...], T]
-"""A nested JSON structure where the leaves need not be JSON-serializable."""
-
-
-def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
-    if isinstance(value, dict):
-        return {k: json_map_leaves(func, v) for k, v in value.items()}
-    elif isinstance(value, list):
-        return [json_map_leaves(func, v) for v in value]
-    elif isinstance(value, tuple):
-        return tuple(json_map_leaves(func, v) for v in value)
-    else:
-        return func(value)
-
-
-def flatten_2d_lists(lists: list[list[T]]) -> list[T]:
+def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
     """Flatten a list of lists to a single list."""
     return [item for sublist in lists for item in sublist]
 
@@ -1637,11 +1621,11 @@ def get_allowed_kwarg_only_overrides(
         if requires_kw_only:
             logger.warning(
                 "The following intended overrides are not keyword-only args "
-                "and and will be dropped: %s", dropped_keys)
+                "and will be dropped: %s", dropped_keys)
         else:
             logger.warning(
                 "The following intended overrides are not keyword args "
-                "and and will be dropped: %s", dropped_keys)
+                "and will be dropped: %s", dropped_keys)
 
     return filtered_overrides
 
@@ -1763,43 +1747,49 @@ def is_navi3() -> bool:
 
 
 @cache
+def is_rocm() -> bool:
+    from vllm.platforms import current_platform
+    return current_platform.is_rocm()
+
+
+@cache
+def aiter_enabled() -> bool:
+    return is_rocm() and envs.VLLM_ROCM_USE_AITER
+
+
+@cache
 def aiter_moe_enabled() -> bool:
-    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_MOE
+    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_MOE
 
 
 @cache
 def aiter_2stage_moe_enabled() -> bool:
-    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_2STAGE_MOE
+    return aiter_moe_enabled() and envs.VLLM_ROCM_USE_AITER_2STAGE_MOE
 
 
 @cache
 def aiter_fp8_block_moe_enabled() -> bool:
-    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_FP8_BLOCK_MOE
+    return aiter_moe_enabled() and envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_MOE
 
 
 @cache
 def aiter_paged_attn_enabled() -> bool:
-    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_PAGED_ATTN
-
-
-@cache
-def aiter_linear_enabled() -> bool:
-    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_LINEAR
-
-
-@cache
-def aiter_norm_enabled() -> bool:
-    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_NORM
+    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
 
 
 @cache
 def aiter_mla_enabled() -> bool:
-    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_MLA
+    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_MLA
+
+
+@cache
+def aiter_linear_enabled() -> bool:
+    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_LINEAR
 
 
 @cache
 def aiter_block_gemm_enabled() -> bool:
-    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_BLOCK_GEMM
+    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_BLOCK_GEMM
 
 
 def weak_ref_tensors(
@@ -2375,20 +2365,53 @@ def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
         ctx.destroy(linger=0)
 
 
-def _check_multiproc_method():
-    if (cuda_is_initialized()
-            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
-        logger.warning("CUDA was previously initialized. We must use "
-                       "the `spawn` multiprocessing start method. Setting "
-                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                       "See https://docs.vllm.ai/en/latest/getting_started/"
-                       "troubleshooting.html#python-multiprocessing "
-                       "for more information.")
+def is_in_ray_actor():
+    """Check if we are in a Ray actor."""
+
+    try:
+        import ray
+        return (ray.is_initialized()
+                and ray.get_runtime_context().get_actor_id() is not None)
+    except ImportError:
+        return False
+
+
+def _maybe_force_spawn():
+    """Check if we need to force the use of the `spawn` multiprocessing start
+    method.
+    """
+    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
+        return
+
+    reason = None
+    if cuda_is_initialized():
+        reason = "CUDA is initialized"
+    elif is_in_ray_actor():
+        # even if we choose to spawn, we need to pass the ray address
+        # to the subprocess so that it knows how to connect to the ray cluster.
+        # env vars are inherited by subprocesses, even if we use spawn.
+        import ray
+        os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
+        reason = "In a Ray actor and can only be spawned"
+
+    if reason is not None:
+        logger.warning(
+            "We must use the `spawn` multiprocessing start method. "
+            "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+            "See https://docs.vllm.ai/en/latest/getting_started/"
+            "troubleshooting.html#python-multiprocessing "
+            "for more information. Reason: %s", reason)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def get_mp_context():
-    _check_multiproc_method()
+    """Get a multiprocessing context with a particular method (spawn or fork).
+    By default we follow the value of the VLLM_WORKER_MULTIPROC_METHOD to
+    determine the multiprocessing method (default is fork). However, under
+    certain conditions, we may enforce spawn and override the value of
+    VLLM_WORKER_MULTIPROC_METHOD.
+    """
+    _maybe_force_spawn()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
     return multiprocessing.get_context(mp_method)
 
@@ -2588,3 +2611,51 @@ def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
         obj[key1] = v2
     else:
         obj.pop(key1, None)
+
+
+@contextlib.contextmanager
+def cprofile_context(save_file: Optional[str] = None):
+    """Run a cprofile
+
+    Args:
+        save_file: path to save the profile result. "1" or
+          None will result in printing to stdout.
+    """
+    import cProfile
+
+    prof = cProfile.Profile()
+    prof.enable()
+
+    try:
+        yield
+    finally:
+        prof.disable()
+        if save_file and save_file != "1":
+            prof.dump_stats(save_file)
+        else:
+            prof.print_stats(sort="cumtime")
+
+
+def cprofile(save_file: Optional[str] = None, enabled: bool = True):
+    """Decorator to profile a Python method using cProfile.
+
+    Args:
+        save_file: Path to save the profile result.
+            If "1", None, or "", results will be printed to stdout.
+        enabled: Set to false to turn this into a no-op
+    """
+
+    def decorator(func: Callable):
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if not enabled:
+                # If profiling is disabled, just call the function directly.
+                return func(*args, **kwargs)
+
+            with cprofile_context(save_file):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator

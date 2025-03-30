@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Dict, List, Optional, Union
+from typing import Optional, Union
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -58,7 +58,7 @@ class BackgroundRunner:
         self.engine_config: VllmConfig
         self.input_queue: multiprocessing.Queue = mp.Queue()
         self.result_queue: multiprocessing.Queue = mp.Queue()
-        self.result_queues: Dict[str, asyncio.Queue] = {}
+        self.result_queues: dict[str, asyncio.Queue] = {}
         self.t: threading.Thread = threading.Thread(target=self.thread_proc)
         self.loop = None
         self.llm: LLM
@@ -346,7 +346,7 @@ async def chat_completions(request: ChatCompletionRequest,
         default_sampling_params=default_sampling_params
         # TODO: gshtras add len(prompt_inputs["prompt_token_ids"])
     )
-    conversation: List[ConversationMessage] = []
+    conversation: list[ConversationMessage] = []
 
     res = ChatCompletionResponse(model=request.model,
                                  choices=[],

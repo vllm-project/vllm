@@ -376,7 +376,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_scaled_mm_supports_block_fp8(int cuda_device_capability) -> "
       "bool");
   ops.impl("cutlass_scaled_mm_supports_block_fp8",
-           &cutlass_scaled_mm_supports_fp8);
+           &cutlass_scaled_mm_supports_block_fp8);
 
   // Check if cutlass sparse scaled_mm is supported for CUDA devices of the
   // given capability

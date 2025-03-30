@@ -4,6 +4,7 @@ import ast
 import copy
 import enum
 import hashlib
+import importlib.metadata
 import json
 import sys
 import warnings
@@ -17,6 +18,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
                     Optional, Protocol, Union)
 
 import torch
+from packaging.version import Version
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
@@ -27,7 +29,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import CpuArchEnum
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.sampling_params import GuidedDecodingParams
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
@@ -37,9 +39,9 @@ from vllm.transformers_utils.config import (
     try_get_generation_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3
-from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, is_mi250, is_navi, random_uuid,
-                        resolve_obj_by_qualname, aiter_mla_enabled)
+from vllm.utils import (GiB_bytes, LayerBlockType, aiter_mla_enabled,
+                        cuda_device_count_stateless, get_cpu_memory, is_mi250,
+                        is_navi, random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -245,6 +247,7 @@ class ModelConfig:
         max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 20,
         disable_sliding_window: bool = False,
+        disable_cascade_attn: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, list[str]]] = None,
         limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
@@ -287,14 +290,18 @@ class ModelConfig:
         if rope_scaling is not None:
             hf_override: dict[str, Any] = {"rope_scaling": rope_scaling}
             hf_overrides_kw.update(hf_override)
-            msg = ("`--rope-scaling` will be removed in a future release. "
-                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            hf_overrides_str = json.dumps(hf_overrides)
+            msg = (
+                "`--rope-scaling` will be removed in a future release. "
+                f"'Please instead use `--hf-overrides '{hf_overrides_str}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
         if rope_theta is not None:
             hf_override = {"rope_theta": rope_theta}
             hf_overrides_kw.update(hf_override)
-            msg = ("`--rope-theta` will be removed in a future release. "
-                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            hf_overrides_str = json.dumps(hf_overrides)
+            msg = (
+                "`--rope-theta` will be removed in a future release. "
+                f"'Please instead use `--hf-overrides '{hf_overrides_str}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
@@ -317,6 +324,7 @@ class ModelConfig:
         self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
+        self.disable_cascade_attn = disable_cascade_attn
         self.skip_tokenizer_init = skip_tokenizer_init
         self.enable_sleep_mode = enable_sleep_mode
 
@@ -342,7 +350,7 @@ class ModelConfig:
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
-        self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+        self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
         self.disable_mm_preprocessor_cache = disable_mm_preprocessor_cache
@@ -666,13 +674,12 @@ class ModelConfig:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
-
-        MODEL_NOT_SUPPORT_CUDA_GRAPH = ['mllama']
-        if (self.hf_config.model_type in MODEL_NOT_SUPPORT_CUDA_GRAPH
-                and not self.enforce_eager):
+        MODEL_NOT_SUPPORT_CUDA_GRAPH_ROCM = ['mllama']
+        if (self.hf_config.model_type in MODEL_NOT_SUPPORT_CUDA_GRAPH_ROCM
+                and not self.enforce_eager and current_platform.is_rocm()):
             logger.warning(
-                "CUDA graph is not supported for %s yet, fallback to the eager "
-                "mode.", self.hf_config.model_type)
+                "CUDA graph is not supported for %s on ROCm yet, fallback "
+                "to the eager mode.", self.hf_config.model_type)
             self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
@@ -818,6 +825,11 @@ class ModelConfig:
                 if qk_rope_head_dim and qk_nope_head_dim:
                     return qk_rope_head_dim + qk_nope_head_dim
 
+        if hasattr(self.hf_text_config,
+                   "model_type") and (self.hf_text_config.model_type
+                                      == "zamba2"):
+            return self.hf_text_config.attention_head_dim
+
         if self.is_attention_free:
             return 0
 
@@ -901,7 +913,9 @@ class ModelConfig:
         else:
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_hidden_layers", 0)
-        pp_rank = parallel_config.rank // parallel_config.tensor_parallel_size
+        # the layout order is: DP x PP x TP
+        pp_rank = (parallel_config.rank // parallel_config.tensor_parallel_size
+                   ) % parallel_config.pipeline_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
         return start, end
@@ -938,6 +952,15 @@ class ModelConfig:
                                  "layers_block_type in the hf_config, "
                                  "cannot determine the num of "
                                  f"{block_type.value} layers")
+
+            if hasattr(self.hf_text_config,
+                       "model_type") and (self.hf_text_config.model_type
+                                          == "zamba2"):
+                if attn_block_type:
+                    return sum(t == "hybrid"
+                               for t in layers_block_type_value[start:end])
+                else:
+                    return self.get_num_layers(parallel_config)
 
             return sum(t == block_type.value
                        for t in layers_block_type_value[start:end])
@@ -1010,6 +1033,13 @@ class ModelConfig:
                     "max_new_tokens")
         else:
             diff_sampling_param = {}
+
+        if diff_sampling_param:
+            logger.warning_once(
+                "Default sampling parameters have been overridden by the "
+                "model's Hugging Face generation config recommended from the "
+                "model creator. If this is not intended, please relaunch "
+                "vLLM instance with `--generation-config vllm`.")
         return diff_sampling_param
 
     @property
@@ -1134,10 +1164,8 @@ class CacheConfig:
                 f"{self.gpu_memory_utilization}.")
 
         if aiter_mla_enabled() and not self.block_size == 1:
-            raise ValueError(
-                "AITER MLA currently requires --block-size=1, "
-                f"but got '{self.block_size}'"
-            )
+            raise ValueError("AITER MLA currently requires --block-size=1, "
+                             f"but got '{self.block_size}'")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
@@ -1155,7 +1183,7 @@ class CacheConfig:
         if not self.enable_prefix_caching:
             return
 
-        if self.sliding_window is not None:
+        if self.sliding_window is not None and not envs.VLLM_USE_V1:
             raise NotImplementedError(
                 "Prefix caching is not supported with sliding window. "
                 "Run with --disable-sliding-window to use prefix caching.")
@@ -1263,6 +1291,7 @@ class LoadFormat(str, enum.Enum):
     BITSANDBYTES = "bitsandbytes"
     MISTRAL = "mistral"
     RUNAI_STREAMER = "runai_streamer"
+    FASTSAFETENSORS = "fastsafetensors"
 
 
 @dataclass
@@ -1283,6 +1312,12 @@ class LoadConfig:
             "tensorizer" will use CoreWeave's tensorizer library for
                 fast weight loading.
             "bitsandbytes" will load nf4 type weights.
+            "sharded_state" will load weights from pre-sharded checkpoint files,
+                supporting efficient loading of tensor-parallel models.
+            "gguf" will load weights from GGUF format files.
+            "mistral" will load weights from consolidated safetensors files used
+                by Mistral models.
+            "runai_streamer" will load weights from RunAI streamer format files.
         model_loader_extra_config: The extra config for the model loader.
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's
@@ -1456,7 +1491,7 @@ class ParallelConfig:
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
-        ray_only_devices = ["tpu"]
+        ray_only_devices: list[str] = []
         from vllm.platforms import current_platform
         if (current_platform.device_type in ray_only_devices
                 and self.world_size > 1):
@@ -1502,18 +1537,6 @@ class ParallelConfig:
             self.distributed_executor_backend = "uni"
 
         self._verify_args()
-
-        if is_mi250() and self.tensor_parallel_size > 1:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "working correctly on multi AMD MI250.")
-
-        if is_navi() and self.tensor_parallel_size <= 2:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "working correctly when using two AMD Navi GPUs.")
 
         if is_mi250() and self.tensor_parallel_size > 1:
             self.disable_custom_all_reduce = True
@@ -1808,7 +1831,7 @@ class DeviceConfig:
             self.device_type = device
 
         # Some device types require processing inputs on CPU
-        if self.device_type in ["neuron", "openvino"]:
+        if self.device_type in ["neuron"]:
             self.device = torch.device("cpu")
         elif self.device_type in ["tpu"]:
             self.device = None
@@ -1817,12 +1840,139 @@ class DeviceConfig:
             self.device = torch.device(self.device_type)
 
 
+@dataclass
 class SpeculativeConfig:
-    """Configuration for speculative decoding.
-
-    The configuration is currently specialized to draft-model speculative
-    decoding with top-1 proposals.
     """
+    Configuration for speculative decoding.
+    Configurable parameters include:
+    - General Speculative Decoding Control:
+        - num_speculative_tokens (int): The number of speculative
+            tokens, if provided. It will default to the number in the draft
+            model config if present, otherwise, it is required.
+        - model (Optional[str]): The name of the draft model, eagle head,
+            or additional weights, if provided.
+        - method (Optional[str]): The name of the speculative method to use.
+            If users provide and set the `model` param, the speculative method
+            type will be detected automatically if possible, if `model` param
+            is not provided, the method name must be provided.
+            - Possible values:
+                - ngram
+                    Related additional configuration:
+                    - prompt_lookup_max (Optional[int]):
+                        Maximum size of ngram token window when using Ngram
+                        proposer, required when method is set to ngram.
+                    - prompt_lookup_min (Optional[int]):
+                        Minimum size of ngram token window when using Ngram
+                        proposer, if provided. Defaults to 1.
+                - eagle
+                - medusa
+                - mlp_speculator
+                - draft_model
+        - acceptance_method (str): The method to use for accepting draft
+            tokens. This can take two possible values: 'rejection_sampler' and
+            'typical_acceptance_sampler' for RejectionSampler and
+            TypicalAcceptanceSampler respectively. If not specified, it
+            defaults to 'rejection_sampler'.
+            - Possible values:
+                - rejection_sampler
+                - typical_acceptance_sampler
+                    Related additional configuration:
+                    - posterior_threshold (Optional[float]):
+                        A threshold value that sets a lower bound on the
+                        posterior probability of a token in the target model
+                        for it to be accepted. This threshold is used only
+                        when we use the TypicalAcceptanceSampler for token
+                        acceptance.
+                    - posterior_alpha (Optional[float]):
+                        Scaling factor for entropy-based threshold, applied
+                        when using TypicalAcceptanceSampler.
+        - draft_tensor_parallel_size (Optional[int]): The degree of the tensor
+            parallelism for the draft model. Can only be 1 or the same as the
+            target model's tensor parallel size.
+        - disable_logprobs (bool): If set to True, token log probabilities are
+            not returned during speculative decoding. If set to False, token
+            log probabilities are returned according to the log probability
+            settings in SamplingParams. If not specified, it defaults to True.
+
+    - Draft Model Configuration:
+        - quantization (Optional[str]): Quantization method that was used to
+            quantize the draft model weights. If None, we assume the
+            model weights are not quantized. Note that it only takes effect
+            when using the draft model-based speculative method.
+        - max_model_len (Optional[int]): The maximum model length of the
+            draft model. Used when testing the ability to skip
+            speculation for some sequences.
+        - revision: The specific model version to use for the draft model. It
+            can be a branch name, a tag name, or a commit id. If unspecified,
+            will use the default version.
+        - code_revision: The specific revision to use for the draft model code
+            on Hugging Face Hub. It can be a branch name, a tag name, or a
+            commit id. If unspecified, will use the default version.
+
+    - Advanced Control:
+        - disable_mqa_scorer (bool): Disable the MQA scorer and fall back to
+            batch expansion for scoring proposals. If not specified, it
+            defaults to False.
+        - disable_by_batch_size (Optional[int]): Disable speculative decoding
+            for new incoming requests when the number of enqueued requests is
+            larger than this value, if provided.
+
+    Although the parameters above are structured hierarchically, there is no
+    need to nest them during configuration.
+
+    Non-configurable internal parameters include:
+    - Model Configuration:
+        - target_model_config (ModelConfig): The configuration of the target
+            model.
+        - draft_model_config (ModelConfig): The configuration of the draft
+            model initialized internal.
+    - Parallelism Configuration:
+        - target_parallel_config (ParallelConfig): The parallel configuration
+            for the target model.
+        - draft_parallel_config (ParallelConfig): The parallel configuration
+            for the draft model initialized internal.
+    - Execution Control:
+        - enable_chunked_prefill (bool): Whether vLLM is configured to use
+            chunked prefill or not. Used for raising an error since it's not
+            yet compatible with speculative decode.
+        - disable_log_stats (bool): Whether to disable the periodic printing of
+            stage times in speculative decoding.
+    """
+    # speculative configs from cli args
+    num_speculative_tokens: int = field(default=None,
+                                        init=True)  # type: ignore
+    method: Optional[str] = None
+    acceptance_method: str = "rejection_sampler"
+    draft_tensor_parallel_size: Optional[int] = None
+    disable_logprobs: bool = True
+
+    model: Optional[str] = None
+    quantization: Optional[str] = None
+    max_model_len: Optional[int] = None
+    revision: Optional[str] = None
+    code_revision: Optional[str] = None
+
+    disable_mqa_scorer: bool = False
+    disable_by_batch_size: Optional[int] = None
+    prompt_lookup_max: Optional[int] = None
+    prompt_lookup_min: Optional[int] = None
+    posterior_threshold: Optional[float] = None
+    posterior_alpha: Optional[float] = None
+
+    # required configuration params passed from engine
+    target_model_config: ModelConfig = field(default=None,
+                                             init=True)  # type: ignore
+    target_parallel_config: ParallelConfig = field(default=None,
+                                                   init=True)  # type: ignore
+    enable_chunked_prefill: bool = field(default=None,
+                                         init=True)  # type: ignore
+    disable_log_stats: bool = field(default=None, init=True)  # type: ignore
+
+    # params generated in the post-init stage
+    draft_model_config: ModelConfig = field(default=None,
+                                            init=True)  # type: ignore
+    draft_parallel_config: ParallelConfig = field(default=None,
+                                                  init=True)  # type: ignore
 
     def compute_hash(self) -> str:
         """
@@ -1842,6 +1992,11 @@ class SpeculativeConfig:
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
+    @classmethod
+    def from_dict(cls, dict_value: dict) -> "SpeculativeConfig":
+        """Parse the CLI value for the speculative config."""
+        return cls(**dict_value)
+
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         if hf_config.model_type == "deepseek_v3":
@@ -1854,230 +2009,172 @@ class SpeculativeConfig:
             })
         return hf_config
 
-    @staticmethod
-    def maybe_create_spec_config(
-        target_model_config: ModelConfig,
-        target_parallel_config: ParallelConfig,
-        target_dtype: str,
-        speculative_model: Optional[str],
-        speculative_model_quantization: Optional[str],
-        speculative_draft_tensor_parallel_size: Optional[int],
-        num_speculative_tokens: Optional[int],
-        speculative_disable_mqa_scorer: Optional[bool],
-        speculative_max_model_len: Optional[int],
-        enable_chunked_prefill: bool,
-        disable_log_stats: bool,
-        speculative_disable_by_batch_size: Optional[int],
-        ngram_prompt_lookup_max: Optional[int],
-        ngram_prompt_lookup_min: Optional[int],
-        draft_token_acceptance_method: str,
-        typical_acceptance_sampler_posterior_threshold: Optional[float],
-        typical_acceptance_sampler_posterior_alpha: Optional[float],
-        disable_logprobs: Optional[bool],
-    ) -> Optional["SpeculativeConfig"]:
-        """Create a SpeculativeConfig if possible, else return None.
+    def __post_init__(self):
 
-        This function attempts to create a SpeculativeConfig object based on the
-        provided parameters. If the necessary conditions are met, it returns an
-        instance of SpeculativeConfig. Otherwise, it returns None.
+        # Note: After next release, the method parameter will be used to
+        # specify the speculative method, which helps to extend the
+        # configuration of non-model-based proposers, and the model parameter
+        # will be used when the draft model or head is needed.
+        # If users do not specify the method, the speculative method will
+        # be detected automatically if possible. If the speculative method can
+        # not be detected, it will be considered as the draft-model-based
+        # method by default.
 
-        Args:
-            target_model_config (ModelConfig): The configuration of the target
-                model.
-            target_parallel_config (ParallelConfig): The parallel configuration
-                for the target model.
-            target_dtype (str): The data type used for the target model.
-            speculative_model (Optional[str]): The name of the speculative
-                model, if provided.
-            speculative_model_quantization (Optional[str]): Quantization method
-                that was used to quantize the speculative model weights. If
-                None, we assume the model weights are not quantized.
-            speculative_draft_tensor_parallel_size (Optional[int]): The degree
-                of the tensor parallelism for the draft model.
-            num_speculative_tokens (Optional[int]): The number of speculative
-                tokens, if provided. Will default to the number in the draft
-                model config if present, otherwise is required.
-            speculative_disable_mqa_scorer (Optional[bool]): Disable the MQA
-                scorer for the speculative model and fall back to batch
-                expansion for scoring.
-            speculative_max_model_len (Optional[int]): The maximum model len of
-                the speculative model. Used when testing the ability to skip
-                speculation for some sequences.
-            enable_chunked_prefill (bool): Whether vLLM is configured to use
-                chunked prefill or not. Used for raising an error since its not
-                yet compatible with spec decode.
-            speculative_disable_by_batch_size (Optional[int]): Disable
-                speculative decoding for new incoming requests when the number
-                of enqueue requests  is larger than this value, if provided.
-            ngram_prompt_lookup_max (Optional[int]): Max size of ngram token
-                window, if provided.
-            ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
-                window, if provided.
-            draft_token_acceptance_method (str): The method to use for
-                accepting draft tokens. This can take two possible
-                values 'rejection_sampler' and 'typical_acceptance_sampler'
-                for RejectionSampler and TypicalAcceptanceSampler
-                respectively.
-            typical_acceptance_sampler_posterior_threshold (Optional[float]):
-                A threshold value that sets a lower bound on the posterior
-                probability of a token in the target model for it to be
-                accepted. This threshold is used only when we use the
-                TypicalAcceptanceSampler for token acceptance.
-            typical_acceptance_sampler_posterior_alpha (Optional[float]):
-                A scaling factor for the entropy-based threshold in the
-                TypicalAcceptanceSampler.
-            disable_logprobs (Optional[bool]): If set to True, token log
-                probabilities are not returned during speculative decoding.
-                If set to False, token log probabilities are returned
-                according to the log probability settings in SamplingParams.
-                If not specified, it defaults to True.
-
-        Returns:
-            Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
-                the necessary conditions are met, else None.
-        """
-        if speculative_model is None:
-            if num_speculative_tokens is not None:
-                if target_model_config.hf_text_config.model_type \
+        if self.model is None and self.num_speculative_tokens is not None:
+            # TODO(Shangming): Refactor mtp configuration logic when supporting
+            # mtp acceleration for more models besides deepseek_v3
+            if self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3":
-                    # use the draft model from the same model:
-                    speculative_model = target_model_config.model
-                else:
-                    raise ValueError(
-                        "num_speculative_tokens was provided without "
-                        "speculative_model.")
+                # use the draft model from the same model:
+                self.model = self.target_model_config.model
+            elif self.method in ("ngram", "[ngram]"):
+                self.model = "ngram"
             else:
-                return None
+                raise ValueError("num_speculative_tokens was provided without "
+                                 "speculative model.")
 
-        if (speculative_disable_by_batch_size is not None
-                and speculative_disable_by_batch_size < 2):
-            raise ValueError("Expect the batch size threshold of disabling "
-                             "speculative decoding is > 1, but got "
-                             f"{speculative_disable_by_batch_size=}")
-        if (enable_chunked_prefill and speculative_model == "eagle"):
-            raise ValueError("Chunked prefill and EAGLE are not compatible.")
-        # TODO: The user should be able to specify revision/max model len
-        # for the draft model. It is not currently supported.
-        draft_revision = None
-        draft_code_revision = None
-        draft_quantization = speculative_model_quantization
+        # Automatically configure the ngram method during configuration
+        # refactoring to ensure a smooth transition.
+        if self.method is None and (self.model is not None
+                                    and self.model in ("ngram", "[ngram]")):
+            self.method = "ngram"
 
-        if speculative_model == "[ngram]":
-            if ngram_prompt_lookup_min is None:
-                ngram_prompt_lookup_min = 1
-            if ngram_prompt_lookup_max is None or ngram_prompt_lookup_max < 1:
-                raise ValueError(f"{ngram_prompt_lookup_max=} must be > 0")
-            if ngram_prompt_lookup_min < 1:
-                raise ValueError(f"{ngram_prompt_lookup_min=} must be > 0")
-            if ngram_prompt_lookup_min > ngram_prompt_lookup_max:
-                raise ValueError(f"{ngram_prompt_lookup_min=} cannot be "
-                                 f"larger than {ngram_prompt_lookup_max=}")
+        if self.method in ("ngram", "[ngram]"):
+            # Unified to "ngram" internally
+            self.method = "ngram"
+            # Set default values if not provided
+            if (self.prompt_lookup_min is None
+                    and self.prompt_lookup_max is None):
+                # TODO(woosuk): Tune these values. They are arbitrarily chosen.
+                self.prompt_lookup_min = 5
+                self.prompt_lookup_max = 5
+            elif self.prompt_lookup_min is None:
+                assert self.prompt_lookup_max is not None
+                self.prompt_lookup_min = self.prompt_lookup_max
+            elif self.prompt_lookup_max is None:
+                assert self.prompt_lookup_min is not None
+                self.prompt_lookup_max = self.prompt_lookup_min
+
+            # Validate values
+            if self.prompt_lookup_min < 1:
+                raise ValueError(
+                    f"prompt_lookup_min={self.prompt_lookup_min} must be > 0")
+            if self.prompt_lookup_max < 1:
+                raise ValueError(
+                    f"prompt_lookup_max={self.prompt_lookup_max} must be > 0")
+            if self.prompt_lookup_min > self.prompt_lookup_max:
+                raise ValueError(
+                    f"prompt_lookup_min={self.prompt_lookup_min} must "
+                    f"be <= prompt_lookup_max={self.prompt_lookup_max}")
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
             # draft related config as None here.
-            draft_model_config = target_model_config
-            draft_parallel_config = target_parallel_config
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
         else:
-            ngram_prompt_lookup_max = 0
-            ngram_prompt_lookup_min = 0
-            draft_model_config = ModelConfig(
-                model=speculative_model,
-                task="draft",
-                tokenizer=target_model_config.tokenizer,
-                tokenizer_mode=target_model_config.tokenizer_mode,
-                trust_remote_code=target_model_config.trust_remote_code,
-                allowed_local_media_path=target_model_config.
-                allowed_local_media_path,
-                dtype=target_model_config.dtype,
-                seed=target_model_config.seed,
-                revision=draft_revision,
-                code_revision=draft_code_revision,
-                tokenizer_revision=target_model_config.tokenizer_revision,
-                max_model_len=None,
-                spec_target_max_model_len=target_model_config.max_model_len,
-                quantization=draft_quantization,
-                enforce_eager=target_model_config.enforce_eager,
-                max_seq_len_to_capture=target_model_config.
-                max_seq_len_to_capture,
-                max_logprobs=target_model_config.max_logprobs,
-                hf_overrides=SpeculativeConfig.hf_config_override,
-            )
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
 
-            draft_hf_config = draft_model_config.hf_config
+            if self.model is not None:
+                self.draft_model_config = ModelConfig(
+                    model=self.model,
+                    task="draft",
+                    tokenizer=self.target_model_config.tokenizer,
+                    tokenizer_mode=self.target_model_config.tokenizer_mode,
+                    trust_remote_code=self.target_model_config.
+                    trust_remote_code,
+                    allowed_local_media_path=self.target_model_config.
+                    allowed_local_media_path,
+                    dtype=self.target_model_config.dtype,
+                    seed=self.target_model_config.seed,
+                    revision=self.revision,
+                    code_revision=self.code_revision,
+                    tokenizer_revision=self.target_model_config.
+                    tokenizer_revision,
+                    max_model_len=None,
+                    spec_target_max_model_len=self.target_model_config.
+                    max_model_len,
+                    quantization=self.quantization,
+                    enforce_eager=self.target_model_config.enforce_eager,
+                    max_seq_len_to_capture=self.target_model_config.
+                    max_seq_len_to_capture,
+                    max_logprobs=self.target_model_config.max_logprobs,
+                    hf_overrides=SpeculativeConfig.hf_config_override,
+                )
 
-            # Detect EAGLE prefix to replace hf_config for EAGLE draft_model
-            if "eagle-" in draft_model_config.model.lower():
-                from vllm.transformers_utils.configs.eagle import EAGLEConfig
-                if isinstance(draft_model_config.hf_config, EAGLEConfig):
-                    pass
+                # Automatically detect the method
+                if "eagle-" in self.draft_model_config.model.lower():
+                    self.method = "eagle"
+                elif self.draft_model_config.hf_config.model_type == "medusa":
+                    self.method = "medusa"
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "mlp_speculator"):
+                    self.method = "mlp_speculator"
                 else:
-                    eagle_config = EAGLEConfig(draft_model_config.hf_config)
-                    draft_model_config.hf_config = eagle_config
+                    self.method = "draft_model"
 
-            if (num_speculative_tokens is not None
-                    and hasattr(draft_hf_config, "num_lookahead_tokens")):
-                draft_hf_config.num_lookahead_tokens = num_speculative_tokens
-            n_predict = getattr(draft_hf_config, "n_predict", None)
-            if n_predict is not None:
-                if num_speculative_tokens is None:
-                    # Default to max value defined in draft model config.
-                    num_speculative_tokens = n_predict
-                elif num_speculative_tokens > n_predict and \
-                        num_speculative_tokens % n_predict != 0:
-                    # Ensure divisibility for MTP module reuse.
-                    raise ValueError(
-                        f"{num_speculative_tokens=} must be divisible by "
-                        f"{n_predict=}")
+                # Replace hf_config for EAGLE draft_model
+                if self.method == "eagle":
+                    if self.enable_chunked_prefill:
+                        raise ValueError(
+                            "Chunked prefill and EAGLE are not compatible.")
 
-            speculative_draft_tensor_parallel_size = \
-                SpeculativeConfig._verify_and_get_draft_model_tensor_parallel_size(
-                    target_parallel_config,
-                    speculative_draft_tensor_parallel_size,
-                    draft_hf_config
-            )
+                    from vllm.transformers_utils.configs.eagle import (
+                        EAGLEConfig)
+                    if isinstance(self.draft_model_config.hf_config,
+                                  EAGLEConfig):
+                        pass
+                    else:
+                        eagle_config = EAGLEConfig(
+                            self.draft_model_config.hf_config)
+                        self.draft_model_config.hf_config = eagle_config
 
-            draft_model_config.max_model_len = (
-                SpeculativeConfig._maybe_override_draft_max_model_len(
-                    speculative_max_model_len,
-                    draft_model_config.max_model_len,
-                    target_model_config.max_model_len,
-                ))
+                if (self.num_speculative_tokens is not None
+                        and hasattr(self.draft_model_config.hf_config,
+                                    "num_lookahead_tokens")):
+                    self.draft_model_config.hf_config.num_lookahead_tokens = \
+                    self.num_speculative_tokens
 
-            draft_parallel_config = (
-                SpeculativeConfig.create_draft_parallel_config(
-                    target_parallel_config,
-                    speculative_draft_tensor_parallel_size, draft_hf_config))
+                n_predict = getattr(self.draft_model_config.hf_config,
+                                    "n_predict", None)
+                if n_predict is not None:
+                    if self.num_speculative_tokens is None:
+                        # Default to max value defined in draft model config.
+                        self.num_speculative_tokens = n_predict
+                    elif self.num_speculative_tokens > n_predict and \
+                            self.num_speculative_tokens % n_predict != 0:
+                        # Ensure divisibility for MTP module reuse.
+                        raise ValueError(
+                            f"num_speculative_tokens:{self.num_speculative_tokens}"
+                            f" must be divisible by {n_predict=}")
 
-        if num_speculative_tokens is None:
-            raise ValueError(
-                "num_speculative_tokens must be provided with "
-                "speculative_model unless the draft model config contains an "
-                "n_predict parameter.")
+                self.draft_tensor_parallel_size = \
+                    SpeculativeConfig._verify_and_get_draft_tp(
+                        self.target_parallel_config,
+                        self.draft_tensor_parallel_size,
+                        self.draft_model_config.hf_config
+                )
 
-        if typical_acceptance_sampler_posterior_threshold is None:
-            typical_acceptance_sampler_posterior_threshold = 0.09
-        if typical_acceptance_sampler_posterior_alpha is None:
-            typical_acceptance_sampler_posterior_alpha = 0.3
-        if disable_logprobs is None:
-            disable_logprobs = True
+                self.draft_model_config.max_model_len = (
+                    SpeculativeConfig._maybe_override_draft_max_model_len(
+                        self.max_model_len,
+                        self.draft_model_config.max_model_len,
+                        self.target_model_config.max_model_len,
+                    ))
 
-        return SpeculativeConfig(
-            draft_model_config,
-            draft_parallel_config,
-            num_speculative_tokens,
-            speculative_disable_mqa_scorer,
-            speculative_disable_by_batch_size,
-            ngram_prompt_lookup_max,
-            ngram_prompt_lookup_min,
-            draft_token_acceptance_method=draft_token_acceptance_method,
-            typical_acceptance_sampler_posterior_threshold=\
-                typical_acceptance_sampler_posterior_threshold,
-            typical_acceptance_sampler_posterior_alpha=\
-                typical_acceptance_sampler_posterior_alpha,
-            disable_logprobs=disable_logprobs,
-            disable_log_stats=disable_log_stats,
-        )
+                self.draft_parallel_config = (
+                    SpeculativeConfig.create_draft_parallel_config(
+                        self.target_parallel_config,
+                        self.draft_tensor_parallel_size))
+
+        if self.acceptance_method == "typical_acceptance_sampler":
+            if self.posterior_threshold is None:
+                self.posterior_threshold = 0.09
+            if self.posterior_alpha is None:
+                self.posterior_alpha = 0.3
+
+        self._verify_args()
 
     @staticmethod
     def _maybe_override_draft_max_model_len(
@@ -2115,7 +2212,7 @@ class SpeculativeConfig:
         )
 
     @staticmethod
-    def _verify_and_get_draft_model_tensor_parallel_size(
+    def _verify_and_get_draft_tp(
             target_parallel_config: ParallelConfig,
             speculative_draft_tensor_parallel_size: Optional[int],
             draft_hf_config: PretrainedConfig) -> int:
@@ -2147,7 +2244,6 @@ class SpeculativeConfig:
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int,
-        draft_hf_config: PretrainedConfig,
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
@@ -2171,74 +2267,13 @@ class SpeculativeConfig:
 
         return draft_parallel_config
 
-    def __init__(
-        self,
-        draft_model_config: ModelConfig,
-        draft_parallel_config: ParallelConfig,
-        num_speculative_tokens: int,
-        speculative_disable_mqa_scorer: Optional[bool],
-        speculative_disable_by_batch_size: Optional[int],
-        ngram_prompt_lookup_max: Optional[int],
-        ngram_prompt_lookup_min: Optional[int],
-        draft_token_acceptance_method: str,
-        typical_acceptance_sampler_posterior_threshold: float,
-        typical_acceptance_sampler_posterior_alpha: float,
-        disable_logprobs: bool,
-        disable_log_stats: bool,
-    ):
-        """Create a SpeculativeConfig object.
-
-        Args:
-            draft_model_config: ModelConfig for the draft model.
-            draft_parallel_config: ParallelConfig for the draft model.
-            num_speculative_tokens: The number of tokens to sample from the
-                draft model before scoring with the target model.
-            speculative_disable_by_batch_size: Disable speculative
-                decoding for new incoming requests when the number of
-                enqueue requests is larger than this value.
-            ngram_prompt_lookup_max: Max size of ngram token window.
-            ngram_prompt_lookup_min: Min size of ngram token window.
-            draft_token_acceptance_method (str): The method to use for
-                accepting draft tokens. This can take two possible
-                values 'rejection_sampler' and 'typical_acceptance_sampler'
-                for RejectionSampler and TypicalAcceptanceSampler
-                respectively.
-            typical_acceptance_sampler_posterior_threshold (Optional[float]):
-                A threshold value that sets a lower bound on the posterior
-                probability of a token in the target model for it to be
-                accepted. This threshold is used only when we use the
-                TypicalAcceptanceSampler for token acceptance.
-            typical_acceptance_sampler_posterior_alpha (Optional[float]):
-                A scaling factor for the entropy-based threshold in the
-                TypicalAcceptanceSampler.
-            disable_logprobs: If set to True, token log probabilities will not
-                be returned even if requested by sampling parameters. This
-                reduces latency by skipping logprob calculation in proposal
-                sampling, target sampling, and after accepted tokens are
-                determined. If set to False, log probabilities will be
-                returned.
-            disable_log_stats: Whether to disable periodic printing of stage
-                times in speculative decoding.
-        """
-        self.draft_model_config = draft_model_config
-        self.draft_parallel_config = draft_parallel_config
-        self.num_speculative_tokens = num_speculative_tokens
-        self.speculative_disable_mqa_scorer = speculative_disable_mqa_scorer
-        self.speculative_disable_by_batch_size = \
-            speculative_disable_by_batch_size
-        self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
-        self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
-        self.draft_token_acceptance_method = draft_token_acceptance_method
-        self.typical_acceptance_sampler_posterior_threshold = \
-            typical_acceptance_sampler_posterior_threshold
-        self.typical_acceptance_sampler_posterior_alpha = \
-            typical_acceptance_sampler_posterior_alpha
-        self.disable_logprobs = disable_logprobs
-        self.disable_log_stats = disable_log_stats
-
-        self._verify_args()
-
     def _verify_args(self) -> None:
+        if self.num_speculative_tokens is None:
+            raise ValueError(
+                "num_speculative_tokens must be provided with "
+                "speculative model unless the draft model config contains an "
+                "n_predict parameter.")
+
         if self.num_speculative_tokens <= 0:
             raise ValueError("Expected num_speculative_tokens to be greater "
                              f"than zero ({self.num_speculative_tokens}).")
@@ -2248,29 +2283,34 @@ class SpeculativeConfig:
                 self.draft_parallel_config)
             # Validate and set draft token acceptance related settings.
 
-        if (self.draft_token_acceptance_method is None):
-            raise ValueError("draft_token_acceptance_method is not set. "
+        if self.acceptance_method is None:
+            raise ValueError("acceptance_method is not set. "
                              "Expected values are rejection_sampler or "
                              "typical_acceptance_sampler.")
 
-        if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method
-                != 'typical_acceptance_sampler'):
+        if (self.acceptance_method != 'rejection_sampler'
+                and self.acceptance_method != 'typical_acceptance_sampler'):
             raise ValueError(
-                "Expected draft_token_acceptance_method to be either "
+                "Expected acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
-                f"is {self.draft_token_acceptance_method}")
+                f"is {self.acceptance_method}")
 
-        if (self.typical_acceptance_sampler_posterior_threshold < 0
-                or self.typical_acceptance_sampler_posterior_alpha < 0):
+        if self.acceptance_method == "typical_acceptance_sampler" and (
+            (self.posterior_threshold is not None
+             and self.posterior_threshold < 0) or
+            (self.posterior_alpha is not None and self.posterior_alpha < 0)):
             raise ValueError(
-                "Expected typical_acceptance_sampler_posterior_threshold "
-                "and typical_acceptance_sampler_posterior_alpha to be > 0. "
-                "Instead found "
-                f"typical_acceptance_sampler_posterior_threshold = "
-                f"{self.typical_acceptance_sampler_posterior_threshold} and "
-                f"typical_acceptance_sampler_posterior_alpha = "
-                f"{self.typical_acceptance_sampler_posterior_alpha}")
+                "Expected the posterior_threshold and posterior_alpha of "
+                "typical_acceptance_sampler to be > 0. "
+                "Instead found posterior_threshold = "
+                f"{self.posterior_threshold} and posterior_alpha = "
+                f"{self.posterior_alpha}")
+
+        if (self.disable_by_batch_size is not None
+                and self.disable_by_batch_size < 2):
+            raise ValueError("Expect the batch size threshold of disabling "
+                             "speculative decoding is > 1, but got "
+                             f"{self.disable_by_batch_size=}")
 
     @property
     def num_lookahead_slots(self) -> int:
@@ -2283,8 +2323,8 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        if self.ngram_prompt_lookup_max > 0:
-            draft_model = "[ngram]"
+        if self.prompt_lookup_max is not None and self.prompt_lookup_max > 0:
+            draft_model = "ngram"
         else:
             draft_model = self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
@@ -2316,9 +2356,14 @@ class LoRAConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # LoRA is not compatible with `torch.compile` .
         factors: list[Any] = []
+        factors.append(self.max_lora_rank)
+        factors.append(self.max_loras)
+        factors.append(self.fully_sharded_loras)
+        factors.append(self.lora_dtype)
+        factors.append(self.lora_extra_vocab_size)
+        factors.append(self.long_lora_scaling_factors)
+        factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2326,7 +2371,7 @@ class LoRAConfig:
         # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
         possible_max_ranks = (8, 16, 32, 64, 128, 256, 320, 512)
-        possible_lora_extra_vocab_size = (0, 256, 512)
+        possible_lora_extra_vocab_size = (256, 512)
         if self.max_lora_rank not in possible_max_ranks:
             raise ValueError(
                 f"max_lora_rank ({self.max_lora_rank}) must be one of "
@@ -2528,6 +2573,14 @@ def _get_and_verify_dtype(
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
     config_dtype = getattr(config, "torch_dtype", None)
+
+    # Fallbacks for multi-modal models if the root config
+    # does not define torch_dtype
+    if config_dtype is None and hasattr(config, "text_config"):
+        config_dtype = getattr(config.text_config, "torch_dtype", None)
+    if config_dtype is None and hasattr(config, "vision_config"):
+        config_dtype = getattr(config.vision_config, "torch_dtype", None)
+
     if config_dtype is None:
         config_dtype = torch.float32
 
@@ -2535,16 +2588,8 @@ def _get_and_verify_dtype(
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
-                if config.model_type in ("gemma2", "gemma3", "gemma3_text"):
-                    logger.info(
-                        "For Gemma 2 and 3, we downcast float32 to bfloat16 "
-                        "instead of float16 by default. Please specify `dtype` "
-                        "if you want to use float16.")
-                    torch_dtype = torch.bfloat16
-                else:
-                    # Following the common practice, we use float16 for float32
-                    # models.
-                    torch_dtype = torch.float16
+                # Following common practice, we use float16 for float32 models
+                torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
 
@@ -2787,12 +2832,14 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        valid_guided_backends = ['outlines', 'lm-format-enforcer', 'xgrammar']
+        valid_guided_backends = [
+            'outlines', 'lm-format-enforcer', 'xgrammar', 'guidance'
+        ]
 
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
         if backend not in valid_guided_backends:
-            raise ValueError(f"Invalid guided_decoding_backend '{backend},"
+            raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
                              f" must be one of {valid_guided_backends}")
 
 
@@ -2870,6 +2917,9 @@ class KVTransferConfig(BaseModel):
     # The KV connector port, used to build distributed connection
     kv_port: int = 14579
 
+    # any extra config that the connector may need
+    kv_connector_extra_config: dict[str, Any] = {}
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2928,6 +2978,9 @@ class KVTransferConfig(BaseModel):
     def is_kv_consumer(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in ["kv_consumer", "kv_both"]
+
+    def get_from_extra_config(self, key, default) -> Any:
+        return self.kv_connector_extra_config.get(key, default)
 
 
 class CompilationLevel:
@@ -3062,8 +3115,7 @@ class CompilationConfig(BaseModel):
             compilation.
             """
             dict_ = self.model_dump(include={"enable_fusion", "enable_noop"})
-            encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
-            return hashlib.sha256(encoded).digest()
+            return InductorPass.hash_dict(dict_)
 
         def model_post_init(self, __context: Any) -> None:
             if not self.enable_noop and self.enable_fusion:
@@ -3144,17 +3196,21 @@ class CompilationConfig(BaseModel):
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
 
+        # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
+        # 1. A bug in PyTorch, fixed in 2.7:
+        #    https://github.com/pytorch/pytorch/issues/147924
+        # 2. Custom passes (fusion) rely on auto-functionalization V1 and don't
+        #    work with V2. Addressing this will take extra engineering effort
+        #    and it is not yet a priority. RFC here:
+        #    https://github.com/vllm-project/vllm/issues/14703
+
+        if Version(importlib.metadata.version('torch')) >= Version("2.6"):
+            KEY = 'enable_auto_functionalized_v2'
+            if KEY not in self.inductor_compile_config:
+                self.inductor_compile_config[KEY] = False
+
         if self.splitting_ops is None:
-            if envs.VLLM_USE_V1:
-                # v1 must split the graph on attention ops
-                # for piecewise cudagraph
-                self.splitting_ops = [
-                    "vllm.unified_attention",
-                    "vllm.unified_attention_with_output",
-                ]
-            else:
-                # v0 uses full graph compilation
-                self.splitting_ops = []
+            self.splitting_ops = []
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
@@ -3249,6 +3305,15 @@ class CompilationConfig(BaseModel):
         self.bs_to_padded_graph_size[
             self.max_capture_size] = self.max_capture_size
 
+    def set_splitting_ops_for_v1(self):
+        # If default, override splitting ops for piecewise cudagraph on V1.
+        # NOTE: this function needs to be called
+        if not self.splitting_ops:
+            self.splitting_ops = [
+                "vllm.unified_attention",
+                "vllm.unified_attention_with_output",
+            ]
+
 
 @dataclass
 class VllmConfig:
@@ -3266,7 +3331,8 @@ class VllmConfig:
                                         init=True)  # type: ignore
     load_config: LoadConfig = field(default=None, init=True)  # type: ignore
     lora_config: Optional[LoRAConfig] = None
-    speculative_config: Optional[SpeculativeConfig] = None
+    speculative_config: SpeculativeConfig = field(default=None,
+                                                  init=True)  # type: ignore
     decoding_config: Optional[DecodingConfig] = None
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
@@ -3300,6 +3366,7 @@ class VllmConfig:
         vllm_factors: list[Any] = []
         from vllm import __version__
         vllm_factors.append(__version__)
+        vllm_factors.append(envs.VLLM_USE_V1)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
@@ -3326,6 +3393,11 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
+            # LoRA creates static buffers based on max_num_batched_tokens.
+            # The tensor sizes and strides get captured in the torch.compile
+            # graph explicitly.
+            vllm_factors.append(
+                str(self.scheduler_config.max_num_batched_tokens))
         else:
             vllm_factors.append("None")
         if self.speculative_config:
@@ -3458,6 +3530,7 @@ class VllmConfig:
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time
             # and avoid any potential issues with the inductor.
+            # FIXME(rob): Add function to set all of these.
             self.compilation_config.custom_ops = ["none"]
             if current_platform.is_rocm():
                 self.compilation_config.custom_ops = [
@@ -3469,6 +3542,7 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
+            self.compilation_config.set_splitting_ops_for_v1()
 
         self._set_cudagraph_sizes()
 
@@ -3480,11 +3554,14 @@ class VllmConfig:
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        if self.lora_config is not None and self.compilation_config.level !=\
-             CompilationLevel.NO_COMPILATION:
-            logger.warning("LoRA is not supported with `torch.compile` yet. "
-                           "Disabling `torch.compile`.")
+        if ((not envs.VLLM_USE_V1) and self.lora_config is not None
+                and self.compilation_config.level
+                != CompilationLevel.NO_COMPILATION):
+            logger.warning(
+                "LoRA for V0 is not supported with `torch.compile` yet. "
+                "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):

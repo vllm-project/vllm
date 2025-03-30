@@ -50,7 +50,7 @@ def _get_test_sampling_params(
     """Generate random sampling params for a batch."""
 
     def get_mostly_n_gt1() -> int:
-        """Mostly n \in [2,20], ~1/3 n=1"""
+        r"""Mostly n \in [2,20], ~1/3 n=1"""
         x = random.randint(0, 28)
         if x < 10:
             return 1

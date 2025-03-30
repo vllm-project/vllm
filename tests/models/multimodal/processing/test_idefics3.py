@@ -9,10 +9,8 @@ from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from ....conftest import _ImageAssets
 from ...utils import build_model_context
 
-models = ["HuggingFaceM4/Idefics3-8B-Llama3"]
 
-
-@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("model_id", ["HuggingFaceM4/Idefics3-8B-Llama3"])
 # yapf: disable
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img"),
@@ -25,7 +23,7 @@ models = ["HuggingFaceM4/Idefics3-8B-Llama3"]
 @pytest.mark.parametrize("kwargs_on_init", [True, False])
 def test_processor_override(
     image_assets: _ImageAssets,
-    model: str,
+    model_id: str,
     mm_processor_kwargs: dict[str, object],
     expected_toks_per_img: int,
     num_imgs: int,
@@ -36,9 +34,7 @@ def test_processor_override(
     # in this test and assume that the kwargs will be correctly expanded by
     # the partial when calling the custom input processor.
     ctx = build_model_context(
-        model_name=model,
-        tokenizer_name=model,
-        trust_remote_code=True,
+        model_id,
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
         limit_mm_per_prompt={"image": num_imgs},
     )

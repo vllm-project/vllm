@@ -11,6 +11,7 @@ from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils import aiter_mla_enabled
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -118,13 +119,18 @@ class RocmPlatform(Platform):
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
         if use_mla:
-            logger.info("Using Triton MLA backend.")
-            return "vllm.attention.backends.triton_mla.TritonMLABackend"
+            if aiter_mla_enabled():
+                logger.info("Using AITER MLA backend.")
+                return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"
+            else:
+                logger.info("Using Triton MLA backend.")
+                return "vllm.attention.backends.triton_mla.TritonMLABackend"
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if envs.VLLM_USE_V1:
-            logger.info("Using ROCm Attention backend on V1 engine.")
-            return "vllm.v1.attention.backends.rocm_attn.ROCmAttentionBackend"
+            logger.info("Using Triton Attention backend on V1 engine.")
+            return ("vllm.v1.attention.backends."
+                    "triton_attn.TritonAttentionBackend")
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.
@@ -221,11 +227,11 @@ class RocmPlatform(Platform):
                             "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
-        if not envs.VLLM_USE_AITER and (envs.VLLM_USE_AITER_LINEAR
-                                        or envs.VLLM_USE_AITER_MOE
-                                        or envs.VLLM_USE_AITER_NORM
-                                        or envs.VLLM_USE_AITER_PAGED_ATTN):
-            logger.info("Aiter main switch (VLLM_USE_AITER) is not set."
+        if not envs.VLLM_ROCM_USE_AITER and (
+                envs.VLLM_ROCM_USE_AITER_LINEAR or envs.VLLM_ROCM_USE_AITER_MOE
+                or envs.VLLM_ROCM_USE_AITER_RMSNORM
+                or envs.VLLM_ROCM_USE_AITER_PAGED_ATTN):
+            logger.info("Aiter main switch (VLLM_ROCM_USE_AITER) is not set."
                         " Disabling individual Aiter components")
 
     @classmethod

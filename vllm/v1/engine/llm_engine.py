@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Mapping
+from copy import copy
 from typing import Optional, Union
 
 from typing_extensions import TypeVar
@@ -20,6 +21,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import Device
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -46,6 +48,13 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+        if not envs.VLLM_USE_V1:
+            raise ValueError(
+                "Using V1 LLMEngine, but envs.VLLM_USE_V1=False. "
+                "This should not happen. As a workaround, try using "
+                "LLMEngine.from_vllm_config(...) or explicitly set "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -87,6 +96,26 @@ class LLMEngine:
         if not multiprocess_mode:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+
+    @classmethod
+    def from_vllm_config(
+        cls,
+        vllm_config: VllmConfig,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        disable_log_stats: bool = False,
+    ) -> "LLMEngine":
+        if stat_loggers is not None:
+            raise NotImplementedError(
+                "Passing StatLoggers to V1 is not yet supported. "
+                "Set VLLM_USE_V1=0 and file and issue on Github.")
+
+        return cls(vllm_config=vllm_config,
+                   executor_class=Executor.get_class(vllm_config),
+                   log_stats=(not disable_log_stats),
+                   usage_context=usage_context,
+                   stat_loggers=stat_loggers,
+                   multiprocess_mode=envs.VLLM_ENABLE_V1_MULTIPROCESSING)
 
     @classmethod
     def from_engine_args(
@@ -137,8 +166,8 @@ class LLMEngine:
     def abort_request(self, request_ids: list[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
+        request_ids = self.output_processor.abort_requests(request_ids)
         self.engine_core.abort_requests(request_ids)
-        self.output_processor.abort_requests(request_ids)
 
     def add_request(
         self,
@@ -151,25 +180,34 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
-        # 1) Fan out child requests (for n>1)
-        parent_req = ParentRequest.from_params(request_id, params)
+        # Process raw inputs into the request.
+        request = self.processor.process_inputs(request_id, prompt, params,
+                                                arrival_time, lora_request,
+                                                trace_headers,
+                                                prompt_adapter_request,
+                                                priority)
+
         n = params.n if isinstance(params, SamplingParams) else 1
-        for idx in range(n):
-            if parent_req is not None:
-                request_id, params = parent_req.get_child_info(idx)
 
-            # 2) Process raw inputs into the request.
-            request = self.processor.process_inputs(request_id, prompt, params,
-                                                    arrival_time, lora_request,
-                                                    trace_headers,
-                                                    prompt_adapter_request,
-                                                    priority)
-
-            # 3) Make a new RequestState and queue.
-            self.output_processor.add_request(request, parent_req, idx)
-
-            # 3) Add the request to EngineCore.
+        if n == 1:
+            # Make a new RequestState and queue.
+            self.output_processor.add_request(request, None, 0)
+            # Add the request to EngineCore.
             self.engine_core.add_request(request)
+            return
+
+        # Fan out child requests (for n>1).
+        parent_req = ParentRequest(request_id, params)
+        for idx in range(n):
+            request_id, params = parent_req.get_child_info(idx)
+            child_request = request if idx == n - 1 else copy(request)
+            child_request.request_id = request_id
+            child_request.sampling_params = params
+
+            # Make a new RequestState and queue.
+            self.output_processor.add_request(child_request, parent_req, idx)
+            # Add the request to EngineCore.
+            self.engine_core.add_request(child_request)
 
     def step(self) -> list[RequestOutput]:
 
@@ -199,7 +237,7 @@ class LLMEngine:
     def stop_profile(self):
         self.engine_core.profile(False)
 
-    def reset_prefix_cache(self):
+    def reset_prefix_cache(self, device: Optional[Device] = None):
         self.engine_core.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
@@ -207,6 +245,9 @@ class LLMEngine:
 
     def wake_up(self):
         self.engine_core.wake_up()
+
+    def is_sleeping(self) -> bool:
+        return self.engine_core.is_sleeping()
 
     def get_tokenizer_group(
         self,

@@ -29,6 +29,10 @@ class TpuPlatform(Platform):
         "tpu_int8", "compressed-tensors", "compressed_tensors"
     ]
 
+    additional_env_vars: list[str] = [
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
+    ]
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
@@ -91,22 +95,22 @@ class TpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
-            if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = \
-                    "vllm.v1.worker.tpu_worker.TPUWorker"
-            else:
-                if scheduler_config.is_multi_step:
+            if scheduler_config.is_multi_step:
+                if envs.VLLM_USE_V1:
+                    raise NotImplementedError(
+                        "Multi-step scheduling is not supported (and not "
+                        "needed) on vLLM V1. Please launch without "
+                        "--num-scheduler-steps.")
+                else:
                     parallel_config.worker_cls = \
                         "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
+            else:
+                if envs.VLLM_USE_V1:
+                    parallel_config.worker_cls = \
+                        "vllm.v1.worker.tpu_worker.TPUWorker"
                 else:
                     parallel_config.worker_cls = \
                         "vllm.worker.tpu_worker.TPUWorker"
-
-        # Adjust scheduler config for V1
-        # TODO: Add support for these
-        if envs.VLLM_USE_V1 and vllm_config.cache_config.enable_prefix_caching:
-            logger.warning("[V1][TPU] Disable prefix caching")
-            vllm_config.cache_config.enable_prefix_caching = False
 
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")

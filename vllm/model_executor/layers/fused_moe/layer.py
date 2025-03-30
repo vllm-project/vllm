@@ -6,9 +6,10 @@ from typing import Callable, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from aiter import biased_grouped_topk
 from torch.nn.parameter import UninitializedParameter
 
-import vllm.envs as envs
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -21,16 +22,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import aiter_2stage_moe_enabled, aiter_moe_enabled
+from vllm.utils import (aiter_2stage_moe_enabled, aiter_moe_enabled,
+                        direct_register_custom_op)
 
-if aiter_moe_enabled():
-    from aiter import ck_moe
-    from aiter import biased_grouped_topk
-    from aiter.ops.shuffle import shuffle_weight
-    if aiter_2stage_moe_enabled():
-        from aiter.fused_moe_bf16_asm import ck_moe_2stages
-
-from vllm.utils import direct_register_custom_op
+from .rocm_aiter_fused_moe import shuffle_weights
 
 if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
@@ -110,12 +105,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().process_weights_after_loading(layer)
 
         if aiter_moe_enabled():
-            layout = (32, 32) if aiter_2stage_moe_enabled() else None
-            layer.w13_weight = torch.nn.Parameter(shuffle_weight(
-                layer.w13_weight.data, layout=layout),
+            layout = (32, 32) if aiter_2stage_moe_enabled() else (16, 16)
+            # reshaping weights is required for aiter moe kernel.
+            shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
+                                                        layer.w2_weight.data,
+                                                        layout=layout)
+            layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                   requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(shuffle_weight(
-                layer.w2_weight.data, layout=layout),
+            layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                  requires_grad=False)
 
         if envs.VLLM_MOE_PADDING:
@@ -135,7 +132,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                     layer.w13_weight,
                     layer.w2_weight,
-                    use_prepack=True,
+                    use_prepack=envs.VLLM_CPU_MOE_PREPACK,
                 )
             else:
                 raise NotImplementedError("CPU MOE only supports x86 arch.")
@@ -201,20 +198,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        if aiter_moe_enabled():
-            if aiter_2stage_moe_enabled():
-                return ck_moe_2stages(a1=x,
-                                      w1=layer.w13_weight,
-                                      w2=layer.w2_weight,
-                                      topk_weight=topk_weights,
-                                      topk_ids=topk_ids)
-
-            return ck_moe(hidden_states=x,
-                          w1=layer.w13_weight,
-                          w2=layer.w2_weight,
-                          topk_weights=topk_weights,
-                          topk_ids=topk_ids)
-
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
                              w2=layer.w2_weight,
@@ -256,6 +239,34 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func,
             e_score_correction_bias,
         )
+
+    def forward_hpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        assert not use_grouped_topk
+        assert num_expert_group is None
+        assert topk_group is None
+        assert custom_routing_function is None
+        assert layer is not None
+        if scoring_func != "softmax":
+            raise NotImplementedError(
+                "Only softmax scoring function is supported for HPU.")
+        if e_score_correction_bias is not None:
+            raise NotImplementedError(
+                "Expert score correction bias is not supported for HPU.")
+        return layer.hpu_fused_moe(x, layer.w13_weight, layer.w2_weight,
+                                   router_logits, top_k)
 
     def forward_tpu(
         self,
@@ -455,6 +466,9 @@ class FusedMoE(torch.nn.Module):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
+        if current_platform.is_hpu():
+            from vllm_hpu_extension.ops import DynamicFusedMOE
+            self.hpu_fused_moe = DynamicFusedMOE(self.num_experts)
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
@@ -753,11 +767,15 @@ class FusedMoE(torch.nn.Module):
         if use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
-            if aiter_moe_enabled() and not e_score_correction_bias is None:
+            if aiter_moe_enabled() and e_score_correction_bias is not None:
                 token = hidden_states.shape[0]
                 device = hidden_states.device
-                topk_ids = torch.empty((token, top_k), dtype=torch.int32, device=device)
-                topk_weights = torch.empty((token, top_k), dtype=torch.float32, device=device)
+                topk_ids = torch.empty((token, top_k),
+                                       dtype=torch.int32,
+                                       device=device)
+                topk_weights = torch.empty((token, top_k),
+                                           dtype=torch.float32,
+                                           device=device)
                 biased_grouped_topk(
                     router_logits,
                     e_score_correction_bias,

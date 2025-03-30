@@ -3,6 +3,12 @@
 
 #include "cpu_types.hpp"
 
+#if defined(__x86_64__)
+  #define DISPATCH_MACRO VLLM_DISPATCH_FLOATING_TYPES_WITH_E5M2
+#else
+  #define DISPATCH_MACRO VLLM_DISPATCH_FLOATING_TYPES
+#endif
+
 namespace {
 template <typename scalar_t>
 void copy_blocks_cpu_impl(std::vector<torch::Tensor> const& key_caches,
@@ -95,13 +101,12 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
   }
 
   const int element_num_per_block = key_caches[0][0].numel();
-  VLLM_DISPATCH_FLOATING_TYPES(
-      key_caches[0].scalar_type(), "copy_blocks_cpu_impl", [&] {
-        CPU_KERNEL_GUARD_IN(copy_blocks_cpu_impl)
-        copy_blocks_cpu_impl<scalar_t>(key_caches, value_caches, block_mapping,
-                                       element_num_per_block, num_layers);
-        CPU_KERNEL_GUARD_OUT(copy_blocks_cpu_impl)
-      });
+  DISPATCH_MACRO(key_caches[0].scalar_type(), "copy_blocks_cpu_impl", [&] {
+    CPU_KERNEL_GUARD_IN(copy_blocks_cpu_impl)
+    copy_blocks_cpu_impl<scalar_t>(key_caches, value_caches, block_mapping,
+                                   element_num_per_block, num_layers);
+    CPU_KERNEL_GUARD_OUT(copy_blocks_cpu_impl)
+  });
 }
 
 void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
@@ -118,16 +123,15 @@ void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);
 
-  VLLM_DISPATCH_FLOATING_TYPES(
-      key.scalar_type(), "reshape_and_cache_cpu_impl", [&] {
-        CPU_KERNEL_GUARD_IN(reshape_and_cache_cpu_impl)
-        reshape_and_cache_cpu_impl<scalar_t>(
-            key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-            key_cache.data_ptr<scalar_t>(), value_cache.data_ptr<scalar_t>(),
-            slot_mapping.data_ptr<int64_t>(), num_tokens, key_stride,
-            value_stride, num_heads, head_size, block_size, x);
-        CPU_KERNEL_GUARD_OUT(reshape_and_cache_cpu_impl)
-      });
+  DISPATCH_MACRO(key.scalar_type(), "reshape_and_cache_cpu_impl", [&] {
+    CPU_KERNEL_GUARD_IN(reshape_and_cache_cpu_impl)
+    reshape_and_cache_cpu_impl<scalar_t>(
+        key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
+        key_cache.data_ptr<scalar_t>(), value_cache.data_ptr<scalar_t>(),
+        slot_mapping.data_ptr<int64_t>(), num_tokens, key_stride, value_stride,
+        num_heads, head_size, block_size, x);
+    CPU_KERNEL_GUARD_OUT(reshape_and_cache_cpu_impl)
+  });
 }
 
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,

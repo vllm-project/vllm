@@ -61,6 +61,7 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
     && pip install -U -r requirements/rocm.txt \
+    && pip install -U -r requirements/rocm-test.txt \
     && pip uninstall -y vllm \
     && pip install *.whl
 
@@ -116,7 +117,7 @@ ENV TOKENIZERS_PARALLELISM=false
 ENV HIP_FORCE_DEV_KERNARG=1
 
 # Enable Aiter. Make sure this only exists on the aiter branch.
-# ENV VLLM_USE_AITER=1
+# ENV VLLM_ROCM_USE_AITER=1
 
 CMD ["/bin/bash"]
 

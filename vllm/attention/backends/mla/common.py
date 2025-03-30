@@ -7,22 +7,22 @@ First we define:
 Sq      as Q sequence length
 Skv     as KV sequence length
 
-MLA has two possible ways of computing, a data-movement friendly approach and a 
-compute friendly approach, we generally want to use the compute friendly 
-approach for "prefill" (i.e. the ratio Sq / Skv is "small", is near 1) 
-and the data-movement friendly approach for "decode" (i.e. the ratio 
-Sq / Skv is "large"). 
+MLA has two possible ways of computing, a data-movement friendly approach and a
+compute friendly approach, we generally want to use the compute friendly
+approach for "prefill" (i.e. the ratio Sq / Skv is "small", is near 1)
+and the data-movement friendly approach for "decode" (i.e. the ratio
+Sq / Skv is "large").
 
-NOTE what we deem small and large is currently determined by if its labelled 
-prefill or decode by the scheduler, but this is something we should probably 
+NOTE what we deem small and large is currently determined by if its labelled
+prefill or decode by the scheduler, but this is something we should probably
 tune.
 
 Main reference: DeepseekV2 paper, and FlashInfer Implementation
 (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
 
 Deepseek's MLA attention works the following way:
-* Use a single latent vector to represent the per-token entry of the KV cache.  
-* For decode (i.e. the memory friendly approach) the attention "simulates" a 
+* Use a single latent vector to represent the per-token entry of the KV cache.
+* For decode (i.e. the memory friendly approach) the attention "simulates" a
 multi-head attention, while the compute is similar to multi-query attention.
 
 Below is example of both paths assuming batchsize = 1
@@ -54,9 +54,9 @@ W_DQ        project h_t to q_c                  shape [H, Lq]
 W_UQ        project q_c to q_nope               shape [Lq, N * P]
 W_QR        project q_c to q_pe                 shape [Lq, N * R]
 W_DKV       project h_t to kv_c                 shape [H, Lkv]
-W_UK        project kv_c to k_nope              shape [Lkv, N * P]
-W_KR        project h_t to k_pe                 shape [H, N * R]
-W_UV        project kv_c to v                   shape [Lkv, N * V]
+W_UK        project kv_c to k_nope              shape [Lkv, N, P]
+W_KR        project h_t to k_pe                 shape [H, R]
+W_UV        project kv_c to v                   shape [Lkv, N, V]
 W_O         project v to h_t                    shape [N * V, H]
 
 
@@ -69,8 +69,8 @@ new_kv_c = h_t @ W_DKV
 new_k_pe = RoPE(h_t @ W_KR)
 kv_c     = torch.cat([new_kv_c, cache_kv_c], dim=0)
 k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
-k_nope   = (kv_c @ W_UK).view(Skv, N, P)
-v        = (kv_c @ W_UV).view(Skv, N, V)
+k_nope   = (kv_c @ W_UK.view(Lkv, N * P)).view(Skv, N, P)
+v        = (kv_c @ W_UV.view(Lkv, N * V)).view(Skv, N, V)
 
 // MHA with QK headdim = P + R
 //           V headdim = V
@@ -90,20 +90,10 @@ NOTE: in the actual code,
 
 ## Data-Movement Friendly Approach (i.e. "_forward_decode"):
 
-Ahead of time, compute:
-
-% this projects from q_c to [Sq, N * Lkv]
-W_UQ_UK = einsum("qnp,knp -> qnk"
-                     W_UQ.view(Lq, N, P), W_UK.view(Lkv, N, P)
-                ).view(Lkv, N * Lkv)
-% this projects from attn output [Sq, N * Lkv] to [Sq, H]
-W_UV_O  = einsum("knv,nvh -> nkh"
-                     W_UV.view(Lkv, N, V), W_O.view(N, V, H)
-                ).view(N * Lkv, H)
-
 Runtime
 q_c      = h_t @ W_DQ
-q_latent = q_c @ W_UQ_UK.view(Sq, N, Lkv)
+q_nope   = (q_c @ W_UQ).view(-1, N, P)
+ql_nope  = einsum("snh,lnh->snl", q, W_UK)
 q_pe     = RoPE(q_c @ W_QR).view(Sq, N, R)
 new_kv_c = h_t @ W_DKV
 new_k_pe = RoPE(h_t @ W_KR)
@@ -116,11 +106,13 @@ k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
 // NOTE: this is less compute-friendly since Lkv > P
 //       but is more data-movement friendly since its MQA vs MHA
 spda_o = scaled_dot_product_attention(
-    torch.cat([q_latent, q_pe], dim=-1),
+    torch.cat([ql_nope, q_pe], dim=-1),
     torch.cat([kv_c, k_pe], dim=-1),
     kv_c
 )
-return spda_o.reshape(-1, N * Lkv) @ W_UV_O
+
+o = einsum("snl,lnv->snv", spda_o.reshape(-1, N, Lkv), W_UV)
+return o.view(-1, N * V) @ self.num_heads @ W_O
 
 
 ## Chunked Prefill
@@ -146,8 +138,8 @@ q_nope     = (q_c @ W_UQ).view(Sq, N, P)
 q_pe       = RoPE(q_c @ W_QR).view(Sq, N, R)
 new_kv_c   = h_t @ W_DKV
 new_k_pe   = RoPE(h_t @ W_KR)
-new_k_nope = (new_kv_c @ W_UK).view(Sq, N, P)
-new_v      = (new_kv_c @ W_UV).view(Sq, N, V)
+new_k_nope = (new_kv_c @ W_UK.view(Lkv, N * P)).view(Sq, N, P)
+new_v      = (new_kv_c @ W_UV.view(Lkv, N * V)).view(Sq, N, V)
 
 // MHA between queries and new KV
 //     with QK headdim = P + R
@@ -171,17 +163,17 @@ for chunk_idx in range(cdiv(C, MCC)):
     cache_k_pe_chunk   = cache_k_pe[chunk_start:chunk_end]
     cache_k_nope_chunk = (cache_kv_c_chunk @ W_UK).view(-1, N, P)
     cache_v_chunk      = (cache_kv_c_chunk @ W_UV).view(-1, N, V)
-    
+
     chunk_o, chunk_lse = scaled_dot_product_attention(
         torch.cat([q_nope, q_pe], dim=-1),
-        torch.cat([cache_k_nope_chunk, 
-                   cache_k_pe_chunk.unsqueeze(1).expand(-1, N, -1)], 
+        torch.cat([cache_k_nope_chunk,
+                   cache_k_pe_chunk.unsqueeze(1).expand(-1, N, -1)],
                    dim=-1),
         cache_v_chunk,
         casual=False,
         return_softmax_lse=True
     )
-    
+
     curr_o, curr_lse = merge_attn_states(
         suffix_output=curr_o,
         suffix_lse=curr_lse,
@@ -202,7 +194,6 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Tuple,
                     Type, TypeVar)
 
 import torch
-from compressed_tensors.quantization import QuantizationStrategy
 
 from vllm import _custom_ops as ops
 from vllm import envs
@@ -212,39 +203,35 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionState, MLAAttentionImpl)
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
-                                           get_flash_attn_version,
                                            is_block_tables_empty)
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod)
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsW8A8Fp8)
-from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    Fp8LinearGenericOp, is_fp8)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
+from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
+
+if HAS_TRITON:
+    from vllm.attention.ops.triton_flash_attention import triton_attention
+    from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+else:
+    merge_attn_states = None
+    triton_attention = None
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
-    # For rocm use upstream flash attention
-    #from flash_attn import flash_attn_varlen_func
-    from aiter import flash_attn_varlen_func
     is_vllm_fa = False
-
-from vllm.attention.ops.triton_flash_attention import triton_attention
+    try:
+        # For rocm use upstream flash attention
+        from flash_attn import flash_attn_varlen_func
+    except ImportError:
+        flash_attn_varlen_func = None
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -353,16 +340,6 @@ class MLACommonState(AttentionState, Generic[T]):
                                       dtype=torch.long,
                                       device=self.runner.device)
 
-        self._paged_kv_indptr_tensor = torch.zeros(max_batch_size+1,
-                                                    dtype=torch.int32,
-                                                    device=self.runner.device)
-        self._paged_kv_indices_tensor = torch.from_numpy(
-            self.runner.paged_kv_indices).to(device=self.runner.device)
-        self._paged_kv_last_page_lens_tensor = torch.full((max_batch_size, ),
-                                                          self.runner.block_size,
-                                                          dtype=torch.int32,
-                                                          device=self.runner.device)
-
         yield
 
         self._is_graph_capturing = False
@@ -370,9 +347,6 @@ class MLACommonState(AttentionState, Generic[T]):
         del self._graph_seq_lens
         del self._graph_block_tables
         del self._positions
-        del self._paged_kv_indices_tensor
-        del self._paged_kv_indptr_tensor
-        del self._paged_kv_last_page_lens_tensor 
 
     def graph_clone(self, batch_size: int):
         assert self._is_graph_capturing
@@ -403,11 +377,7 @@ class MLACommonState(AttentionState, Generic[T]):
             context_lens_tensor=None,
             block_tables=self._graph_block_tables[:batch_size],
             input_positions=self._positions[:batch_size],
-            head_dim=self.runner.model_config.get_head_size(),
-            paged_kv_indptr=self._paged_kv_indptr_tensor[:batch_size+1],
-            paged_kv_indices=self._paged_kv_indices_tensor,
-            paged_kv_last_page_lens=self._paged_kv_last_page_lens_tensor[:batch_size],
-        )
+            head_dim=self.runner.model_config.get_head_size())
 
         if is_encoder_decoder_model:
             raise NotImplementedError(
@@ -423,9 +393,6 @@ class MLACommonState(AttentionState, Generic[T]):
             "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
             "block_tables": attn_metadata.decode_metadata.block_tables,
             "input_positions": attn_metadata.decode_metadata.input_positions,
-            "paged_kv_indptr": attn_metadata.decode_metadata.paged_kv_indptr,
-            "paged_kv_indices": attn_metadata.decode_metadata.paged_kv_indices,
-            "paged_kv_last_page_lens": attn_metadata.decode_metadata.paged_kv_last_page_lens,
         }
         if is_encoder_decoder_model:
             raise NotImplementedError(
@@ -450,14 +417,6 @@ class MLACommonState(AttentionState, Generic[T]):
         if is_encoder_decoder_model:
             raise NotImplementedError(
                 "TritonMLAState does not support encoder/decoder yet")
-        
-        num_total_blocks = attn_metadata.decode_metadata.paged_kv_indices.shape[0]
-        input_buffers["paged_kv_indptr"].copy_(
-            attn_metadata.decode_metadata.paged_kv_indptr, non_blocking=True)
-        input_buffers["paged_kv_indices"][:num_total_blocks].copy_(
-            attn_metadata.decode_metadata.paged_kv_indices, non_blocking=True)
-        input_buffers["paged_kv_last_page_lens"].copy_(
-            attn_metadata.decode_metadata.paged_kv_last_page_lens, non_blocking=True)
 
     def begin_forward(self, model_input):
         if self.chunked_prefill_enabled or self.enable_prefix_caching:
@@ -569,16 +528,6 @@ class MLACommonMetadata(AttentionMetadata):
     # Set by MLAAttentionState in `begin_forward` so it doesn't get broadcasted
     context_chunk_workspace: Optional[torch.Tensor] = None
 
-    # The following 4 tensors are for current version of AITER MLA
-    block_table_bound: Optional[torch.Tensor] = None
-    # The indptr of the paged kv cache, shape: [batch_size + 1]
-    paged_kv_indptr: Optional[torch.Tensor] = None
-    # The page indices of the paged kv cache
-    paged_kv_indices: Optional[torch.Tensor] = None
-    # The number of entries in the last page of each request in
-    # the paged kv cache, shape: [batch_size]
-    paged_kv_last_page_lens: Optional[torch.Tensor] = None
-
     def __post_init__(self):
         supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
         if self.head_dim is not None and self.head_dim \
@@ -646,11 +595,6 @@ class MLACommonMetadata(AttentionMetadata):
             context_chunk_starts=self.context_chunk_starts,
             context_chunk_seq_tot=self.context_chunk_seq_tot,
             context_chunk_max_seq_lens=self.context_chunk_max_seq_lens,
-            # AITER MLA specific
-            paged_kv_indptr=self.paged_kv_indptr,
-            paged_kv_indices=self.paged_kv_indices,
-            paged_kv_last_page_lens=self.paged_kv_last_page_lens,
-            block_table_bound=self.block_table_bound,
         )
         return self._cached_prefill_metadata
 
@@ -703,25 +647,14 @@ class MLACommonMetadata(AttentionMetadata):
             block_tables=block_tables,
             input_positions=input_positions,
             head_dim=self.head_dim,
-            is_profile_run=self.is_profile_run,
-            # AITER MLA specific
-            paged_kv_indptr=self.paged_kv_indptr,
-            paged_kv_indices=self.paged_kv_indices,
-            paged_kv_last_page_lens=self.paged_kv_last_page_lens,
-            block_table_bound=self.block_table_bound,
-        )
+            is_profile_run=self.is_profile_run)
         return self._cached_decode_metadata
 
-    def advance_step(self,
-                     model_input: "ModelInputForGPUWithSamplingMetadata",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int,
-                     num_seqs: int,
-                     num_queries: int,
-                     turn_prefills_into_decodes: bool = False):
-        """
-        Update metadata in-place to advance one decode step.
-        """
+    def advance_step_assertions(
+            self,
+            num_seqs: int,
+            num_queries: int,
+            turn_prefills_into_decodes: bool = False) -> None:
         # When using cudagraph, the num_seqs is padded to the next captured
         # batch sized, but num_queries tracks the actual number of requests in
         # the batch. For --enforce-eager mode, num_seqs == num_queries
@@ -774,22 +707,31 @@ class MLACommonMetadata(AttentionMetadata):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
 
-        # here we use advance_step_flashinfo to update the paged_kv_* tensors
-        ops.advance_step_flashinfer(
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
+        """
+        Update metadata in-place to advance one decode step.
+        """
+        self.advance_step_assertions(
             num_seqs=num_seqs,
             num_queries=num_queries,
-            block_size=block_size,
-            input_tokens=model_input.input_tokens,
-            sampled_token_ids=sampled_token_ids,
-            input_positions=model_input.input_positions,
-            seq_lens=self.seq_lens_tensor,
-            slot_mapping=self.slot_mapping,
-            block_tables=self.block_tables,
-            paged_kv_indices=self.paged_kv_indices,
-            paged_kv_indptr=self.paged_kv_indptr,
-            paged_kv_last_page_lens=self.paged_kv_last_page_lens,
-            block_table_bound=self.block_table_bound
-        )
+            turn_prefills_into_decodes=turn_prefills_into_decodes)
+
+        # here we use advance_step_flashinfo to update the paged_kv_* tensors
+        ops.advance_step_flashattn(num_seqs=num_seqs,
+                                   num_queries=num_queries,
+                                   block_size=block_size,
+                                   input_tokens=model_input.input_tokens,
+                                   sampled_token_ids=sampled_token_ids,
+                                   input_positions=model_input.input_positions,
+                                   seq_lens=self.seq_lens_tensor,
+                                   slot_mapping=self.slot_mapping,
+                                   block_tables=self.block_tables)
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
@@ -828,12 +770,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
         self.has_prefix_cache_hit = False
-
-        # For current version of AITER MLA
-        self.paged_kv_indices: List[int] = []
-        self.paged_kv_indptr: List[int] = [0]
-        self.paged_kv_last_page_lens: List[int] = []
-        self.total_blocks = 0
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -889,31 +825,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
-            if is_profile_run:
-                 return
- 
-            # Update paged_kv_* tensors only for non-profile run
-            block_table = block_tables[seq_id]
-            self._update_paged_kv_tensors(block_table, seq_len)
- 
-    def _update_paged_kv_tensors(self, block_table: List[int], seq_len: int):
-        # Get the number of valid blocks based on sequence length.
-        # If seq_len = 16, block_size = 16,
-        # block_table_bound is 1 with 1 valid block.
-        # If seq_len = 15, block_size = 16,
-        # block_table_bound is 0 + 1 with 1 valid block.
-        self.total_blocks += len(block_table)
-        block_table_bound = seq_len // self.block_size + 1 \
-            if seq_len % self.block_size != 0 \
-            else seq_len // self.block_size
-        self.paged_kv_indices.extend(block_table[:block_table_bound])
-        self.paged_kv_indptr.append(self.paged_kv_indptr[-1] +
-                                    block_table_bound)
- 
-        last_page_len = seq_len % self.block_size
-        if last_page_len == 0:
-            last_page_len = self.block_size
-        self.paged_kv_last_page_lens.append(last_page_len)
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int,
@@ -938,6 +849,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
 
         return torch.from_numpy(graph_block_tables).to(
             device=self.runner.device, non_blocking=True)
+
+    def get_block_tables_with_captured_graph(self, cuda_graph_pad_size: int,
+                                             num_seqs: int) -> torch.Tensor:
+        self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
+        self.block_tables.extend([] * cuda_graph_pad_size)
+        block_tables = self._get_graph_runner_block_tables(
+            num_seqs, self.block_tables)
+
+        return block_tables
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
@@ -977,16 +897,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
 
         num_seqs = len(seq_lens)
         if use_captured_graph:
-            self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.block_tables.extend([[]] * cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
-            block_tables = self._get_graph_runner_block_tables(
-                num_seqs, self.block_tables)
-            # For current version of AITER MLA
-            last_paged_kv_indptr = self.paged_kv_indptr[-1]
-            self.paged_kv_indptr.extend([last_paged_kv_indptr] *
-                                        cuda_graph_pad_size)
-            self.paged_kv_last_page_lens.extend([0] * cuda_graph_pad_size)
+            block_tables = self.get_block_tables_with_captured_graph(
+                cuda_graph_pad_size, num_seqs)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
@@ -1064,30 +977,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             assert max(context_chunk_seq_tot) <= \
                 self.context_chunk_workspace_size
 
-        # For current version of AITER MLA
-        if len(self.paged_kv_indptr) > 0:
-            # extend to the maximum number of blocks as returned by the
-            # scheduler
-            self.paged_kv_indices.extend(
-                [0] * (self.total_blocks - len(self.paged_kv_indices)))
-            paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
-                                                   device=device,
-                                                   dtype=torch.int)
-            paged_kv_indptr_tensor = torch.tensor(self.paged_kv_indptr,
-                                                  device=device,
-                                                  dtype=torch.int)
-            paged_kv_last_page_lens_tensor = torch.tensor(
-                self.paged_kv_last_page_lens, device=device, dtype=torch.int)
-            block_table_bound_tensor = torch.zeros(len(self.paged_kv_indptr) -
-                                                   1,
-                                                   device=device,
-                                                   dtype=torch.int)
-        else:
-            paged_kv_indices_tensor = None
-            paged_kv_indptr_tensor = None
-            paged_kv_last_page_lens_tensor = None
-            block_table_bound_tensor = None
-
         return self.runner.attn_backend.make_metadata(
             # Required by ModelRunner
             use_cuda_graph=use_captured_graph,  # Not Attention Related
@@ -1118,10 +1007,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             context_chunk_starts=context_chunk_starts,
             context_chunk_seq_tot=context_chunk_seq_tot,
             context_chunk_max_seq_lens=context_chunk_max_seq_lens,
-            paged_kv_indptr=paged_kv_indptr_tensor,
-            paged_kv_indices=paged_kv_indices_tensor,
-            paged_kv_last_page_lens=paged_kv_last_page_lens_tensor,
-            block_table_bound=block_table_bound_tensor,
         )
 
 
@@ -1178,7 +1063,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
         self.triton_fa_func = triton_attention
-        self.fp8_linear_generic = Fp8LinearGenericOp()
 
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
@@ -1191,79 +1075,28 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                                   fa_version=self.vllm_flash_attn_version)
 
     def _v_up_proj_and_o_proj(self, x):
-        if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            if is_fp8(self.W_UV_O):
-                output_parallel = self.fp8_linear_generic.apply(
-                    x.flatten(start_dim=1), self.W_UV_O, self.W_UV_O_scales,
-                    self.reqaunt_input_group_shape,
-                    self.reqaunt_weight_group_shape)
-            else:
-                output_parallel = torch.matmul(x.flatten(start_dim=1),
-                                               self.W_UV_O)
-            if self.tp_size > 1:
-                output = tensor_model_parallel_all_reduce(output_parallel)
-            else:
-                output = output_parallel
-            return output
-        else:
-            x = torch.einsum("bnl,lnv->bnv", x, self.W_UV)
-            return self.o_proj(x.reshape(-1,
-                                         self.num_heads * self.v_head_dim))[0]
+        # Convert from (B, N, L) to (N, B, L)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+        x = torch.bmm(x, self.W_UV)
+        # Convert from (N, B, V) to (B, N * V)
+        x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        return self.o_proj(x)[0]
 
+    # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
-        if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            if is_fp8(self.W_Q_UK):
-                return self.fp8_linear_generic.apply(
-                    x, self.W_Q_UK, self.W_Q_UK_scales,
-                    self.reqaunt_input_group_shape,
-                    self.reqaunt_weight_group_shape).view(
-                        -1, self.num_heads, self.kv_lora_rank)
-            return torch.matmul(x, self.W_Q_UK)\
-                .view(-1, self.num_heads, self.kv_lora_rank)
-        else:
-            x = torch.matmul(x, self.W_Q)\
-                .view(-1, self.num_heads, self.qk_nope_head_dim)
-            return torch.einsum("bnp,lnp->bnl", x, self.W_UK)\
-                .view(-1, self.num_heads, self.kv_lora_rank)
+        q_nope, q_pe = self.q_proj(x)[0]\
+            .view(-1, self.num_heads, self.qk_head_dim)\
+            .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+        # Convert from (B, N, P) to (N, B, P)
+        q_nope = q_nope.transpose(0, 1)
+        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+        ql_nope = torch.bmm(q_nope, self.W_UK_T)
+        # Convert from (N, B, L) to (B, N, L)
+        return ql_nope.transpose(0, 1), q_pe
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-
-        # TODO(lucas) This is very gross, we need a more wide scale refactor of
-        # all the FP8 code with a more standard way of
-        # defining schemes/group-shapes, we should also potentially force
-        # quant_methods to support a decompress function
-        #
-        # returns input_group_shape, weight_group_shape
-        def get_scale_group_shapes_for_fp8(layer: LinearBase) -> \
-            Tuple[Tuple[int, int], Tuple[int, int]]:
-            if isinstance(layer.quant_method, Fp8LinearMethod):
-                if layer.quant_method.block_quant:
-                    weight_block_size = \
-                        layer.quant_method.quant_config.weight_block_size
-                    # per-token-group (1, X), block-quantized (X, Y)
-                    return (1, weight_block_size[-1]), weight_block_size
-                else:
-                    return (-1, -1), (-1, -1)  # per-tensor, per-tensor
-            elif isinstance(layer.quant_method, CompressedTensorsLinearMethod)\
-                and isinstance(layer.scheme, CompressedTensorsW8A8Fp8):
-                # this is hacky but we always assume the for
-                # CompressedTensorsW8A8Fp8 the input is dynamic per-token
-                # we ignore if it is static-per-tensor since we are going to
-                # requantize after later anyways
-                strategy = layer.scheme.strategy
-                if strategy == QuantizationStrategy.TENSOR:
-                    return (1, -1), (-1, -1)  # per-token, per-tensor
-                elif strategy == QuantizationStrategy.CHANNEL:
-                    return (1, -1), (-1, 1)  # per-token, per-channel
-                else:
-                    raise NotImplementedError(
-                        f"QuantizationStrategy.{strategy} is not supported for "
-                        "fp8 MLA, please run with VLLM_MLA_DISABLE=1")
-            else:
-                raise NotImplementedError(
-                    "Can't determine scale group shapes for "
-                    f"{layer.quant_method}, please run with VLLM_MLA_DISABLE=1"
-                )
 
         def get_layer_weight(layer):
             WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
@@ -1288,10 +1121,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 return dequant_weights.T
             return layer.weight
 
-        weight_dtype = get_layer_weight(self.kv_b_proj).dtype
-        assert get_layer_weight(self.o_proj).dtype == weight_dtype
-        assert get_layer_weight(self.q_proj).dtype == weight_dtype
-
+        # we currently do not have quantized bmm's which are needed for
+        # `W_UV` and `W_UK_T`, we we just store fp16/bf16 copies and perform
+        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
@@ -1310,89 +1142,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        q_proj_weight = get_and_maybe_dequant_weights(self.q_proj).T\
-                .view(-1, self.num_heads, self.qk_head_dim)
-
-        # can be W_Q or W_UQ depending q_lora_rank, the former if
-        # q_lora_rank is None, the latter otherwise. From the Attention backend
-        # perspective though we call these both W_Q and rely on the layer
-        # to pass in the correct matrix
-        W_Q = q_proj_weight[..., :self.qk_nope_head_dim]
-        self.W_QR = q_proj_weight[..., self.qk_nope_head_dim:]\
-            .flatten(start_dim=1).contiguous()
-
-        # W_QR is small so for simplicity we dont bother requantizing it
-        self.W_QR = self.W_QR.to(act_dtype)
-
-        if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            requantization_enabled = not envs.VLLM_MLA_DISABLE_REQUANTIZATION
-            if is_fp8(weight_dtype) and requantization_enabled:
-                # This assumes it wise to requantize using the same group shapes
-                # (i.e. strategy, per-tensor, per-channel, block etc.) that the
-                # weights were originally quantized
-                requant_input_group_shape, requant_weight_group_shape = \
-                    get_scale_group_shapes_for_fp8(self.q_proj)
-                assert (requant_input_group_shape, requant_weight_group_shape)\
-                    == get_scale_group_shapes_for_fp8(self.kv_b_proj)
-                assert (requant_input_group_shape, requant_weight_group_shape)\
-                    == get_scale_group_shapes_for_fp8(self.o_proj)
-                self.reqaunt_input_group_shape = requant_input_group_shape
-                self.reqaunt_weight_group_shape = requant_weight_group_shape
-
-            #
-            # Perform matrix-absorption following
-            #     https://github.com/flashinfer-ai/flashinfer/pull/551
-            # for decode, as a result we end up with absorbed weights for decode
-            # and another copy of raw weights for prefill.
-            #
-            self.W_UK, self.W_UV = kv_b_proj_weight.split(
-                [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            # We absorb `W_UK` into `W_Q` resulting in either W_Q_UK or W_UQ_UK
-            # depending q_lora_rank, the former if q_lora_rank is None, the
-            # latter otherwise
-            # basically if q_lora_rank is none we are absorbing into q_proj
-            # instead of UQ
-            W_Q_UK = torch.einsum("qnd,lnd -> qnl", W_Q, W_UK)\
-                .flatten(start_dim=1).contiguous()
-
-            if is_fp8(weight_dtype) and requantization_enabled:
-                W_Q_UK, W_Q_UK_scales = scaled_quantize(
-                    W_Q_UK,
-                    self.reqaunt_weight_group_shape,
-                    quant_dtype=current_platform.fp8_dtype())
-                # For FP8 save the transpose so we can use
-                # `apply_w8a8_block_fp8_linear` directly
-                self.W_Q_UK = W_Q_UK.T.contiguous()
-                self.W_Q_UK_scales = W_Q_UK_scales.T.contiguous()
-            else:
-                self.W_Q_UK = W_Q_UK.to(act_dtype)
-
-            W_O = get_and_maybe_dequant_weights(self.o_proj)\
-                .view(-1, self.num_heads, self.v_head_dim)
-            W_UV_O = torch.einsum("lnd,hnd -> nlh", W_UV, W_O)\
-                .flatten(start_dim=0, end_dim=1).contiguous()
-
-            if is_fp8(weight_dtype) and requantization_enabled:
-                W_UV_O, W_UV_O_scales = scaled_quantize(
-                    W_UV_O,
-                    self.reqaunt_weight_group_shape,
-                    quant_dtype=current_platform.fp8_dtype())
-                # For FP8 save the transpose so we can use
-                # `apply_w8a8_block_fp8_linear` directly
-                self.W_UV_O = W_UV_O.T.contiguous()
-                self.W_UV_O_scales = W_UV_O_scales.T.contiguous()
-            else:
-                self.W_UV_O = W_UV_O.to(act_dtype)
-
-            self.tp_size = get_tensor_model_parallel_world_size()
-        else:
-            if is_fp8(weight_dtype):
-                raise NotImplementedError(
-                    "Currently fp8 requires matrix absorption")
-
-            self.W_UV = W_UV
-            self.W_UK = W_UK
-            self.W_Q = W_Q.flatten(start_dim=1)
+        # Convert from (L, N, V) to (N, L, V)
+        self.W_UV = W_UV.transpose(0, 1)
+        # Convert from (L, N, P) to (N, P, L)
+        self.W_UK_T = W_UK.permute(1, 2, 0)
 
     def _compute_prefill_context(
         self,
@@ -1463,7 +1216,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     return_softmax_lse=True,
                 )
             else:
-                attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
+                attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
                     q=q,
                     k=k,
                     v=v_padded,
@@ -1474,7 +1227,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     context_chunk_max_seq_lens[i],
                     softmax_scale=self.scale,
                     causal=False,  # Context is unmasked
-                    return_lse=True,
+                    return_attn_probs=True,
                 )
 
             if output is None:
@@ -1564,10 +1317,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 max_seqlen_k=prefill_metadata.max_prefill_seq_len,
                 softmax_scale=self.scale,
                 causal=True,
-                return_lse=has_context,
+                return_attn_probs=has_context,
             )
-            if not has_context:
-                output = output[0]
 
         if has_context:
             # ROCm flash_attn_varlen_func will return 3 objects instead of 2
@@ -1594,7 +1345,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     @abstractmethod
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
+        ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: T,
@@ -1649,9 +1400,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         prefill_k_c_normed = k_c_normed[:num_prefill_tokens]
 
         if has_decode:
-            decode_q_nope = self._q_proj_and_k_up_proj(decode_hs_or_q_c)
-            decode_q_pe = torch.matmul(decode_hs_or_q_c, self.W_QR)\
-                .view(-1, self.num_heads, self.qk_rope_head_dim)
+            decode_ql_nope, decode_q_pe = \
+                self._q_proj_and_k_up_proj(decode_hs_or_q_c)
             decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
                 decode_input_positions, decode_q_pe, decode_k_pe)
 
@@ -1685,6 +1435,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         if has_decode:
             output[num_prefill_tokens:] = self._forward_decode(
-                decode_q_nope, decode_q_pe, kv_cache, attn_metadata)
+                decode_ql_nope, decode_q_pe, kv_cache, attn_metadata)
 
         return output

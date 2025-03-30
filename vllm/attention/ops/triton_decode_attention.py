@@ -33,9 +33,7 @@ import logging
 import triton
 import triton.language as tl
 
-from vllm import envs
 from vllm.platforms import current_platform
-from vllm.utils import aiter_mla_enabled
 
 is_hip_ = current_platform.is_rocm()
 
@@ -180,7 +178,7 @@ def _decode_att_m_fwd(
     page_size,
     logit_cap,
 ):
-    BLOCK = 64
+    BLOCK = 64 if not is_hip_ else 8
     NUM_KV_SPLITS = num_kv_splits
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
@@ -190,7 +188,9 @@ def _decode_att_m_fwd(
     grid = (batch, head_num, NUM_KV_SPLITS)
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
 
-    num_warps = 4 if kv_group_num == 1 else 2
+    num_warps = 4
+    if kv_group_num != 1:
+        num_warps = 1 if is_hip_ else 2
 
     BLOCK_DMODEL = triton.next_power_of_2(Lk)
     BLOCK_DV = triton.next_power_of_2(Lv)
@@ -420,14 +420,16 @@ def _decode_grouped_att_m_fwd(
     )
 
     extra_kargs = {}
+    num_stages = 2
     if is_hip_:
         # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
         extra_kargs = {
-            "waves_per_eu": 4,
+            "waves_per_eu": 1,
             "matrix_instr_nonkdim": 16,
             "kpack": 2
         }
+        num_stages = 1
 
     _fwd_grouped_kernel_stage1[grid](
         q,
@@ -458,7 +460,7 @@ def _decode_grouped_att_m_fwd(
         PAGE_SIZE=page_size,
         logit_cap=logit_cap,
         num_warps=4,
-        num_stages=2,
+        num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
         **extra_kargs,
@@ -634,29 +636,12 @@ def decode_attention_fwd(
     num_kv_splits,
     sm_scale,
     page_size=1,
-    kv_indptr=None,
-    kv_indices=None,
-    kv_last_page_lens=None,
     logit_cap=0.0,
 ):
     assert num_kv_splits == attn_logits.shape[2]
     kv_group_num = q.shape[1] // v_buffer.shape[-2]
 
-    if aiter_mla_enabled():
-        from aiter.mla import mla_decode_fwd
-
-        mla_decode_fwd(
-            q,
-            k_buffer.view(-1, 1, 1, q.shape[-1]),
-            o,
-            kv_indptr,
-            kv_indices,
-            kv_last_page_lens,
-            sm_scale,
-            logit_cap
-        )
-        k_buffer = k_buffer.reshape(-1, 1, q.shape[-1])
-    elif kv_group_num == 1:
+    if kv_group_num == 1:
         # MHA
         decode_attention_fwd_normal(
             q,

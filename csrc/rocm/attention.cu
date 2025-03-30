@@ -161,7 +161,7 @@ __device__ __forceinline__ T from_float(const float& inp) {
 
 template <typename T>
 __device__ __forceinline__ _B16x4 from_floatx4(const floatx4& inp) {
-  union tmpcvt {
+  [[maybe_unused]] union tmpcvt {
     uint16_t u;
     _Float16 f;
     __hip_bfloat16 b;
@@ -194,7 +194,7 @@ __device__ __forceinline__ _B16x4 from_floatx4(const floatx4& inp) {
 template <typename T>
 __device__ __forceinline__ _B16x4 addx4(const _B16x4& inp1,
                                         const _B16x4& inp2) {
-  union tmpcvt {
+  [[maybe_unused]] union tmpcvt {
     uint16_t u;
     _Float16 f;
     __hip_bfloat16 b;
@@ -382,8 +382,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   constexpr int GQA_RATIO4 = DIVIDE_ROUND_UP(GQA_RATIO, 4);
 
-  __shared__ float shared_qk_max[NWARPS][16 + 1];
-  __shared__ float shared_exp_sum[NWARPS][16 + 1];
+  [[maybe_unused]] __shared__ float shared_qk_max[NWARPS][16 + 1];
+  [[maybe_unused]] __shared__ float shared_exp_sum[NWARPS][16 + 1];
   // shared_logits is used for multiple purposes
   __shared__ _B16x4 shared_logits[NWARPS][4][16][4];
 
@@ -500,7 +500,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const cache_t* k_ptr2 = k_ptr + kblock_number * kv_block_stride;
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
-    const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
+    [[maybe_unused]] const int kglobal_token_idx =
+        partition_start_token_idx + klocal_token_idx;
     const int kphysical_block_offset = klocal_token_idx % BLOCK_SIZE;
     const cache_t* k_ptr3 = k_ptr2 + kphysical_block_offset * KX;
 
@@ -1349,9 +1350,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   const int seq_idx = blockIdx.y;
   const int context_len = context_lens[seq_idx];
   const int num_partitions = DIVIDE_ROUND_UP(context_len, PARTITION_SIZE);
-  constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
+  [[maybe_unused]] constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   const int warpid = threadIdx.x / WARP_SIZE;
-  const int laneid = threadIdx.x % WARP_SIZE;
+  [[maybe_unused]] const int laneid = threadIdx.x % WARP_SIZE;
 
   __shared__ float shared_global_exp_sum;
   // max num partitions supported is warp_size * NPAR_LOOPS

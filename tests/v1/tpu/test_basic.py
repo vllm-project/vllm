@@ -3,16 +3,22 @@
 
 Run `pytest tests/v1/tpu/test_basic.py`.
 """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import pytest
 
 from vllm.platforms import current_platform
 
-from ...conftest import VllmRunner
+if TYPE_CHECKING:
+    from tests.conftest import VllmRunner
 
 MODELS = [
+    "Qwen/Qwen2.5-1.5B-Instruct",
+    # TODO: Enable this models with v6e
     # "Qwen/Qwen2-7B-Instruct",
-    "meta-llama/Llama-3.1-8B",
-    # TODO: Add models here as necessary
+    # "meta-llama/Llama-3.1-8B",
 ]
 
 TENSOR_PARALLEL_SIZES = [1]
@@ -28,7 +34,8 @@ TENSOR_PARALLEL_SIZES = [1]
 @pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("tensor_parallel_size", TENSOR_PARALLEL_SIZES)
 def test_models(
-    monkeypatch,
+    vllm_runner: type[VllmRunner],
+    monkeypatch: pytest.MonkeyPatch,
     model: str,
     max_tokens: int,
     enforce_eager: bool,
@@ -41,7 +48,7 @@ def test_models(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        with VllmRunner(
+        with vllm_runner(
                 model,
                 max_model_len=8192,
                 enforce_eager=enforce_eager,
@@ -50,5 +57,5 @@ def test_models(
                 tensor_parallel_size=tensor_parallel_size) as vllm_model:
             vllm_outputs = vllm_model.generate_greedy(example_prompts,
                                                       max_tokens)
-    output = vllm_outputs[0][1]
-    assert "1024" in output
+        output = vllm_outputs[0][1]
+        assert "1024" in output

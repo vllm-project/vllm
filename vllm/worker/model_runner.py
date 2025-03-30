@@ -1050,6 +1050,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             dtype=np.int32)
 
         # paged_kv_indices: flattened graph_block_tables
+        # used by AITER MLA
         self.paged_kv_indices = np.zeros(self.max_batchsize_to_capture *
                                          self.get_max_block_per_batch(),
                                          dtype=np.int32)

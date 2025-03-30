@@ -13,13 +13,13 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    expand_weights, shuffle_weights)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -36,15 +36,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import (aiter_2stage_moe_enabled, aiter_fp8_block_moe_enabled,
                         aiter_moe_enabled)
-
-if aiter_moe_enabled():
-    from aiter.fused_moe_bf16_asm import asm_moe
-    if aiter_2stage_moe_enabled():
-        from aiter.fused_moe_bf16_asm import ck_moe_2stages
-    if aiter_fp8_block_moe_enabled():
-        from aiter.fused_moe_bf16_asm import moe_sorting_ck
-        from aiter import fmoe_fp8_blockscale_g1u1
-    from aiter.ops.shuffle import shuffle_weight
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -261,6 +252,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     weight_loader=weight_loader,
                 )
                 scale[:] = torch.finfo(torch.float32).min
+                set_weight_attrs(scale, {"scale_type": "weight_scale"})
                 layer.register_parameter("weight_scale", scale)
             else:
                 assert self.quant_config.activation_scheme == "dynamic"
@@ -275,6 +267,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     weight_loader=weight_loader,
                 )
                 scale[:] = torch.finfo(torch.float32).min
+                set_weight_attrs(scale, {"scale_type": "weight_scale"})
                 # The weight_scale_inv name is intentional for deepseekv3
                 layer.register_parameter("weight_scale_inv", scale)
 
@@ -285,6 +278,7 @@ class Fp8LinearMethod(LinearMethodBase):
                                                 weight_loader=weight_loader)
 
                 scale[:] = torch.finfo(torch.float32).min
+                set_weight_attrs(scale, {"scale_type": "input_scale"})
                 layer.register_parameter("input_scale", scale)
             else:
                 layer.register_parameter("input_scale", None)
@@ -586,10 +580,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2_weight = layer.w2_weight
                 w2_weight_scale_inv = layer.w2_weight_scale_inv
 
-            if aiter_fp8_block_moe_enabled():
-                w13_weight = shuffle_weight(w13_weight, (16, 16))
-                w2_weight = shuffle_weight(w2_weight, (16, 16))
-
             # torch.compile() cannot use Parameter subclasses.
             layer.w13_weight = Parameter(w13_weight, requires_grad=False)
             layer.w13_weight_scale_inv = Parameter(w13_weight_scale_inv,
@@ -597,6 +587,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
+
+            if aiter_fp8_block_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight.data, layer.w2_weight.data)
+
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
+
             return
 
         # If checkpoint is fp16, quantize in place.
@@ -624,31 +625,28 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
+
             if aiter_moe_enabled():
-                w13_scales = layer.w13_weight_scale.data.unsqueeze(
-                    -1).unsqueeze(-1).expand(
-                        (-1, layer.w13_weight.shape[1], -1))
-                w2_scales = layer.w2_weight_scale.data.unsqueeze(-1).unsqueeze(
-                    -1).expand((-1, layer.w2_weight.shape[1], -1))
-                layer.w2_weight_scale = torch.nn.Parameter(
-                    w2_scales.contiguous(), requires_grad=False)
+                # reshaping weights is required for aiter moe kernel.
+                w13_scales, w2_scales = expand_weights(
+                    layer.w13_weight_scale.data,
+                    layer.w2_weight_scale.data,
+                    expansion_dims=[
+                        layer.w13_weight.shape[1], layer.w2_weight.shape[1]
+                    ])
                 layer.w13_weight_scale = torch.nn.Parameter(
                     w13_scales.contiguous(), requires_grad=False)
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales.contiguous(), requires_grad=False)
+                layout = (32, 32) if aiter_2stage_moe_enabled() else (16, 16)
+                shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
+                                                            layer.w2_weight,
+                                                            layout=layout)
 
-                if aiter_2stage_moe_enabled():
-                    layer.w13_weight = torch.nn.Parameter(shuffle_weight(
-                        layer.w13_weight, layout=(32, 32)),
-                                                          requires_grad=False)
-                    layer.w2_weight = torch.nn.Parameter(shuffle_weight(
-                        layer.w2_weight, layout=(32, 32)),
-                                                         requires_grad=False)
-                else:
-                    layer.w13_weight = torch.nn.Parameter(shuffle_weight(
-                        layer.w13_weight),
-                                                          requires_grad=False)
-                    layer.w2_weight = torch.nn.Parameter(shuffle_weight(
-                        layer.w2_weight),
-                                                         requires_grad=False)
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
             return
 
         # If checkpoint is fp8, we need to handle that the
@@ -720,23 +718,30 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 if aiter_2stage_moe_enabled():
                     max_w13_scales = max_w13_scales.unsqueeze(-1)
                     w2_scales = layer.w2_weight_scale.data.unsqueeze(-1)
-                    layer.w13_weight = torch.nn.Parameter(shuffle_weight(
+                    layer.w13_weight = torch.nn.Parameter(shuffle_weights(
                         layer.w13_weight, layout=(32, 32)),
                                                           requires_grad=False)
-                    layer.w2_weight = torch.nn.Parameter(shuffle_weight(
+                    layer.w2_weight = torch.nn.Parameter(shuffle_weights(
                         layer.w2_weight, layout=(32, 32)),
                                                          requires_grad=False)
                 else:
-                    max_w13_scales = max_w13_scales.unsqueeze(-1).unsqueeze(
-                        -1).expand((-1, layer.w13_weight.shape[1], -1))
-                    w2_scales = layer.w2_weight_scale.data.unsqueeze(
-                        -1).unsqueeze(-1).expand(
-                            (-1, layer.w2_weight.shape[1], -1))
-                    layer.w13_weight = torch.nn.Parameter(shuffle_weight(
-                        layer.w13_weight),
+                    # reshaping weights is required for aiter moe kernel.
+                    expansion_dims = [
+                        layer.w13_weight.shape[1], layer.w2_weight.shape[1]
+                    ]
+                    max_w13_scales, w2_scales = expand_weights(
+                        max_w13_scales,
+                        layer.w2_weight_scale.data,
+                        expansion_dims=expansion_dims)
+                    layer.w2_weight_scale = torch.nn.Parameter(
+                        w2_scales.contiguous(), requires_grad=False)
+
+                    shuffled_w13, shuffled_w2 = shuffle_weights(
+                        layer.w13_weight, layer.w2_weight)
+
+                    layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                           requires_grad=False)
-                    layer.w2_weight = torch.nn.Parameter(shuffle_weight(
-                        layer.w2_weight),
+                    layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                          requires_grad=False)
 
                 layer.w2_weight_scale = torch.nn.Parameter(
@@ -777,43 +782,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        if aiter_moe_enabled():
-            if self.block_quant and aiter_fp8_block_moe_enabled():
-                return fp8_blockscale_moe(
-                    hidden_states=x,
-                    w1=layer.w13_weight,
-                    w2=layer.w2_weight,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    w1_scale=layer.w13_weight_scale_inv,
-                    w2_scale=layer.w2_weight_scale_inv,
-                    block_shape=self.quant_config.weight_block_size)
-
-            if aiter_2stage_moe_enabled():
-                return ck_moe_2stages(a1=x,
-                                      w1=layer.w13_weight,
-                                      w2=layer.w2_weight,
-                                      topk_weight=topk_weights,
-                                      topk_ids=topk_ids,
-                                      fc1_scale=layer.w13_weight_scale,
-                                      fc2_scale=layer.w2_weight_scale,
-                                      a1_scale=layer.w13_input_scale,
-                                      a2_scale=layer.w2_input_scale)
-
-            return asm_moe(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weight=topk_weights,
-                topk_ids=topk_ids,
-                fc1_scale=(layer.w13_weight_scale_inv
-                           if self.block_quant else layer.w13_weight_scale),
-                fc2_scale=(layer.w2_weight_scale_inv
-                           if self.block_quant else layer.w2_weight_scale),
-                fc1_smooth_scale=None,
-                fc2_smooth_scale=None,
-                a16=False)
-
         return fused_experts(
             x,
             layer.w13_weight,
@@ -833,58 +801,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             block_shape=self.quant_config.weight_block_size,
         )
-
-
-def fp8_blockscale_moe(
-        hidden_states,
-        w1,  # [expert(local_expert:EP), inter_dim*2, dim] N,K
-        w2,  # [expert(local_expert:EP), dim, inter_dim]
-        topk_weights,
-        topk_ids,
-        w1_scale,
-        w2_scale,
-        block_shape,
-        expert_mask=None):
-    local_E = E = w1.shape[0]
-    if expert_mask is not None:
-        E = expert_mask.numel()
-    topk = topk_ids.shape[1]
-    model_dim = w1.shape[-1]
-    dtype = hidden_states.dtype
-    scale_blk_k = block_shape[1]
-    (
-        sorted_token_ids,
-        sorted_weight_buf,
-        sorted_expert_ids,
-        num_valid_ids,
-        out_asm,
-    ) = moe_sorting_ck(topk_ids,
-                       topk_weights,
-                       E,
-                       model_dim,
-                       dtype,
-                       expert_mask=expert_mask)
-
-    a1, a1_scale = per_token_group_quant_fp8(hidden_states, scale_blk_k)
-
-    fmoe_fp8_blockscale_g1u1(
-        out_asm,
-        a1,
-        w1,
-        w2,
-        sorted_token_ids,
-        sorted_weight_buf,
-        sorted_expert_ids,
-        num_valid_ids,
-        topk,
-        w1_scale.view(local_E, -1),
-        w2_scale.view(local_E, -1),
-        a1_scale.t().contiguous(),
-        block_shape[0],
-        block_shape[1],
-        None,
-    )
-    return out_asm
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

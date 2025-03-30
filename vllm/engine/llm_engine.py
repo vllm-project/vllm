@@ -216,6 +216,12 @@ class LLMEngine:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
+        if envs.VLLM_USE_V1:
+            raise ValueError(
+                "Using V0 LLMEngine, but envs.VLLM_USE_V1=True. "
+                "This should not happen. As a workaround, try using "
+                "LLMEngine.from_vllm_config(...) or explicitly set "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -480,6 +486,22 @@ class LLMEngine:
         return executor_class
 
     @classmethod
+    def from_vllm_config(
+        cls,
+        vllm_config: VllmConfig,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        disable_log_stats: bool = False,
+    ) -> "LLMEngine":
+        return cls(
+            vllm_config=vllm_config,
+            executor_class=cls._get_executor_cls(vllm_config),
+            log_stats=(not disable_log_stats),
+            usage_context=usage_context,
+            stat_loggers=stat_loggers,
+        )
+
+    @classmethod
     def from_engine_args(
         cls,
         engine_args: EngineArgs,
@@ -488,18 +510,19 @@ class LLMEngine:
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
-        engine_config = engine_args.create_engine_config(usage_context)
-        executor_class = cls._get_executor_cls(engine_config)
-        # Create the LLM engine.
-        engine = cls(
-            vllm_config=engine_config,
-            executor_class=executor_class,
-            log_stats=not engine_args.disable_log_stats,
+        vllm_config = engine_args.create_engine_config(usage_context)
+
+        engine_cls = cls
+        if envs.VLLM_USE_V1:
+            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+            engine_cls = V1LLMEngine
+
+        return engine_cls.from_vllm_config(
+            vllm_config=vllm_config,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
+            disable_log_stats=engine_args.disable_log_stats,
         )
-
-        return engine
 
     def __reduce__(self):
         # This is to ensure that the LLMEngine is not referenced in
@@ -760,7 +783,6 @@ class LLMEngine:
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
-            request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
@@ -830,6 +852,10 @@ class LLMEngine:
             self.generation_config_fields, seq.eos_token_id)
 
         # Create the sequence group.
+        draft_size = 1
+        if self.vllm_config.speculative_config is not None:
+            draft_size = \
+                self.vllm_config.speculative_config.num_speculative_tokens + 1
         seq_group = SequenceGroup(
             request_id=request_id,
             seqs=[seq],
@@ -839,7 +865,8 @@ class LLMEngine:
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
-            priority=priority)
+            priority=priority,
+            draft_size=draft_size)
 
         return seq_group
 
@@ -927,12 +954,12 @@ class LLMEngine:
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for all devices."""
 
         success = True
         for scheduler in self.scheduler:
-            success = success and scheduler.reset_prefix_cache()
+            success = success and scheduler.reset_prefix_cache(device)
         return success
 
     @staticmethod
@@ -1920,6 +1947,9 @@ class LLMEngine:
             "Sleep mode is not enabled in the model config")
         self.model_executor.wake_up()
 
+    def is_sleeping(self) -> bool:
+        return self.model_executor.is_sleeping
+
     def check_health(self) -> None:
         if self.tokenizer:
             self.tokenizer.check_health()
@@ -2097,6 +2127,6 @@ class LLMEngine:
         return sampling_params
 
 
-# TODO(v1): Remove this class proxy when V1 goes default.
-if envs.VLLM_USE_V1:
-    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
+if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
+    from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+    LLMEngine = V1LLMEngine  # type: ignore
