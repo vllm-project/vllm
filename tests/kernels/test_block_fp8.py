@@ -141,7 +141,8 @@ def native_w8a8_block_fp8_matmul(A,
 
 
 # Fold into utils.py torch_moe?
-def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, expert_map, block_shape):
+def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, expert_map,
+                             block_shape):
     """Fused moe with block-wise quantization using native torch."""
     B, D = a.shape
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
@@ -241,10 +242,12 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 
 @pytest.mark.parametrize(
     "M,N,K,E,topk,ep_size,block_size,dtype,seed",
-    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, EP_SIZE, BLOCK_SIZE, DTYPES, SEEDS))
+    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, EP_SIZE, BLOCK_SIZE,
+                      DTYPES, SEEDS))
 @torch.inference_mode()
-def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, seed):
-    if topk > E: # or ep_size < E:
+def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype,
+                                  seed):
+    if topk > E: # or ep_size > E:
         pytest.skip(f"Skipping test; topk={topk} > E={E}")
 
     torch.manual_seed(seed)
@@ -283,7 +286,7 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, 
     e_ids: List[Optional[torch.Tensor]] = [None] * ep_size
 
     for ep_rank in range(ep_size):
-        n_local_experts[ep_rank], expert_map[ep_rank], _ = determine_expert_map(ep_size, ep_rank, E)
+        n_local_experts[ep_rank], expert_map[ep_rank] = determine_expert_map(ep_size, ep_rank, E)
         e_map = expert_map[ep_rank]
         if e_map is not None:
             e_ids[ep_rank] = e_map[e_map >= 0]
@@ -305,7 +308,7 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, 
                 w1_scale=fp8_perm(w1_s, e_ids[ep_rank]),
                 w2_scale=fp8_perm(w2_s, e_ids[ep_rank]),
                 block_shape=block_size,
-                global_num_experts = E,
+                global_num_experts=E,
                 expert_map=expert_map[ep_rank],
                 allow_deep_gemm=False,
             )
@@ -328,7 +331,6 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, 
             else:
                 ref_out = ref_out + ep_ref_out
                 out = out + ep_out
-
 
         #print(f"{out.sum()=}")
         #print(f"{ref_out.sum()=}")
@@ -415,7 +417,6 @@ def test_moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
     inv_perm = torch.argsort(sorted_token_ids)[:num_tokens]
 
     a = fp8_perm(a, sorted_token_ids // topk)
-
     if a_s is not None:
         a_s = a_s[sorted_token_ids // topk]
 
@@ -528,17 +529,10 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
 
     n_local_experts: List[int] = [-1] * ep_size
     expert_map: List[Optional[torch.Tensor]] = [None] * ep_size
-    expert_starts: List[Optional[torch.Tensor]] = [None] * ep_size
-    expert_ends: List[Optional[torch.Tensor]] = [None] * ep_size
-    expert_valid: List[Optional[torch.Tensor]] = [None] * ep_size
     e_ids: List[Optional[torch.Tensor]] = [None] * ep_size
 
     for ep_rank in range(ep_size):
-        (n_local_experts[ep_rank],
-         expert_map[ep_rank],
-         expert_starts[ep_rank],
-         expert_ends[ep_rank],
-         expert_valid[ep_rank]) = determine_expert_map(ep_size, ep_rank, E)
+        n_local_experts[ep_rank], expert_map[ep_rank] = determine_expert_map(ep_size, ep_rank, E)
         e_map = expert_map[ep_rank]
         if e_map is not None:
             e_ids[ep_rank] = e_map[e_map >= 0]
@@ -551,9 +545,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         for ep_rank in range(ep_size):
             if M >= 128 and ep_size == 1:
                 # TODO: NYI expert map
-                ep_ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s,
-                                                          w2_s, score, topk,
-                                                          block_size)
+                ep_ref_out = deep_gemm_w8a8_block_fp8_moe(
+                    M, K, a, w1, w2, w1_s, w2_s, score, topk, block_size)
             else:
                 ep_ref_out = torch_w8a8_block_fp8_moe(
                     a,

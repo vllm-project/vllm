@@ -742,7 +742,7 @@ def find_contiguous_segments(t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tenso
     non_matching = t[:-1] != t[1:]
     #index_range = torch.arange(1, t.numel(), device=t.device).flatten()
     #ends = index_range[non_matching]
-    if non_matching.numel() > 0:
+    if True or non_matching.numel() > 0:
         ends = non_matching.nonzero().flatten() + 1
         starts = torch.concat((torch.tensor([0], device=t.device), ends))
         ends = torch.concat((ends, torch.tensor([t.numel()], device=t.device)))
@@ -771,10 +771,10 @@ def put_a_bird_on_it(
 
     positive = expert_ids >= 0
 
-    print(f"\nstarts = {starts}")
-    print(f"ends = {ends}")
-    print(f"valid = {positive}")
-    print(f"ids = {expert_ids}")
+    # print(f"\nstarts = {starts}")
+    # print(f"ends = {ends}")
+    # print(f"valid = {positive}")
+    # print(f"ids = {expert_ids}")
 
     for start, end, valid in zip(starts, ends, positive):
         start128 = start * 128
@@ -843,9 +843,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                             topk_ids: torch.Tensor,
                             sorted_token_ids: torch.Tensor,
                             expert_ids: torch.Tensor,
-                            expert_starts: Optional[torch.Tensor],
-                            expert_ends: Optional[torch.Tensor],
-                            expert_valid: Optional[torch.Tensor],
                             num_tokens_post_padded: torch.Tensor,
                             mul_routed_weight: bool,
                             top_k: int,
@@ -1350,9 +1347,6 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           use_int4_w4a16: bool = False,
                           global_num_experts: int = -1,
                           expert_map: Optional[torch.Tensor] = None,
-                          expert_starts: Optional[torch.Tensor] = None,
-                          expert_ends: Optional[torch.Tensor] = None,
-                          expert_valid: Optional[torch.Tensor] = None,
                           w1_scale: Optional[torch.Tensor] = None,
                           w2_scale: Optional[torch.Tensor] = None,
                           w1_zp: Optional[torch.Tensor] = None,
@@ -1363,7 +1357,6 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
                        activation, use_fp8_w8a8, use_int8_w8a16,
                        use_int4_w4a16, global_num_experts, expert_map,
-                       expert_starts, expert_ends, expert_valid,
                        w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
                        block_shape)
 
@@ -1420,7 +1413,6 @@ def outplace_fused_experts(
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
                               False, activation, use_fp8_w8a8, use_int8_w8a16,
                               use_int4_w4a16, global_num_experts, expert_map,
-                              expert_starts, expert_ends, expert_valid,
                               w1_scale, w2_scale, w1_zp, w2_zp, a1_scale,
                               a2_scale, block_shape)
 
@@ -1485,9 +1477,6 @@ def fused_experts(hidden_states: torch.Tensor,
                   use_int4_w4a16: bool = False,
                   global_num_experts: int = -1,
                   expert_map: Optional[torch.Tensor] = None,
-                  expert_starts: Optional[torch.Tensor] = None,
-                  expert_ends: Optional[torch.Tensor] = None,
-                  expert_valid: Optional[torch.Tensor] = None,
                   w1_scale: Optional[torch.Tensor] = None,
                   w2_scale: Optional[torch.Tensor] = None,
                   w1_zp: Optional[torch.Tensor] = None,
@@ -1625,9 +1614,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                        use_int4_w4a16: bool = False,
                        global_num_experts: int = -1,
                        expert_map: Optional[torch.Tensor] = None,
-                       expert_starts: Optional[torch.Tensor] = None,
-                       expert_ends: Optional[torch.Tensor] = None,
-                       expert_valid: Optional[torch.Tensor] = None,
                        w1_scale: Optional[torch.Tensor] = None,
                        w2_scale: Optional[torch.Tensor] = None,
                        w1_zp: Optional[torch.Tensor] = None,
@@ -1753,9 +1739,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 curr_topk_ids,
                                 sorted_token_ids,
                                 expert_ids,
-                                expert_starts,
-                                expert_ends,
-                                expert_valid,
                                 num_tokens_post_padded,
                                 False,
                                 top_k_num,
@@ -1794,9 +1777,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 curr_topk_ids,
                                 sorted_token_ids,
                                 expert_ids,
-                                expert_starts,
-                                expert_ends,
-                                expert_valid,
                                 num_tokens_post_padded,
                                 True,
                                 1,
@@ -1830,9 +1810,6 @@ def fused_moe(
     use_int4_w4a16: bool = False,
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
-    expert_starts: Optional[torch.Tensor] = None,
-    expert_ends: Optional[torch.Tensor] = None,
-    expert_valid: Optional[torch.Tensor] = None,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     w1_zp: Optional[torch.Tensor] = None,
@@ -1871,8 +1848,8 @@ def fused_moe(
         Defaults to False.
     - global_num_experts (int): The total number of experts in the global
         expert space.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-        from the global expert space to the local expert space of the expert
+    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
+        from the global expert space to the local expert space of the expert 
         parallel shard.
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.
@@ -1913,9 +1890,6 @@ def fused_moe(
                          use_int4_w4a16=use_int4_w4a16,
                          global_num_experts=global_num_experts,
                          expert_map=expert_map,
-                         expert_starts=expert_starts,
-                         expert_ends=expert_ends,
-                         expert_valid=expert_valid,
                          w1_scale=w1_scale,
                          w2_scale=w2_scale,
                          w1_zp=w1_zp,
