@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import sys
 from typing import TYPE_CHECKING, Optional
 
 import psutil
@@ -37,6 +38,9 @@ class CpuPlatform(Platform):
                              use_mla: bool) -> str:
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
+        if use_mla:
+            logger.info("Using CPU MLA backend.")
+            return "vllm.attention.backends.cpu_mla.CPUMLABackend"
         logger.info("Using Torch SDPA backend.")
         return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
 
@@ -129,9 +133,6 @@ class CpuPlatform(Platform):
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
-        # MLA attention is not supported
-        os.environ["VLLM_MLA_DISABLE"] = "1"
-
         # Intel OpenMP setting
         ld_prealod_str = os.getenv("LD_PRELOAD", "")
         if "libiomp5.so" in ld_prealod_str:
@@ -148,6 +149,13 @@ class CpuPlatform(Platform):
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size)
+        if sys.platform == "darwin" and \
+                envs.VLLM_WORKER_MULTIPROC_METHOD == "fork":
+            if os.environ.get('VLLM_WORKER_MULTIPROC_METHOD', None) is None:
+                logger.warning(
+                    "Default to spawn method on MacOS. If this is not desired,"
+                    " set VLLM_WORKER_MULTIPROC_METHOD to fork explicitly.")
+                os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
