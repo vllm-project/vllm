@@ -21,33 +21,33 @@ TEMPLATE = ("template __global__ void Marlin<"
             "{{thread_m_blocks}}, "
             "{{thread_n_blocks}}, "
             "{{thread_k_blocks}}, "
+            "{{'true' if m_block_size_8 else 'false'}}, "
             "{{stages}}, "
-            "{{has_act_order}}, "
-            "{{has_zp}}, "
+            "{{'true' if has_act_order else 'false'}}, "
+            "{{'true' if has_zp else 'false'}}, "
             "{{group_blocks}}, "
-            "{{is_zp_float}}>"
+            "{{'true' if is_zp_float else 'false'}}>"
             "( MARLIN_KERNEL_PARAMS );")
 
 SCALAR_TYPES = ["vllm::kU4", "vllm::kU8", "vllm::kU4B8", "vllm::kU8B128"]
 THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128),
                   (128, 64, 128)]
 
-THREAD_M_BLOCKS = [1, 2, 3, 4]
+THREAD_M_BLOCKS = [0.5, 1, 2, 3, 4]
 GROUP_BLOCKS = [0, -1, 2, 4, 8]
 DTYPES = ["fp16", "bf16"]
 
 for scalar_type, dtype in itertools.product(SCALAR_TYPES, DTYPES):
     settings = []
     bit = int(scalar_type[8])
-    has_zp = "false" if "B" in scalar_type else "true"
-
+    has_zp = "B" not in scalar_type
     all_template_str_list = []
 
     for group_blocks, m_blocks, thread_configs in itertools.product(
             GROUP_BLOCKS, THREAD_M_BLOCKS, THREAD_CONFIGS):
 
-        has_act_order = "true" if group_blocks == 0 else "false"
-        if has_zp == "true" and has_act_order == "true":
+        has_act_order = group_blocks == 0
+        if has_zp and has_act_order:
             continue
 
         k_blocks = thread_configs[0] // 16
@@ -60,14 +60,15 @@ for scalar_type, dtype in itertools.product(SCALAR_TYPES, DTYPES):
             scalar_t=c_dtype,
             w_type_id=scalar_type + ".id()",
             threads=threads,
-            thread_m_blocks=m_blocks,
+            thread_m_blocks=max(m_blocks, 1),
             thread_n_blocks=n_blocks,
             thread_k_blocks=k_blocks,
+            m_block_size_8=m_blocks == 0.5,
             stages="pipe_stages",
             has_act_order=has_act_order,
             has_zp=has_zp,
             group_blocks=group_blocks,
-            is_zp_float="false",
+            is_zp_float=False,
         )
 
         all_template_str_list.append(template_str)

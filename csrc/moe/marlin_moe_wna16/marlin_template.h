@@ -44,6 +44,8 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                                       // threadblock
           const int thread_n_blocks,  // same for n dimension (output)
           const int thread_k_blocks,  // same for k dimension (reduction)
+          const bool m_block_size_8,  // whether m_block_size == 8
+                                      // only works when thread_m_blocks == 1
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
           const bool has_act_order,  // whether act_order is enabled
@@ -110,16 +112,58 @@ __device__ inline void mma(const typename ScalarType<scalar_t>::FragA& a_frag,
   }
 }
 
+template <typename scalar_t>
+__device__ inline void mma_trans(
+    const typename ScalarType<scalar_t>::FragA& a_frag,
+    const typename ScalarType<scalar_t>::FragB& frag_b,
+    const typename ScalarType<scalar_t>::FragB& frag_b2,
+    typename ScalarType<scalar_t>::FragC& frag_c) {
+  const uint32_t* a = reinterpret_cast<const uint32_t*>(&a_frag);
+  const uint32_t* b = reinterpret_cast<const uint32_t*>(&frag_b);
+  const uint32_t* b2 = reinterpret_cast<const uint32_t*>(&frag_b2);
+  float* c = reinterpret_cast<float*>(&frag_c);
+  if constexpr (std::is_same<scalar_t, half>::value) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+        : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
+        : "r"(b[0]), "r"(b2[0]), "r"(b[1]), "r"(b2[1]), "r"(a[0]), "r"(a[1]),
+          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+  } else if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+        : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
+        : "r"(b[0]), "r"(b2[0]), "r"(b[1]), "r"(b2[1]), "r"(a[0]), "r"(a[1]),
+          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+  } else {
+    STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
+  }
+}
+
 // Instruction for loading a full 16x16 matrix fragment of operand A from shared
 // memory, directly in tensor core layout.
-template <typename scalar_t>
-__device__ inline void ldsm4(typename ScalarType<scalar_t>::FragA& frag_a,
-                             const void* smem_ptr) {
+template <int count, typename scalar_t>
+__device__ inline void ldsm(typename ScalarType<scalar_t>::FragA& frag_a,
+                            const void* smem_ptr) {
   uint32_t* a = reinterpret_cast<uint32_t*>(&frag_a);
   uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-               : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
-               : "r"(smem));
+  if constexpr (count == 4) {
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+        : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
+        : "r"(smem));
+  } else if constexpr (count == 2) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+                 : "=r"(a[0]), "=r"(a[1])
+                 : "r"(smem));
+  } else if constexpr (count == 1) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];\n"
+                 : "=r"(a[0])
+                 : "r"(smem));
+  } else {
+    static_assert(count == 1 || count == 2 || count == 4, "invalid count");
+  }
 }
 
 // Lookup-table based 3-input logical operation; explicitly used for
@@ -145,8 +189,9 @@ __device__ inline uint32_t prmt(uint32_t a) {
   return res;
 }
 
-template <typename scalar_t, vllm::ScalarTypeId w_type_id>
-__device__ inline typename ScalarType<scalar_t>::FragB dequant(int q);
+template <typename scalar_t, int bit>
+__device__ inline typename ScalarType<scalar_t>::FragB dequant(
+    int q, typename ScalarType<scalar_t>::FragB& frag_b);
 
 //
 // Efficiently dequantize 4bit values packed in an int32 value into a full
@@ -158,8 +203,8 @@ __device__ inline typename ScalarType<scalar_t>::FragB dequant(int q);
 // https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L327-L385
 //
 template <>
-__device__ inline typename ScalarType<half>::FragB
-dequant<half, vllm::kU4B8.id()>(int q) {
+__device__ inline typename ScalarType<half>::FragB dequant<half, 4>(
+    int q, typename ScalarType<half>::FragB& frag_b) {
   const int LO = 0x000f000f;
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
@@ -171,7 +216,6 @@ dequant<half, vllm::kU4B8.id()>(int q) {
   const int SUB = 0x64086408;
   const int MUL = 0x2c002c00;
   const int ADD = 0xd480d480;
-  typename ScalarType<half>::FragB frag_b;
   frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
                       *reinterpret_cast<const half2*>(&SUB));
   frag_b[1] = __hfma2(*reinterpret_cast<half2*>(&hi),
@@ -182,7 +226,8 @@ dequant<half, vllm::kU4B8.id()>(int q) {
 
 template <>
 __device__ inline typename ScalarType<nv_bfloat16>::FragB
-dequant<nv_bfloat16, vllm::kU4B8.id()>(int q) {
+dequant<nv_bfloat16, 4>(int q,
+                        typename ScalarType<nv_bfloat16>::FragB& frag_b) {
   static constexpr uint32_t MASK = 0x000f000f;
   static constexpr uint32_t EX = 0x43004300;
 
@@ -192,56 +237,8 @@ dequant<nv_bfloat16, vllm::kU4B8.id()>(int q) {
   q >>= 4;
   int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
 
-  typename ScalarType<nv_bfloat16>::FragB frag_b;
   static constexpr uint32_t MUL = 0x3F803F80;
   static constexpr uint32_t ADD = 0xC308C308;
-
-  frag_b[0] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&lo),
-                      *reinterpret_cast<const nv_bfloat162*>(&MUL),
-                      *reinterpret_cast<const nv_bfloat162*>(&ADD));
-  frag_b[1] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&hi),
-                      *reinterpret_cast<const nv_bfloat162*>(&MUL),
-                      *reinterpret_cast<const nv_bfloat162*>(&ADD));
-  return frag_b;
-}
-
-template <>
-__device__ inline typename ScalarType<half>::FragB
-dequant<half, vllm::kU4.id()>(int q) {
-  const int LO = 0x000f000f;
-  const int HI = 0x00f000f0;
-  const int EX = 0x64006400;
-  // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
-
-  const int SUB = 0x64006400;
-  const int MUL = 0x2c002c00;
-  const int ADD = 0xd400d400;
-  typename ScalarType<half>::FragB frag_b;
-  frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
-                      *reinterpret_cast<const half2*>(&SUB));
-  frag_b[1] = __hfma2(*reinterpret_cast<half2*>(&hi),
-                      *reinterpret_cast<const half2*>(&MUL),
-                      *reinterpret_cast<const half2*>(&ADD));
-  return frag_b;
-}
-
-template <>
-__device__ inline typename ScalarType<nv_bfloat16>::FragB
-dequant<nv_bfloat16, vllm::kU4.id()>(int q) {
-  static constexpr uint32_t MASK = 0x000f000f;
-  static constexpr uint32_t EX = 0x43004300;
-
-  // Guarantee that the `(a & b) | c` operations are LOP3s.
-
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
-  q >>= 4;
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
-
-  typename ScalarType<nv_bfloat16>::FragB frag_b;
-  static constexpr uint32_t MUL = 0x3F803F80;
-  static constexpr uint32_t ADD = 0xC300C300;
 
   frag_b[0] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&lo),
                       *reinterpret_cast<const nv_bfloat162*>(&MUL),
@@ -261,8 +258,8 @@ dequant<nv_bfloat16, vllm::kU4.id()>(int q) {
 // https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L125-L175
 //
 template <>
-__device__ inline typename ScalarType<half>::FragB
-dequant<half, vllm::kU8B128.id()>(int q) {
+__device__ inline typename ScalarType<half>::FragB dequant<half, 8>(
+    int q, typename ScalarType<half>::FragB& frag_b) {
   static constexpr uint32_t mask_for_elt_01 = 0x5250;
   static constexpr uint32_t mask_for_elt_23 = 0x5351;
   static constexpr uint32_t start_byte_for_fp16 = 0x64646464;
@@ -272,7 +269,6 @@ dequant<half, vllm::kU8B128.id()>(int q) {
 
   static constexpr uint32_t I8s_TO_F16s_MAGIC_NUM = 0x64806480;
 
-  typename ScalarType<half>::FragB frag_b;
   frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
                       *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
   frag_b[1] = __hsub2(*reinterpret_cast<half2*>(&hi),
@@ -282,9 +278,8 @@ dequant<half, vllm::kU8B128.id()>(int q) {
 
 template <>
 __device__ inline typename ScalarType<nv_bfloat16>::FragB
-dequant<nv_bfloat16, vllm::kU8B128.id()>(int q) {
-  typename ScalarType<nv_bfloat16>::FragB frag_b;
-
+dequant<nv_bfloat16, 8>(int q,
+                        typename ScalarType<nv_bfloat16>::FragB& frag_b) {
   float fp32_intermediates[4];
   uint32_t* fp32_intermediates_casted =
       reinterpret_cast<uint32_t*>(fp32_intermediates);
@@ -309,55 +304,6 @@ dequant<nv_bfloat16, vllm::kU8B128.id()>(int q) {
   return frag_b;
 }
 
-template <>
-__device__ inline typename ScalarType<half>::FragB
-dequant<half, vllm::kU8.id()>(int q) {
-  static constexpr uint32_t mask_for_elt_01 = 0x5250;
-  static constexpr uint32_t mask_for_elt_23 = 0x5351;
-  static constexpr uint32_t start_byte_for_fp16 = 0x64646464;
-
-  uint32_t lo = prmt<start_byte_for_fp16, mask_for_elt_01>(q);
-  uint32_t hi = prmt<start_byte_for_fp16, mask_for_elt_23>(q);
-
-  static constexpr uint32_t I8s_TO_F16s_MAGIC_NUM = 0x64006400;
-
-  typename ScalarType<half>::FragB frag_b;
-  frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
-                      *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
-  frag_b[1] = __hsub2(*reinterpret_cast<half2*>(&hi),
-                      *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
-  return frag_b;
-}
-
-template <>
-__device__ inline typename ScalarType<nv_bfloat16>::FragB
-dequant<nv_bfloat16, vllm::kU8.id()>(int q) {
-  typename ScalarType<nv_bfloat16>::FragB frag_b;
-
-  float fp32_intermediates[4];
-  uint32_t* fp32_intermediates_casted =
-      reinterpret_cast<uint32_t*>(fp32_intermediates);
-
-  static constexpr uint32_t fp32_base = 0x4B000000;
-  fp32_intermediates_casted[0] = __byte_perm(q, fp32_base, 0x7650);
-  fp32_intermediates_casted[1] = __byte_perm(q, fp32_base, 0x7652);
-  fp32_intermediates_casted[2] = __byte_perm(q, fp32_base, 0x7651);
-  fp32_intermediates_casted[3] = __byte_perm(q, fp32_base, 0x7653);
-
-  fp32_intermediates[0] -= 8388608.f;
-  fp32_intermediates[1] -= 8388608.f;
-  fp32_intermediates[2] -= 8388608.f;
-  fp32_intermediates[3] -= 8388608.f;
-
-  uint32_t* bf16_result_ptr = reinterpret_cast<uint32_t*>(&frag_b);
-  bf16_result_ptr[0] = __byte_perm(fp32_intermediates_casted[0],
-                                   fp32_intermediates_casted[1], 0x7632);
-  bf16_result_ptr[1] = __byte_perm(fp32_intermediates_casted[2],
-                                   fp32_intermediates_casted[3], 0x7632);
-
-  return frag_b;
-}
-
 // Multiply dequantized values by the corresponding quantization scale; used
 // only for grouped quantization.
 template <typename scalar_t>
@@ -369,6 +315,16 @@ __device__ inline void scale(typename ScalarType<scalar_t>::FragB& frag_b,
       ScalarType<scalar_t>::num2num2(reinterpret_cast<scalar_t*>(&frag_s)[i]);
   frag_b[0] = __hmul2(frag_b[0], s);
   frag_b[1] = __hmul2(frag_b[1], s);
+}
+
+template <typename scalar_t>
+__device__ inline void scale_and_sub(
+    typename ScalarType<scalar_t>::FragB& frag_b, scalar_t s, scalar_t zp) {
+  using scalar_t2 = typename ScalarType<scalar_t>::scalar_t2;
+  scalar_t2 s2 = ScalarType<scalar_t>::num2num2(s);
+  scalar_t2 zp2 = ScalarType<scalar_t>::num2num2(zp);
+  frag_b[0] = __hfma2(frag_b[0], s2, __hneg2(zp2));
+  frag_b[1] = __hfma2(frag_b[1], s2, __hneg2(zp2));
 }
 
 template <typename scalar_t>
@@ -469,6 +425,8 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                                       // threadblock
           const int thread_n_blocks,  // same for n dimension (output)
           const int thread_k_blocks,  // same for k dimension (reduction)
+          const bool m_block_size_8,  // whether m_block_size == 8
+                                      // only works when thread_m_blocks == 1
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
           const bool has_act_order,  // whether act_order is enabled
@@ -524,7 +482,8 @@ __global__ void Marlin(
   static constexpr auto w_type = vllm::ScalarType::from_id(w_type_id);
 
   constexpr int pack_factor = 32 / w_type.size_bits();
-  constexpr int moe_block_size = 16 * thread_m_blocks;
+  static_assert(thread_m_blocks == 1 || !m_block_size_8);
+  constexpr int moe_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
   const int group_size =
       (!has_act_order && group_blocks == -1) ? prob_k : prob_k / num_groups;
   const int scales_expert_stride = prob_n * prob_k / group_size / 8;
@@ -696,11 +655,13 @@ __global__ void Marlin(
 
       for (int index = threadIdx.x; index < num_int4s; index += threads) {
         int row = index / stride_n;
-        if (row >= block_num_valid_tokens) break;
-        int64_t sorted_row = block_sorted_ids[row];
-        int col = index % stride_n;
-        int64_t true_index = sorted_row * global_stride_n + off_stride_n + col;
-        C[true_index] = {0, 0, 0, 0};
+        if (row < block_num_valid_tokens) {
+          int64_t sorted_row = block_sorted_ids[row];
+          int col = index % stride_n;
+          int64_t true_index =
+              sorted_row * global_stride_n + off_stride_n + col;
+          C[true_index] = {0, 0, 0, 0};
+        }
       }
 
       ntile_id = 0;
@@ -844,7 +805,8 @@ __global__ void Marlin(
                 (threadIdx.x % a_gl_rd_delta_o);
   // Shared read index.
   int a_sh_rd =
-      a_sh_stride * ((threadIdx.x % 32) % 16) + (threadIdx.x % 32) / 16;
+      a_sh_stride * ((threadIdx.x % 32) % (16 / (m_block_size_8 ? 2 : 1))) +
+      (threadIdx.x % 32) / (16 / (m_block_size_8 ? 2 : 1));
   a_sh_rd += 2 * ((threadIdx.x / 32) / (thread_n_blocks / 4));
 
   int b_gl_rd = b_gl_stride * (threadIdx.x / b_sh_stride_threads) +
@@ -894,6 +856,9 @@ __global__ void Marlin(
   if constexpr (group_blocks != -1)
     s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
               (threadIdx.x % 32) / 4;
+  else if constexpr (group_blocks == -1 && (m_block_size_8 || has_zp))
+    s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
+              (threadIdx.x % 32) / 8;
   else
     s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
               (threadIdx.x % 32) % 4;
@@ -982,8 +947,8 @@ __global__ void Marlin(
   int sh_num_groups = -1;
   constexpr int sh_max_num_groups = 32;
 
-  auto fetch_scales_to_shared = [&](bool is_async, int first_group_id,
-                                    int last_group_id) {
+  auto fetch_act_order_scales_to_shared = [&](bool is_async, int first_group_id,
+                                              int last_group_id) {
     sh_first_group_id = first_group_id;
     sh_num_groups = last_group_id - first_group_id + 1;
 
@@ -1024,7 +989,9 @@ __global__ void Marlin(
       for (int i = 0; i < a_sh_wr_iters; i++) {
         int a_idx = a_gl_rd_delta_i * i + a_gl_rd + a_gl_rd_delta_o * a_off;
         int row = a_idx / a_gl_stride;
-        int64_t sorted_row = block_sorted_ids[row] / top_k;
+        int64_t sorted_row = 0;
+        if (!m_block_size_8 || row < 8)
+          sorted_row = block_sorted_ids[row] / top_k;
         int64_t true_idx = sorted_row * a_gl_stride + a_idx % a_gl_stride;
         cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]], &A[true_idx],
                        row < block_num_valid_tokens);
@@ -1061,11 +1028,11 @@ __global__ void Marlin(
           int4* sh_s_stage = sh_s + s_sh_stage * pipe;
 
           if constexpr (group_blocks >= thread_k_blocks) {
-            if (s_sh_wr_pred) {
-              cp_async4(&sh_s_stage[s_sh_wr], &scales_ptr[s_gl_rd]);
-            }
             // Only fetch scales if this tile starts a new group
-            if ((pipe + 1) % (group_blocks / thread_k_blocks) == 0) {
+            if (pipe % (group_blocks / thread_k_blocks) == 0) {
+              if (s_sh_wr_pred) {
+                cp_async4(&sh_s_stage[s_sh_wr], &scales_ptr[s_gl_rd]);
+              }
               s_gl_rd += s_gl_rd_delta;
             }
           } else {
@@ -1107,9 +1074,15 @@ __global__ void Marlin(
     cp_async_fence();
   };
 
-  auto fetch_zp_to_shared = [&]() {
+  auto fetch_col_zp_to_shared = [&]() {
     if (zp_sh_wr_pred) {
       cp_async4(&sh_zp[zp_sh_wr], &zp_ptr[zp_gl_rd]);
+    }
+  };
+
+  auto fetch_col_scale_to_shared = [&]() {
+    if (s_sh_wr_pred) {
+      cp_async4(&sh_s[s_sh_wr], &scales_ptr[s_gl_rd]);
     }
   };
 
@@ -1129,8 +1102,8 @@ __global__ void Marlin(
     int4* sh_a_stage = sh_a + a_sh_stage * pipe;
   #pragma unroll
     for (int i = 0; i < thread_m_blocks; i++)
-      ldsm4<scalar_t>(frag_a[k % 2][i],
-                      &sh_a_stage[a_sh_rd_trans[k % b_sh_wr_iters][i]]);
+      ldsm<m_block_size_8 ? 2 : 4, scalar_t>(
+          frag_a[k % 2][i], &sh_a_stage[a_sh_rd_trans[k % b_sh_wr_iters][i]]);
     int4* sh_b_stage = sh_b + b_sh_stage * pipe;
 
   #pragma unroll
@@ -1165,9 +1138,17 @@ __global__ void Marlin(
 
     if constexpr (!has_act_order) {
       // No act-order case
-      if constexpr (group_blocks != -1) {
+      if constexpr (group_blocks == -1) {
+        // load only when starting a new slice
+        if (k == 0 && full_pipe == 0) {
+          reinterpret_cast<int4*>(&frag_s)[0] = sh_s[s_sh_rd];
+          reinterpret_cast<int4*>(&frag_s)[1] = sh_s[s_sh_rd + 4];
+        }
+      } else if constexpr (group_blocks != -1) {
         if constexpr (group_blocks >= thread_k_blocks) {
-          int4* sh_s_stage = sh_s + s_sh_stage * pipe;
+          int4* sh_s_stage =
+              sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
+                                   (pipe / (group_blocks / thread_k_blocks)));
           reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
         } else {
           int warp_id = threadIdx.x / 32;
@@ -1269,8 +1250,12 @@ __global__ void Marlin(
       int pipe = full_pipe % stages;
 
       if constexpr (group_blocks == -1) {
-        for (int i = 0; i < num_ints_per_thread; i++) {
-          frag_qzp[k % 2][i] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd + i];
+        // load only when starting a new slice
+        if (k == 0 && full_pipe == 0) {
+  #pragma unroll
+          for (int i = 0; i < num_ints_per_thread; i++) {
+            frag_qzp[k % 2][i] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd + i];
+          }
         }
 
       } else if constexpr (group_blocks >= thread_k_blocks) {
@@ -1345,30 +1330,37 @@ __global__ void Marlin(
   };
 
   // Execute the actual tensor core matmul of a sub-tile.
+  bool is_first_matmul_in_slice = true;
   auto matmul = [&](int k) {
+    int k2 = k % 2;
+    const bool is_new_zp =
+        ((group_blocks != -1) && (group_blocks < thread_k_blocks || k == 0)) ||
+        (group_blocks == -1 && is_first_matmul_in_slice);
     if constexpr (has_zp && !is_zp_float) {
-      FragB frag_zp_0;
-      FragB frag_zp_1;
-      int zp_quant_0, zp_quant_1;
+      if (is_new_zp) {
+        if constexpr (group_blocks == -1) is_first_matmul_in_slice = false;
+        FragB frag_zp_0;
+        FragB frag_zp_1;
+        int zp_quant_0, zp_quant_1;
 
-      if constexpr (w_type.size_bits() == 4) {
-        zp_quant_0 = frag_qzp[k % 2][0];
-        zp_quant_1 = zp_quant_0 >> 8;
-      } else {
-        static_assert(w_type.size_bits() == 8);
-        zp_quant_0 = frag_qzp[k % 2][0];
-        zp_quant_1 = frag_qzp[k % 2][1];
+        if constexpr (w_type.size_bits() == 4) {
+          zp_quant_0 = frag_qzp[k2][0];
+          zp_quant_1 = zp_quant_0 >> 8;
+        } else {
+          static_assert(w_type.size_bits() == 8);
+          zp_quant_0 = frag_qzp[k2][0];
+          zp_quant_1 = frag_qzp[k2][1];
+        }
+
+        dequant<scalar_t, w_type.size_bits()>(zp_quant_0, frag_zp_0);
+        dequant<scalar_t, w_type.size_bits()>(zp_quant_1, frag_zp_1);
+
+        frag_zp[0] = frag_zp_0[0];
+        frag_zp[1] = frag_zp_0[1];
+        frag_zp[2] = frag_zp_1[0];
+        frag_zp[3] = frag_zp_1[1];
       }
-
-      frag_zp_0 = dequant<scalar_t, w_type_id>(zp_quant_0);
-      frag_zp_1 = dequant<scalar_t, w_type_id>(zp_quant_1);
-
-      frag_zp[0] = frag_zp_0[0];
-      frag_zp[1] = frag_zp_0[1];
-      frag_zp[2] = frag_zp_1[0];
-      frag_zp[3] = frag_zp_1[1];
     }
-
   // We have the m dimension as the inner loop in order to encourage overlapping
   // dequantization and matmul operations.
   #pragma unroll
@@ -1378,63 +1370,59 @@ __global__ void Marlin(
       int b_quant_0, b_quant_1;
 
       if constexpr (w_type.size_bits() == 4) {
-        b_quant_0 = frag_b_quant[k % 2][0][j];
+        b_quant_0 = frag_b_quant[k2][0][j];
         b_quant_1 = b_quant_0 >> 8;
       } else {
         static_assert(w_type.size_bits() == 8);
-        int* frag_b_quant_ptr = reinterpret_cast<int*>(frag_b_quant[k % 2]);
+        int* frag_b_quant_ptr = reinterpret_cast<int*>(frag_b_quant[k2]);
         b_quant_0 = frag_b_quant_ptr[j * 2 + 0];
         b_quant_1 = frag_b_quant_ptr[j * 2 + 1];
       }
 
-      frag_b0 = dequant<scalar_t, w_type_id>(b_quant_0);
-      frag_b1 = dequant<scalar_t, w_type_id>(b_quant_1);
-
-      // Apply zero-point to frag_b0
-      if constexpr (has_zp && !is_zp_float) {
-        sub_zp<scalar_t>(frag_b0, frag_zp[j], 0);
-      }
-
-      else if constexpr (has_zp && is_zp_float && group_blocks != -1) {
-        sub_zp<scalar_t>(frag_b0, frag_zpf[k % 2][j], 0);
-      }
+      dequant<scalar_t, w_type.size_bits()>(b_quant_0, frag_b0);
+      dequant<scalar_t, w_type.size_bits()>(b_quant_1, frag_b1);
 
       // Apply scale to frag_b0
       if constexpr (has_act_order) {
-        scale4<scalar_t>(frag_b0, act_frag_s[k % 2][0][j],
-                         act_frag_s[k % 2][1][j], act_frag_s[k % 2][2][j],
-                         act_frag_s[k % 2][3][j], 0);
-      } else {
-        if constexpr (group_blocks != -1) {
-          scale<scalar_t>(frag_b0, frag_s[k % 2][j], 0);
-        }
-      }
+        static_assert(group_blocks != -1);
+        scale4<scalar_t>(frag_b0, act_frag_s[k2][0][j], act_frag_s[k2][1][j],
+                         act_frag_s[k2][2][j], act_frag_s[k2][3][j], 0);
+        scale4<scalar_t>(frag_b1, act_frag_s[k2][0][j], act_frag_s[k2][1][j],
+                         act_frag_s[k][2][j], act_frag_s[k2][3][j], 1);
 
-      // Apply zero-point to frag_b1
-      if constexpr (has_zp && !is_zp_float) {
-        sub_zp<scalar_t>(frag_b1, frag_zp[j], 1);
-      }
-
-      else if constexpr (has_zp && is_zp_float && group_blocks != -1) {
-        sub_zp<scalar_t>(frag_b1, frag_zpf[k % 2][j], 1);
-      }
-
-      // Apply scale to frag_b1
-      if constexpr (has_act_order) {
-        scale4<scalar_t>(frag_b1, act_frag_s[k % 2][0][j],
-                         act_frag_s[k % 2][1][j], act_frag_s[k % 2][2][j],
-                         act_frag_s[k % 2][3][j], 1);
-
-      } else {
-        if constexpr (group_blocks != -1) {
-          scale<scalar_t>(frag_b1, frag_s[k % 2][j], 1);
-        }
+      } else if constexpr (has_zp && !is_zp_float && group_blocks == -1) {
+        int idx = (threadIdx.x / 4) % 2;
+        scalar_t2 s2 = Dtype::nums2num2(
+            reinterpret_cast<scalar_t*>(&frag_s[j / 2][j % 2 * 2 + 0])[idx],
+            reinterpret_cast<scalar_t*>(&frag_s[j / 2][j % 2 * 2 + 1])[idx]);
+        if (is_new_zp) frag_zp[j] = __hmul2(frag_zp[j], s2);
+        scale_and_sub<scalar_t>(frag_b0, s2.x, frag_zp[j].x);
+        scale_and_sub<scalar_t>(frag_b1, s2.y, frag_zp[j].y);
+      } else if constexpr (has_zp && !is_zp_float && group_blocks != -1) {
+        if (is_new_zp)
+          frag_zp[j] = __hmul2(frag_zp[j],
+                               *reinterpret_cast<scalar_t2*>(&frag_s[k2][j]));
+        scale_and_sub<scalar_t>(frag_b0, frag_s[k % 2][j][0].x, frag_zp[j].x);
+        scale_and_sub<scalar_t>(frag_b1, frag_s[k % 2][j][0].y, frag_zp[j].y);
+      } else if constexpr (has_zp && is_zp_float && group_blocks != -1) {
+        if (is_new_zp)
+          frag_zpf[k2][j] = __hmul2(
+              frag_zpf[k2][j], *reinterpret_cast<scalar_t2*>(&frag_s[k2][j]));
+        scale_and_sub<scalar_t>(frag_b0, frag_s[k2][j].x, frag_zpf[k2][j].x);
+        scale_and_sub<scalar_t>(frag_b1, frag_s[k2][j].y, frag_zpf[k2][j].y);
+      } else if constexpr (group_blocks != -1) {
+        scale<scalar_t>(frag_b0, frag_s[k2][j], 0);
+        scale<scalar_t>(frag_b1, frag_s[k2][j], 1);
       }
 
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
-        mma<scalar_t>(frag_a[k % 2][i], frag_b0, frag_c[i][j][0]);
-        mma<scalar_t>(frag_a[k % 2][i], frag_b1, frag_c[i][j][1]);
+        if constexpr (m_block_size_8) {
+          mma_trans<scalar_t>(frag_a[k2][i], frag_b0, frag_b1, frag_c[i][j][0]);
+        } else {
+          mma<scalar_t>(frag_a[k2][i], frag_b0, frag_c[i][j][0]);
+          mma<scalar_t>(frag_a[k2][i], frag_b1, frag_c[i][j][1]);
+        }
       }
     }
   };
@@ -1462,7 +1450,7 @@ __global__ void Marlin(
         for (int i = red_off; i > 0; i /= 2) {
           if (i <= red_idx && red_idx < 2 * i) {
   #pragma unroll
-            for (int j = 0; j < 4 * 2; j++) {
+            for (int j = 0; j < 4 * 2; j += (m_block_size_8 ? 2 : 1)) {
               int red_sh_wr =
                   red_sh_delta * j + (red_sh_rd - red_sh_stride * i);
               if (i < red_off) {
@@ -1482,7 +1470,7 @@ __global__ void Marlin(
         }
         if (red_idx == 0) {
   #pragma unroll
-          for (int i = 0; i < 4 * 2; i++) {
+          for (int i = 0; i < 4 * 2; i += (m_block_size_8 ? 2 : 1)) {
             float* c_rd =
                 reinterpret_cast<float*>(&sh_red[red_sh_delta * i + red_sh_rd]);
   #pragma unroll
@@ -1525,10 +1513,11 @@ __global__ void Marlin(
       for (int i = 0; i < thread_m_blocks * 4; i++) {
         int c_idx =
             c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
-        int64_t sorted_row = block_sorted_ids[c_idx / c_gl_stride];
-        int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
-        if (c_idx / c_gl_stride < block_num_valid_tokens)
+        if (c_idx / c_gl_stride < block_num_valid_tokens) {
+          int64_t sorted_row = block_sorted_ids[c_idx / c_gl_stride];
+          int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
           sh_red[c_sh_wr + c_sh_wr_delta * i] = C[true_idx];
+        }
       }
     }
 
@@ -1554,9 +1543,11 @@ __global__ void Marlin(
 
         int c_idx =
             c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
-        int64_t sorted_row = block_sorted_ids[c_idx / c_gl_stride];
-        int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
-        if (c_idx / c_gl_stride < block_num_valid_tokens) C[true_idx] = c;
+        if (c_idx / c_gl_stride < block_num_valid_tokens) {
+          int64_t sorted_row = block_sorted_ids[c_idx / c_gl_stride];
+          int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
+          C[true_idx] = c;
+        }
       }
     }
   };
@@ -1618,9 +1609,17 @@ __global__ void Marlin(
     int c_gl_wr = c_gl_stride * (threadIdx.x / (2 * thread_n_blocks)) +
                   (threadIdx.x % (2 * thread_n_blocks));
     c_gl_wr += (2 * thread_n_blocks) * slice_col;
-    int c_sh_wr =
-        (4 * c_sh_stride) * ((threadIdx.x % 32) / 4) + (threadIdx.x % 32) % 4;
-    c_sh_wr += 32 * (threadIdx.x / 32);
+    int c_sh_wr;
+    if constexpr (m_block_size_8) {
+      c_sh_wr = (8 * c_sh_stride) * ((threadIdx.x % 32) % 4 * 2) +
+                (threadIdx.x % 32) / 4;
+      c_sh_wr += 64 * (threadIdx.x / 32);
+    } else {
+      c_sh_wr =
+          (4 * c_sh_stride) * ((threadIdx.x % 32) / 4) + (threadIdx.x % 32) % 4;
+      c_sh_wr += 32 * (threadIdx.x / 32);
+    }
+
     int c_sh_rd = c_sh_stride * (threadIdx.x / (2 * thread_n_blocks)) +
                   (threadIdx.x % (2 * thread_n_blocks));
 
@@ -1633,11 +1632,16 @@ __global__ void Marlin(
       // For per-column quantization we finally apply the scale here (only for
       // 4-bit)
       if constexpr (!has_act_order && group_blocks == -1 &&
-                    w_type.size_bits() == 4) {
+                    w_type.size_bits() == 4 && !has_zp) {
         res = __hmul2(res, s[0]);
       }
 
-      ((scalar_t2*)sh_red)[idx] = res;
+      if constexpr (m_block_size_8) {
+        ((scalar_t*)sh_red)[idx] = res.x;
+        ((scalar_t*)sh_red)[idx + 8 * c_sh_stride] = res.y;
+      } else {
+        ((scalar_t2*)sh_red)[idx] = res;
+      }
     };
 
     if (threadIdx.x / 32 < thread_n_blocks / 4) {
@@ -1645,15 +1649,23 @@ __global__ void Marlin(
       for (int i = 0; i < thread_m_blocks; i++) {
   #pragma unroll
         for (int j = 0; j < 4; j++) {
-          int wr = c_sh_wr + 8 * j;
-          write(wr + (4 * c_sh_stride) * 0 + 0, frag_c[i][j][0][0],
-                frag_c[i][j][0][1], frag_s[j / 2][2 * (j % 2) + 0]);
-          write(wr + (4 * c_sh_stride) * 8 + 0, frag_c[i][j][0][2],
-                frag_c[i][j][0][3], frag_s[j / 2][2 * (j % 2) + 0]);
-          write(wr + (4 * c_sh_stride) * 0 + 4, frag_c[i][j][1][0],
-                frag_c[i][j][1][1], frag_s[j / 2][2 * (j % 2) + 1]);
-          write(wr + (4 * c_sh_stride) * 8 + 4, frag_c[i][j][1][2],
-                frag_c[i][j][1][3], frag_s[j / 2][2 * (j % 2) + 1]);
+          if constexpr (m_block_size_8) {
+            int wr = c_sh_wr + 16 * j;
+            write(wr, frag_c[i][j][0][0], frag_c[i][j][0][1],
+                  frag_s[j / 2][2 * (j % 2) + 0]);
+            write(wr + 8, frag_c[i][j][0][2], frag_c[i][j][0][3],
+                  frag_s[j / 2][2 * (j % 2) + 1]);
+          } else {
+            int wr = c_sh_wr + 8 * j;
+            write(wr + (4 * c_sh_stride) * 0 + 0, frag_c[i][j][0][0],
+                  frag_c[i][j][0][1], frag_s[j / 2][2 * (j % 2) + 0]);
+            write(wr + (4 * c_sh_stride) * 8 + 0, frag_c[i][j][0][2],
+                  frag_c[i][j][0][3], frag_s[j / 2][2 * (j % 2) + 0]);
+            write(wr + (4 * c_sh_stride) * 0 + 4, frag_c[i][j][1][0],
+                  frag_c[i][j][1][1], frag_s[j / 2][2 * (j % 2) + 1]);
+            write(wr + (4 * c_sh_stride) * 8 + 4, frag_c[i][j][1][2],
+                  frag_c[i][j][1][3], frag_s[j / 2][2 * (j % 2) + 1]);
+          }
         }
         c_sh_wr += 16 * (4 * c_sh_stride);
       }
@@ -1665,9 +1677,9 @@ __global__ void Marlin(
          i < div_ceil(16 * thread_m_blocks, threads / (2 * thread_n_blocks));
          i++) {
       int row = c_gl_wr / c_gl_stride;
-      int64_t sorted_row = block_sorted_ids[row];
-      int64_t true_idx = sorted_row * c_gl_stride + c_gl_wr % c_gl_stride;
       if (row < block_num_valid_tokens) {
+        int64_t sorted_row = block_sorted_ids[row];
+        int64_t true_idx = sorted_row * c_gl_stride + c_gl_wr % c_gl_stride;
         scalar_t2 topk_weight_score;
         if (mul_topk_weights)
           topk_weight_score =
@@ -1708,12 +1720,14 @@ __global__ void Marlin(
         if (last_g_idx >= prob_k) {
           last_g_idx = prob_k - 1;
         }
-        fetch_scales_to_shared(true, g_idx[slice_k_start], g_idx[last_g_idx]);
+        fetch_act_order_scales_to_shared(true, g_idx[slice_k_start],
+                                         g_idx[last_g_idx]);
       }
 
       if constexpr (has_zp && !is_zp_float && group_blocks == -1) {
         if (i == 0) {
-          fetch_zp_to_shared();
+          fetch_col_zp_to_shared();
+          fetch_col_scale_to_shared();
         }
       }
       fetch_to_shared(i, i, i < slice_iters);
@@ -1773,7 +1787,7 @@ __global__ void Marlin(
       }
       int last_group_id = g_idx[last_g_idx];
       if (last_group_id >= sh_first_group_id + sh_num_groups) {
-        fetch_scales_to_shared(false, first_group_id, last_group_id);
+        fetch_act_order_scales_to_shared(false, first_group_id, last_group_id);
         __syncthreads();
       }
     }
@@ -1786,39 +1800,31 @@ __global__ void Marlin(
       bool last = slice_idx == slice_count - 1;
       // For per-column scales, we only fetch them here in the final step before
       // write-out
-      if constexpr (!has_act_order && group_blocks == -1) {
-        if constexpr (w_type.size_bits() == 8) {
+      if constexpr (!has_act_order && group_blocks == -1 && !has_zp) {
+        if (w_type.size_bits() == 8 || (last || use_atomic_add)) {
           if (s_sh_wr_pred) {
             cp_async4(&sh_s[s_sh_wr], &scales_ptr[s_gl_rd]);
           }
           cp_async_fence();
-        } else {
-          if (last || use_atomic_add) {
-            if (s_sh_wr_pred) {
-              cp_async4(&sh_s[s_sh_wr], &scales_ptr[s_gl_rd]);
-            }
-            cp_async_fence();
-          }
         }
       }
 
       thread_block_reduce();
-      if constexpr (!has_act_order && group_blocks == -1) {
-        if constexpr (w_type.size_bits() == 8) {
+      if constexpr (!has_act_order && group_blocks == -1 && !has_zp) {
+        if (w_type.size_bits() == 8 || (last || use_atomic_add)) {
           cp_async_wait<0>();
           __syncthreads();
           if (threadIdx.x / 32 < thread_n_blocks / 4) {
             reinterpret_cast<int4*>(&frag_s)[0] = sh_s[s_sh_rd + 0];
             reinterpret_cast<int4*>(&frag_s)[1] = sh_s[s_sh_rd + 4];
-          }
-
-        } else {
-          if (last || use_atomic_add) {
-            cp_async_wait<0>();
-            __syncthreads();
-            if (threadIdx.x / 32 < thread_n_blocks / 4) {
-              reinterpret_cast<int4*>(&frag_s)[0] = sh_s[s_sh_rd + 0];
-              reinterpret_cast<int4*>(&frag_s)[1] = sh_s[s_sh_rd + 4];
+            if constexpr (m_block_size_8) {
+              int idx = (threadIdx.x / 4) % 2;
+              scalar_t2* frag_s_half2 = reinterpret_cast<scalar_t2*>(frag_s);
+  #pragma unroll
+              for (int i = 0; i < 8; i++) {
+                frag_s_half2[i] = Dtype::num2num2(
+                    reinterpret_cast<scalar_t*>(&frag_s_half2[i])[idx]);
+              }
             }
           }
         }
@@ -1828,7 +1834,7 @@ __global__ void Marlin(
       // that converts the fp32 results to fp16 (so that we avoid possible
       // overflow in fp16)
       if constexpr (!has_act_order && group_blocks == -1 &&
-                    w_type.size_bits() == 8) {
+                    w_type.size_bits() == 8 && !has_zp) {
         if (threadIdx.x / 32 < thread_n_blocks / 4) {
   #pragma unroll
           for (int i = 0; i < thread_m_blocks; i++) {
@@ -1839,14 +1845,16 @@ __global__ void Marlin(
                   frag_s[j / 2][2 * (j % 2) + 0]);
               scale_float<scalar_t>(
                   reinterpret_cast<float*>(&frag_c[i][j][0][2]),
-                  frag_s[j / 2][2 * (j % 2) + 0]);
+                  frag_s[j / 2][2 * (j % 2) + (m_block_size_8 ? 1 : 0)]);
 
-              scale_float<scalar_t>(
-                  reinterpret_cast<float*>(&frag_c[i][j][1][0]),
-                  frag_s[j / 2][2 * (j % 2) + 1]);
-              scale_float<scalar_t>(
-                  reinterpret_cast<float*>(&frag_c[i][j][1][2]),
-                  frag_s[j / 2][2 * (j % 2) + 1]);
+              if constexpr (!m_block_size_8) {
+                scale_float<scalar_t>(
+                    reinterpret_cast<float*>(&frag_c[i][j][1][0]),
+                    frag_s[j / 2][2 * (j % 2) + 1]);
+                scale_float<scalar_t>(
+                    reinterpret_cast<float*>(&frag_c[i][j][1][2]),
+                    frag_s[j / 2][2 * (j % 2) + 1]);
+              }
             }
           }
         }
@@ -1870,6 +1878,7 @@ __global__ void Marlin(
       slice_row = 0;
       slice_col_par++;
       slice_col++;
+      is_first_matmul_in_slice = true;
       init_slice();
       if (slice_iters) {
         a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) +

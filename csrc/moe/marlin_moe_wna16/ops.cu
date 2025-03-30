@@ -144,23 +144,25 @@ __global__ void permute_cols_kernel(
 }
 
   #define __CALL_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, \
-                    HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS, NUM_THREADS,          \
-                    IS_ZP_FLOAT)                                               \
+                    M_BLOCK_SIZE_8, HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS,       \
+                    NUM_THREADS, IS_ZP_FLOAT)                                  \
     else if (q_type == W_TYPE && thread_m_blocks == THREAD_M_BLOCKS &&         \
              thread_n_blocks == THREAD_N_BLOCKS &&                             \
              thread_k_blocks == THREAD_K_BLOCKS &&                             \
+             m_block_size_8 == M_BLOCK_SIZE_8 &&                               \
              has_act_order == HAS_ACT_ORDER && has_zp == HAS_ZP &&             \
              group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS &&     \
              is_zp_float == IS_ZP_FLOAT) {                                     \
       if constexpr (!IS_ZP_FLOAT || std::is_same<scalar_t, half>::value) {     \
         cudaFuncSetAttribute(                                                  \
             Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,        \
-                   THREAD_N_BLOCKS, THREAD_K_BLOCKS, pipe_stages,              \
-                   HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>,          \
+                   THREAD_N_BLOCKS, THREAD_K_BLOCKS, M_BLOCK_SIZE_8,           \
+                   pipe_stages, HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS,           \
+                   IS_ZP_FLOAT>,                                               \
             cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);      \
         Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,            \
-               THREAD_N_BLOCKS, THREAD_K_BLOCKS, pipe_stages, HAS_ACT_ORDER,   \
-               HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>                              \
+               THREAD_N_BLOCKS, THREAD_K_BLOCKS, M_BLOCK_SIZE_8, pipe_stages,  \
+               HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>               \
             <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                 \
                 A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,      \
                 sorted_token_ids_ptr, expert_ids_ptr,                          \
@@ -225,7 +227,7 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
   }
 }
 
-bool is_valid_cache_size(thread_config_t const& th_config, int moe_block_size,
+bool is_valid_cache_size(thread_config_t const& th_config, int thread_m_blocks,
                          int prob_m, int prob_n, int prob_k, int num_bits,
                          int scales_cache_size, int max_shared_mem) {
   int pack_factor = 32 / num_bits;
@@ -237,7 +239,7 @@ bool is_valid_cache_size(thread_config_t const& th_config, int moe_block_size,
   int b_size = (tb_k * tb_n / pack_factor) * 4;
 
   // Get A size
-  int tb_max_m = moe_block_size;
+  int tb_max_m = thread_m_blocks * 16;
   int a_size = (tb_max_m * tb_k) * 2;
 
   float pipe_size = (a_size + b_size) * pipe_stages;
@@ -250,7 +252,7 @@ bool is_valid_cache_size(thread_config_t const& th_config, int moe_block_size,
   return pipe_size + reduce_size < 0.95f * (max_shared_mem - scales_cache_size);
 }
 
-bool is_valid_config(thread_config_t const& th_config, int moe_block_size,
+bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
                      int prob_m, int prob_n, int prob_k, int num_bits,
                      int group_size, bool has_act_order, bool is_k_full,
                      int max_shared_mem) {
@@ -281,7 +283,7 @@ bool is_valid_config(thread_config_t const& th_config, int moe_block_size,
                             group_size, has_act_order, is_k_full);
 
   // Check that pipeline fits into cache
-  if (!is_valid_cache_size(th_config, moe_block_size, prob_m, prob_n, prob_k,
+  if (!is_valid_cache_size(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
                            num_bits, scales_cache_size, max_shared_mem)) {
     return false;
   }
@@ -290,12 +292,12 @@ bool is_valid_config(thread_config_t const& th_config, int moe_block_size,
 }
 
 thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
-                                        int moe_block_size, int num_bits,
+                                        int thread_m_blocks, int num_bits,
                                         int group_size, bool has_act_order,
                                         bool is_k_full, int max_shared_mem) {
-  if (moe_block_size <= 16) {
+  if (thread_m_blocks <= 1) {
     for (auto th_config : small_batch_thread_configs) {
-      if (is_valid_config(th_config, moe_block_size, prob_m, prob_n, prob_k,
+      if (is_valid_config(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
                           num_bits, group_size, has_act_order, is_k_full,
                           max_shared_mem)) {
         return th_config;
@@ -303,7 +305,7 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
     }
   } else {
     for (auto th_config : large_batch_thread_configs) {
-      if (is_valid_config(th_config, moe_block_size, prob_m, prob_n, prob_k,
+      if (is_valid_config(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
                           num_bits, group_size, has_act_order, is_k_full,
                           max_shared_mem)) {
         return th_config;
@@ -313,97 +315,119 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
   return thread_config_t{-1, -1, -1};
 }
 
-  #define GPTQ_CALL_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS,   \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS,   \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS,   \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS,   \
-              false)                                                        \
-                                                                            \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS, \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS,  \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS,  \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS,  \
-              false)                                                        \
-                                                                            \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS, \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS,  \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS,  \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS,  \
-              false)                                                        \
-                                                                            \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS, \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS,  \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS,  \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS,  \
-              false)                                                        \
-                                                                            \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS, \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS,  \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS,  \
-              false)                                                        \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS,  \
-              false)
+  #define GPTQ_CALL_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, true, false, 0,    \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, false, 0,   \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, false, 0,   \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, false, 0,   \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, false, 0,   \
+              NUM_THREADS, false)                                     \
+                                                                      \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, false, -1,  \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, false, 2,   \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, false, 4,   \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, false, 8,   \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, false, -1, \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, false, 2,  \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, false, 4,  \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, false, 8,  \
+              NUM_THREADS, false)                                     \
+                                                                      \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, false, -1, \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, false, 2,  \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, false, 4,  \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, false, 8,  \
+              NUM_THREADS, false)                                     \
+                                                                      \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, false, -1, \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, false, 2,  \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, false, 4,  \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, false, 8,  \
+              NUM_THREADS, false)                                     \
+                                                                      \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, false, -1, \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, false, 2,  \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, false, 4,  \
+              NUM_THREADS, false)                                     \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, false, 8,  \
+              NUM_THREADS, false)
 
-  #define AWQ_CALL_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS, \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS,  \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS,  \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS,  \
-              false)                                                       \
-                                                                           \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS, \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS,  \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS,  \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS,  \
-              false)                                                       \
-                                                                           \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS, \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS,  \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS,  \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS,  \
-              false)                                                       \
-                                                                           \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS, \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS,  \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS,  \
-              false)                                                       \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS, false)
+  #define AWQ_CALL_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, -1,  \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, 2,   \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, 4,   \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, 8,   \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, -1, \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, 2,  \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, 4,  \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, 8,  \
+              NUM_THREADS, false)                                    \
+                                                                     \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, -1, \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, 2,  \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, 4,  \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, 8,  \
+              NUM_THREADS, false)                                    \
+                                                                     \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, true, -1, \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, true, 2,  \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, true, 4,  \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, true, 8,  \
+              NUM_THREADS, false)                                    \
+                                                                     \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, true, -1, \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, true, 2,  \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, true, 4,  \
+              NUM_THREADS, false)                                    \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, true, 8,  \
+              NUM_THREADS, false)
 
   // We currently have 4-bit models only with group_blocks == 4
-  #define HQQ_CALL_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)            \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, \
-              true)                                                       \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, \
-              true)                                                       \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, \
-              true)                                                       \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, true)
+  #define HQQ_CALL_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)      \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, 4,  \
+              NUM_THREADS, true)                                    \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, 4, \
+              NUM_THREADS, true)                                    \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, 4, \
+              NUM_THREADS, true)                                    \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, true, 4, \
+              NUM_THREADS, true)                                    \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, true, 4, \
+              NUM_THREADS, true)
 
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
@@ -417,7 +441,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                int dev, cudaStream_t stream, int thread_k, int thread_n,
                int sms, bool use_atomic_add, bool use_fp32_reduce,
                bool is_zp_float) {
-  int thread_m_blocks = moe_block_size / 16;
+  int thread_m_blocks = div_ceil(moe_block_size, 16);
+  bool m_block_size_8 = moe_block_size == 8;
+
   if (has_zp) {
     TORCH_CHECK(
         q_type == vllm::kU4 || q_type == vllm::kU8,
@@ -449,15 +475,15 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
     thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
   } else {
     // Auto config
-    thread_tfg = determine_thread_config(prob_m, prob_n, prob_k, moe_block_size,
-                                         num_bits, group_size, has_act_order,
-                                         is_k_full, max_shared_mem);
+    thread_tfg = determine_thread_config(
+        prob_m, prob_n, prob_k, thread_m_blocks, num_bits, group_size,
+        has_act_order, is_k_full, max_shared_mem);
   }
 
-  TORCH_CHECK(is_valid_config(thread_tfg, moe_block_size, prob_m, prob_n,
+  TORCH_CHECK(is_valid_config(thread_tfg, thread_m_blocks, prob_m, prob_n,
                               prob_k, num_bits, group_size, has_act_order,
                               is_k_full, max_shared_mem),
-              "Invalid thread config: moe_block_size = ", moe_block_size,
+              "Invalid thread config: thread_m_blocks = ", thread_m_blocks,
               ", thread_k = ", thread_tfg.thread_k,
               ", thread_n = ", thread_tfg.thread_n,
               ", num_threads = ", thread_tfg.num_threads, " for MKN = [",
@@ -519,9 +545,11 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 
   if (has_act_order) {
     // Permute A columns
-    auto kernel = permute_cols_kernel<16>;
-    if (moe_block_size == 16) {
-    } else if (moe_block_size == 32)
+    auto kernel = permute_cols_kernel<8>;
+    if (moe_block_size == 8) {
+    } else if (moe_block_size == 16)
+      kernel = permute_cols_kernel<16>;
+    else if (moe_block_size == 32)
       kernel = permute_cols_kernel<32>;
     else if (moe_block_size == 48)
       kernel = permute_cols_kernel<48>;
@@ -597,6 +625,13 @@ torch::Tensor moe_wna16_marlin_gemm(
   vllm::ScalarType const b_q_type = vllm::ScalarType::from_id(b_q_type_id);
   int pack_factor = 32 / b_q_type.size_bits();
 
+  if (moe_block_size != 8) {
+    TORCH_CHECK(moe_block_size % 16 == 0,
+                "unsupported moe_block_size=", moe_block_size);
+    TORCH_CHECK(moe_block_size >= 16 && moe_block_size <= 64,
+                "unsupported moe_block_size=", moe_block_size);
+  }
+
   // Verify A
   TORCH_CHECK(a.size(0) == size_m, "Shape mismatch: a.size(0) = ", a.size(0),
               ", size_m = ", size_m);
@@ -662,9 +697,10 @@ torch::Tensor moe_wna16_marlin_gemm(
   auto options_fp32 =
       torch::TensorOptions().dtype(at::kFloat).device(a.device());
   if (use_fp32_reduce && !use_atomic_add) {
-    const long max_c_tmp_size =
+    long max_c_tmp_size =
         min(((long)size_n * sorted_token_ids.size(0)),
             (long)(sms * moe_block_size * MARLIN_NAMESPACE_NAME::max_thread_n));
+    if (moe_block_size == 8) max_c_tmp_size *= 2;
     c_tmp = torch::empty({max_c_tmp_size}, options_fp32);
   } else {
     c_tmp = torch::empty({0}, options_fp32);

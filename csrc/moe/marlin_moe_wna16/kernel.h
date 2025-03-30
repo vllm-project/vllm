@@ -29,6 +29,8 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                                       // threadblock
           const int thread_n_blocks,  // same for n dimension (output)
           const int thread_k_blocks,  // same for k dimension (reduction)
+          const bool m_block_size_8,  // whether m_block_size == 8
+                                      // only works when thread_m_blocks == 1
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
           const bool has_act_order,  // whether act_order is enabled
