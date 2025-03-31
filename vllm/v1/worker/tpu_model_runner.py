@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import bisect
+import gc
 import time
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
@@ -625,7 +626,8 @@ class TPUModelRunner:
                 assert req_id in self.encoder_cache
                 assert i in self.encoder_cache[req_id]
                 encoder_output = self.encoder_cache[req_id][i]
-                # TODO dynamic shape of an on device tensor will recompile
+                # TODO (NickLucche) Dynamic shape will trigger recompilation.
+                # To be addressed separately at the scheduler level.
                 encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
 
@@ -878,16 +880,14 @@ class TPUModelRunner:
                 dummy_data_modality, max_num_mm_items)
 
             # Run multimodal encoder.
-            # NOTE This will not compile the whole _execute_encoder, which adds
-            # some overhead to the graph and will require recompilation
+            # Isolate encoder graph from post-processing to minimize
+            # impact of recompilation until it's fixed.
             start = time.perf_counter()
             xm.mark_step()
-            # NOTE (NickLucche): For CLIP-based encoders, the graph breaks at
-            # F.scaled_dot_product_attention in attn
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
                 **batched_dummy_mm_inputs)
             xm.mark_step()
-            xm.wait_device_ops()  # isolate encoder graph
+            xm.wait_device_ops()
             end = time.perf_counter()
             logger.info(
                 "Multimodal Encoder profiling finished in in %.2f [secs].",
@@ -932,7 +932,8 @@ class TPUModelRunner:
                 xm.mark_step()
                 if num_items >= max_items_by_mode:
                     break
-                num_items *= 2
+                # No padding for MM encoder just yet.
+                num_items += 1
 
             xm.wait_device_ops()
 
@@ -1030,10 +1031,9 @@ class TPUModelRunner:
             self.kv_caches)
 
     def _get_mm_dummy_batch(self, modality: str, batch_size: int):
-        dummy_request_data = self.input_registry.dummy_data_for_profiling(
+        dummy_request_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
-            mm_registry=self.mm_registry,
         )
         dummy_mm_data = dummy_request_data.multi_modal_data
 

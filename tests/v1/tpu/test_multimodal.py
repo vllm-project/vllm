@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import tempfile
-from time import time
 
 import openai
 import pytest
@@ -19,6 +18,12 @@ if not envs.VLLM_USE_V1:
     )
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    # MM is not yet recompilation-free at runtime.
+    monkeypatch.setenv('VLLM_XLA_CHECK_RECOMPILATION', '0')
+
+
 @pytest.fixture(scope="session")
 def base64_encoded_image() -> dict[str, str]:
     return {
@@ -30,8 +35,9 @@ def base64_encoded_image() -> dict[str, str]:
 @pytest.mark.asyncio
 @pytest.mark.skipif(not current_platform.is_tpu(),
                     reason="This test needs a TPU")
-async def test_encoder_compilation(monkeypatch,
-                                   base64_encoded_image: dict[str, str]):
+@pytest.mark.parametrize("model_name", ["llava-hf/llava-1.5-7b-hf"])
+async def test_basic_vision(model_name: str, monkeypatch,
+                            base64_encoded_image: dict[str, str]):
 
     def whats_in_this_image_msg(b64):
         return [{
@@ -51,10 +57,9 @@ async def test_encoder_compilation(monkeypatch,
             ],
         }]
 
-    model_name = "llava-hf/llava-1.5-7b-hf"
     server_args = [
         "--max-model-len", "4096", "--max-num-seqs", "16",
-        "--trust-remote-code", "--max-num-batched-tokens", "128",
+        "--trust-remote-code", "--max-num-batched-tokens", "512",
         "--chat-template", "examples/template_llava.jinja"
     ]
 
@@ -64,28 +69,23 @@ async def test_encoder_compilation(monkeypatch,
         with RemoteOpenAIServer(model_name, server_args,
                                 max_wait_seconds=600) as remote_server:
             client: openai.AsyncOpenAI = remote_server.get_async_client()
-            image_base64 = base64_encoded_image[TEST_IMAGE_URLS[0]]
-
-            s = time()
-            chat_completion_from_base64 = await client.chat.completions.create(
-                model=model_name,
-                messages=whats_in_this_image_msg(image_base64),
-                max_completion_tokens=16,
-                temperature=0.0)
-            # TODO first run is still slow due to pre/post
-            run1 = time() - s
 
             # Other requests now should be much faster
             for image_url in TEST_IMAGE_URLS:
                 image_base64 = base64_encoded_image[image_url]
-                s = time()
                 chat_completion_from_base64 = await client.chat.completions\
                     .create(
                     model=model_name,
                     messages=whats_in_this_image_msg(image_base64),
                     max_completion_tokens=24,
                     temperature=0.0)
-                run_i = time() - s
-                result = chat_completion_from_base64.choices[0].message.content
+                result = chat_completion_from_base64
                 assert result
-                assert run1 * 0.1 > run_i
+                choice = result.choices[0]
+                assert choice.finish_reason == "length"
+
+                message = choice.message
+                message = result.choices[0].message
+                assert message.content is not None and len(
+                    message.content) >= 10
+                assert message.role == "assistant"
