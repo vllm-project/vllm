@@ -37,6 +37,8 @@ from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from .utils import sanity_check_mm_encoder_outputs
+
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -511,6 +513,11 @@ class TPUModelRunner:
             # depending on the input multimodal items.
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
+
+            sanity_check_mm_encoder_outputs(
+                curr_group_outputs,
+                expected_num_items=len(grouped_mm_inputs),
+            )
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
