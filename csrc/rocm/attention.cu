@@ -1596,7 +1596,7 @@ void paged_attention_custom_launcher(
     const std::optional<torch::Tensor>& query_start_loc, int max_context_len,
     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
     torch::Tensor& v_scale) {
-  int num_seqs = (query_start_loc ? query_start_loc->size(0) : query.size(0));
+  int num_seqs = block_tables.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
   int max_num_blocks_per_seq = block_tables.size(1);

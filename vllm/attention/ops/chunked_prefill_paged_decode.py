@@ -41,26 +41,26 @@ def kernel_paged_attention_2d(
         num_query_heads: tl.constexpr,  # int
         num_queries_per_kv: tl.constexpr,  # int
         num_queries_per_kv_padded: tl.constexpr,  # int
-        block_table_stride: tl.constexpr,  # int
-        query_stride_0: tl.constexpr,  # int
-        query_stride_1: tl.constexpr,  # int, should be equal to head_size
-        output_stride_0: tl.constexpr,  # int
-        output_stride_1: tl.constexpr,  # int, should be equal to head_size
+        block_table_stride: tl.int64,  # int
+        query_stride_0: tl.int64,  # int
+        query_stride_1: tl.int64,  # int, should be equal to head_size
+        output_stride_0: tl.int64,  # int
+        output_stride_1: tl.int64,  # int, should be equal to head_size
         BLOCK_SIZE: tl.constexpr,  # int
         HEAD_SIZE: tl.constexpr,  # int
         HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
         USE_ALIBI_SLOPES: tl.constexpr,  # bool
         SLIDING_WINDOW: tl.constexpr,  # int
         x: tl.constexpr,  # int
-        stride_k_cache_0: tl.constexpr,  # int
-        stride_k_cache_1: tl.constexpr,  # int
-        stride_k_cache_2: tl.constexpr,  # int
-        stride_k_cache_3: tl.constexpr,  # int
-        stride_k_cache_4: tl.constexpr,  # int
-        stride_v_cache_0: tl.constexpr,  # int
-        stride_v_cache_1: tl.constexpr,  # int
-        stride_v_cache_2: tl.constexpr,  # int
-        stride_v_cache_3: tl.constexpr,  # int
+        stride_k_cache_0: tl.int64,  # int
+        stride_k_cache_1: tl.int64,  # int
+        stride_k_cache_2: tl.int64,  # int
+        stride_k_cache_3: tl.int64,  # int
+        stride_k_cache_4: tl.int64,  # int
+        stride_v_cache_0: tl.int64,  # int
+        stride_v_cache_1: tl.int64,  # int
+        stride_v_cache_2: tl.int64,  # int
+        stride_v_cache_3: tl.int64,  # int
         filter_by_query_len: tl.constexpr,  # bool
         query_start_len_ptr,  # [num_seqs+1]
 ):
