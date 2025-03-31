@@ -10,9 +10,9 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import requests
+import torch
 from openai import BadRequestError
 
-import torch
 
 from ...utils import RemoteOpenAIServer
 from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
