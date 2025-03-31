@@ -11,8 +11,6 @@ import aiohttp
 import zmq
 from quart import Quart, make_response, request
 
-from vllm.logger import init_logger
-
 prefill_instances: dict[str, str] = {}  # http_address: zmq_address
 decode_instances: dict[str, str] = {}  # http_address: zmq_address
 
@@ -44,7 +42,7 @@ def _listen_for_register(poller, router_socket):
                         data["http_address"]] = data["zmq_address"]
             else:
                 print("Unexpected, Received message from %s, data: %s",
-                            remote_address, data)
+                      remote_address, data)
 
 
 def start_service_discovery(hostname, port):
@@ -107,18 +105,22 @@ async def handle_request():
         global prefill_instances
         global prefill_cv
         with prefill_cv:
-            prefill_address, prefill_zmq_address = random.choice(list(prefill_instances.items()))
-            print("handle_request, prefill_address: %s, zmq_address: %s", prefill_address,
-                        prefill_zmq_address)
+            prefill_address, prefill_zmq_address = random.choice(
+                list(prefill_instances.items()))
+            print("handle_request, prefill_address: %s, zmq_address: %s",
+                  prefill_address, prefill_zmq_address)
 
         global decode_instances
         global decode_cv
         with decode_cv:
-            decode_address, decode_zmq_address = random.choice(list(decode_instances.items()))
-            print("handle_request, decode_address: %s, zmq_address: %s", decode_address,
-                        decode_zmq_address)
+            decode_address, decode_zmq_address = random.choice(
+                list(decode_instances.items()))
+            print("handle_request, decode_address: %s, zmq_address: %s",
+                  decode_address, decode_zmq_address)
 
-        request_id = f"___prefill_address_{prefill_zmq_address}___decode_address_{decode_zmq_address}_{random_uuid()}"
+        request_id = (
+            f"___prefill_address_{prefill_zmq_address}___decode_address_{decode_zmq_address}_{random_uuid()}"
+        )
 
         # finish prefill
         async for _ in forward_request(
