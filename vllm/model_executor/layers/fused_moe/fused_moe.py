@@ -1877,8 +1877,7 @@ def deep_gemm_moe_fp8(
     # https://github.com/vllm-project/vllm/issues/5938
     CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
 
-    use_dg = _valid_deep_gemm(hidden_states, w1, w2)
-    assert use_dg
+    assert _valid_deep_gemm(hidden_states, w1, w2, expert_map)
 
     if inplace:
         out_hidden_states = hidden_states
