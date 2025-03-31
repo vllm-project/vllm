@@ -33,7 +33,6 @@ from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
                           ProcessorMixin)
 from typing_extensions import Required, TypeAlias, TypedDict
 
-import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
@@ -540,14 +539,17 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
+        mm_registry = self._mm_registry
+        model_config = self.model_config
+
         input_modality = modality.replace("_embeds", "")
 
-        if envs.VLLM_USE_V1:
-            mm_processor = self._mm_registry.create_processor(self.model_config)
+        if mm_registry.has_processor(model_config):
+            mm_processor = mm_registry.create_processor(model_config)
             allowed_counts = mm_processor.info.get_allowed_mm_limits()
             allowed_count = allowed_counts.get(input_modality, 0)
         else:
-            mm_config = self.model_config.multimodal_config
+            mm_config = model_config.multimodal_config
             if mm_config is None:
                 msg = "This model does not support multi-modal inputs"
                 raise ValueError(msg)
