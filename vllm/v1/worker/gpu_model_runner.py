@@ -673,7 +673,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # use two kernels for cascade attention. Let's imagine:
         # Request 3's input query: [D]
         # Request 3's kv cache: [A, B, C, D]
-        # Request 3's num_computed_tokens: 4 (i.e., [A, B, C, D])
+        # Request 3's num_computed_tokens: 3 (i.e., [A, B, C])
         # If we use [A, B, C, D] as the common prefix for Request 1-3,
         # then Request 3 will be processed only by the first kernel,
         # and the second kernel will get an empty input. While this is not
