@@ -116,20 +116,18 @@ class BackgroundProcHandle:
         process_kwargs["output_path"] = output_path
 
         # Run busy loop in background process.
-        self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
+        self.proc = context.Process(target=target_fn,
+                                    kwargs=process_kwargs,
+                                    name=process_name)
         self._finalizer = weakref.finalize(self, shutdown, self.proc,
                                            input_path, output_path)
         self.proc.start()
 
-    def shutdown(self):
-        self._finalizer()
+    def wait_for_startup(self, shutdown_callback: Callable) -> None:
+        # Wait for startup.
 
-    def wait_for_startup(self, shutdown_callback: Callable):
-        """Wait until the background process is ready."""
-
-        e = Exception(f"{self.process_name} initialization failed due to "
-                      "an exception in a background process. See stack trace "
-                      "for root cause.")
+        e = RuntimeError(f"{self.proc.name} initialization failed. "
+                         "See root cause above.")
 
         try:
             if self.reader.recv()["status"] != "READY":
@@ -144,6 +142,9 @@ class BackgroundProcHandle:
         finally:
             self.reader.close()
             self.writer.close()
+
+    def shutdown(self):
+        self._finalizer()
 
 
 # Note(rob): shutdown function cannot be a bound method,

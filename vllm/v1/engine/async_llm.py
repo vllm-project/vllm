@@ -12,10 +12,11 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
-from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
+from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -47,7 +48,7 @@ class AsyncLLM(EngineClient):
         executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
@@ -63,11 +64,17 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: list[StatLoggerBase] = []
+
+        # Set up stat loggers; independent set for each DP rank.
+        self.stat_loggers: list[list[StatLoggerBase]] = []
         if self.log_stats:
-            if logger.isEnabledFor(logging.INFO):
-                self.stat_loggers.append(LoggingStatLogger())
-            self.stat_loggers.append(PrometheusStatLogger(vllm_config))
+            for i in range(vllm_config.parallel_config.data_parallel_size):
+                loggers: list[StatLoggerBase] = []
+                if logger.isEnabledFor(logging.INFO):
+                    loggers.append(LoggingStatLogger(engine_index=i))
+                loggers.append(
+                    PrometheusStatLogger(vllm_config, engine_index=i))
+                self.stat_loggers.append(loggers)
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -81,7 +88,7 @@ class AsyncLLM(EngineClient):
         self.processor = Processor(
             vllm_config=vllm_config,
             tokenizer=self.tokenizer,
-            input_registry=input_registry,
+            mm_registry=mm_registry,
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
@@ -343,6 +350,7 @@ class AsyncLLM(EngineClient):
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
                 self._record_stats(
+                    engine_index=outputs.engine_index,
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
                 )
@@ -365,12 +373,13 @@ class AsyncLLM(EngineClient):
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
+        engine_index: int = 0,
     ):
         if not self.log_stats:
             return
 
         assert scheduler_stats is not None
-        for stat_logger in self.stat_loggers:
+        for stat_logger in self.stat_loggers[engine_index]:
             stat_logger.record(scheduler_stats=scheduler_stats,
                                iteration_stats=iteration_stats)
 
@@ -408,8 +417,9 @@ class AsyncLLM(EngineClient):
         scheduler_outputs=None,
         model_output=None,
     ) -> None:
-        for stat_logger in self.stat_loggers:
-            stat_logger.log()
+        for loggers in self.stat_loggers:
+            for stat_logger in loggers:
+                stat_logger.log()
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")

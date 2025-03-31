@@ -203,6 +203,7 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    FAILED_STR = "FAILED"
 
     def __init__(
         self,
@@ -243,19 +244,19 @@ class WorkerProc:
             self.worker_response_mq = MessageQueue(1, 1)
             worker_response_mq_handle = self.worker_response_mq.export_handle()
 
+            # Send READY once we know everything is loaded
+            ready_pipe.send({
+                "status": WorkerProc.READY_STR,
+                "handle": pickle.dumps(worker_response_mq_handle)
+            })
+
             # Initialize device and loads weights
             self.worker.init_device()
             self.worker.load_model()
 
-            # Send READY once we know everything is loaded
-            ready_pipe.send({
-                "status": "READY",
-                "handle": pickle.dumps(worker_response_mq_handle)
-            })
-
         except Exception as e:
             logger.exception("WorkerProc got error at startup:", exc_info=e)
-            ready_pipe.send({"status": "FAILED"})
+            ready_pipe.send({"status": WorkerProc.FAILED_STR})
 
         finally:
             ready_pipe.close()
@@ -284,8 +285,8 @@ class WorkerProc:
         proc = context.Process(target=WorkerProc.worker_main,
                                kwargs=process_kwargs,
                                daemon=True)
-        proc.start()
 
+        proc.start()
         return UnreadyWorkerProcHandle(proc, rank, pipe_tuple)
 
     @staticmethod

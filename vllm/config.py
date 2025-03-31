@@ -40,7 +40,8 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, random_uuid, resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, random_uuid,
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -410,6 +411,7 @@ class ModelConfig:
 
         self.is_attention_free = self._init_attention_free()
         self.is_hybrid = self._init_is_hybrid()
+        self.has_noops = self._init_has_noops()
         self.has_inner_state = self._init_has_inner_state()
 
         if current_platform.is_neuron():
@@ -508,6 +510,10 @@ class ModelConfig:
 
     def _init_is_hybrid(self) -> bool:
         return self.registry.is_hybrid_model(self.architectures)
+
+    def _init_has_noops(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return self.registry.is_noops_model(architectures)
 
     def _init_has_inner_state(self) -> bool:
         return self.registry.model_has_inner_state(self.architectures)
@@ -681,8 +687,9 @@ class ModelConfig:
 
     def _verify_bnb_config(self) -> None:
         """
-        The current version of bitsandbytes (0.44.0) with 8-bit models does not
+        The current version of bitsandbytes (0.45.3) with 8-bit models does not
         yet support CUDA graph.
+        # TODO Remove this when bitsandbytes supports.
         """
         is_bitsandbytes = self.quantization == "bitsandbytes"
         has_quantization_config = (getattr(self.hf_config,
@@ -697,8 +704,9 @@ class ModelConfig:
                 not self.enforce_eager,
         ]):
             logger.warning(
-                "CUDA graph is not supported on BitAndBytes 8bit yet, "
+                "CUDA graph is not supported on BitsAndBytes 8bit yet, "
                 "fallback to the eager mode.")
+
             self.enforce_eager = True
 
     def _verify_with_expert_parallelism(self) -> None:
@@ -869,6 +877,14 @@ class ModelConfig:
             return getattr(self.hf_config.attn_config, "kv_n_heads",
                            self.hf_config.num_attention_heads)
 
+        if self.hf_config.model_type == "nemotron-nas":
+            for block in self.hf_config.block_configs:
+                if not block.attention.no_op:
+                    return self.hf_config.num_attention_heads \
+                        // block.attention.n_heads_in_group
+
+            raise RuntimeError("Couldn't determine number of kv heads")
+
         if self.is_attention_free:
             return 0
 
@@ -937,7 +953,9 @@ class ModelConfig:
         # This function relies on 'layers_block_type' in hf_config,
         # for w/o this attribute, we will need to have workarounds like so
         attn_block_type = block_type == LayerBlockType.attention
-        is_transformer = not self.is_hybrid and not self.is_attention_free
+        is_transformer = not self.is_hybrid and \
+                            not self.has_noops and \
+                            not self.is_attention_free
         start, end = self.get_layers_start_end_indices(parallel_config)
 
         if is_transformer:
@@ -948,6 +966,10 @@ class ModelConfig:
             # Note that this code assumes there
             # is only one type of attention-free block type.
             return 0 if attn_block_type else end - start
+        elif self.has_noops:
+            block_configs = self.hf_config.block_configs
+            return sum(not bc.attention.no_op
+                       for bc in block_configs[start:end])
         else:
             # Hybrid model
             layers_block_type_value = getattr(self.hf_config,
@@ -1389,6 +1411,8 @@ class ParallelConfig:
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
     data_parallel_size: int = 1  # Number of data parallel groups.
     data_parallel_rank: int = 0  # Rank of the data parallel group.
+    # Local rank of the data parallel group, defaults to global rank.
+    data_parallel_rank_local: Optional[int] = None
     # IP of the data parallel master.
     data_parallel_master_ip: str = "127.0.0.1"
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
@@ -1493,10 +1517,18 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        self.data_parallel_size = envs.VLLM_DP_SIZE
-        self.data_parallel_rank = envs.VLLM_DP_RANK
-        self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
-        self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+        if self.data_parallel_size > 1:
+            # Data parallel was specified in the engine args.
+            self.data_parallel_master_port = get_open_port()
+            # TODO multi-node
+        else:
+            # Otherwise fall back to env vars (e.g. for offline SPMD case).
+            self.data_parallel_size = envs.VLLM_DP_SIZE
+            self.data_parallel_rank = envs.VLLM_DP_RANK
+            self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
+            self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
+            self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+
         self.world_size_across_dp = self.world_size * self.data_parallel_size
 
         if self.distributed_executor_backend == "external_launcher":
@@ -2974,12 +3006,6 @@ class KVTransferConfig(BaseModel):
             self.kv_role in ["kv_producer", "kv_consumer", "kv_both"]
 
     @property
-    def need_kv_parallel_group(self) -> bool:
-        # for those database-based connector, vLLM does not need to create
-        # parallel group, and in that case the kv parallel size will be 1.
-        return self.kv_connector is not None and self.kv_parallel_size > 1
-
-    @property
     def is_kv_producer(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in ["kv_producer", "kv_both"]
@@ -3555,9 +3581,10 @@ class VllmConfig:
 
         if self.cache_config is not None and \
             self.cache_config.cpu_offload_gb > 0 and \
-            self.compilation_config.level != CompilationLevel.NO_COMPILATION:
+            self.compilation_config.level != CompilationLevel.NO_COMPILATION \
+                and not envs.VLLM_USE_V1:
             logger.warning(
-                "CPU offload is not supported with `torch.compile` yet."
+                "CPU offload is not supported with `torch.compile` in v0 yet."
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 

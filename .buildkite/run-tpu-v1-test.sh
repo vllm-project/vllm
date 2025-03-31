@@ -32,11 +32,10 @@ docker run --privileged --net host --shm-size=16G -it \
     && echo TEST_5 \
     && python3 /workspace/vllm/examples/offline_inference/tpu.py \
     && echo TEST_6 \
-    && pytest -s -v /workspace/vllm/tests/tpu/worker/test_tpu_model_runner.py \
+    && pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py \
     && echo TEST_7 \
     && pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py" \
 
 
 # TODO: This test fails because it uses RANDOM_SEED sampling
 # && VLLM_USE_V1=1 pytest -v -s /workspace/vllm/tests/tpu/test_custom_dispatcher.py \
-
