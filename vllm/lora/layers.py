@@ -262,14 +262,13 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 -1,
             )
 
-        lora_output = self.punica_wrapper.add_lora_embedding(
-            full_output,
-            full_lora_a_embeddings,
-            self.lora_b_stacked,
-            add_input=True)
+        lora_output: Optional[
+            torch.Tensor] = self.punica_wrapper.add_lora_embedding(
+                full_output,
+                full_lora_a_embeddings,
+                self.lora_b_stacked,
+                add_input=True)
 
-        # lora_output is None if the platform supports inplace updates.
-        # Otherwise it's a tensor, so we update the output manually
         if not current_platform.can_update_inplace():
             full_output = lora_output
 
@@ -418,9 +417,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        lora_output = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked,
-            self.lora_bias_stacked, 1.0, self.output_slices)
+        lora_output: Optional[
+            torch.Tensor] = self.punica_wrapper.add_lora_linear(
+                output, x, self.lora_a_stacked, self.lora_b_stacked,
+                self.lora_bias_stacked, 1.0, self.output_slices)
         if not current_platform.can_update_inplace():
             output = lora_output
 
@@ -1164,10 +1164,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits
 
-        # LogitsProcessorWithLoRA always uses bgmv
-        lora_output = self.punica_wrapper.add_lora_logits(
-            logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked,
-            1.0)
+        lora_output: Optional[
+            torch.Tensor] = self.punica_wrapper.add_lora_logits(
+                logits, hidden_states, self.lora_a_stacked,
+                self.lora_b_stacked, 1.0)
 
         if not current_platform.can_update_inplace():
             logits = lora_output
