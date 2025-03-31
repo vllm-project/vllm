@@ -535,16 +535,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     grid = lambda META: (triton.cdiv(EM, META['BLOCK_SIZE_M']) * triton.cdiv(
         B.shape[1], META['BLOCK_SIZE_N']), )
 
-    if use_dg:
-        assert use_fp8_w8a8
-        # Note: we never apply the topk_weights here since it requires
-        # unpermuting and resizing the output.  This goes against the
-        # existing interface as the `mul_routed_weight` argument is
-        # ignored.  The weights are applied in _moe_unpermute.
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (A, A_scale), (B, B_scale), C, expert_ids)
-
-    elif (use_int8_w8a16 or use_int4_w4a16) and \
+    if (use_int8_w8a16 or use_int4_w4a16) and \
             block_shape is not None and block_shape[1] > 0:
         assert B_scale is not None and B_scale.ndim == 3
         assert B_zp is None or B_zp.ndim == 3
@@ -848,7 +839,6 @@ def try_get_optimal_moe_config(
     M: int,
     is_marlin: bool = False,
     block_shape: Optional[List[int]] = None,
-    use_deep_gemm: bool = False,
 ):
     from vllm.model_executor.layers.fused_moe import get_config
     override_config = get_config()
@@ -871,11 +861,6 @@ def try_get_optimal_moe_config(
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
                                         is_marlin, block_shape)
-
-    # Enforce DeepGemm M blocking no matter what the config says.
-    if use_deep_gemm:
-        config['BLOCK_SIZE_M'] = dg.get_m_alignment_for_contiguous_layout()
-
     return config
 
 
@@ -1048,14 +1033,13 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           w2_zp: Optional[torch.Tensor] = None,
                           a1_scale: Optional[torch.Tensor] = None,
                           a2_scale: Optional[torch.Tensor] = None,
-                          block_shape: Optional[List[int]] = None,
-                          allow_deep_gemm: bool = False) -> None:
+                          block_shape: Optional[List[int]] = None) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
                        activation, apply_router_weight_on_input, use_fp8_w8a8,
                        use_int8_w8a8, use_int8_w8a16, use_int4_w4a16,
                        per_channel_quant, global_num_experts, expert_map,
                        w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-                       block_shape, allow_deep_gemm)
+                       block_shape)
 
 
 def inplace_fused_experts_fake(
@@ -1489,7 +1473,6 @@ def fused_moe(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
-    allow_deep_gemm: bool = True,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -1523,8 +1506,8 @@ def fused_moe(
         Defaults to False.
     - global_num_experts (int): The total number of experts in the global
         expert space.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-        from the global expert space to the local expert space of the expert
+    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
+        from the global expert space to the local expert space of the expert 
         parallel shard.
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.
