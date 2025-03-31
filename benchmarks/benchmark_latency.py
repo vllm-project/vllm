@@ -5,18 +5,21 @@ import argparse
 import dataclasses
 import json
 import os
+import random
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
-from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
+from benchmark_utils import (convert_to_pytorch_benchmark_format, get_requests,
+                             validate_dataset, write_to_json)
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.inputs import PromptType
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser
 
@@ -55,21 +58,27 @@ def main(args: argparse.Namespace):
         detokenize=not args.disable_detokenize,
     )
     print(sampling_params)
-    dummy_prompt_token_ids = np.random.randint(10000,
-                                               size=(args.batch_size,
-                                                     args.input_len))
-    dummy_prompts: list[PromptType] = [{
-        "prompt_token_ids": batch
-    } for batch in dummy_prompt_token_ids.tolist()]
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.tokenizer, trust_remote_code=args.trust_remote_code)
+    requests = get_requests(args.batch_size, args, tokenizer)
+    prompts: list[Union[TextPrompt, TokensPrompt]] = []
+    for request in requests:
+        prompts.append(
+            TokensPrompt(prompt_token_ids=request.prompt["prompt_token_ids"],
+                       multi_modal_data=request.multi_modal_data)
+            if "prompt_token_ids" in request.prompt else \
+            TextPrompt(prompt=request.prompt,
+                       multi_modal_data=request.multi_modal_data))
 
     def llm_generate():
         if not args.use_beam_search:
-            llm.generate(dummy_prompts,
+            llm.generate(prompts,
                          sampling_params=sampling_params,
                          use_tqdm=False)
         else:
             llm.beam_search(
-                dummy_prompts,
+                prompts,
                 BeamSearchParams(
                     beam_width=args.n,
                     max_tokens=args.output_len,
@@ -180,7 +189,43 @@ if __name__ == "__main__":
         help=("Do not detokenize responses (i.e. do not include "
               "detokenization time in the latency measurement)"),
     )
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
+        help="Name of the dataset to benchmark on.",
+        default="sharegpt")
+    # random dataset
+    parser.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=None,
+        help="Range of sampled ratio of input/output length, "
+        "used only for RandomDataSet.",
+    )
+    parser.add_argument("--dataset-path",
+                        type=str,
+                        default=None,
+                        help="Path to the dataset")
+
+    # LoRA
+    parser.add_argument(
+        "--lora-path",
+        type=str,
+        default=None,
+        help="Path to the lora adapters to use. This can be an absolute path, "
+        "a relative path, or a Hugging Face model identifier.")
+
+    parser.add_argument("--prefix-len",
+                        type=int,
+                        default=None,
+                        help="Number of prefix tokens per request."
+                        "This is for the RandomDataset and SonnetDataset")
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    if args.tokenizer is None:
+        args.tokenizer = args.model
+    validate_dataset(args)
+    random.seed(0)
     main(args)

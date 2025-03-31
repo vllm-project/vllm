@@ -11,11 +11,9 @@ from typing import Any, Optional, Union
 
 import torch
 import uvloop
-from benchmark_dataset import (BurstGPTDataset, ConversationDataset,
-                               InstructCoderDataset, RandomDataset,
-                               SampleRequest, ShareGPTDataset, SonnetDataset,
-                               VisionArenaDataset)
-from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
+from benchmark_dataset import SampleRequest
+from benchmark_utils import (convert_to_pytorch_benchmark_format, get_requests,
+                             validate_dataset, write_to_json)
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
@@ -287,59 +285,6 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
         write_to_json(pt_file, pt_records)
 
 
-def get_requests(args, tokenizer):
-    # Common parameters for all dataset types.
-    common_kwargs = {
-        "dataset_path": args.dataset_path,
-        "random_seed": args.seed,
-    }
-    sample_kwargs = {
-        "tokenizer": tokenizer,
-        "lora_path": args.lora_path,
-        "max_loras": args.max_loras,
-        "num_requests": args.num_prompts,
-        "input_len": args.input_len,
-        "output_len": args.output_len,
-    }
-
-    if args.dataset_path is None or args.dataset_name == "random":
-        sample_kwargs["range_ratio"] = args.random_range_ratio
-        sample_kwargs["prefix_len"] = args.prefix_len
-        dataset_cls = RandomDataset
-    elif args.dataset_name == "sharegpt":
-        dataset_cls = ShareGPTDataset
-        if args.backend == "vllm-chat":
-            sample_kwargs["enable_multimodal_chat"] = True
-    elif args.dataset_name == "sonnet":
-        assert tokenizer.chat_template or tokenizer.default_chat_template, (
-            "Tokenizer/model must have chat template for sonnet dataset.")
-        dataset_cls = SonnetDataset
-        sample_kwargs["prefix_len"] = args.prefix_len
-        sample_kwargs["return_prompt_formatted"] = True
-    elif args.dataset_name == "burstgpt":
-        dataset_cls = BurstGPTDataset
-    elif args.dataset_name == "hf":
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
-            dataset_cls = VisionArenaDataset
-            common_kwargs['dataset_subset'] = None
-            common_kwargs['dataset_split'] = "train"
-            sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
-            dataset_cls = InstructCoderDataset
-            common_kwargs['dataset_split'] = "train"
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
-            dataset_cls = ConversationDataset
-            common_kwargs['dataset_subset'] = args.hf_subset
-            common_kwargs['dataset_split'] = args.hf_split
-            sample_kwargs["enable_multimodal_chat"] = True
-
-    else:
-        raise ValueError(f"Unknown dataset name: {args.dataset_name}")
-    # Remove None values
-    sample_kwargs = {k: v for k, v in sample_kwargs.items() if v is not None}
-    return dataset_cls(**common_kwargs).sample(**sample_kwargs)
-
-
 def main(args: argparse.Namespace):
     if args.seed is None:
         args.seed = 0
@@ -348,7 +293,7 @@ def main(args: argparse.Namespace):
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
-    requests = get_requests(args, tokenizer)
+    requests = get_requests(args.num_prompts, args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None
                          for request in requests)
     request_outputs: Optional[list[RequestOutput]] = None
@@ -449,47 +394,7 @@ def validate_args(args):
     if args.backend not in valid_backends:
         raise ValueError(f"Unsupported backend: {args.backend}")
 
-    # === Dataset Configuration ===
-    if not args.dataset and not args.dataset_path:
-        print(
-            "When dataset path is not set, it will default to random dataset")
-        args.dataset_name = 'random'
-        if args.input_len is None:
-            raise ValueError("input_len must be provided for a random dataset")
-
-    # === Dataset Name Specific Checks ===
-    # --hf-subset and --hf-split: only used
-    # when dataset_name is 'hf'
-    if args.dataset_name != "hf" and (
-            getattr(args, "hf_subset", None) is not None
-            or getattr(args, "hf_split", None) is not None):
-        warnings.warn("--hf-subset and --hf-split will be ignored \
-                since --dataset-name is not 'hf'.",
-                      stacklevel=2)
-    elif args.dataset_name == "hf":
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm-chat", "VisionArenaDataset needs to use vllm-chat as the backend."  #noqa: E501
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm", "InstructCoder dataset needs to use vllm as the backend."  #noqa: E501
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm-chat", "ConversationDataset needs to use vllm-chat as the backend."  #noqa: E501
-        else:
-            raise ValueError(
-                f"{args.dataset_path} is not supported by hf dataset.")
-
-    # --random-range-ratio: only used when dataset_name is 'random'
-    if args.dataset_name != 'random' and args.random_range_ratio is not None:
-        warnings.warn("--random-range-ratio will be ignored since \
-                --dataset-name is not 'random'.",
-                      stacklevel=2)
-
-    # --prefix-len: only used when dataset_name is 'random', 'sonnet', or not
-    # set.
-    if args.dataset_name not in {"random", "sonnet", None
-                                 } and args.prefix_len is not None:
-        warnings.warn("--prefix-len will be ignored since --dataset-name\
-                 is not 'random', 'sonnet', or not set.",
-                      stacklevel=2)
+    validate_dataset(args)
 
     # === LoRA Settings ===
     if getattr(args, "enable_lora", False) and args.backend != "vllm":
@@ -529,14 +434,6 @@ if __name__ == "__main__":
         choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
         help="Name of the dataset to benchmark on.",
         default="sharegpt")
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default=None,
-        help="Path to the ShareGPT dataset, will be deprecated in\
-            the next release. The dataset is expected to "
-        "be a json in form of list[dict[..., conversations: "
-        "list[dict[..., value: <prompt_or_response>]]]]")
     parser.add_argument("--dataset-path",
                         type=str,
                         default=None,
