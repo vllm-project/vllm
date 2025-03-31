@@ -16,7 +16,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.sequence import IntermediateTensors
-from vllm.utils import get_cuda_view_from_cpu_tensor, is_pin_memory_available
+from vllm.utils import (get_cuda_view_from_cpu_tensor, is_pin_memory_available,
+                        is_uva_available)
 
 logger = init_logger(__name__)
 
@@ -506,9 +507,11 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
         return module
 
     pin_memory = is_pin_memory_available()
+    uva_available = is_uva_available()
 
     if envs.VLLM_USE_V1:
-        assert pin_memory, "V1 CPU offloading requires pin_memory support"
+        assert uva_available, ("V1 CPU offloading requires"
+                               " uva (pin memory) support")
         uva_offloading = True
     else:
         uva_offloading = False
