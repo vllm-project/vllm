@@ -509,7 +509,6 @@ class HPUEncoderDecoderModelRunner(
             'block_list',
             'block_mapping',
             'block_usage',
-            'slot_mapping',
             'is_prompt',
             'block_indices',
             'block_offsets',
