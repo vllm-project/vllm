@@ -168,7 +168,8 @@ def apply_approx_top_p(
     probs = logits.softmax(dim=-1)
 
     # Add a small, random perturbation to the probabilities, and re-normalize.
-    epsilon = torch.empty(probs.shape).uniform_(-1e-9, 1e-9)
+    epsilon = torch.empty(probs.shape,
+                          device=logits.device).uniform_(-1e-9, 1e-9)
     probs += epsilon
     probs /= probs.sum(dim=-1, keepdim=True)
 
