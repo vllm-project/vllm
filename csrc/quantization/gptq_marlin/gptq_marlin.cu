@@ -42,7 +42,7 @@ namespace marlin {
 __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,
                                     int4* __restrict__ out_int4_ptr, int size_m,
-                                    int size_k, int block_rows) {}
+                                    int size_k, int lda, int block_rows) {}
 
 template <typename scalar_t,  // compute dtype, half or nv_float16
           const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
@@ -459,29 +459,32 @@ __device__ inline void barrier_release(int* lock, bool reset = false) {
 __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,
                                     int4* __restrict__ out_int4_ptr, int size_m,
-                                    int size_k, int block_rows) {
-  int start_row = block_rows * blockIdx.x;
+                                    int size_k, int lda, int block_rows) {
+  auto start_row = block_rows * blockIdx.x;
   int finish_row = start_row + block_rows;
   if (finish_row > size_m) {
     finish_row = size_m;
   }
   int cur_block_rows = finish_row - start_row;
 
-  int row_stride = size_k * sizeof(half) / 16;
+  int input_row_stride = lda * sizeof(half) / 16;
+  int output_row_stride = size_k * sizeof(half) / 16;
 
   auto permute_row = [&](int row) {
     int iters = size_k / default_threads;
     int rest = size_k % default_threads;
 
-    int offset = row * row_stride;
+    int input_offset = row * input_row_stride;
+    int output_offset = row * output_row_stride;
 
-    half const* a_row_half = reinterpret_cast<half const*>(a_int4_ptr + offset);
-    half* out_half = reinterpret_cast<half*>(out_int4_ptr + offset);
+    half const* a_row_half =
+        reinterpret_cast<half const*>(a_int4_ptr + input_offset);
+    half* out_half = reinterpret_cast<half*>(out_int4_ptr + output_offset);
 
     int base_k = 0;
 
     for (int i = 0; i < iters; i++) {
-      int cur_k = base_k + threadIdx.x;
+      auto cur_k = base_k + threadIdx.x;
       int src_pos = perm_int_ptr[cur_k];
 
       out_half[cur_k] = a_row_half[src_pos];
@@ -491,7 +494,7 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
 
     if (rest) {
       if (threadIdx.x < rest) {
-        int cur_k = base_k + threadIdx.x;
+        auto cur_k = base_k + threadIdx.x;
         int src_pos = perm_int_ptr[cur_k];
 
         out_half[cur_k] = a_row_half[src_pos];
@@ -537,6 +540,7 @@ __global__ void Marlin(
     int prob_m,           // batch dimension m
     int prob_n,           // output dimension n
     int prob_k,           // reduction dimension k
+    int lda,              // A.stride(0), equal to prob_k is A is contiguous
     int* locks,           // extra global storage for barrier synchronization
     bool use_atomic_add,  // whether to use atomic add to reduce
     bool use_fp32_reduce  // whether to use fp32 global reduce
@@ -600,7 +604,7 @@ __global__ void Marlin(
   // We can easily implement parallel problem execution by just remapping
   // indices and advancing global pointers
   if (slice_col_par >= n_tiles) {
-    A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_k / 8;
+    A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * lda / 8;
     C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
     locks += (slice_col_par / n_tiles) * n_tiles;
     slice_col = slice_col_par % n_tiles;
@@ -631,7 +635,7 @@ __global__ void Marlin(
       }
     }
     if (slice_col == n_tiles) {
-      A += 16 * thread_m_blocks * prob_k / 8;
+      A += 16 * thread_m_blocks * lda / 8;
       C += 16 * thread_m_blocks * prob_n / 8;
       locks += n_tiles;
       slice_col = 0;
@@ -643,7 +647,7 @@ __global__ void Marlin(
   // A sizes/strides
 
   // stride of the A matrix in global memory
-  int a_gl_stride = prob_k / 8;
+  int a_gl_stride = lda / 8;
   // stride of an A matrix tile in shared memory
   constexpr int a_sh_stride = 16 * thread_k_blocks / 8;
   // delta between subsequent A tiles in global memory
@@ -719,8 +723,8 @@ __global__ void Marlin(
                 (threadIdx.x % b_sh_stride_threads) * b_thread_vecs;
   b_gl_rd += b_sh_stride * slice_col;
   b_gl_rd += b_gl_rd_delta_o * slice_row;
-  int b_sh_wr = threadIdx.x * b_thread_vecs;
-  int b_sh_rd = threadIdx.x * b_thread_vecs;
+  auto b_sh_wr = threadIdx.x * b_thread_vecs;
+  auto b_sh_rd = threadIdx.x * b_thread_vecs;
 
   // For act_order
   constexpr int k_iter_size = tb_k / b_sh_wr_iters;
@@ -739,7 +743,7 @@ __global__ void Marlin(
                 s_sh_stride * slice_col + threadIdx.x;
     }
   }
-  int s_sh_wr = threadIdx.x;
+  auto s_sh_wr = threadIdx.x;
   bool s_sh_wr_pred = threadIdx.x < s_sh_stride;
 
   // Zero-points
@@ -752,7 +756,7 @@ __global__ void Marlin(
                  zp_sh_stride * slice_col + threadIdx.x;
     }
   }
-  int zp_sh_wr = threadIdx.x;
+  auto zp_sh_wr = threadIdx.x;
   bool zp_sh_wr_pred = threadIdx.x < zp_sh_stride;
 
   // We use a different scale layout for grouped and column-wise quantization as
@@ -1043,7 +1047,7 @@ __global__ void Marlin(
           int4* sh_s_stage = sh_s + s_sh_stage * pipe;
           reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
         } else {
-          int warp_id = threadIdx.x / 32;
+          auto warp_id = threadIdx.x / 32;
           int n_warps = thread_n_blocks / 4;
 
           int warp_row = warp_id / n_warps;
@@ -1081,7 +1085,7 @@ __global__ void Marlin(
 
     // Determine "position" inside the thread-block (based on warp and
     // thread-id)
-    int warp_id = threadIdx.x / 32;
+    auto warp_id = threadIdx.x / 32;
     int n_warps =
         thread_n_blocks / 4;  // Each warp processes 4 16-size tiles over N
 
@@ -1090,7 +1094,7 @@ __global__ void Marlin(
 
     cur_k += warp_row * 16;
 
-    int th_id = threadIdx.x % 32;
+    auto th_id = threadIdx.x % 32;
     cur_k += (th_id % 4) * 2;  // Due to tensor-core layout for fp16 B matrix
 
     int s_col_shift =
@@ -1155,7 +1159,7 @@ __global__ void Marlin(
               (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
         }
       } else {
-        int warp_id = threadIdx.x / 32;
+        auto warp_id = threadIdx.x / 32;
         int n_warps = thread_n_blocks / 4;
 
         int warp_row = warp_id / n_warps;
@@ -1193,7 +1197,7 @@ __global__ void Marlin(
                                      (pipe / (group_blocks / thread_k_blocks)));
           reinterpret_cast<int4*>(&frag_zpf[k % 2])[0] = sh_zp_stage[zp_sh_rd];
         } else {
-          int warp_id = threadIdx.x / 32;
+          auto warp_id = threadIdx.x / 32;
           int n_warps = thread_n_blocks / 4;
 
           int warp_row = warp_id / n_warps;
@@ -1319,7 +1323,7 @@ __global__ void Marlin(
   auto thread_block_reduce = [&]() {
     constexpr int red_off = threads / b_sh_stride_threads / 2;
     if (red_off >= 1) {
-      int red_idx = threadIdx.x / b_sh_stride_threads;
+      auto red_idx = threadIdx.x / b_sh_stride_threads;
       constexpr int red_sh_stride = b_sh_stride_threads * 4 * 2;
       constexpr int red_sh_delta = b_sh_stride_threads;
       int red_sh_rd = red_sh_stride * (threadIdx.x / b_sh_stride_threads) +
@@ -1386,7 +1390,7 @@ __global__ void Marlin(
                     4 * (threadIdx.x / 32) + threadIdx.x % 4;
       c_gl_wr += (2 * thread_n_blocks) * slice_col;
       constexpr int c_sh_wr_delta = active_threads;
-      int c_sh_wr = threadIdx.x;
+      auto c_sh_wr = threadIdx.x;
 
       int row = (threadIdx.x % 32) / 4;
 
@@ -1780,8 +1784,8 @@ __global__ void Marlin(
                HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>                              \
             <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                 \
                 A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,      \
-                num_groups, prob_m, prob_n, prob_k, locks, use_atomic_add,     \
-                use_fp32_reduce);                                              \
+                num_groups, prob_m, prob_n, prob_k, lda, locks,                \
+                use_atomic_add, use_fp32_reduce);                              \
       }                                                                        \
     }
 
@@ -2071,7 +2075,7 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                void* zp, void* g_idx, void* perm, void* a_tmp, int prob_m,
-               int prob_n, int prob_k, void* workspace,
+               int prob_n, int prob_k, int lda, void* workspace,
                vllm::ScalarType const& q_type, bool has_act_order,
                bool is_k_full, bool has_zp, int num_groups, int group_size,
                int dev, cudaStream_t stream, int thread_k, int thread_n,
@@ -2184,8 +2188,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
     // Permute A columns
     int block_rows = div_ceil(prob_m, blocks);
     permute_cols_kernel<<<blocks, default_threads, 0, stream>>>(
-        A_ptr, perm_ptr, a_tmp_ptr, prob_m, prob_k, block_rows);
+        A_ptr, perm_ptr, a_tmp_ptr, prob_m, prob_k, lda, block_rows);
     A_ptr = a_tmp_ptr;
+    lda = prob_k;
   }
 
   // If we have a full K, then we can run the non-act-order version of Marlin
@@ -2244,7 +2249,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                   ", num_bits = ", num_bits);
     }
 
-    A_ptr += 16 * thread_m_blocks * (prob_k / 8) * par;
+    A_ptr += 16 * thread_m_blocks * (lda / 8) * par;
     C_ptr += 16 * thread_m_blocks * (prob_n / 8) * par;
   }
 }
@@ -2300,7 +2305,10 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
 
   // Verify device and strides
   TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
-  TORCH_CHECK(a.is_contiguous(), "A is not contiguous");
+  TORCH_CHECK(a.stride(1) == 1, "A.stride(1) is not 1");
+  // We use int4 (16 bytes) to load A, so A must aligned to 16 bytes
+  TORCH_CHECK(a.stride(0) % 8 == 0, "A.stride(0) must divisible by 8");
+  TORCH_CHECK(((uint64_t)a.data_ptr()) % 16 == 0, "A must aligned to 16 bytes");
 
   TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
   TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
@@ -2432,7 +2440,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
         c_tmp.data_ptr<float>(), b_scales.data_ptr<at::Half>(),
         b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
-        a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
+        a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k, a.stride(0),
         workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, marlin::max_par, use_atomic_add,
@@ -2443,10 +2451,10 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
         b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
         perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
-        workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
-        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, marlin::max_par, use_atomic_add,
-        use_fp32_reduce, is_zp_float);
+        a.stride(0), workspace.data_ptr(), b_q_type, has_act_order, is_k_full,
+        has_zp, num_groups, group_size, dev,
+        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        marlin::max_par, use_atomic_add, use_fp32_reduce, is_zp_float);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }

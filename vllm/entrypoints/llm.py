@@ -492,8 +492,8 @@ class LLM:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
         """
-        executor = self.llm_engine.model_executor
-        return executor.collective_rpc(method, timeout, args, kwargs)
+
+        return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
@@ -690,8 +690,10 @@ class LLM:
         model_config = self.llm_engine.get_model_config()
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
+            tools,
             chat_template_content_format,
             tokenizer,
+            trust_remote_code=model_config.trust_remote_code,
         )
 
         prompts: list[Union[TokensPrompt, TextPrompt]] = []
@@ -713,18 +715,19 @@ class LLM:
                     tokenizer,
                     messages=msgs,
                     chat_template=chat_template,
+                    tools=tools,
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
-                    tools=tools,
                 )
             else:
                 prompt_data = apply_hf_chat_template(
                     tokenizer,
+                    trust_remote_code=model_config.trust_remote_code,
                     conversation=conversation,
                     chat_template=chat_template,
+                    tools=tools,
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
-                    tools=tools,
                 )
 
             prompt: Union[TokensPrompt, TextPrompt]

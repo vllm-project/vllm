@@ -163,24 +163,24 @@ VLM_TEST_SETTINGS = {
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     #### Extended model tests
-    # "aria": VLMTestInfo(
-    #     models=["rhymes-ai/Aria"],
-    #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-    #     prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
-    #     img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
-    #     max_model_len=4096,
-    #     max_num_seqs=2,
-    #     auto_cls=AutoModelForImageTextToText,
-    #     single_image_prompts=IMAGE_ASSETS.prompts({
-    #         "stop_sign": "<vlm_image>Please describe the image shortly.",
-    #         "cherry_blossom": "<vlm_image>Please infer the season with reason.",  # noqa: E501
-    #     }),
-    #     multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
-    #     stop_str=["<|im_end|>"],
-    #     image_size_factors=[(0.10, 0.15)],
-    #     max_tokens=64,
-    #     marks=[large_gpu_mark(min_gb=64)],
-    # ),
+    "aria": VLMTestInfo(
+        models=["rhymes-ai/Aria"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<vlm_image>Please describe the image shortly.",
+            "cherry_blossom": "<vlm_image>Please infer the season with reason.",  # noqa: E501
+        }),
+        multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
+        stop_str=["<|im_end|>"],
+        image_size_factors=[(0.10, 0.15)],
+        max_tokens=64,
+        marks=[large_gpu_mark(min_gb=64)],
+    ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
@@ -352,6 +352,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda vid_prompt: f"USER: {vid_prompt} ASSISTANT:",
         num_video_frames=16,
         max_model_len=4096,
+        max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
     ),
@@ -406,7 +407,7 @@ VLM_TEST_SETTINGS = {
     ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
-        test_type=(VLMTestType.IMAGE),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=identity,
         max_model_len=4096,
         max_num_seqs=2,
@@ -448,6 +449,20 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
+    ),
+    "skywork_r1v": VLMTestInfo(
+        models=["Skywork/Skywork-R1V-38B"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<｜begin▁of▁sentence｜><｜User｜>\n{img_prompt}<｜Assistant｜><think>\n", # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<image>\nWhat's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "<image>\nWhat is the season?",
+        }),
+        multi_image_prompt="<image>\n<image>\nDescribe the two images in short.",  # noqa: E501
+        max_model_len=4096,
+        use_tokenizer_eos=True,
+        patch_hf_runner=model_utils.skyworkr1v_patch_hf_runner,
+        marks=[large_gpu_mark(min_gb=80)],
     ),
     ### Tensor parallel / multi-gpu broadcast tests
     "chameleon-broadcast": VLMTestInfo(
