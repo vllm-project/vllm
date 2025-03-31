@@ -801,8 +801,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
 
-    def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping, lora_requests) -> None:
-        super()._set_active_loras(prompt_lora_mapping, token_lora_mapping, lora_requests)
+    def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping,
+                          lora_requests) -> None:
+        super()._set_active_loras(prompt_lora_mapping, token_lora_mapping,
+                                  lora_requests)
         xm.mark_step()
 
     def capture_model(self) -> None:
@@ -954,7 +956,7 @@ class ModelWrapperV1(nn.Module):
         sampling_metadata: TPUSupportedSamplingMetadata,
     ) -> torch.Tensor:
         """
-        Sample with xla-friendly function. This function is to be traced 
+        Sample with xla-friendly function. This function is to be traced
         separately from `forward` for lighter compilation overhead.
         """
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
@@ -993,13 +995,13 @@ def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
 
 def _get_paddings(min_token_size: int, max_token_size: int,
                   padding_gap: int) -> list[int]:
-    """Generate a list of padding size, starting from min_token_size, 
+    """Generate a list of padding size, starting from min_token_size,
     ending with a number that can cover max_token_size
-    
+
     If padding_gap == 0 then:
         increase 2X each time (exponential)
     else:
-        first increase the size to twice, 
+        first increase the size to twice,
         then increase the padding size by padding_gap.
     """
     paddings = []
