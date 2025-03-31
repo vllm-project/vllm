@@ -118,6 +118,7 @@ class RequestOutput:
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[list[int]] = None,
         num_cached_tokens: Optional[int] = None,
+        hidden_states: Optional[torch.Tensor] = None,
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
     ) -> None:
@@ -133,6 +134,8 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
+        if hidden_states is not None:
+            self.hidden_states = hidden_states
 
     def add(self, next_output: "RequestOutput") -> None:
         """Merge subsequent RequestOutput into this one"""
@@ -160,8 +163,11 @@ class RequestOutput:
 
     @classmethod
     def from_seq_group(
-        cls, seq_group: SequenceGroup, use_cache: bool,
-        seq_id_to_seq_group: dict[str, SequenceGroupBase]
+        cls,
+        seq_group: SequenceGroup,
+        use_cache: bool,
+        seq_id_to_seq_group: dict[str, SequenceGroupBase],
+        hidden_states: Optional[torch.Tensor] = None,
     ) -> Optional["RequestOutput"]:
         finished = seq_group.is_finished()
 
@@ -291,21 +297,37 @@ class RequestOutput:
             prompt_logprobs = None
         finished_time = time.time() if finished else None
         seq_group.set_finished_time(finished_time)
-
-        init_kwargs = {
-            "request_id": seq_group.request_id,
-            "prompt": prompt,
-            "prompt_token_ids": prompt_token_ids,
-            "prompt_logprobs": prompt_logprobs,
-            "outputs": outputs,
-            "finished": finished,
-            "metrics": seq_group.metrics,
-            "lora_request": seq_group.lora_request,
-            "encoder_prompt": encoder_prompt,
-            "encoder_prompt_token_ids": encoder_prompt_token_ids,
-            "num_cached_tokens": num_cached_tokens,
-            "multi_modal_placeholders": seq_group.multi_modal_placeholders
-        }
+        if hidden_states is not None:
+            init_kwargs = {
+                "request_id": seq_group.request_id,
+                "prompt": prompt,
+                "prompt_token_ids": prompt_token_ids,
+                "prompt_logprobs": prompt_logprobs,
+                "outputs": outputs,
+                "finished": finished,
+                "metrics": seq_group.metrics,
+                "lora_request": seq_group.lora_request,
+                "encoder_prompt": encoder_prompt,
+                "encoder_prompt_token_ids": encoder_prompt_token_ids,
+                "num_cached_tokens": num_cached_tokens,
+                "multi_modal_placeholders": seq_group.multi_modal_placeholders,
+                "hidden_states": hidden_states,
+            }
+        else:
+            init_kwargs = {
+                "request_id": seq_group.request_id,
+                "prompt": prompt,
+                "prompt_token_ids": prompt_token_ids,
+                "prompt_logprobs": prompt_logprobs,
+                "outputs": outputs,
+                "finished": finished,
+                "metrics": seq_group.metrics,
+                "lora_request": seq_group.lora_request,
+                "encoder_prompt": encoder_prompt,
+                "encoder_prompt_token_ids": encoder_prompt_token_ids,
+                "num_cached_tokens": num_cached_tokens,
+                "multi_modal_placeholders": seq_group.multi_modal_placeholders,
+            }
 
         if use_cache:
             request_output = seq_group.cached_request_output
@@ -385,12 +407,18 @@ class RequestOutputFactory:
     @staticmethod
     def create(seq_group: SequenceGroup,
                seq_id_to_seq_group: dict[str, SequenceGroupBase],
-               use_cache: bool = False):
+               use_cache: bool = False,
+               hidden_states: Optional[torch.Tensor] = None):
         if seq_group.pooled_data is not None:
             return PoolingRequestOutput.from_seq_group(seq_group)
         else:
-            return RequestOutput.from_seq_group(seq_group, use_cache,
-                                                seq_id_to_seq_group)
+            if hidden_states is not None:
+                return RequestOutput.from_seq_group(seq_group, use_cache,
+                                                    seq_id_to_seq_group,
+                                                    hidden_states)
+            else:
+                return RequestOutput.from_seq_group(seq_group, use_cache,
+                                                    seq_id_to_seq_group)
 
 
 @dataclass
