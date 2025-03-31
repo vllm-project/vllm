@@ -649,7 +649,7 @@ def moe_align_block_size(
                                       device=topk_ids.device)
     if num_experts >= 224:
         if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts not in (
-                256, 256 + envs.VLLM_ENABLE_SHARE_EXPERT_FUSION):
+                256, 256 + envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS):
             moe_align_block_size_triton(
                 topk_ids,
                 num_experts,
@@ -1782,7 +1782,7 @@ def fused_moe(
             renormalize,
             num_expert_group,
             topk_group,
-            share_fusion=envs.VLLM_ENABLE_SHARE_EXPERT_FUSION)
+            share_fusion=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS)
     elif custom_routing_function is None:
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)
