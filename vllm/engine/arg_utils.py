@@ -102,7 +102,6 @@ class EngineArgs:
     allowed_local_media_path: str = ""
     download_dir: Optional[str] = None
     load_format: str = 'auto'
-    weights_load_device: Optional[str] = None
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
@@ -337,12 +336,6 @@ class EngineArgs:
             'specified in https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n'
             '* "mistral" will load weights from consolidated safetensors files '
             'used by Mistral models.\n')
-        parser.add_argument("--weights-load-device",
-                            type=str,
-                            default=EngineArgs.weights_load_device,
-                            choices=DEVICE_OPTIONS,
-                            help='Device to which model weights '
-                            'will be loaded.')
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -1084,7 +1077,7 @@ class EngineArgs:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
-            device=self.weights_load_device,
+            device="cpu" if self.quantization == "inc" else None,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
