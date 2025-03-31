@@ -32,7 +32,7 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 def is_transformers_impl_compatible(
         arch: str,
-        module: Optional[transformers.PreTrainedModel] = None) -> bool:
+        module: Optional["transformers.PreTrainedModel"] = None) -> bool:
     mod = module or getattr(transformers, arch, None)
     if mod is None:
         return False
@@ -42,7 +42,7 @@ def is_transformers_impl_compatible(
 def resolve_transformers_fallback(model_config: ModelConfig,
                                   architectures: list[str]):
     for i, arch in enumerate(architectures):
-        if arch == "TransformersModel":
+        if arch == "TransformersForCausalLM":
             continue
         auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
                                            None) or dict()
@@ -66,7 +66,7 @@ def resolve_transformers_fallback(model_config: ModelConfig,
                 raise ValueError(
                     f"The Transformers implementation of {arch} is not "
                     "compatible with vLLM.")
-            architectures[i] = "TransformersModel"
+            architectures[i] = "TransformersForCausalLM"
         if model_config.model_impl == ModelImpl.AUTO:
             if not is_transformers_impl_compatible(arch, custom_model_module):
                 raise ValueError(
@@ -77,7 +77,7 @@ def resolve_transformers_fallback(model_config: ModelConfig,
                 "%s has no vLLM implementation, falling back to Transformers "
                 "implementation. Some features may not be supported and "
                 "performance may not be optimal.", arch)
-            architectures[i] = "TransformersModel"
+            architectures[i] = "TransformersForCausalLM"
     return architectures
 
 

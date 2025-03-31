@@ -317,6 +317,37 @@ def _test_completion_close(
     return results
 
 
+def _test_chat(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+):
+    results = []
+
+    messages = [{
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": prompt
+        }]
+    }]
+
+    # test with text prompt
+    chat_response = client.chat.completions.create(model=model,
+                                                   messages=messages,
+                                                   max_tokens=5,
+                                                   temperature=0.0)
+
+    results.append({
+        "test": "completion_close",
+        "text": chat_response.choices[0].message.content,
+        "finish_reason": chat_response.choices[0].finish_reason,
+        "usage": chat_response.usage,
+    })
+
+    return results
+
+
 def _test_embeddings(
     client: openai.OpenAI,
     model: str,
@@ -512,6 +543,8 @@ def compare_all_settings(model: str,
                 results += _test_completion(client, model, prompt, token_ids)
             elif method == "generate_close":
                 results += _test_completion_close(client, model, prompt)
+            elif method == "generate_chat":
+                results += _test_chat(client, model, prompt)
             elif method == "generate_with_image":
                 results += _test_image_text(
                     client, model,
@@ -786,7 +819,7 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     without enough resources, or called when filtering tests to run directly.
     """
     try:
-        if current_platform.is_cpu() or current_platform.is_openvino():
+        if current_platform.is_cpu():
             memory_gb = 0
         else:
             memory_gb = current_platform.get_device_total_memory() / GB_bytes

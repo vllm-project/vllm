@@ -273,8 +273,7 @@ class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
 
-        return ("cpu" if current_platform.is_cpu()
-                or current_platform.is_openvino() else "cuda")
+        return ("cpu" if current_platform.is_cpu() else "cuda")
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
         if x is None or isinstance(x, (bool, )):
@@ -748,30 +747,27 @@ class VllmRunner:
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
     ) -> list[TextPrompt]:
-        if images is not None:
-            assert len(prompts) == len(images)
 
-        if videos is not None:
-            assert len(prompts) == len(videos)
+        if any(x is not None and len(x) != len(prompts)
+               for x in [images, videos, audios]):
+            raise ValueError(
+                "All non-None multimodal inputs must have the same length as "
+                "prompts")
 
-        if audios is not None:
-            assert len(prompts) == len(audios)
+        inputs = []
+        for i, prompt in enumerate(prompts):
+            multi_modal_data = {}
+            if images is not None and (image := images[i]) is not None:
+                multi_modal_data["image"] = image
+            if videos is not None and (video := videos[i]) is not None:
+                multi_modal_data["video"] = video
+            if audios is not None and (audio := audios[i]) is not None:
+                multi_modal_data["audio"] = audio
 
-        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
-        if images is not None:
-            for i, image in enumerate(images):
-                if image is not None:
-                    inputs[i]["multi_modal_data"] = {"image": image}
-
-        if videos is not None:
-            for i, video in enumerate(videos):
-                if video is not None:
-                    inputs[i]["multi_modal_data"] = {"video": video}
-
-        if audios is not None:
-            for i, audio in enumerate(audios):
-                if audio is not None:
-                    inputs[i]["multi_modal_data"] = {"audio": audio}
+            inputs.append(
+                TextPrompt(prompt=prompt,
+                           multi_modal_data=multi_modal_data
+                           if multi_modal_data else None))
 
         return inputs
 
@@ -1121,15 +1117,3 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "optional" in item.keywords:
             item.add_marker(skip_optional)
-
-
-@pytest.fixture(scope="session")
-def cli_config_file():
-    """Return the path to the CLI config file."""
-    return os.path.join(_TEST_DIR, "config", "test_config.yaml")
-
-
-@pytest.fixture(scope="session")
-def cli_config_file_with_model():
-    """Return the path to the CLI config file with model."""
-    return os.path.join(_TEST_DIR, "config", "test_config_with_model.yaml")

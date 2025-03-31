@@ -125,8 +125,13 @@ class ShmRingBuffer:
                        lambda *args, **kwargs: None):
                 try:
                     self.shared_memory = shared_memory.SharedMemory(name=name)
-                    assert (
-                        self.shared_memory.size == self.total_bytes_of_buffer)
+                    # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
+                    # Some platforms allocate memory based on page size,
+                    # so the shared memory block size may be larger or equal
+                    # to the requested size. The size parameter is ignored
+                    # when attaching to an existing block.
+                    assert (self.shared_memory.size
+                            >= self.total_bytes_of_buffer)
                 except FileNotFoundError:
                     # we might deserialize the object in a different node
                     # in this case, this object is not used,
@@ -233,6 +238,7 @@ class MessageQueue:
             if is_valid_ipv6_address(connect_ip):
                 self.remote_socket.setsockopt(IPV6, 1)
                 remote_addr_ipv6 = True
+                connect_ip = f"[{connect_ip}]"
             socket_addr = f"tcp://*:{remote_subscribe_port}"
             self.remote_socket.bind(socket_addr)
             remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
@@ -356,8 +362,11 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.debug("No available block found in %s second. ",
-                                     VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        logger.debug(
+                            ("No available shared memory broadcast block found"
+                             " in %s second."),
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                        )
                         n_warning += 1
 
                     # if we time out, raise an exception
@@ -414,8 +423,11 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.debug("No available block found in %s second. ",
-                                     VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        logger.debug(
+                            ("No available shared memory broadcast block found"
+                             "in %s second."),
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                        )
                         n_warning += 1
 
                     # if we time out, raise an exception

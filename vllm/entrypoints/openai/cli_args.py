@@ -247,7 +247,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         default=None,
                         help='Max number of prompt characters or prompt '
                         'ID numbers being printed in log.'
-                        '\n\nDefault: Unlimited')
+                        ' The default of None means unlimited.')
 
     parser.add_argument(
         "--disable-fastapi-docs",
@@ -288,13 +288,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_reasoning and not args.reasoning_parser:
         raise TypeError("Error: --enable-reasoning requires "
                         "--reasoning-parser")
-
-    # Ref https://api-docs.deepseek.com/guides/reasoning_model
-    # tool call and reasoning cannot be enabled at the same time.
-    if args.enable_auto_tool_choice and args.enable_reasoning:
-        raise TypeError(
-            "Error: --enable-auto-tool-choice and "
-            "--enable-reasoning cannot be enabled at the same time")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
