@@ -2047,14 +2047,13 @@ class SpeculativeConfig:
 
     def __post_init__(self):
 
-        # Note: After next release, the method parameter will be used to
-        # specify the speculative method, which helps to extend the
-        # configuration of non-model-based proposers, and the model parameter
-        # will be used when the draft model or head is needed.
-        # If users do not specify the method, the speculative method will
-        # be detected automatically if possible. If the speculative method can
-        # not be detected, it will be considered as the draft-model-based
-        # method by default.
+        # Note: "method" is a new parameter that helps to extend the
+        # configuration of non-model-based proposers, and the "model" parameter
+        # will be used to set the draft model, eagle head, or additional weight
+        # when needed. If users do not specify "method", the speculative method
+        # will be detected automatically if possible. If the speculative method
+        # can not be detected, it will be considered as the "draft_model" by
+        # default.
 
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
@@ -2069,8 +2068,8 @@ class SpeculativeConfig:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
 
-        # Automatically configure the ngram method during configuration
-        # refactoring to ensure a smooth transition.
+        # Automatically configure the method for ngram when "model" is used
+        # instead of "method"
         if self.method is None and (self.model is not None
                                     and self.model in ("ngram", "[ngram]")):
             self.method = "ngram"
