@@ -602,13 +602,9 @@ class Scheduler(SchedulerInterface):
                 request.num_computed_tokens -= num_tokens_rejected
 
                 if spec_decoding_stats is not None:
-                    # FIXME: If a drafter proposes zero tokens, we should
-                    # treat this as if num_spec_tokens were proposed and
-                    # all rejected to allow fair comparisons between drafters
                     spec_decoding_stats.observe(
                         num_draft_tokens=len(scheduled_spec_token_ids),
-                        num_accepted_tokens=len(generated_token_ids) - 1,
-                        num_emitted_tokens=len(generated_token_ids))
+                        num_accepted_tokens=len(generated_token_ids) - 1)
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))

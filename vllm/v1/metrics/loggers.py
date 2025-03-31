@@ -32,15 +32,14 @@ class StatLoggerBase(ABC):
 
 class LoggingStatLogger(StatLoggerBase):
 
-    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
+    def __init__(self, engine_index: int = 0):
         self.engine_index = engine_index
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
         # Prefix cache metrics. This cannot be reset.
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
-        self.spec_decoding_metrics = SpecDecodingMetrics(
-            vllm_config.speculative_config)
+        self.spec_decoding_metrics = SpecDecodingMetrics()
 
     def _reset(self, now):
         self.last_log_time = now
@@ -329,11 +328,6 @@ class PrometheusStatLogger(StatLoggerBase):
                 name="vllm:spec_decode_num_accepted_tokens_total",
                 documentation="Number of accepted tokens.",
                 labelnames=labelnames).labels(*labelvalues)
-        self.counter_spec_decode_num_emitted_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_emitted_tokens_total",
-                documentation="Number of emitted tokens.",
-                labelnames=labelnames).labels(*labelvalues)
 
         #
         # Cache config info metric
@@ -376,8 +370,6 @@ class PrometheusStatLogger(StatLoggerBase):
                 scheduler_stats.spec_decoding_stats.num_draft_tokens)
             self.counter_spec_decode_num_accepted_tokens.inc(
                 scheduler_stats.spec_decoding_stats.num_accepted_tokens)
-            self.counter_spec_decode_num_emitted_tokens.inc(
-                scheduler_stats.spec_decoding_stats.num_emitted_tokens)
 
         if iteration_stats is None:
             return
