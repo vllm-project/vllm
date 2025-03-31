@@ -67,7 +67,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import decode_tokens
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -766,8 +766,70 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
         return get_sampler()
 
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> Optional[NestedTensors]:
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        modalities = {}
+
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if input_key in ("pixel_values",
+                             "image_embeds") and "images" not in modalities:
+                modalities["images"] = self._parse_and_validate_image_input(
+                    **kwargs)
+            if input_key in ("pixel_values_videos",
+                             "video_embeds") and "videos" not in modalities:
+                modalities["videos"] = self._parse_and_validate_video_input(
+                    **kwargs)
+            if input_key in (
+                    "input_audio_features") and "audio" not in modalities:
+                modalities["audio"] = self._parse_and_validate_audio_input(
+                    **kwargs)
+        return modalities
+
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+
+        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not modalities:
+            return None
+
+        # The result multimodal_embeddings is tuple of tensors, with each
+        # tensor correspoending to a multimodal data item (image or video).
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+
+        # NOTE: It is important to iterate over the keys in this dictionary
+        # to preserve the order of the modalities.
+        for modality in modalities:
+            if modality == "images":
+                image_input = modalities["images"]
+                vision_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += vision_embeddings
+            if modality == "videos":
+                video_input = modalities["videos"]
+                video_embeddings = self._process_video_input(video_input)
+                multimodal_embeddings += video_embeddings
+            if modality == "audio":
+                audio_input = modalities["audio"]
+                audio_embeddings = self._process_audio_input(audio_input)
+                multimodal_embeddings += audio_embeddings
+        return multimodal_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings, [
+                    self.config.image_token_id, self.config.video_token_id,
+                    self.config.audio_token_index
+                ])
+        return inputs_embeds
+
+    def get_multimodal_embeddings_v0(
+            self, **kwargs: object) -> Optional[NestedTensors]:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         image_input = self._parse_and_validate_image_input(**kwargs)
         video_input = self._parse_and_validate_video_input(**kwargs)
@@ -788,7 +850,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             multimodal_embeddings.append((video_embeds, "video"))
         return multimodal_embeddings
 
-    def get_input_embeddings(
+    def get_input_embeddings_v0(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[NestedTensors] = None,
@@ -822,9 +884,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings)
+            multimodal_embeddings = self.get_multimodal_embeddings_v0(**kwargs)
+            inputs_embeds = self.get_input_embeddings_v0(
+                input_ids, multimodal_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
