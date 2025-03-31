@@ -898,8 +898,7 @@ class MllamaTextCrossAttention(nn.Module):
         q = self.q_norm(q)
 
         if attention_mask is not None:
-            output = self._attention_with_mask(q.contiguous(), k.contiguous(),
-                                               v.contiguous(), attention_mask,
+            output = self._attention_with_mask(q, k, v, attention_mask,
                                                kv_range_for_decode)
         else:
             output = self.attn(
