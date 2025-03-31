@@ -14,7 +14,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata)
+                                           PagedAttentionMetadata,
+                                           use_rocm_custom_paged_attention)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -22,11 +23,7 @@ if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)
-
 _PARTITION_SIZE_ROCM = 256
-_GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-_ON_NAVI = "gfx1" in _GPU_ARCH
-_ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
@@ -790,7 +787,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             num_seqs, num_heads, head_size = decode_query.shape
             block_size = value_cache.shape[3]
             gqa_ratio = num_heads // self.num_kv_heads
-            use_custom = _use_rocm_custom_paged_attention(
+            use_custom = use_rocm_custom_paged_attention(
                 decode_query.dtype, head_size, block_size, gqa_ratio,
                 decode_meta.max_decode_seq_len)
             if use_custom:
@@ -899,15 +896,3 @@ def _sdpa_attention(
             start = end
 
     return output
-
-
-def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
-                                     block_size: int, gqa_ratio: int,
-                                     max_seq_len: int) -> bool:
-    # rocm custom page attention not support on navi (gfx1*)
-    return (_ON_MI250_MI300 and not _ON_NAVI
-            and (qtype == torch.half or qtype == torch.bfloat16)
-            and (head_size == 64 or head_size == 128)
-            and (block_size == 16 or block_size == 32)
-            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
-            and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
