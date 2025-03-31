@@ -57,7 +57,7 @@ class NVLMProcessor(BaseInternVLProcessor):
         # when trying to find "<tile" as a subsequence of "<Image><tile"
         repl = "<Image>" + features + "</Image>"
 
-        return PromptUpdateDetails(full=repl, features=repl)
+        return PromptUpdateDetails.select_token_text(repl, IMG_PAD)
 
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
@@ -175,12 +175,7 @@ class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            repl = hf_processor.get_image_repl(feature_size, num_patches)
-
-            return PromptUpdateDetails(
-                full=repl.full + "\n",
-                features=repl.features + "\n",
-            )
+            return hf_processor.get_image_repl(feature_size, num_patches)
 
         # See note in dummy data regarding why we have the extra newline
         return [

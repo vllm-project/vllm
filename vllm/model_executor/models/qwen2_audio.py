@@ -229,9 +229,9 @@ class Qwen2AudioMultiModalProcessor(
 
             audio_tokens = [audio_token_id] * num_features
 
-            return PromptUpdateDetails(
-                full=[audio_bos_id] + audio_tokens + [audio_eos_id],
-                features=audio_tokens,
+            return PromptUpdateDetails.select_token_id(
+                [audio_bos_id] + audio_tokens + [audio_eos_id],
+                embed_token_id=audio_token_id,
             )
 
         return [

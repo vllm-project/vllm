@@ -252,9 +252,9 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
             image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
                             [_NEWLINE_TOKEN_ID]) * nrows
 
-            return PromptUpdateDetails(
-                full=image_tokens + [bos_token_id],
-                features=image_tokens,
+            return PromptUpdateDetails.select_token_id(
+                image_tokens + [bos_token_id],
+                embed_token_id=_IMAGE_TOKEN_ID,
             )
 
         return [
