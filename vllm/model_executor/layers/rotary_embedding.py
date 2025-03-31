@@ -260,15 +260,22 @@ class RotaryEmbedding(CustomOp):
         sin = self.sin
         cos = self.cos
         query_shape = query.shape
+        key_shape = key.shape
         query = query.view(num_tokens, -1, self.head_size)
+        key = key.view(num_tokens, -1, self.head_size)
+
+        if self.head_size == self.rotary_dim:
+            # Avoid unnecessary slicing and concatenation
+            query = apply_rotary_pos_emb(query, cos, sin, None, 0, rope_mode)
+            key = apply_rotary_pos_emb(key, cos, sin, None, 0, rope_mode)
+            return query.reshape(query_shape), key.reshape(key_shape)
+
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
         query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0,
                                          rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
-        key_shape = key.shape
-        key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., :self.rotary_dim]
         key_pass = key[..., self.rotary_dim:]
         key_rot = apply_rotary_pos_emb(key_rot, cos, sin, None, 0, rope_mode)
