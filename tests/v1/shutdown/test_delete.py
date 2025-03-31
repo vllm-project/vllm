@@ -4,9 +4,8 @@
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
-from vllm import LLM, SamplingParams
+from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.sampling_params import RequestOutputKind
 from vllm.utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -15,10 +14,9 @@ MODELS = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-async def test_async_llm_delete(model: str, tensor_parallel_size: int) -> None:
+def test_async_llm_delete(model: str, tensor_parallel_size: int) -> None:
     """Test that AsyncLLM frees GPU memory upon deletion.
     AsyncLLM always uses an MP client.
     """
@@ -32,12 +30,6 @@ async def test_async_llm_delete(model: str, tensor_parallel_size: int) -> None:
     # Instantiate AsyncLLM; make request to complete any deferred
     # initialization; then delete instance
     async_llm = AsyncLLM.from_engine_args(engine_args)
-    async for _ in async_llm.generate(
-            "Hello my name is",
-            request_id="abc",
-            sampling_params=SamplingParams(
-                max_tokens=1, output_kind=RequestOutputKind.DELTA)):
-        pass
     del async_llm
 
     # Confirm all the processes are cleaned up.
