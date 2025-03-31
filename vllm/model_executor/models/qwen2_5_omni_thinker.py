@@ -546,15 +546,17 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
 class Qwen2_5OmniConditionalGenerationMixin:
 
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> torch.Tensor:
+    def _validate_and_reshape_mm_tensor(self,
+                                        mm_input: object,
+                                        name: str,
+                                        dim: int = 0) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
             raise ValueError(f"Incorrect type of {name}. "
                              f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
-            return torch.concat(list(mm_input))
+            return torch.concat(list(mm_input), dim=dim)
         else:
-            return torch.concat(mm_input)
+            return torch.concat(mm_input, dim=dim)
 
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> Optional[Qwen2AudioInputs]:
@@ -564,7 +566,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
         if input_audio_features is None:
             return None
         input_audio_features = self._validate_and_reshape_mm_tensor(
-            input_audio_features, 'input_audio_features')
+            input_audio_features, 'input_audio_features', dim=1)
         if feature_attention_mask is not None:
             feature_attention_mask = self._validate_and_reshape_mm_tensor(
                 feature_attention_mask, 'feature_attention_mask')
@@ -660,13 +662,13 @@ class Qwen2_5OmniConditionalGenerationMixin:
 
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
-
         if input_features.ndim == 3:
             assert input_features.shape[0] == 1
             input_features = input_features.squeeze(0)
         if audio_feature_lengths.ndim == 2:
-            assert audio_feature_lengths.shape[0] == 1
-            audio_feature_lengths = audio_feature_lengths.squeeze(0)
+            assert audio_feature_lengths.shape[
+                0] == 1 or audio_feature_lengths.shape[1] == 1
+            audio_feature_lengths = audio_feature_lengths.squeeze()
 
         audio_feat_lengths, audio_output_lengths = (
             self.audio_tower._get_feat_extract_output_lengths(
@@ -678,17 +680,24 @@ class Qwen2_5OmniConditionalGenerationMixin:
             aftercnn_lens=audio_feat_lengths,
         )
         audio_features = audio_outputs.last_hidden_state
-        return audio_features
+        return audio_features.split(audio_output_lengths.tolist())
 
     def _process_image_input(
-            self, image_input: Qwen2_5_VLImageInputs) -> torch.Tensor:
+            self,
+            image_input: Qwen2_5_VLImageInputs) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["image_embeds"].type(self.visual.dtype)
 
+        grid_thw = image_input["image_grid_thw"]
+        assert grid_thw.ndim == 2
+
         pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-        image_embeds = self.visual(pixel_values,
-                                   grid_thw=image_input["image_grid_thw"])
-        return image_embeds
+        image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+        # Split concatenated embeddings for each image item.
+        merge_size = self.visual.spatial_merge_size
+        sizes = grid_thw.prod(-1) // merge_size // merge_size
+
+        return image_embeds.split(sizes.tolist())
 
     def _process_video_input(
             self,
@@ -698,12 +707,17 @@ class Qwen2_5OmniConditionalGenerationMixin:
         if video_input["type"] == "video_embeds":
             return video_input["video_embeds"].type(self.visual.dtype)
 
-        video_grid_thw = video_input["video_grid_thw"]
+        grid_thw = video_input["video_grid_thw"]
+        assert grid_thw.ndim == 2
+
         pixel_values_videos = video_input["pixel_values_videos"].type(
             self.visual.dtype)
-        video_embeds = self.visual(pixel_values_videos,
-                                   grid_thw=video_grid_thw)
-        return video_embeds
+        video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+        # Split concatenated embeddings for each video item.
+        merge_size = self.visual.spatial_merge_size
+        sizes = grid_thw.prod(-1) // merge_size // merge_size
+
+        return video_embeds.split(sizes.tolist())
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -827,7 +841,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             # `use_audio_in_video` will work on V1.
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings, [
-                    self.config.image_token_id, self.config.video_token_id,
+                    self.config.image_token_index,
+                    self.config.video_token_index,
                     self.config.audio_token_index
                 ])
         return inputs_embeds
