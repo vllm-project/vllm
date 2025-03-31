@@ -23,13 +23,6 @@ class ServeSubcommand(CLISubcommand):
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, 'model_tag') and args.model_tag is not None:
             args.model = args.model_tag
-        # Otherwise use model from config (already in args.model)
-
-        if (hasattr(args, '_original_args')
-                and '--model' in args._original_args):
-            raise ValueError(
-                "With `vllm serve`, you should provide the model as a "
-                "positional argument instead of via the `--model` option.")
 
         uvloop.run(run_server(args))
 
