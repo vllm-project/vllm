@@ -11,14 +11,9 @@ import triton
 import triton.language as tl
 
 from vllm import _custom_ops as ops
-from vllm import envs
+from vllm.attention.ops.paged_attn import use_rocm_custom_paged_attention
 
 from .prefix_prefill import context_attention_fwd
-
-_PARTITION_SIZE_ROCM = 256
-_GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-_ON_NAVI = "gfx1" in _GPU_ARCH
-_ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 
 @triton.jit
@@ -284,12 +279,12 @@ def chunked_prefill_paged_decode(
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv),
                                     16)
 
-    # max_seq_len = torch.max(seq_lens) # perf pain
-    use_custom = _use_rocm_custom_paged_attention(query.dtype, head_size,
-                                                  block_size,
-                                                  num_queries_per_kv,
-                                                  max_seq_len)
+    use_custom = use_rocm_custom_paged_attention(query.dtype, head_size,
+                                                 block_size,
+                                                 num_queries_per_kv,
+                                                 max_seq_len)
     if use_custom:
+        _PARTITION_SIZE_ROCM = 256
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
                               _PARTITION_SIZE_ROCM)
         assert _PARTITION_SIZE_ROCM % block_size == 0
@@ -368,15 +363,3 @@ def chunked_prefill_paged_decode(
             filter_by_query_len=True,
             query_start_len_ptr=query_start_loc,
         )
-
-
-def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
-                                     block_size: int, gqa_ratio: int,
-                                     max_seq_len: int) -> bool:
-    # rocm custom page attention not support on navi (gfx1*)
-    return (_ON_MI250_MI300 and not _ON_NAVI
-            and (qtype == torch.half or qtype == torch.bfloat16)
-            and (head_size == 64 or head_size == 128)
-            and (block_size == 16 or block_size == 32)
-            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
-            and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
