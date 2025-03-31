@@ -17,7 +17,6 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
-from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
@@ -82,6 +81,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.enforce_eager = model_config.enforce_eager
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
+        self._hidden_states_dtype = self.dtype
 
         self.is_multimodal_model = model_config.is_multimodal_model
         self.sliding_window = model_config.get_sliding_window()
@@ -103,7 +103,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.hidden_size = model_config.get_hidden_size()
 
         # Multi-modal data support
-        self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
         # TODO: Support M-RoPE (e.g, Qwen2-VL)
@@ -632,6 +631,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
         request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
+        discard_sampled_tokens_req_indices = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
             req_state = self.requests[req_id]
@@ -647,6 +647,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
+                # Record the index of the request that should not be sampled,
+                # so that we could clear the sampled tokens before returning.
+                discard_sampled_tokens_req_indices.append(i)
+
         assert all(
             req_id is not None for req_id in
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
@@ -660,11 +664,19 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         if max_gen_len == 1:
             valid_sampled_token_ids = selected_token_ids.tolist()
 
+            # Mask out the sampled tokens that should not be sampled.
+            # TODO: Keep in sync with gpu_model_runner.py, in particular
+            #       the "else" case here
+            for i in discard_sampled_tokens_req_indices:
+                valid_sampled_token_ids[i].clear()
+
+            # Append sampled tokens
             for i, req_state, seq_len in request_seq_lens:
                 token_id = valid_sampled_token_ids[i][0]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
                 self.input_batch.num_tokens[i] += 1
+
         else:
             valid_mask = selected_token_ids != INVALID_TOKEN_ID
             gen_lens = valid_mask.sum(dim=1).tolist()
@@ -783,10 +795,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 self.lora_config,
                 np.array([num_tokens], dtype=np.int32)), set_forward_context(
                     attn_metadata, self.vllm_config, 0):
-            self.model(input_ids=input_ids,
-                       positions=position_ids,
-                       kv_caches=kv_caches,
-                       inputs_embeds=inputs_embeds)
+            out = self.model(input_ids=input_ids,
+                             positions=position_ids,
+                             kv_caches=kv_caches,
+                             inputs_embeds=inputs_embeds)
+        self._hidden_states_dtype = out.dtype
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -813,7 +826,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             num_reqs_to_sample = MIN_NUM_SEQS
             dummy_hidden = torch.randn((num_tokens, hsize),
                                        device=device,
-                                       dtype=torch.bfloat16)
+                                       dtype=self._hidden_states_dtype)
             # Compile for [8, 16, .., 128,.., `self.max_num_reqs`]
             while num_reqs_to_sample <= num_tokens:
                 indices = torch.zeros(
@@ -842,7 +855,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     num_reqs_to_sample + 1, self.max_num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
-        logger.info("Compilation finished in in %.2f [secs].", end - start)
+        logger.info("Compilation finished in %.2f [secs].", end - start)
         # Record the number cached XLA graph after warming up, this will be
         # used for checking there is no additional graph compilation during
         # runtime execution.
@@ -878,12 +891,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
 
-                    tpu_k_cache = torch.zeros(kv_cache_shape,
-                                              dtype=dtype,
-                                              device=self.device)
-                    tpu_v_cache = torch.zeros_like(tpu_k_cache)
+                    tpu_kv_cache = torch.zeros(kv_cache_shape,
+                                               dtype=dtype,
+                                               device=self.device)
 
-                    kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                    kv_caches[layer_name] = tpu_kv_cache
                 else:
                     raise NotImplementedError
 
@@ -910,7 +922,7 @@ class ModelWrapperV1(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: list[torch.Tensor],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Executes the forward pass of the model.
