@@ -283,13 +283,14 @@ class P2pConnector(KVConnectorBase):
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
     @staticmethod
-    def parse_request_id(request_id: str, is_prefill = True) -> Tuple[str, int]:
-        logger.info("parse_request_id, request_id: %s, is_prefill: %s", request_id, is_prefill)
+    def parse_request_id(request_id: str, is_prefill=True) -> Tuple[str, int]:
+        logger.info("parse_request_id, request_id: %s, is_prefill: %s",
+                    request_id, is_prefill)
         # Regular expression to match the string hostname and integer port
         if is_prefill:
-            pattern = r"___decode_address_(.*):(\d+)"
+            pattern = r"___decode_addr_(.*):(\d+)"
         else:
-            pattern = r"___prefill_address_(.*):(\d+)___"
+            pattern = r"___prefill_addr_(.*):(\d+)___"
 
         # Use re.search to find the pattern in the request_id
         match = re.search(pattern, request_id)
@@ -298,9 +299,8 @@ class P2pConnector(KVConnectorBase):
             ip = match.group(1)
             port = int(match.group(2))
 
-            logger.info(
-                f"parse_request_id, {request_id=}, {ip=}, {port=}"
-            )
+            logger.info("parse_request_id, request_id: %s, ip: %s, port: %s",
+                        request_id, ip, str(port))
             return ip, port
         raise ValueError(
             f"Request id {request_id} does not contain hostname and port")

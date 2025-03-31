@@ -105,21 +105,21 @@ async def handle_request():
         global prefill_instances
         global prefill_cv
         with prefill_cv:
-            prefill_address, prefill_zmq_address = random.choice(
+            prefill_address, prefill_zmq_addr = random.choice(
                 list(prefill_instances.items()))
-            print("handle_request, prefill_address: %s, zmq_address: %s",
-                  prefill_address, prefill_zmq_address)
+            print("handle_request, prefill_addr: %s, zmq_addr: %s",
+                  prefill_address, prefill_zmq_addr)
 
         global decode_instances
         global decode_cv
         with decode_cv:
-            decode_address, decode_zmq_address = random.choice(
+            decode_addr, decode_zmq_addr = random.choice(
                 list(decode_instances.items()))
-            print("handle_request, decode_address: %s, zmq_address: %s",
-                  decode_address, decode_zmq_address)
+            print("handle_request, decode_addr: %s, zmq_addr: %s", decode_addr,
+                  decode_zmq_addr)
 
         request_id = (
-            f"___prefill_address_{prefill_zmq_address}___decode_address_{decode_zmq_address}_{random_uuid()}"
+            f"___prefill_addr_{prefill_zmq_addr}___decode_addr_{decode_zmq_addr}_{random_uuid()}"
         )
 
         # finish prefill
@@ -129,7 +129,7 @@ async def handle_request():
             continue
 
         # return decode
-        generator = forward_request(f'http://{decode_address}/v1/completions',
+        generator = forward_request(f'http://{decode_addr}/v1/completions',
                                     original_request_data, request_id)
         response = await make_response(generator)
         response.timeout = None
