@@ -1105,7 +1105,8 @@ class LLMEngine:
             return_hidden_states = False
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
-                if self.model_config.task == "generate" and outputs_by_sequence_group[0][0].hidden_states:
+                if self.model_config.task == "generate" and \
+                        outputs_by_sequence_group[0][0].hidden_states is not None:
                     return_hidden_states = True
                     dev = outputs_by_sequence_group[i][0].hidden_states.device
                     n = len(outputs_by_sequence_group[i])
@@ -1119,7 +1120,8 @@ class LLMEngine:
                             k].hidden_states
             else:
                 output = [outputs_by_sequence_group[0][i]]
-                if self.model_config.task == "generate" and outputs_by_sequence_group[0].hidden_states:
+                if self.model_config.task == "generate" and \
+                        outputs_by_sequence_group[0].hidden_states is not None:
                     return_hidden_states = True
                     hidden_states = outputs_by_sequence_group[
                         0].hidden_states 

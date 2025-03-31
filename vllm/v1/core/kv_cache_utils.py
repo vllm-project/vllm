@@ -488,9 +488,9 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
     if needed_memory > available_memory:
         raise ValueError(
             f"To serve at least one request with the models's max seq len "
-            f"({max_model_len}), ({needed_memory/1024/1024/1024:.2f} GB KV "
+            f"({max_model_len}), ({needed_memory/1024/1024/1024:.2f} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory/1024/1024/1024:.2f} GB). Try "
+            f"memory ({available_memory/1024/1024/1024:.2f} GiB). Try "
             f"increasing `gpu_memory_utilization` or decreasing "
             f"`max_model_len` when initializing the engine.")
 

@@ -69,10 +69,12 @@ llm = LLM(
     max_model_len=max_model_len,
     max_num_seqs=args.max_num_seqs,
     gpu_memory_utilization=0.8,
-    speculative_model=eagle_dir,
-    num_speculative_tokens=args.num_spec_tokens,
-    speculative_draft_tensor_parallel_size=args.draft_tp,
-    speculative_max_model_len=max_model_len,
+    speculative_config={
+        "model": eagle_dir,
+        "num_speculative_tokens": args.num_spec_tokens,
+        "draft_tensor_parallel_size": args.draft_tp,
+        "max_model_len": max_model_len,
+    },
     disable_log_stats=False,
 )
 
