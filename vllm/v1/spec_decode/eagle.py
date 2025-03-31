@@ -41,7 +41,7 @@ class EagleProposer:
         # [batch_size, max_num_blocks_per_req]
         block_table: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:  # [batch_size, num_speculative_tokens]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
@@ -82,16 +82,18 @@ class EagleProposer:
             )
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
-
-        # Sample the next token.
-        draft_token_ids = sample_token_ids(logits, sampling_metadata)
+        draft_token_ids, draft_probs = compute_probs_and_sample_next_token(
+            logits, sampling_metadata)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
-            return draft_token_ids.view(-1, 1)
+            # [batch_size, 1] and [batch_size, 1, vocab_size]
+            return draft_token_ids.view(-1, 1), draft_probs.unsqueeze(dim=1)
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
+        draft_probs_list = [draft_probs]
+
         positions = target_positions[last_token_indices]
         hidden_states = sample_hidden_states
         attn_metadata.num_actual_tokens = batch_size
@@ -119,11 +121,16 @@ class EagleProposer:
                     positions=positions,
                 )
             logits = self.model.compute_logits(hidden_states, None)
-            draft_token_ids = sample_token_ids(logits, sampling_metadata)
+            draft_token_ids, probs = compute_probs_and_sample_next_token(
+                logits, sampling_metadata)
             draft_token_ids_list.append(draft_token_ids)
+            draft_probs_list.append(probs)
 
         # [batch_size, num_speculative_tokens]
-        return torch.stack(draft_token_ids_list, dim=1)
+        draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        # [batch_size, num_speculative_tokens, vocab_size]
+        draft_probs = torch.stack(draft_probs_list, dim=1)
+        return draft_token_ids, draft_probs
 
     @staticmethod
     def prepare_inputs(
@@ -191,34 +198,41 @@ class DummyEagleModel(nn.Module):
         return hidden_states + input_embeddings  # Dummy return.
 
 
-# TODO(woosuk): The logic here is duplicated with the main sampling code.
+# FIXME(woosuk): The logic here is duplicated with the main sampling code.
 # We should refactor this to reuse the same sampling implementation.
-def sample_token_ids(
-    logits: torch.Tensor,  # [batch_size, vocab_size]
+def compute_probs_and_sample_next_token(
+    logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
-) -> torch.Tensor:  # [batch_size]
-    # NOTE(woosuk): We don't need to apply all the sampling parameters
-    # for generating the draft tokens.
+) -> tuple[torch.Tensor, torch.Tensor]:
     if sampling_metadata.all_greedy:
-        # All greedy.
+        # For greedy requests, draft_probs is not used in rejection sampling.
+        # Therefore, we can just return the logits.
+        probs = logits
         next_token_ids = logits.argmax(dim=-1)
-    else:
-        logits.div_(sampling_metadata.temperature.view(-1, 1))
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
+        return next_token_ids, probs
 
-        # TODO(woosuk): Consider seeds?
-        q = torch.empty_like(logits)
-        q.exponential_()
-        next_token_ids = probs.div_(q).argmax(dim=-1).view(-1)
+    is_greedy = sampling_metadata.temperature == -1
+    temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
+    logits.div_(temperature.view(-1, 1))
+    probs = logits.softmax(dim=-1, dtype=torch.float32)
 
-        if not sampling_metadata.all_random:
-            greedy_token_ids = logits.argmax(dim=-1)
-            next_token_ids = torch.where(
-                sampling_metadata.temperature == -1,
-                greedy_token_ids,
-                next_token_ids,
-            )
-    return next_token_ids
+    # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
+    # generating the draft tokens. We only use the temperature. While this
+    # could degrade the acceptance rate, it does not affect the distribution
+    # of the generated tokens after rejection sampling.
+
+    # TODO(woosuk): Consider seeds.
+    q = torch.empty_like(probs)
+    q.exponential_()
+    next_token_ids = probs.div_(q).argmax(dim=-1).view(-1)
+    if not sampling_metadata.all_random:
+        greedy_token_ids = probs.argmax(dim=-1)
+        next_token_ids = torch.where(
+            is_greedy,
+            greedy_token_ids,
+            next_token_ids,
+        )
+    return next_token_ids, probs
 
 
 @triton.jit

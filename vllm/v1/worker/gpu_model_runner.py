@@ -1182,7 +1182,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
-            spec_token_ids = self.drafter.propose(
+            draft_token_ids, draft_probs = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -1191,7 +1191,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cu_num_tokens=cu_num_tokens,
                 block_table=attn_metadata.block_table,
                 sampling_metadata=sampling_metadata,
-            ).tolist()
+            )
+            spec_token_ids = draft_token_ids.tolist()
+            # TODO(woosuk): Cache draft_probs and use it for rejection sampling
+            # in the next step.
+            del draft_probs
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
