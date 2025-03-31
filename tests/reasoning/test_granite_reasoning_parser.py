@@ -2,10 +2,8 @@
 import pytest
 from transformers import AutoTokenizer
 
-from tests.entrypoints.openai.reasoning_parsers.utils import (
-    DeltaMessage, run_reasoning_extraction)
-from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
-                                                       ReasoningParserManager)
+from tests.reasoning.utils import DeltaMessage, run_reasoning_extraction
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "granite"
 START_REASONING = "Here is my thought process:"

@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from threading import Thread
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import zmq
 import zmq.asyncio
@@ -32,6 +32,8 @@ from vllm.v1.utils import BackgroundProcHandle
 logger = init_logger(__name__)
 
 AnyFuture = Union[asyncio.Future[Any], Future[Any]]
+
+_R = TypeVar('_R')  # Return type for collective_rpc
 
 
 class EngineCoreClient(ABC):
@@ -117,6 +119,13 @@ class EngineCoreClient(ABC):
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        raise NotImplementedError
+
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
@@ -151,6 +160,14 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def pin_lora_async(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    async def collective_rpc_async(
+            self,
+            method: Union[str, Callable[..., _R]],
+            timeout: Optional[float] = None,
+            args: tuple = (),
+            kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         raise NotImplementedError
 
 
@@ -209,6 +226,13 @@ class InprocClient(EngineCoreClient):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.engine_core.pin_lora(lora_id)
+
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
 
 class CoreEngine:
@@ -416,9 +440,9 @@ class SyncMPClient(MPClient):
 
         def process_outputs_socket():
             shutdown_socket = ctx.socket(zmq.PAIR)
-            shutdown_socket.bind(shutdown_path)
             out_socket = make_zmq_socket(ctx, output_path, zmq.constants.PULL)
             try:
+                shutdown_socket.bind(shutdown_path)
                 poller = zmq.Poller()
                 poller.register(shutdown_socket)
                 poller.register(out_socket)
@@ -504,6 +528,14 @@ class SyncMPClient(MPClient):
 
     def execute_dummy_batch(self) -> None:
         self.call_utility("execute_dummy_batch")
+
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return self.call_utility("collective_rpc", method, timeout, args,
+                                 kwargs)
 
 
 class AsyncMPClient(MPClient):
@@ -635,6 +667,15 @@ class AsyncMPClient(MPClient):
 
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self.call_utility_async("pin_lora", lora_id)
+
+    async def collective_rpc_async(
+            self,
+            method: Union[str, Callable[..., _R]],
+            timeout: Optional[float] = None,
+            args: tuple = (),
+            kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return await self.call_utility_async("collective_rpc", method, timeout,
+                                             args, kwargs)
 
 
 class DPAsyncMPClient(AsyncMPClient):

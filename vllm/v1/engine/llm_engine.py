@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from copy import copy
-from typing import Optional, Union
+from typing import Any, Callable, Optional, Union
 
 from typing_extensions import TypeVar
 
@@ -11,7 +11,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -32,6 +32,7 @@ from vllm.v1.executor.abstract import Executor
 logger = init_logger(__name__)
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
+_R = TypeVar("_R", default=Any)
 
 
 class LLMEngine:
@@ -44,7 +45,6 @@ class LLMEngine:
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
-        input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
@@ -80,7 +80,6 @@ class LLMEngine:
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config=vllm_config,
                                    tokenizer=self.tokenizer,
-                                   input_registry=input_registry,
                                    mm_registry=mm_registry)
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
@@ -283,6 +282,13 @@ class LLMEngine:
     def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
         return self.engine_core.pin_lora(lora_id)
+
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
     def __del__(self):
         if dp_group := getattr(self, "dp_group", None):
