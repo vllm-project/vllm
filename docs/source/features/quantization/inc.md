@@ -22,7 +22,7 @@ Once you've completed the model calibration process and collected the measuremen
 
 ```bash
 export QUANT_CONFIG=/path/to/quant/config/inc/meta-llama-3.1-405b-instruct/maxabs_measure_g3.json
-vllm serve meta-llama/Llama-3.1-405B-Instruct --quantization inc --kv-cache-dtype fp8_inc --weights-load-device cpu --tensor_paralel_size 8
+vllm serve meta-llama/Llama-3.1-405B-Instruct --quantization inc --kv-cache-dtype fp8_inc --tensor_paralel_size 8
 ```
 
 > [!TIP]
@@ -51,13 +51,7 @@ llm = LLM("llama3.1/Meta-Llama-3.1-8B-Instruct", quantization="inc", kv_cache_dt
 llm.llm_engine.model_executor.shutdown()
 ```
 
-## Specifying Device for the Model's Weights Uploading
+## Device for the Model's Weights Uploading
 
-It is possible to load the unquantized weights on a different device before quantizing them, then moving them to the device on which the model will run.
-This reduces the device memory footprint of model weights, as only quantized weights are stored in device memory.
-To set the device to upload weights, use the `weights_load_device` parameter for the `LLM` object, or `--weights-load-device` command line parameter when running online inference:
-
-```python
-from vllm import LLM
-llm = LLM("llama3.1/Meta-Llama-3.1-8B-Instruct", quantization="inc", kv_cache_dtype="fp8_inc", weights_load_device="cpu")
-```
+The unquantized weights are first loaded onto the CPU, then quantized and transferred to the target device (HPU) for model execution.
+This reduces the device memory footprint of model weights, as only quantized weights are stored in the device memory.
