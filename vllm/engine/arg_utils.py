@@ -1795,6 +1795,10 @@ class EngineArgs:
         if self.scheduler_cls == EngineArgs.scheduler_cls:
             self.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
 
+        # Multimodal limits are ignored in V1
+        if self.limit_mm_per_prompt is not None:
+            logger.info("limit_mm_per_prompt has no effect in V1 Engine")
+
         # When no user override, set the default values based on the usage
         # context.
         # Use different default values for different hardware.
