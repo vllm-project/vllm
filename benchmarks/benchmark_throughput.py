@@ -11,7 +11,7 @@ from typing import Any, Optional, Union
 
 import torch
 import uvloop
-from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
+from benchmark_dataset import (BurstGPTDataset, ConversationDataset,
                                InstructCoderDataset, RandomDataset,
                                SampleRequest, ShareGPTDataset, SonnetDataset,
                                VisionArenaDataset)
@@ -319,21 +319,19 @@ def get_requests(args, tokenizer):
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
     elif args.dataset_name == "hf":
-        if args.dataset_path == VisionArenaDataset.VISION_ARENA_DATASET_PATH:
-            if args.args.backend == "vllm-chat":
-                raise ValueError(
-                    "hf datasets only are supported by vllm-chat backend")
-            # Choose between VisionArenaDataset and HuggingFaceDataset based on
-            # provided parameters.
-            dataset_cls = (VisionArenaDataset if args.dataset_path
-                           == VisionArenaDataset.VISION_ARENA_DATASET_PATH
-                           and args.hf_subset is None else HuggingFaceDataset)
+        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = VisionArenaDataset
+            common_kwargs['dataset_subset'] = None
+            common_kwargs['dataset_split'] = "train"
+            sample_kwargs["enable_multimodal_chat"] = True
+        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = InstructCoderDataset
+            common_kwargs['dataset_split'] = "train"
+        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = ConversationDataset
             common_kwargs['dataset_subset'] = args.hf_subset
             common_kwargs['dataset_split'] = args.hf_split
             sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path == "likaixin/InstructCoder":
-            dataset_cls = InstructCoderDataset
-            common_kwargs['dataset_split'] = "train"
 
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
@@ -469,10 +467,12 @@ def validate_args(args):
                 since --dataset-name is not 'hf'.",
                       stacklevel=2)
     elif args.dataset_name == "hf":
-        if args.dataset_path == VisionArenaDataset.VISION_ARENA_DATASET_PATH:
+        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
             assert args.backend == "vllm-chat", "VisionArenaDataset needs to use vllm-chat as the backend."  #noqa: E501
-        elif args.dataset_path == "likaixin/InstructCoder":
+        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
             assert args.backend == "vllm", "InstructCoder dataset needs to use vllm as the backend."  #noqa: E501
+        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+            assert args.backend == "vllm-chat", "ConversationDataset needs to use vllm-chat as the backend."  #noqa: E501
         else:
             raise ValueError(
                 f"{args.dataset_path} is not supported by hf dataset.")
