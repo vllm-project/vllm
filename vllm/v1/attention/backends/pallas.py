@@ -113,7 +113,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
                                       "PallasAttentionBackendImpl")
 
         tpu_version = torch_xla.tpu.version()
-        print(f'xw32 {tpu_version=}')
         if tpu_version < 4:
             raise NotImplementedError("TPU version must be 4 or higher.")
         # NOTE(chengjiyao): the TPU v4's vmem capacity is 16MB
