@@ -243,9 +243,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b", min_transformers_version="4.50"), # noqa: E501
-    "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b"),  # noqa: E501
+    "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b",  # noqa: E501
+                                                     extras={"6b": "Salesforce/blip2-opt-6.7b"}),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
+                                                extras={"fork": "Isotr0py/deepseek-vl2-tiny"},  # noqa: E501
+                                                max_transformers_version="4.48",  # noqa: E501
+                                                transformers_version_reason="HF model is not compatible.",  # noqa: E501
                                                hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it",
@@ -267,13 +271,19 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo("llava-hf/LLaVA-NeXT-Video-7B-hf"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),  # noqa: E501
     "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3",  # noqa: E501
+                                                      max_transformers_version="4.48",  # noqa: E501
+                                                      transformers_version_reason="HF model is not compatible.",  # noqa: E501
                                                       hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
     "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
+                                max_transformers_version="4.48",
+                                transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
                                 trust_remote_code=True),
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
                                 extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
+                                        max_transformers_version="4.48",
+                                        transformers_version_reason="Use of private method which no longer exists.",  # noqa: E501
                                         extras={"olmo": "allenai/Molmo-7B-O-0924"},  # noqa: E501
                                         trust_remote_code=True),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B",
