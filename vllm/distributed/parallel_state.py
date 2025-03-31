@@ -118,6 +118,38 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     return torch.empty_like(tensor)
 
 
+def reduce_scatter(tensor: torch.Tensor, dim: int, world_size: int,
+                   group_name: str) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group.reduce_scatter(tensor, dim)
+
+
+def reduce_scatter_fake(tensor: torch.Tensor, dim: int, world_size: int,
+                        group_name: str) -> torch.Tensor:
+    new_shape = list(tensor.shape)
+    new_shape[dim] = tensor.shape[dim] // world_size
+    return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
+
+
+def all_gather(tensor: torch.Tensor, dim: int, world_size: int,
+               group_name: str) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group.all_gather(tensor, dim)
+
+
+def all_gather_fake(tensor: torch.Tensor, dim: int, world_size: int,
+                    group_name: str) -> torch.Tensor:
+    new_shape = list(tensor.shape)
+    new_shape[dim] = tensor.shape[dim] * world_size
+    return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
+
+
 if supports_custom_op():
     from vllm.platforms import current_platform
     direct_register_custom_op(
@@ -126,6 +158,20 @@ if supports_custom_op():
         mutates_args=[],
         fake_impl=all_reduce_fake,
         dispatch_key=current_platform.dispatch_key,
+    )
+
+    direct_register_custom_op(
+        op_name="reduce_scatter",
+        op_func=reduce_scatter,
+        mutates_args=[],
+        fake_impl=reduce_scatter_fake,
+    )
+
+    direct_register_custom_op(
+        op_name="all_gather",
+        op_func=all_gather,
+        mutates_args=[],
+        fake_impl=all_gather_fake,
     )
 
 
