@@ -68,7 +68,9 @@ def run_vllm(
         lora_requests = [request.lora_request for request in requests]
 
     use_beam_search = False
-
+    if os.environ.get('VLLM_ZERO_OVERHEAD') == '1':
+        print("sleep 0.1")
+        time.sleep(0.1) # ZERO_OVERHEAD : sleep and wait the last step in warmup
     outputs = None
     if not use_beam_search:
         start = time.perf_counter()

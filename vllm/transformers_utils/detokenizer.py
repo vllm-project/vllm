@@ -16,6 +16,7 @@ class Detokenizer:
 
     def __init__(self, tokenizer_group: BaseTokenizerGroup):
         self.tokenizer_group = tokenizer_group
+        self.zero_overhead = os.environ.get('VLLM_ZERO_OVERHEAD') == '1'
 
     def get_tokenizer_for_seq(self, sequence: Sequence) -> AnyTokenizer:
         """Returns the HF tokenizer to use for a given sequence."""
@@ -108,6 +109,9 @@ class Detokenizer:
             The number of characters added to the output text.
         """
         all_input_ids = seq.get_token_ids()
+        if self.zero_overhead:
+            eff_length = seq.get_prompt_len() + seq.data._effective_length
+            all_input_ids = seq.get_token_ids()[ : eff_length]
         token_id_generated_this_iteration = all_input_ids[-1]
         tokenizer = self.get_tokenizer_for_seq(seq)
 

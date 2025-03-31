@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import os
+import queue
+import threading
 import time
 from collections import Counter as collectionsCounter
 from collections import deque
@@ -421,6 +424,18 @@ class LLMEngine:
         # Flag to set when an input fails to process and the engine should run
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
+        
+        self.zero_overhead = os.environ.get('VLLM_ZERO_OVERHEAD') == '1'
+        if self.zero_overhead:
+            self.async_d2h = None
+            self.last_record = None
+            self.async_event = torch.cuda.Event(enable_timing=False)
+            self.zero_thread = threading.Thread(target=self.thread_zero_overhead)
+            self.q_recorder = queue.Queue()
+            self.q_recorder.put(None) # None is use for first step ignore
+            self.thread_running = True
+            self.sem_m2s = threading.Semaphore(0) # main to scheduler thread
+            self.zero_thread.start()
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -1244,6 +1259,35 @@ class LLMEngine:
 
         return None
 
+    def _fix_last_step(
+            self, output: List[SamplerOutput],
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
+        
+        #sample_out_list = output[0].sampler_out_tenosr.cpu().tolist()
+        sample_out_list = self.async_d2h.tolist()
+        sample_out_ids = output[0].sampler_out_ids.tolist()
+        for seq_group_metadata, sequence_group_outputs, scheduled_seq_group in \
+            zip(seq_group_metadata_list, output[0], scheduled_seq_groups):
+            seq_group = scheduled_seq_group.seq_group
+
+            if seq_group.is_finished():
+                continue
+
+            if seq_group_metadata.do_sample:
+                sample = sequence_group_outputs.samples[0]
+
+                assert len(seq_group.seqs) == 1
+                seq = seq_group.seqs[0]
+                for token_id, seq_id in zip(sample_out_list, sample_out_ids):
+                    if seq.seq_id == seq_id:
+                        if type(token_id) is list:
+                            sample.output_token = token_id[0]
+                        else:
+                            sample.output_token = token_id
+                        seq.fix_last_token_id(sample.output_token)
+                        break
+                    
     def _advance_to_next_step(
             self, output: SamplerOutput,
             seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -1287,6 +1331,129 @@ class LLMEngine:
                         seq_group.update_num_computed_tokens(1)
                 else:
                     seq.append_token_id(sample.output_token, sample.logprobs)
+
+    def finish_thread(self):
+        if self.zero_overhead:
+            self.thread_running = False
+            self.sem_m2s.release()
+    
+    def thread_zero_overhead(self):
+        while True:
+            self.sem_m2s.acquire()
+            if not self.thread_running:
+                break
+
+            last_outputs_ids = None
+            last_outputs_tensor = None
+            if self.last_record is not None:
+                last_output = self.last_record[0][0]
+                last_outputs_ids,  last_outputs_tensor = last_output.sampler_out_ids,  last_output.sampler_out_tenosr           
+                self.async_d2h = last_outputs_tensor.to('cpu', non_blocking=True)
+                self.async_event.record()
+                self.q_recorder.put(self.last_record)
+            virtual_engine = 0
+            ctx = self.scheduler_contexts[virtual_engine]
+
+            # Clear outputs for each new scheduler iteration
+            ctx.request_outputs.clear()
+            
+            # Schedule iteration
+            (seq_group_metadata_list, scheduler_outputs,
+                allow_async_output_proc
+                ) = self.scheduler[virtual_engine].schedule()
+            ctx.seq_group_metadata_list = seq_group_metadata_list
+            ctx.scheduler_outputs = scheduler_outputs
+
+            finished_requests_ids = self.scheduler[
+                virtual_engine].get_and_reset_finished_requests_ids()
+
+            assert seq_group_metadata_list is not None
+            assert scheduler_outputs is not None
+            last_sampled_token_ids = \
+                self._get_last_sampled_token_ids(virtual_engine)
+
+            execute_model_req = ExecuteModelRequest(
+                seq_group_metadata_list=seq_group_metadata_list,
+                blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+                blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+                blocks_to_copy=scheduler_outputs.blocks_to_copy,
+                num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
+                running_queue_size=scheduler_outputs.running_queue_size,
+                finished_requests_ids=finished_requests_ids,
+                # We use ExecuteModelRequest to pass the last sampled_token_ids
+                # to each of the non-last PP stages for in-place prepare_input.
+                last_sampled_token_ids=last_sampled_token_ids, 
+                last_outputs_ids = last_outputs_ids, 
+                last_outputs_sample = last_outputs_tensor)
+
+            #profile.ProfRangeAutoPush('model_executor')
+            outputs = self.model_executor.execute_model(
+                execute_model_req=execute_model_req)
+
+            self._advance_to_next_step(
+                outputs[0], seq_group_metadata_list,
+                scheduler_outputs.scheduled_seq_groups)
+            self.last_record = [outputs, seq_group_metadata_list, scheduler_outputs]
+
+    def zero_overhead_step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+        if not self.thread_running:
+            self.zero_thread.join()
+            self.zero_thread = threading.Thread(target=self.thread_zero_overhead)
+            self.thread_running = True
+            self.zero_thread.start()
+        self.sem_m2s.release()
+        recode_output = self.q_recorder.get()
+        if recode_output is None: # None is for the first step
+            return None
+        virtual_engine = 0
+        ctx = self.scheduler_contexts[virtual_engine]
+        outputs, seq_group_metadata_list, scheduler_outputs = recode_output
+        ctx.seq_group_metadata_list = seq_group_metadata_list
+        ctx.scheduler_outputs = scheduler_outputs
+        self.async_event.synchronize()
+        self._fix_last_step(
+            outputs, seq_group_metadata_list,
+            scheduler_outputs.scheduled_seq_groups)
+
+        # is_first_step_output is True only when the num_steps of all
+        # the sequences are 1. When the num_steps > 1,
+        # multi_step_model_runner does the first-step output append.
+        is_first_step_output: bool = False if not seq_group_metadata_list \
+            else seq_group_metadata_list[0].state.num_steps == 1
+
+        # Add results to the output_queue
+        ctx.append_output(outputs=outputs,
+                            seq_group_metadata_list=seq_group_metadata_list,
+                            scheduler_outputs=scheduler_outputs,
+                            is_async=True,
+                            is_last_step=True,
+                            is_first_step_output=is_first_step_output)
+
+        # Check if need to run the usual non-async path
+        #if not allow_async_output_proc:
+        self._process_model_outputs(ctx=ctx)
+
+        # Log stats.
+        self.do_log_stats(scheduler_outputs, outputs)
+
+        # Tracing
+        self.do_tracing(scheduler_outputs)
+
+        #profile.ProfRangeAutoPush('has_unfinish')
+        if not self.has_unfinished_requests():
+            # Drain async postprocessor (if exists)
+            if len(ctx.output_queue) > 0:
+                self._process_model_outputs(ctx=ctx)
+            assert len(ctx.output_queue) == 0
+
+            # Stop the execute model loop in parallel workers until there are
+            # more requests to process. This avoids waiting indefinitely in
+            # torch.distributed ops which may otherwise timeout, and unblocks
+            # the RPC thread in the workers so that they can process any other
+            # queued control plane messages, such as add/remove lora adapters.
+            logger.debug("Stopping remote worker execution loop.")
+            self.model_executor.stop_remote_worker_execution_loop()
+        return ctx.request_outputs
 
     def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -1339,6 +1506,11 @@ class LLMEngine:
             >>>     if not (engine.has_unfinished_requests() or example_inputs):
             >>>         break
         """
+        if self.zero_overhead:
+            out = self.zero_overhead_step()
+            if out is None: #the first step need launch twice
+                out = self.zero_overhead_step()
+            return out
         if self.parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "

@@ -20,6 +20,7 @@ class StopChecker:
         # Do not use it directly, but use `self._get_max_model_len`.
         self._max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
+        self.zero_overhead = os.environ.get('VLLM_ZERO_OVERHEAD') == '1'
 
     def _get_max_model_len(self, lora_req: Optional[LoRARequest]):
         if lora_req and lora_req.long_lora_max_len:
@@ -42,12 +43,12 @@ class StopChecker:
 
         # Check if the minimum number of tokens has been generated yet;
         # skip the stop string/token checks if not
-        if seq.get_output_len() < sampling_params.min_tokens:
+        if seq.get_output_len(self.zero_overhead) < sampling_params.min_tokens:
             return
 
         # Check if the sequence has generated the EOS token.
         if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == seq.eos_token_id):
+                and seq.get_last_token_id(self.zero_overhead) == seq.eos_token_id):
             # Remove the last EOS token unless explicitly specified
             # This prevents unintended exposure of the EOS token
             if new_char_count and (
@@ -58,7 +59,7 @@ class StopChecker:
 
         # Check if a stop token was encountered.
         # This assumes a single token produced per step.
-        last_token_id = seq.get_last_token_id()
+        last_token_id = seq.get_last_token_id(self.zero_overhead)
         if last_token_id in (sampling_params.stop_token_ids or ()):
             if new_char_count and (
                     not sampling_params.include_stop_str_in_output):
@@ -81,12 +82,12 @@ class StopChecker:
             return
 
         # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self._get_max_model_len(lora_req):
+        if seq.get_len(self.zero_overhead) > self._get_max_model_len(lora_req):
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
         # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
+        if seq.get_output_len(self.zero_overhead) == sampling_params.max_tokens:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 

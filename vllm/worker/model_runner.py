@@ -4,6 +4,7 @@ import dataclasses
 import gc
 import inspect
 import itertools
+import os
 import time
 import weakref
 from contextlib import contextmanager
@@ -58,6 +59,8 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+
+from vllm.model_executor.layers.update_input import UpdateInputTokens
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -473,6 +476,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 self.sliding_window + self.block_size - 1) // self.block_size
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
+            
+        self.zero_overhead = os.environ.get('VLLM_ZERO_OVERHEAD') == '1'
+        self.last_sample_tensor = None
+        self.last_sample_ids = None
+        self.req_ids = []
 
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
@@ -897,6 +905,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
                                                self.runner.device,
                                                self.runner.pin_memory)
+        if self.zero_overhead and self.last_sample_tensor is not None:
+            input_ids = async_tensor_h2d(self.req_ids, torch.long,
+                                               self.runner.device,
+                                               self.runner.pin_memory)
+            last_ids = async_tensor_h2d(self.last_sample_ids.tolist(), torch.long,
+                                               self.runner.device,
+                                               self.runner.pin_memory)
+            UpdateInputTokens(input_tokens_tensor, input_ids, self.last_sample_tensor, last_ids)
 
         token_types_tensor = async_tensor_h2d(token_types, torch.long,
                                                self.runner.device,

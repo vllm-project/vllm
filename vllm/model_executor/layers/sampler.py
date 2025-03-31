@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
+import os
 import warnings
 from dataclasses import dataclass
 from importlib.util import find_spec
@@ -68,6 +69,15 @@ class SampleResultArgsType:
     sample_results_dict: SampleResultsDictType
     sampling_metadata: SamplingMetadata
     greedy_samples: Optional[torch.Tensor]
+# Implemented by guanyu
+@dataclass
+class SampleDeviceToDevices:
+    def __init__(self):
+        self.seq_id:torch.Tensor = None
+        self.random_samples:torch.Tensor = None
+        self.zero_overhead:bool = False
+
+d2d_data = SampleDeviceToDevices() 
 
 
 # Union of non-deferred (single-step scheduling)
@@ -186,6 +196,7 @@ class Sampler(nn.Module):
         # speculative decoding.
         self.include_gpu_probs_tensor = False
         self.should_modify_greedy_probs_inplace = False
+        self.zero_overhead = os.environ.get('VLLM_ZERO_OVERHEAD') == '1'
 
     def _init_sampling_tensors(
         self,
@@ -446,7 +457,8 @@ def _greedy_sample(
         same as the length of selected_seq_groups. If the corresponding
         seq_group has do_sample=False, tuple contains ([], [])
     """
-    samples_lst = samples.tolist()
+    if not d2d_data.zero_overhead:
+        samples_lst = samples.tolist()
     sample_idx = 0
     results: SampleResultType = []
     for seq_group in selected_seq_groups:
@@ -459,7 +471,11 @@ def _greedy_sample(
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
-        next_token_ids = [samples_lst[sample_idx]]
+        if d2d_data.zero_overhead:
+            assert num_parent_seqs == 1 # not support muti seqences in seqence group
+            next_token_ids = [0] #place holder token id
+        else:
+            next_token_ids = [samples_lst[sample_idx]]
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     return results
@@ -482,7 +498,8 @@ def _random_sample(
         seq_group has do_sample=False, tuple contains ([], [])
     """
     # Find the maximum n value of the prompt phase requests.
-    random_samples = random_samples.cpu()
+    if not d2d_data.zero_overhead:
+        random_samples = random_samples.cpu()
     sample_idx = 0
     results: SampleResultType = []
     for seq_group in selected_seq_groups:
@@ -497,13 +514,21 @@ def _random_sample(
         if is_prompt:
             # Prompt phase.
             parent_ids = [0] * sampling_params.n
-            next_token_ids = random_samples[
-                sample_idx, :sampling_params.n].tolist()
+            if d2d_data.zero_overhead:
+                assert num_parent_seqs == 1 # not support muti seqences in seqence group
+                next_token_ids = [0] * sampling_params.n  #place holder token id
+            else:
+                next_token_ids = random_samples[
+                    sample_idx, :sampling_params.n].tolist()
         else:
             # Generation phase.
             parent_ids = list(range(num_parent_seqs))
-            next_token_ids = random_samples[sample_idx:sample_idx +
-                                            num_parent_seqs, 0].tolist()
+            if d2d_data.zero_overhead:
+                assert num_parent_seqs == 1 # not support muti seqences in seqence group
+                next_token_ids = [0] * num_parent_seqs  #place holder token id
+            else:
+                next_token_ids = random_samples[sample_idx:sample_idx +
+                                                num_parent_seqs, 0].tolist()
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     return results

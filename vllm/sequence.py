@@ -184,6 +184,9 @@ class SequenceData(msgspec.Struct,
     # It is used to compute mrope_position_ids.
     _mrope_position_delta: Optional[int] = None
 
+    # use for zero over head schedule
+    _effective_length: int = 0
+
     @staticmethod
     def from_prompt_token_counts(
             *token_counts: tuple[int, int]) -> "SequenceData":
@@ -294,14 +297,29 @@ class SequenceData(msgspec.Struct,
         self._cached_all_token_ids.append(token_id)
         self._cumulative_logprob += logprob
 
+    def fix_effective_token_id(self, token_id: int,):
+        effect_offset = self._effective_length - len(self.output_token_ids)
+        if effect_offset < 0:
+            self._output_token_ids[effect_offset] = token_id
+            if len(self._new_appended_tokens) >= effect_offset * -1:
+                self._new_appended_tokens[effect_offset] = token_id
+            self._cached_all_token_ids[effect_offset] = token_id
+            self._effective_length += 1
+
     def get_len(self) -> int:
         return len(self._output_token_ids) + len(self._prompt_token_ids)
+
+    def zero_overhead_get_len(self) -> int:
+        return self._effective_length + len(self._prompt_token_ids)
 
     def get_prompt_len(self) -> int:
         return len(self._prompt_token_ids)
 
     def get_output_len(self) -> int:
         return len(self._output_token_ids)
+
+    def zero_overhead_get_output_len(self) -> int:
+        return self._effective_length
 
     def get_token_ids(self) -> list[int]:
         return self._cached_all_token_ids
@@ -359,8 +377,16 @@ class SequenceData(msgspec.Struct,
             return self._prompt_token_ids[-1]
         return self._output_token_ids[-1]
 
+    def zero_overhead_get_last_token_id(self) -> int:
+        if self._effective_length == 0:
+            return self._prompt_token_ids[-1]
+        return self._output_token_ids[self._effective_length - 1]
+
     def get_prompt_token_ids(self) -> tuple[int, ...]:
         return self.prompt_token_ids
+
+    def zero_overhead_get_output_token_ids(self) -> Tuple[int, ...]:
+        return self.output_token_ids[:self._effective_length]
 
     def get_output_token_ids(self) -> tuple[int, ...]:
         return self.output_token_ids
@@ -441,6 +467,7 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[list[str]] = None
+        self.zero_overhead = os.environ.get('VLLM_ZERO_OVERHEAD') == '1'
 
     @property
     def n_blocks(self) -> int:
@@ -507,9 +534,9 @@ class Sequence:
         """If delta is True, only new tokens since the last call to
         this method are returned"""
         if not delta:
-            return self.get_output_token_ids()
+            return self.get_output_token_ids(self.zero_overhead)
 
-        output_len = self.get_output_len()
+        output_len = self.get_output_len(self.zero_overhead)
 
         # Get the number of new tokens
         num_new_tokens = output_len - self._last_output_token_ids_offset
@@ -519,11 +546,17 @@ class Sequence:
         if num_new_tokens == 1:
             # Optimization for single decode token case
             # (which is what we have most of the time)
-            return self.data._cached_all_token_ids[-1]
+            if self.zero_overhead:
+                return self.data._cached_all_token_ids[self.data._effective_length - 1]
+            else:
+                return self.data._cached_all_token_ids[-1]
 
         if num_new_tokens == 0:
             return []
 
+        if self.zero_overhead:
+            effctive_len = self.data.zero_overhead_get_len()
+            return self.data._cached_all_token_ids[-num_new_tokens : effctive_len]
         return self.data._cached_all_token_ids[-num_new_tokens:]
 
     def hash_of_block(self, logical_idx: int) -> int:
@@ -562,13 +595,20 @@ class Sequence:
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
-    def get_len(self) -> int:
+    def fix_last_token_id(self, token_id: int) -> None:
+        self.data.fix_effective_token_id(token_id)
+
+    def get_len(self, zero_overhead = False) -> int:
+        if zero_overhead:
+            return self.data.zero_overhead_get_len()
         return self.data.get_len()
 
     def get_prompt_len(self) -> int:
         return self.data.get_prompt_len()
 
-    def get_output_len(self) -> int:
+    def get_output_len(self, zero_overhead = False) -> int:
+        if zero_overhead:
+            return self.data.zero_overhead_get_output_len()
         return self.data.get_output_len()
 
     def get_token_ids(self) -> list[int]:
@@ -577,10 +617,14 @@ class Sequence:
     def get_prompt_token_ids(self) -> tuple[int, ...]:
         return self.data.get_prompt_token_ids()
 
-    def get_last_token_id(self) -> int:
+    def get_last_token_id(self, zero_overhead = False) -> int:
+        if zero_overhead:
+            return self.data.zero_overhead_get_last_token_id()
         return self.data.get_last_token_id()
 
-    def get_output_token_ids(self) -> tuple[int, ...]:
+    def get_output_token_ids(self, zero_overhead = False) -> tuple[int, ...]:
+        if zero_overhead:
+            return self.data.zero_overhead_get_output_token_ids()
         return self.data.get_output_token_ids()
 
     def get_cumulative_logprob(self) -> float:
@@ -792,17 +836,19 @@ class SequenceGroup:
     def set_last_token_time(self, now: float) -> None:
         """Sets the last token time for Request level timings."""
         # If still in prefill phase, assertion fails.
-        assert not self.is_prefill(), (
-            "seq_group.set_last_token_time() should not be called "
-            "if the seq_group is in prefill phase.")
+        if not self.seqs[0].zero_overhead:
+            assert not self.is_prefill(), (
+                "seq_group.set_last_token_time() should not be called "
+                "if the seq_group is in prefill phase.")
         self.last_token_latency = now - self.metrics.last_token_time
         self.metrics.last_token_time = now
 
     def get_last_token_latency(self) -> float:
         """Returns the latency of the last token."""
-        assert not self.is_prefill(), (
-            "seq_group.get_last_token_latency() should not be called "
-            "if the seq_group is in prefill phase.")
+        if not self.seqs[0].zero_overhead:
+            assert not self.is_prefill(), (
+                "seq_group.get_last_token_latency() should not be called "
+                "if the seq_group is in prefill phase.")
         return self.last_token_latency
 
     def maybe_set_first_token_time(self, time: float) -> None:
@@ -1330,6 +1376,12 @@ class ExecuteModelRequest(
     # Async callback
     async_callback: Optional[Callable] = None
 
+    # for zero-overhead scheduler
+    last_outputs_sample : Optional[torch.Tensor] = None
+
+    # for zero-overhead scheduler
+    last_outputs_ids : Optional[torch.Tensor] = None
+
     @property
     def is_first_multi_step(self) -> bool:
         # TODO(will) make this be able to handle batches with variable number of
@@ -1375,7 +1427,9 @@ class ExecuteModelRequest(
             finished_requests_ids=self.finished_requests_ids,
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
             if self.last_sampled_token_ids is not None else None,
-            async_callback=self.async_callback)
+            async_callback=self.async_callback,
+            last_outputs_sample = self.last_outputs_sample,
+            last_outputs_ids = self.last_outputs_ids)
 
 
 @dataclass
