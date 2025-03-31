@@ -1008,6 +1008,36 @@ class BaseProcessingInfo:
         """
         raise NotImplementedError
 
+    def get_allowed_mm_limits(self) -> Mapping[str, Optional[int]]:
+        """
+        Return the maximum allowed number of items for each modality.
+
+        A value of `None` means unlimited number of items.
+
+        Omitting a modality from the returned dictionary means that
+        it is not supported at all.
+        """
+        supported_mm_limits = self.get_supported_mm_limits()
+
+        if envs.VLLM_USE_V1:
+            return supported_mm_limits
+
+        mm_config = self.ctx.get_mm_config()
+        allowed_mm_limits = {
+            modality: mm_config.get_limit_per_prompt(modality)
+            for modality in supported_mm_limits
+        }
+
+        for modality, supported_limit in supported_mm_limits.items():
+            limit = allowed_mm_limits[modality]
+            if supported_limit is not None and supported_limit < limit:
+                raise ValueError(
+                    f"You set {modality}={limit} (or defaulted to 1) in "
+                    f"`--limit-mm-per-prompt`, but this model only supports "
+                    f"at most {supported_limit} {modality} items.")
+
+        return allowed_mm_limits
+
     @abstractmethod
     def get_mm_max_tokens_per_item(
         self,
@@ -1082,17 +1112,25 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before passing them to :meth:`_get_hf_mm_data`.
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
+        supported_mm_limits = self.info.get_supported_mm_limits()
+        allowed_mm_limits = self.info.get_allowed_mm_limits()
 
-        if not envs.VLLM_USE_V1:
-            mm_config = self.info.ctx.get_mm_config()
+        for modality, items in mm_items.items():
+            supported_limit = supported_mm_limits.get(modality, 0)
+            allowed_limit = allowed_mm_limits.get(modality, 0)
+            num_items = len(items)
 
-            for modality, items in mm_items.items():
-                limit = mm_config.get_limit_per_prompt(modality)
-                if len(items) > limit:
-                    raise ValueError(
-                        f"You set {modality}={limit} (or defaulted to 1) in "
-                        f"`--limit-mm-per-prompt`, but passed {len(items)} "
-                        f"{modality} items in the same prompt.")
+            if supported_limit is not None and num_items > supported_limit:
+                raise ValueError(
+                    f"The model only supports at most {supported_limit} "
+                    f"{modality} items, but you passed {num_items} "
+                    f"{modality} items in the same prompt.")
+
+            if allowed_limit is not None and num_items > allowed_limit:
+                raise ValueError(
+                    f"You set {modality}={allowed_limit} (or defaulted to 1) "
+                    f"`in --limit-mm-per-prompt`, but passed {num_items} "
+                    f"{modality} items in the same prompt.")
 
         return mm_items
 
