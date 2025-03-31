@@ -43,7 +43,6 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings_from_map)
 
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
-_AUDIO_PLACEHOLDER_TOKEN = 0
 _AUDIO_TOKENS_PER_SECOND = 6.25
 _MAX_ENCODER_BATCH_SIZE = 16
 
@@ -91,16 +90,13 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
                 {'additional_special_tokens': [_AUDIO_PLACEHOLDER_OVERRIDE]})
             hf_processor.vocab = hf_processor.tokenizer.get_vocab()
 
-        global _AUDIO_PLACEHOLDER_TOKEN
-        _AUDIO_PLACEHOLDER_TOKEN = hf_processor.tokenizer.encode(
-            _AUDIO_PLACEHOLDER_OVERRIDE, add_special_tokens=False)[0]
-
         # NOTE: Ultravox processing definition uses '<|eot_id|>' as the
         # placeholder that will cause confusion with the actual end of turn
         # token, thus we override placeholder with a reserved special
         # token.
         hf_processor.audio_token_replacement = _AUDIO_PLACEHOLDER_OVERRIDE
-        hf_processor.audio_replacement_token_id = _AUDIO_PLACEHOLDER_TOKEN
+        hf_processor.audio_replacement_token_id = hf_processor.tokenizer.encode(
+            _AUDIO_PLACEHOLDER_OVERRIDE, add_special_tokens=False)[0]
         return hf_processor
 
     def get_feature_extractor(
@@ -595,8 +591,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
+        # The audio token index is not included in the embedding table
+        # We need to remove it before embedding lookup
         safe_input_ids = input_ids.clone()
-        safe_input_ids[safe_input_ids == _AUDIO_PLACEHOLDER_TOKEN] = 0
+        safe_input_ids[safe_input_ids == self.config.audio_token_index] = 0
         inputs_embeds = self.language_model.get_input_embeddings(
             safe_input_ids)
         if multimodal_embeddings is not None:
@@ -610,7 +608,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             else:
                 inputs_embeds = merge_multimodal_embeddings(
                     input_ids, inputs_embeds, multimodal_embeddings,
-                    _AUDIO_PLACEHOLDER_TOKEN)
+                    self.config.audio_token_index)
         return inputs_embeds
 
     def forward(self,
