@@ -133,17 +133,9 @@ def test_linear_decode_forward_triton(
     torch.cuda.manual_seed_all(42)
     current_platform.seed_everything(42)
 
-    base = 0.01
     q = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
     k = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
     v = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
-
-    for i in range(batch_size):
-        for j in range(num_heads):
-            for d in range(head_size):
-                q[i, j, 0, d] = base * (i + j + d + 1)
-                k[i, j, 0, d] = base * (i + j + d + 2)
-                v[i, j, 0, d] = base * (i + j + d + 3)
 
     kv_caches = torch.zeros(batch_size,
                             num_heads,
@@ -151,13 +143,6 @@ def test_linear_decode_forward_triton(
                             head_size,
                             dtype=dtype,
                             device="cuda")
-
-    for i in range(batch_size):
-        for j in range(num_heads):
-            for k_idx in range(head_size):
-                for v_idx in range(head_size):
-                    kv_caches[i, j, k_idx,
-                              v_idx] = base * (i + j + k_idx + v_idx + 4)
 
     kv_caches_copy = kv_caches.clone()
 
@@ -197,17 +182,9 @@ def test_linear_decode_forward_triton_with_padding(
 
     batch_size = 4
 
-    base = 0.001
     q = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
     k = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
     v = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
-
-    for i in range(batch_size):
-        for j in range(num_heads):
-            for d in range(head_size):
-                q[i, j, 0, d] = base * (i + j + d + 1)
-                k[i, j, 0, d] = base * (i + j + d + 2)
-                v[i, j, 0, d] = base * (i + j + d + 3)
 
     kv_caches = torch.zeros(batch_size,
                             num_heads,
@@ -215,14 +192,7 @@ def test_linear_decode_forward_triton_with_padding(
                             head_size,
                             dtype=dtype,
                             device="cuda")
-
-    for i in range(batch_size):
-        for j in range(num_heads):
-            for k_idx in range(head_size):
-                for v_idx in range(head_size):
-                    kv_caches[i, j, k_idx,
-                              v_idx] = base * (i + j + k_idx + v_idx + 4)
-
+    
     kv_caches_copy = kv_caches.clone()
 
     slope_rate = torch.zeros(num_heads, device="cuda")
@@ -277,18 +247,9 @@ def test_lightning_attention_reference(
     torch.cuda.manual_seed_all(42)
     current_platform.seed_everything(42)
 
-    base = 0.001
     q = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
     k = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
     v = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
-
-    for i in range(batch_size):
-        for j in range(num_heads):
-            for s in range(seq_len):
-                for d in range(head_size):
-                    q[i, j, s, d] = base * (i + j + s + d + 1)
-                    k[i, j, s, d] = base * (i + j + s + d + 2)
-                    v[i, j, s, d] = base * (i + j + s + d + 3)
 
     ed = torch.zeros(num_heads, device="cuda")
     for h in range(num_heads):
@@ -300,13 +261,6 @@ def test_lightning_attention_reference(
                              head_size,
                              dtype=dtype,
                              device="cuda")
-
-    for i in range(batch_size):
-        for j in range(num_heads):
-            for k_idx in range(head_size):
-                for v_idx in range(head_size):
-                    kv_history[i, j, k_idx,
-                               v_idx] = base * (i + j + k_idx + v_idx + 4)
 
     kv_history_clone = kv_history.clone()
 

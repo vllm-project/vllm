@@ -52,7 +52,7 @@ class MambaCacheManager(ConstantSizeCache):
         return self._mamba_cache
 
     def _copy_cache(self, from_index: int, to_index: int):
-        for cache_t in self._mamba_cache:
+        for cache_t in self.cache:
             cache_t[:, to_index].copy_(cache_t[:, from_index],
                                        non_blocking=True)
 
