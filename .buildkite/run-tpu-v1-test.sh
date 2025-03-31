@@ -3,7 +3,7 @@
 set -e
 
 # Build the docker image.
-docker build -f Dockerfile.tpu -t vllm-tpu .
+docker build -f docker/Dockerfile.tpu -t vllm-tpu .
 
 # Set up cleanup.
 remove_docker_container() { docker rm -f tpu-test || true; }
