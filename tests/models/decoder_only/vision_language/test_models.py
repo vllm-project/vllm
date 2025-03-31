@@ -36,10 +36,6 @@ REQUIRES_V0_MODELS = [
     # V1 Test: no way to fall back for head_dim = 80
     # https://github.com/vllm-project/vllm/issues/14524
     "qwen_vl",
-    "h2ovl",
-    "blip2",
-    # V1 Test: not enough KV cache space in C1.
-    "fuyu",
 ]
 
 # yapf: disable
@@ -182,7 +178,8 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=64)],
     ),
     "blip2": VLMTestInfo(
-        models=["Salesforce/blip2-opt-2.7b"],
+        # TODO: Change back to 2.7b once head_dim = 80 is supported
+        models=["Salesforce/blip2-opt-6.7b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"Question: {img_prompt} Answer:",
         img_idx_to_prompt=lambda idx: "",
@@ -275,7 +272,8 @@ VLM_TEST_SETTINGS = {
     "h2ovl": VLMTestInfo(
         models = [
             "h2oai/h2ovl-mississippi-800m",
-            "h2oai/h2ovl-mississippi-2b",
+            # TODO: Re-enable once head_dim = 80 is supported
+            # "h2oai/h2ovl-mississippi-2b",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|prompt|>{img_prompt}<|end|><|answer|>", # noqa: E501
