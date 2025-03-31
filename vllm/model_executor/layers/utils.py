@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Utility methods for model layers."""
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 
@@ -62,9 +62,9 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     return logits
 
 
-def apply_gemm_rocm(x: torch.Tensor,
-                    weight: torch.Tensor,
-                    bias: Optional[torch.Tensor] = None):
+def rocm_unquantized_gemm(x: torch.Tensor,
+                          weight: torch.Tensor,
+                          bias: Optional[torch.Tensor] = None):
     x_view = x.view(-1, x.size(-1))
     m = weight.shape[0]
     k = weight.shape[1]
@@ -92,3 +92,9 @@ def apply_gemm_rocm(x: torch.Tensor,
         ops.LLMM1(weight, x_view, out, 4)
         return out.view(*x.shape[:-1], weight.shape[0])
     return torch.nn.functional.linear(x, weight, bias)
+
+
+def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
+    if current_platform.is_rocm():
+        return rocm_unquantized_gemm
+    return torch.nn.functional.linear

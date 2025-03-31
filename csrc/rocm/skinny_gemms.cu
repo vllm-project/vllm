@@ -344,14 +344,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int m = 0; m < M; m++) sum[m][i] = 0;
 
     bigType bigA[M][UNRL];
-    bigType bigB0[UNRL];
-    bigType bigB1[UNRL];
-    bigType bigB2[UNRL];
-    bigType bigB3[UNRL];
-    bigType bigB4[UNRL];
-    bigType bigB5[UNRL];
-    bigType bigB6[UNRL];
-    bigType bigB7[UNRL];
+    bigType bigB[YTILE][UNRL];
     //----------------------------------------------------
     // Fetch weight matrix B in interleaved K-split!
     // - Each thread (lane) is fetching 8 elements (A_Chunk)
@@ -379,17 +372,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if (k_ >= K) break;
 
         const scalar_t* B_ = &B[(n + 0) * K + k_];
-        bigB0[k2].h8 = (loadnt((scalar8*)(&B_[0 * K])));
+        bigB[0][k2].h8 = (loadnt((scalar8*)(&B_[0 * K])));
         //----------------------------------------------------
         // The following code with YTILE > 1 has to be deleted
         //----------------------------------------------------
-        if (YTILE >= 2) bigB1[k2].h8 = (loadnt((scalar8*)(&B_[1 * K])));
-        if (YTILE >= 3) bigB2[k2].h8 = (loadnt((scalar8*)(&B_[2 * K])));
-        if (YTILE >= 4) bigB3[k2].h8 = (loadnt((scalar8*)(&B_[3 * K])));
-        if (YTILE >= 5) bigB4[k2].h8 = (loadnt((scalar8*)(&B_[4 * K])));
-        if (YTILE >= 6) bigB5[k2].h8 = (loadnt((scalar8*)(&B_[5 * K])));
-        if (YTILE >= 7) bigB6[k2].h8 = (loadnt((scalar8*)(&B_[6 * K])));
-        if (YTILE >= 8) bigB7[k2].h8 = (loadnt((scalar8*)(&B_[7 * K])));
+        if (YTILE >= 2) bigB[1][k2].h8 = (loadnt((scalar8*)(&B_[1 * K])));
+        if (YTILE >= 3) bigB[2][k2].h8 = (loadnt((scalar8*)(&B_[2 * K])));
+        if (YTILE >= 4) bigB[3][k2].h8 = (loadnt((scalar8*)(&B_[3 * K])));
+        if (YTILE >= 5) bigB[4][k2].h8 = (loadnt((scalar8*)(&B_[4 * K])));
+        if (YTILE >= 6) bigB[5][k2].h8 = (loadnt((scalar8*)(&B_[5 * K])));
+        if (YTILE >= 7) bigB[6][k2].h8 = (loadnt((scalar8*)(&B_[6 * K])));
+        if (YTILE >= 8) bigB[7][k2].h8 = (loadnt((scalar8*)(&B_[7 * K])));
       }
 
       // Fetch activation matrix from either just LDS or from both LDS / memory
@@ -418,31 +411,30 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (uint32_t m = 0; m < M; m++) {
   #pragma unroll
           for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
-            DOT2C(sum[m][0], bigA[m][k2].f[b], bigB0[k2].f[b])
-
+            DOT2C(sum[m][0], bigA[m][k2].f[b], bigB[0][k2].f[b])
             //----------------------------------------------------
             // The following code with YTILE > 1
             //----------------------------------------------------
             if (YTILE >= 2) {
-              DOT2C(sum[m][1], bigA[m][k2].f[b], bigB1[k2].f[b]);
+              DOT2C(sum[m][1], bigA[m][k2].f[b], bigB[1][k2].f[b]);
             }
             if (YTILE >= 3) {
-              DOT2C(sum[m][2], bigA[m][k2].f[b], bigB2[k2].f[b]);
+              DOT2C(sum[m][2], bigA[m][k2].f[b], bigB[2][k2].f[b]);
             }
             if (YTILE >= 4) {
-              DOT2C(sum[m][3], bigA[m][k2].f[b], bigB3[k2].f[b]);
+              DOT2C(sum[m][3], bigA[m][k2].f[b], bigB[3][k2].f[b]);
             }
             if (YTILE >= 5) {
-              DOT2C(sum[m][4], bigA[m][k2].f[b], bigB4[k2].f[b]);
+              DOT2C(sum[m][4], bigA[m][k2].f[b], bigB[4][k2].f[b]);
             }
             if (YTILE >= 6) {
-              DOT2C(sum[m][5], bigA[m][k2].f[b], bigB5[k2].f[b]);
+              DOT2C(sum[m][5], bigA[m][k2].f[b], bigB[5][k2].f[b]);
             }
             if (YTILE >= 7) {
-              DOT2C(sum[m][6], bigA[m][k2].f[b], bigB6[k2].f[b]);
+              DOT2C(sum[m][6], bigA[m][k2].f[b], bigB[6][k2].f[b]);
             }
             if (YTILE >= 8) {
-              DOT2C(sum[m][7], bigA[m][k2].f[b], bigB7[k2].f[b]);
+              DOT2C(sum[m][7], bigA[m][k2].f[b], bigB[7][k2].f[b]);
             }
           }
         }
@@ -600,15 +592,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int m = 0; m < M; m++) sum[m][i] = 0;
 
     bigType bigA[M][UNRL];
-    bigType bigB0[UNRL];
-    bigType bigB1[UNRL];
-    bigType bigB2[UNRL];
-    bigType bigB3[UNRL];
-    bigType bigB4[UNRL];
-    bigType bigB5[UNRL];
-    bigType bigB6[UNRL];
-    bigType bigB7[UNRL];
-    bigType bigB8[UNRL];
+    bigType bigB[YTILE][UNRL];
     //----------------------------------------------------
     // Fetch weight matrix B in interleaved K-split!
     // - Each thread (lane) is fetching 8 elements (A_Chunk)
@@ -635,17 +619,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if (k_ >= K) break;
 
         const scalar_t* B_ = &B[(n + 0) * K + k_];
-        bigB0[k2].h8 = (loadnt((scalar8*)(&B_[0 * K])));
+        bigB[0][k2].h8 = (loadnt((scalar8*)(&B_[0 * K])));
         //----------------------------------------------------
         // The following code with YTILE > 1 has to be deleted
         //----------------------------------------------------
-        if (YTILE >= 2) bigB1[k2].h8 = (loadnt((scalar8*)(&B_[1 * K])));
-        if (YTILE >= 3) bigB2[k2].h8 = (loadnt((scalar8*)(&B_[2 * K])));
-        if (YTILE >= 4) bigB3[k2].h8 = (loadnt((scalar8*)(&B_[3 * K])));
-        if (YTILE >= 5) bigB4[k2].h8 = (loadnt((scalar8*)(&B_[4 * K])));
-        if (YTILE >= 6) bigB5[k2].h8 = (loadnt((scalar8*)(&B_[5 * K])));
-        if (YTILE >= 7) bigB6[k2].h8 = (loadnt((scalar8*)(&B_[6 * K])));
-        if (YTILE >= 8) bigB7[k2].h8 = (loadnt((scalar8*)(&B_[7 * K])));
+        if (YTILE >= 2) bigB[1][k2].h8 = (loadnt((scalar8*)(&B_[1 * K])));
+        if (YTILE >= 3) bigB[2][k2].h8 = (loadnt((scalar8*)(&B_[2 * K])));
+        if (YTILE >= 4) bigB[3][k2].h8 = (loadnt((scalar8*)(&B_[3 * K])));
+        if (YTILE >= 5) bigB[4][k2].h8 = (loadnt((scalar8*)(&B_[4 * K])));
+        if (YTILE >= 6) bigB[5][k2].h8 = (loadnt((scalar8*)(&B_[5 * K])));
+        if (YTILE >= 7) bigB[6][k2].h8 = (loadnt((scalar8*)(&B_[6 * K])));
+        if (YTILE >= 8) bigB[7][k2].h8 = (loadnt((scalar8*)(&B_[7 * K])));
       }
 
       // Fetch activation matrix from either just LDS or from both LDS / memory
@@ -677,31 +661,30 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
           for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
-            DOT2C(sum[m][0], bigA[m][k2].f[b], bigB0[k2].f[b]);
-
+            DOT2C(sum[m][0], bigA[m][k2].f[b], bigB[0][k2].f[b]);
             //----------------------------------------------------
             // The following code with YTILE > 1
             //----------------------------------------------------
             if (YTILE >= 2) {
-              DOT2C(sum[m][1], bigA[m][k2].f[b], bigB1[k2].f[b]);
+              DOT2C(sum[m][1], bigA[m][k2].f[b], bigB[1][k2].f[b]);
             }
             if (YTILE >= 3) {
-              DOT2C(sum[m][2], bigA[m][k2].f[b], bigB2[k2].f[b]);
+              DOT2C(sum[m][2], bigA[m][k2].f[b], bigB[2][k2].f[b]);
             }
             if (YTILE >= 4) {
-              DOT2C(sum[m][3], bigA[m][k2].f[b], bigB3[k2].f[b]);
+              DOT2C(sum[m][3], bigA[m][k2].f[b], bigB[3][k2].f[b]);
             }
             if (YTILE >= 5) {
-              DOT2C(sum[m][4], bigA[m][k2].f[b], bigB4[k2].f[b]);
+              DOT2C(sum[m][4], bigA[m][k2].f[b], bigB[4][k2].f[b]);
             }
             if (YTILE >= 6) {
-              DOT2C(sum[m][5], bigA[m][k2].f[b], bigB5[k2].f[b]);
+              DOT2C(sum[m][5], bigA[m][k2].f[b], bigB[5][k2].f[b]);
             }
             if (YTILE >= 7) {
-              DOT2C(sum[m][6], bigA[m][k2].f[b], bigB6[k2].f[b]);
+              DOT2C(sum[m][6], bigA[m][k2].f[b], bigB[6][k2].f[b]);
             }
             if (YTILE >= 8) {
-              DOT2C(sum[m][7], bigA[m][k2].f[b], bigB7[k2].f[b]);
+              DOT2C(sum[m][7], bigA[m][k2].f[b], bigB[7][k2].f[b]);
             }
           }
         }
@@ -892,17 +875,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int m = 0; m < M; m++) sum[m][i] = 0;
 
     bigType bigA[M][UNRL];
-    bigType bigB0[UNRL];
-    bigType bigB1[UNRL];
-    bigType bigB2[UNRL];
-    bigType bigB3[UNRL];
-    bigType bigB4[UNRL];
-    bigType bigB5[UNRL];
-    bigType bigB6[UNRL];
-    bigType bigB7[UNRL];
-    bigType bigB8[UNRL];
-    bigType bigB9[UNRL];
-    bigType bigB10[UNRL];
+    bigType bigB[YTILE][UNRL];
     //----------------------------------------------------
     // Fetch weight matrix B in interleaved K-split!
     // - Each thread (lane) is fetching 8 elements (A_Chunk)
@@ -948,17 +921,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if (k_ >= K) break;
 
         const scalar_t* B_ = &B[(n + 0) * K + k_];
-        bigB0[k2].h8 = (loadnt((scalar8*)(&B_[0 * K])));
+        bigB[0][k2].h8 = (loadnt((scalar8*)(&B_[0 * K])));
         //----------------------------------------------------
         // The following code with YTILE > 1 has to be deleted
         //----------------------------------------------------
-        if (YTILE >= 2) bigB1[k2].h8 = (loadnt((scalar8*)(&B_[1 * K])));
-        if (YTILE >= 3) bigB2[k2].h8 = (loadnt((scalar8*)(&B_[2 * K])));
-        if (YTILE >= 4) bigB3[k2].h8 = (loadnt((scalar8*)(&B_[3 * K])));
-        if (YTILE >= 5) bigB4[k2].h8 = (loadnt((scalar8*)(&B_[4 * K])));
-        if (YTILE >= 6) bigB5[k2].h8 = (loadnt((scalar8*)(&B_[5 * K])));
-        if (YTILE >= 7) bigB6[k2].h8 = (loadnt((scalar8*)(&B_[6 * K])));
-        if (YTILE >= 8) bigB7[k2].h8 = (loadnt((scalar8*)(&B_[7 * K])));
+        if (YTILE >= 2) bigB[1][k2].h8 = (loadnt((scalar8*)(&B_[1 * K])));
+        if (YTILE >= 3) bigB[2][k2].h8 = (loadnt((scalar8*)(&B_[2 * K])));
+        if (YTILE >= 4) bigB[3][k2].h8 = (loadnt((scalar8*)(&B_[3 * K])));
+        if (YTILE >= 5) bigB[4][k2].h8 = (loadnt((scalar8*)(&B_[4 * K])));
+        if (YTILE >= 6) bigB[5][k2].h8 = (loadnt((scalar8*)(&B_[5 * K])));
+        if (YTILE >= 7) bigB[6][k2].h8 = (loadnt((scalar8*)(&B_[6 * K])));
+        if (YTILE >= 8) bigB[7][k2].h8 = (loadnt((scalar8*)(&B_[7 * K])));
       }
 
       // Fetch activation matrix from either just LDS or from both LDS / memory
@@ -994,31 +967,30 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
           for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
-            DOT2C(sum[m][0], bigA[m][k2].f[b], bigB0[k2].f[b]);
-
+            DOT2C(sum[m][0], bigA[m][k2].f[b], bigB[0][k2].f[b]);
             //----------------------------------------------------
             // The following code with YTILE > 1
             //----------------------------------------------------
             if (YTILE >= 2) {
-              DOT2C(sum[m][1], bigA[m][k2].f[b], bigB1[k2].f[b]);
+              DOT2C(sum[m][1], bigA[m][k2].f[b], bigB[1][k2].f[b]);
             }
             if (YTILE >= 3) {
-              DOT2C(sum[m][2], bigA[m][k2].f[b], bigB2[k2].f[b]);
+              DOT2C(sum[m][2], bigA[m][k2].f[b], bigB[2][k2].f[b]);
             }
             if (YTILE >= 4) {
-              DOT2C(sum[m][3], bigA[m][k2].f[b], bigB3[k2].f[b]);
+              DOT2C(sum[m][3], bigA[m][k2].f[b], bigB[3][k2].f[b]);
             }
             if (YTILE >= 5) {
-              DOT2C(sum[m][4], bigA[m][k2].f[b], bigB4[k2].f[b]);
+              DOT2C(sum[m][4], bigA[m][k2].f[b], bigB[4][k2].f[b]);
             }
             if (YTILE >= 6) {
-              DOT2C(sum[m][5], bigA[m][k2].f[b], bigB5[k2].f[b]);
+              DOT2C(sum[m][5], bigA[m][k2].f[b], bigB[5][k2].f[b]);
             }
             if (YTILE >= 7) {
-              DOT2C(sum[m][6], bigA[m][k2].f[b], bigB6[k2].f[b]);
+              DOT2C(sum[m][6], bigA[m][k2].f[b], bigB[6][k2].f[b]);
             }
             if (YTILE >= 8) {
-              DOT2C(sum[m][7], bigA[m][k2].f[b], bigB7[k2].f[b]);
+              DOT2C(sum[m][7], bigA[m][k2].f[b], bigB[7][k2].f[b]);
             }
           }
         }
@@ -1164,16 +1136,16 @@ void wvSplitK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
     switch (N_in) {
       case 1:
-        WVSPLITK(16, 2, 2, 2, 2, 2, 2, 1)  // MI308
+        WVSPLITK(16, 2, 2, 2, 2, 2, 2, 1)
         break;
       case 2:
-        WVSPLITK(16, 2, 2, 2, 2, 2, 2, 2)  // MI308
+        WVSPLITK(16, 2, 2, 2, 2, 2, 2, 2)
         break;
       case 3:
-        WVSPLITK(16, 4, 7, 7, 1, 1, 1, 3)  // MI308
+        WVSPLITK(16, 4, 7, 7, 1, 1, 1, 3)
         break;
       case 4:
-        WVSPLITK(16, 4, 7, 7, 1, 1, 1, 4)  // MI308
+        WVSPLITK(16, 4, 7, 7, 1, 1, 1, 4)
         break;
       default:
         throw std::runtime_error(
