@@ -478,14 +478,6 @@ def bgmv_expand_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
 
     return torch.empty((T, L), device=inputs.device)
 
-
-def largest_divisor(n: int, divs: List[int]) -> int:
-    for div in sorted(divs, reverse=True):
-        if n % div == 0:
-            return div
-    return max(divs)
-
-
 def next_multiple_of(n: int, mult: int) -> int:
     return math.ceil(n / mult) * mult
 

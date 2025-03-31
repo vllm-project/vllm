@@ -60,12 +60,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def shrink(
         self,
-        y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
         scale: float,
     ):
-        return bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
+        return bgmv_shrink(x, w_t_all, self.token_lora_indices, scale)
 
     def expand(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor,
                add_inputs: bool, enable_laning: bool):
@@ -115,7 +114,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             y_org = y_s
             y_s = y_s.view(-1, y_s.shape[-1])
 
-            y_s = self.shrink(y_s, x, lora_s, scale)
+            y_s = self.shrink(x, lora_s, scale)
             y_s = y_s.view_as(y_org)
             new_y.append(y_s)
         return tuple(new_y)
@@ -275,20 +274,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
-        return y
-
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
 
-        rank = lora_b_stacked.size(-1)
-        if buffer is None:
-            buffer = torch.zeros((x.size(0), rank),
-                                 dtype=y.dtype,
-                                 device=x.device)
-
-        buffer = bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices,
-                             scale)
+        buffer = bgmv_shrink(x, lora_a_stacked, self.sampler_indices, scale)
         y = bgmv_expand(buffer,
                         lora_b_stacked,
                         y,
@@ -355,7 +345,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             self, prompt_mapping: Tuple[int, ...]) -> Tuple[int, ...]:
         num_reqs = len(prompt_mapping)
 
-        # From vllm/v1/worker/tppu_model_runner:52, but need to avoid a circular import
+        # From vllm/v1/worker/tpu_model_runner:51, but need to avoid a circular 
+        # import
         MIN_NUM_SEQS = 8
 
         padded_num_reqs = max(2**math.ceil(math.log2(num_reqs)), MIN_NUM_SEQS)

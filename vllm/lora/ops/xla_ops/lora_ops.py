@@ -34,7 +34,6 @@ def bgmv_expand(inputs: torch.Tensor,
 
 def bgmv_shrink(inputs: torch.Tensor,
                 lora_b_weights: torch.Tensor,
-                output_tensor: torch.Tensor,
                 lora_indices_tensor: torch.Tensor,
                 scaling: float = 1.0):
 
