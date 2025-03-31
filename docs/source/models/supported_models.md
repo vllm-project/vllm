@@ -73,7 +73,7 @@ The Transformers fallback explicitly supports the following features:
 
 - <project:#quantization-index> (except GGUF)
 - <project:#lora-adapter>
-- <project:#distributed-serving> (requires `transformers>=4.49.0`)
+- <project:#distributed-serving>
 
 #### Remote code
 
@@ -224,7 +224,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `DeciLMForCausalLM`
   * DeciLM
-  * `Deci/DeciLM-7B`, `Deci/DeciLM-7B-instruct`, etc.
+  * `nvidia/Llama-3_3-Nemotron-Super-49B-v1`, etc.
   *
   * ✅︎
 - * `DeepseekForCausalLM`
