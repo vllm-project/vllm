@@ -36,6 +36,8 @@ REQUIRES_V0_MODELS = [
     # V1 Test: no way to fall back for head_dim = 80
     # https://github.com/vllm-project/vllm/issues/14524
     "qwen_vl",
+    # V1 Test: not enough KV cache space in C1.
+    "fuyu",
 ]
 
 # yapf: disable
