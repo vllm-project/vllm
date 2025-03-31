@@ -8,7 +8,7 @@ import time
 from concurrent.futures import Future
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import psutil
@@ -42,6 +42,8 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
+
+_R = TypeVar('_R')  # Return type for collective_rpc
 
 
 class EngineCore:
@@ -93,7 +95,6 @@ class EngineCore:
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
-            speculative_config=vllm_config.speculative_config,
             include_finished_set=vllm_config.parallel_config.data_parallel_size
             > 1,
             log_stats=self.log_stats,
@@ -279,6 +280,14 @@ class EngineCore:
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
+
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return self.model_executor.collective_rpc(method, timeout, args,
+                                                  kwargs)
 
 
 class EngineCoreProc(EngineCore):
