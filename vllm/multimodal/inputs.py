@@ -138,6 +138,13 @@ class PlaceholderRange(TypedDict):
     """
 
 
+def get_num_embeds(placeholder_info: PlaceholderRange) -> int:
+    if (is_embed := placeholder_info.get("is_embed")) is None:
+        return placeholder_info["length"]
+
+    return int(is_embed.sum().item())
+
+
 NestedTensors = Union[list["NestedTensors"], list[torch.Tensor], torch.Tensor,
                       tuple[torch.Tensor, ...]]
 """
