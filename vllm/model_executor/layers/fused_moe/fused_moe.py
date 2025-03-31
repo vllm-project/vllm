@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fused MoE kernel."""
 import functools
+import importlib.util
 import json
 import os
 from math import prod
@@ -24,12 +25,7 @@ from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
 
 logger = init_logger(__name__)
 
-has_deep_gemm = False
-try:
-    import deep_gemm as dg
-    has_deep_gemm = True
-except ImportError:
-    pass
+has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
 @triton.jit
@@ -690,6 +686,9 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     """
     if not has_deep_gemm:
         return False
+
+    # Lazy import to avoid CUDA initialization problems.
+    import deep_gemm as dg
 
     # Expert maps not supported yet.
     if expert_map is not None:
@@ -1845,6 +1844,8 @@ def deep_gemm_moe_fp8(
     Returns:
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
+    # Lazy import to avoid CUDA initialization problems.
+    import deep_gemm as dg
 
     assert expert_map is None, "Expert maps not supported yet"
 

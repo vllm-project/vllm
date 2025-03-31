@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -37,14 +38,7 @@ ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
 
-allow_deep_gemm = False
-if envs.VLLM_USE_DEEP_GEMM:
-    try:
-        import deep_gemm as dg
-        logger.info_once("Using DeepGemm for fp8 fused MoE.")
-        allow_deep_gemm = True
-    except ImportError:
-        logger.warning_once("Failed to import DeepGemm kernels.")
+has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
 def _is_col_major(x: torch.Tensor) -> bool:
@@ -438,14 +432,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
-        self.allow_deep_gemm = allow_deep_gemm
 
-        if self.allow_deep_gemm and not (
-                current_platform.is_cuda()
-                and current_platform.has_device_capability(90)):
-            logger.warning_once(
-                "DeepGemm not supported on the current platform.")
-            self.allow_deep_gemm = False
+        # Check for DeepGemm support.
+        self.allow_deep_gemm = False
+        if envs.VLLM_USE_DEEP_GEMM:
+            if not has_deep_gemm:
+                logger.warning_once("Failed to import DeepGemm kernels.")
+            elif (current_platform.is_cuda()
+                  and current_platform.has_device_capability(90)):
+                logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
+                self.allow_deep_gemm = True
+            else:
+                logger.warning_once(
+                    "DeepGemm not supported on the current platform.")
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -612,6 +611,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # DeepGemm scales need to be transposed and aligned.  We try to do
             # it ahead of time for performance reasons.
             if self.allow_deep_gemm:
+                # Lazy import to avoid CUDA initialization problems.
+                import deep_gemm as dg
                 if _is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
                         dg.get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
