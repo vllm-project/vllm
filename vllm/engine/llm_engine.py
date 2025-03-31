@@ -1157,17 +1157,12 @@ class LLMEngine:
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)
-            if return_hidden_states:
-                request_output = RequestOutputFactory.create(
-                    seq_group,
-                    self.seq_id_to_seq_group,
-                    use_cache=self.use_cached_outputs,
-                    hidden_states=output[0].hidden_states)
-            else:
-                request_output = RequestOutputFactory.create(
-                    seq_group,
-                    self.seq_id_to_seq_group,
-                    use_cache=self.use_cached_outputs)
+            request_output = RequestOutputFactory.create(
+                seq_group,
+                self.seq_id_to_seq_group,
+                use_cache=self.use_cached_outputs,
+                hidden_states=output[0].hidden_states if return_hidden_states else None,
+            )
             if request_output:
                 ctx.request_outputs.append(request_output)
 
