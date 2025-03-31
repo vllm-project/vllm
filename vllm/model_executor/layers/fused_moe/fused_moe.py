@@ -21,7 +21,6 @@ from .rocm_aiter_fused_moe import (rocm_aiter_fused_experts,
                                    rocm_aiter_topk_softmax)
 
 logger = init_logger(__name__)
-padding_size = 128 if envs.VLLM_MOE_PADDING else 0
 
 
 @triton.jit
@@ -722,8 +721,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             block_shape is not None and block_shape[1] > 0:
         assert B_scale is not None and B_scale.ndim == 3
         assert B_zp is None or B_zp.ndim == 3
-        assert padding_size == 0, "MoE padding is not supported " \
-              "with GPTQ/AWQ quantization"
 
         use_moe_wna16_cuda = should_moe_wna16_use_cuda(
             num_valid_tokens=topk_ids.numel(),
@@ -806,7 +803,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             expert_ids,
             num_tokens_post_padded,
             B.shape[1],
-            B.shape[2] - padding_size,
+            B.shape[2],
             EM,
             topk_ids.numel(),
             A.stride(0),
@@ -1367,13 +1364,12 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         assert hidden_states.shape[1] // 2 == w1.shape[
             2], "Hidden size mismatch"
     else:
-        assert hidden_states.shape[
-            1] == w1.shape[2] - padding_size, "Hidden size mismatch"
+        assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
-    assert w1.is_contiguous(), "Expert weights1 must be contiguous"
-    assert w2.is_contiguous(), "Expert weights2 must be contiguous"
+    assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
+    assert w2.stride(-1) == 1, "Stride of last dimension must be 1"
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]
@@ -1395,7 +1391,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
         w1.shape,
-        (w2.shape[0], w2.shape[1], w2.shape[2] - padding_size),
+        w2.shape,
         top_k_num,
         config_dtype,
         block_shape=block_shape,
