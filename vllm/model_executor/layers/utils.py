@@ -73,11 +73,11 @@ def rocm_unquantized_gemm(x: torch.Tensor,
 
     use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM is True and \
                     x.dtype in [torch.float16, torch.bfloat16] \
-                    and k % 8 == 0 and bias is None )
+                    and k % 8 == 0 and bias is None)
 
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
-    if m > 8 and n <= 2:
+    if m > 8 and n < 4:
         out = torch.empty(x_view.shape[0],
                           weight.shape[0],
                           dtype=x.dtype,
