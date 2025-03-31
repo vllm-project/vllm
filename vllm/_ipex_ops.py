@@ -73,7 +73,6 @@ class ipex_ops:
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> None:
-        assert kv_cache_dtype == "auto"
         num_heads = out.size(1)
         num_queries_per_tokens = num_heads // num_kv_heads
         ipex.llm.modules.PagedAttention.single_query_kv_attention(
@@ -225,7 +224,8 @@ class ipex_ops:
     ) -> None:
         # assert kv_cache_dtype == "auto"
         ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
-            key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype, k_scale, v_scale)
+            key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
+            k_scale, v_scale)
 
     @staticmethod
     def chunked_prefill(
@@ -251,8 +251,8 @@ class ipex_ops:
         return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
             output,
             query.contiguous(),
-            key_cache, # uint8
-            value_cache, # uint8  
+            key_cache,  # uint8
+            value_cache,  # uint8  
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
@@ -261,7 +261,7 @@ class ipex_ops:
             is_casual,
             block_table,
             alibi_slopes,
-            kv_cache_dtype=kv_cache_dtype, # "fp8"
+            kv_cache_dtype=kv_cache_dtype,  # "fp8"
             k_scale=1.0,
             v_scale=1.0,
         )
