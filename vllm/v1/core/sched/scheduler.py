@@ -17,8 +17,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
-from vllm.v1.core.sched.utils import (check_stop,
-                                      force_recompute_last_token_for_full_hit)
+from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -302,17 +301,6 @@ class Scheduler(SchedulerInterface):
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
-                if num_new_tokens == 0:
-                    # When all tokens are cached, we need to recompute the last
-                    # prompt token to generate the first decode token. It
-                    # happens when prompt length is divisible by the block size
-                    # and all blocks are cached. Note that we needs to recompute
-                    # more tokens besides the last token due to some internal
-                    # constraints in the comments of the below function.
-                    num_computed_tokens, num_new_tokens, computed_blocks = (
-                        force_recompute_last_token_for_full_hit(
-                            self.kv_cache_config, num_computed_tokens,
-                            num_new_tokens, computed_blocks))
 
                 if (0 < self.scheduler_config.long_prefill_token_threshold <
                         num_new_tokens):

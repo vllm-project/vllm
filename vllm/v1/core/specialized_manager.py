@@ -94,16 +94,17 @@ class SlidingWindowManager(SpecializedManager):
         super().__init__(kv_cache_spec, block_pool)
         self.sliding_window = kv_cache_spec.sliding_window
         # The number of contiguous blocks needed for prefix cache hit.
+        # -1 since the input token itself is also included in the window
         self.sliding_window_contiguous_blocks = cdiv(
             (kv_cache_spec.sliding_window - 1), self.block_size)
         self._null_block = block_pool.null_block
 
     def find_longest_cache_hit(
             self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
-        # TODO: reduce i by num_block_sliding_window when cache miss, to
+        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(len(block_hashes)) to
-        # O(len(block_hashes) / num_block_sliding_window +
-        #   sliding_window / block_size)
+        # O(len(block_hashes) / sliding_window_contiguous_blocks +
+        # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
         computed_blocks = [self._null_block] * len(block_hashes)
         num_contiguous_blocks = 0
