@@ -169,10 +169,10 @@ See <project:#deployment-docker-pre-built-image> for instructions on using the o
 
 ### Build image from source
 
-You can use <gh-file:Dockerfile.tpu> to build a Docker image with TPU support.
+You can use <gh-file:docker/Dockerfile.tpu> to build a Docker image with TPU support.
 
 ```console
-docker build -f Dockerfile.tpu -t vllm-tpu .
+docker build -f docker/Dockerfile.tpu -t vllm-tpu .
 ```
 
 Run the Docker image with the following command:
