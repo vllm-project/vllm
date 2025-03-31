@@ -214,7 +214,7 @@ class ExecutorBase(ABC):
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
             return
-        if tags is not None:
+        if tags:
             for tag in tags:
                 if tag not in self.sleeping_tags:
                     logger.warning("Tag %s is not in sleeping tags %s", tag,
@@ -226,7 +226,7 @@ class ExecutorBase(ABC):
         logger.info("It took %.6f seconds to wake up tags %s.",
                     time_after_wakeup - time_before_wakeup,
                     tags if tags is not None else self.sleeping_tags)
-        if tags is not None:
+        if tags:
             for tag in tags:
                 self.sleeping_tags.remove(tag)
         else:

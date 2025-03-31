@@ -26,7 +26,7 @@ def test_sleep_mode():
                                 "CUDA_VISIBLE_DEVICES": "0"
                             }) as remote_server:
         response = requests.post(remote_server.url_for("sleep"),
-                                 json={"level": "1"})
+                                 params={"level": "1"})
         assert response.status_code == 200
         response = requests.get(remote_server.url_for("is_sleeping"))
         assert response.status_code == 200
@@ -40,11 +40,11 @@ def test_sleep_mode():
 
         # test wake up with tags
         response = requests.post(remote_server.url_for("sleep"),
-                                 json={"level": "1"})
+                                 params={"level": "1"})
         assert response.status_code == 200
 
         response = requests.post(remote_server.url_for("wake_up"),
-                                 json={"tags": ["weights"]})
+                                 params={"tags": ["weights"]})
         assert response.status_code == 200
 
         # is sleeping should be false after waking up any part of the engine
@@ -53,7 +53,7 @@ def test_sleep_mode():
         assert response.json().get("is_sleeping") is True
 
         response = requests.post(remote_server.url_for("wake_up"),
-                                 json={"tags": ["kv_cache"]})
+                                 params={"tags": ["kv_cache"]})
         assert response.status_code == 200
 
         response = requests.get(remote_server.url_for("is_sleeping"))
