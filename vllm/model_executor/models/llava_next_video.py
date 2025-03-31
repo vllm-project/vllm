@@ -406,19 +406,20 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                h, w)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels)
-            return stacked_embeddings.view(b, num_frames,
-                                           *stacked_embeddings.shape[1:])
+            embeds = stacked_embeddings.view(b, num_frames,
+                                             *stacked_embeddings.shape[1:])
 
         elif is_list_of(video_pixels, torch.Tensor):
             frames_per_videos = [v.shape[0] for v in video_pixels]
             stacked_pixels = torch.cat(video_pixels, dim=0)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels)
-            return torch.split(stacked_embeddings, frames_per_videos, dim=0)
-
+            embeds = torch.split(stacked_embeddings, frames_per_videos, dim=0)
         else:
             raise ValueError(
                 f"Unsupported type of video input {type(video_pixels)}")
+
+        return [e.flatten(0, 1) for e in embeds]
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
