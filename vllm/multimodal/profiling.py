@@ -127,18 +127,19 @@ class MultiModalProfiler(Generic[_I]):
         mm_config = self.processing_info.ctx.get_mm_config()
         supported_mm_limits = self.processing_info.get_supported_mm_limits()
 
-        mm_limits = {
-            modality: mm_config.get_limit_per_prompt(modality)
-            for modality in supported_mm_limits
-        }
+        if not envs.VLLM_USE_V1:
+            mm_limits = {
+                modality: mm_config.get_limit_per_prompt(modality)
+                for modality in supported_mm_limits
+            }
 
-        for modality, supported_limit in supported_mm_limits.items():
-            limit = mm_limits[modality]
-            if supported_limit is not None and supported_limit < limit:
-                raise ValueError(
-                    f"You set {modality}={limit} (or defaulted to 1) in "
-                    f"`--limit-mm-per-prompt`, but this model only supports "
-                    f"at most {supported_limit} {modality} items.")
+            for modality, supported_limit in supported_mm_limits.items():
+                limit = mm_limits[modality]
+                if supported_limit is not None and supported_limit < limit:
+                    raise ValueError(
+                        f"You set {modality}={limit} (or defaulted to 1) in "
+                        f"`--limit-mm-per-prompt`, but this model only supports "
+                        f"at most {supported_limit} {modality} items.")
 
         return mm_limits
 

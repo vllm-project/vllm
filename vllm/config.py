@@ -2504,6 +2504,9 @@ class MultiModalConfig:
         for the given modality.
 
         If not set by the user, this defaults to `1`.
+
+        Note:
+            This is only used in V0.
         """
         return self.limit_per_prompt.get(modality, 1)
 
