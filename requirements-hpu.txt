@@ -8,4 +8,4 @@ pandas
 tabulate
 setuptools>=61
 setuptools-scm>=8
-vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@21284c9
+vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@708a89a329b721b36d44bd424da3472593a8d42c

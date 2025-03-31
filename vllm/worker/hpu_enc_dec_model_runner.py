@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union, cast
 
 import habana_frameworks.torch as htorch
 import torch
-from vllm_hpu_extension.ops import batch2block, block2batch
 
 from vllm.attention import AttentionMetadata
 from vllm.distributed import broadcast_tensor_dict
@@ -84,17 +83,6 @@ class HpuModelAdapterEncoderDecoder(HpuModelAdapter):
                                      cross_attn_bias=cross_attn_bias)
         return metadata
 
-    def _set_cross_block_scales(self, metadata, device):
-        cross_block_mapping = metadata.cross_block_mapping
-        ones = torch.ones((cross_block_mapping.size(0), ),
-                          device=device,
-                          dtype=cross_block_mapping.dtype)
-        sums = batch2block(block2batch(ones, cross_block_mapping),
-                           cross_block_mapping)
-        cross_block_scales = torch.reciprocal(torch.maximum(ones, sums))
-        metadata = metadata._replace(cross_block_scales=cross_block_scales)
-        return metadata
-
     def _set_cross_indices_and_offsets(self, metadata, block_size):
         cross_slot_mapping = metadata.cross_slot_mapping.flatten()
         indices = torch.div(cross_slot_mapping,
@@ -128,7 +116,6 @@ class HpuModelAdapterEncoderDecoder(HpuModelAdapter):
         else:
             attn_metadata = self._set_cross_block_mapping(
                 attn_metadata, batch_size, device, dtype)
-            attn_metadata = self._set_cross_block_scales(attn_metadata, device)
 
         return attn_metadata
 
@@ -526,7 +513,6 @@ class HPUEncoderDecoderModelRunner(
             'is_prompt',
             'block_indices',
             'block_offsets',
-            'block_scales',
             'block_groups',
             'num_prefill_tokens',
             'num_decode_tokens',
@@ -540,7 +526,6 @@ class HPUEncoderDecoderModelRunner(
             'cross_slot_mapping',
             'cross_block_mapping',
             'cross_block_groups',
-            'cross_block_scales',
             'cross_block_usage',
             'cross_attn_bias',
         ])
