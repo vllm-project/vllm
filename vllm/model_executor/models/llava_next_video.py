@@ -415,6 +415,9 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels)
             embeds = torch.split(stacked_embeddings, frames_per_videos, dim=0)
+        else:
+            raise ValueError(
+                f"Unsupported type of video input {type(video_pixels)}")
 
         return [e.flatten(0, 1) for e in embeds]
 
