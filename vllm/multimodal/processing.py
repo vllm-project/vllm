@@ -1082,9 +1082,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before passing them to :meth:`_get_hf_mm_data`.
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
-        mm_config = self.info.ctx.get_mm_config()
 
         if not envs.VLLM_USE_V1:
+            mm_config = self.info.ctx.get_mm_config()
+
             for modality, items in mm_items.items():
                 limit = mm_config.get_limit_per_prompt(modality)
                 if len(items) > limit:
