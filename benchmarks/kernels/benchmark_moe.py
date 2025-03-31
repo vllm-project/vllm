@@ -114,23 +114,41 @@ def benchmark_config(config: BenchmarkConfig,
     def run():
         from vllm.model_executor.layers.fused_moe import override_config
         with override_config(config):
-            fused_moe(
-                x,
-                w1,
-                w2,
-                input_gating,
-                topk,
-                renormalize=True,
-                inplace=True,
-                use_fp8_w8a8=use_fp8_w8a8,
-                use_int8_w8a16=use_int8_w8a16,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                a1_scale=a1_scale,
-                a2_scale=a2_scale,
-                block_shape=block_quant_shape,
-                allow_deep_gemm=use_deep_gemm,
-            )
+            if use_deep_gemm:
+                topk_weights, topk_ids = fused_topk(x, input_gating, topk,
+                                                    False)
+                return fused_experts(
+                    x,
+                    w1,
+                    w2,
+                    topk_weights,
+                    topk_ids,
+                    inplace=True,
+                    use_fp8_w8a8=use_fp8_w8a8,
+                    w1_scale=w1_scale,
+                    w2_scale=w2_scale,
+                    a1_scale=a1_scale,
+                    a2_scale=a2_scale,
+                    block_shape=block_quant_shape,
+                    allow_deep_gemm=True,
+                )
+            else:
+                fused_moe(
+                    x,
+                    w1,
+                    w2,
+                    input_gating,
+                    topk,
+                    renormalize=True,
+                    inplace=True,
+                    use_fp8_w8a8=use_fp8_w8a8,
+                    use_int8_w8a16=use_int8_w8a16,
+                    w1_scale=w1_scale,
+                    w2_scale=w2_scale,
+                    a1_scale=a1_scale,
+                    a2_scale=a2_scale,
+                    block_shape=block_quant_shape,
+                )
 
     # JIT compilation & warmup
     run()

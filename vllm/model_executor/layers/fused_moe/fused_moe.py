@@ -702,8 +702,8 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     if align > M or N % align != 0 or K % align != 0:
         return False
 
-    return (hidden_states.is_contiguous() and
-            w1.is_contiguous() and w2.is_contiguous())
+    return (hidden_states.is_contiguous() and w1.is_contiguous()
+            and w2.is_contiguous())
 
 
 def _fp8_quantize(
@@ -1850,14 +1850,10 @@ def deep_gemm_moe_fp8(
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]
-    #assert hidden_states.shape[1] == w1.shape[1], "Hidden size mismatch w1"
     assert w1.dtype == torch.float8_e4m3fn
     assert w2.dtype == torch.float8_e4m3fn
-    #assert w1.shape[2] == w2.shape[1] * 2, "Hidden size mismatch w2"
     assert w1.shape[0] == w2.shape[0], "Expert number mismatch"
-    #assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 or w1_scale.shape[1] == w1.shape[2], "W1 scale shape mismatch"
     assert w1.shape[0] == w1_scale.shape[0], "w1 scales expert number mismatch"
-    #assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 or w2_scale.shape[1] == w2.shape[2], "W2 scale shape mismatch"
     assert w1.shape[0] == w2_scale.shape[0], "w2 scales expert number mismatch"
     assert a1_scale is None or a1_scale.dim(
     ) == 0 or a1_scale.shape[0] == 1 or a1_scale.shape[
