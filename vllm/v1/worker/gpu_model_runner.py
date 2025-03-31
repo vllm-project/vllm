@@ -71,6 +71,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
+        from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
+        set_cpu_offload_max_bytes(
+            int(self.cache_config.cpu_offload_gb * 1024**3))
+
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
@@ -675,7 +679,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # use two kernels for cascade attention. Let's imagine:
         # Request 3's input query: [D]
         # Request 3's kv cache: [A, B, C, D]
-        # Request 3's num_computed_tokens: 4 (i.e., [A, B, C, D])
+        # Request 3's num_computed_tokens: 3 (i.e., [A, B, C])
         # If we use [A, B, C, D] as the common prefix for Request 1-3,
         # then Request 3 will be processed only by the first kernel,
         # and the second kernel will get an empty input. While this is not
