@@ -379,6 +379,13 @@ class Platform:
         """
         return False
 
+    @classmethod
+    def attention_threads(cls) -> int:
+        """
+        Returns the number of threads to use for attention.
+        """
+        return 128
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED

@@ -255,3 +255,13 @@ class RocmPlatform(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on AMD gpus is experimental
         return True
+
+    @classmethod
+    def attention_threads(cls):
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        if "gfx1" in gcn_arch:
+            # Radeon
+            return 128
+
+        # Instinct
+        return 1024
