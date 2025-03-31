@@ -296,37 +296,21 @@ class RequestOutput:
             prompt_logprobs = None
         finished_time = time.time() if finished else None
         seq_group.set_finished_time(finished_time)
-        if hidden_states is not None:
-            init_kwargs = {
-                "request_id": seq_group.request_id,
-                "prompt": prompt,
-                "prompt_token_ids": prompt_token_ids,
-                "prompt_logprobs": prompt_logprobs,
-                "outputs": outputs,
-                "finished": finished,
-                "metrics": seq_group.metrics,
-                "lora_request": seq_group.lora_request,
-                "encoder_prompt": encoder_prompt,
-                "encoder_prompt_token_ids": encoder_prompt_token_ids,
-                "num_cached_tokens": num_cached_tokens,
-                "multi_modal_placeholders": seq_group.multi_modal_placeholders,
-                "hidden_states": hidden_states,
-            }
-        else:
-            init_kwargs = {
-                "request_id": seq_group.request_id,
-                "prompt": prompt,
-                "prompt_token_ids": prompt_token_ids,
-                "prompt_logprobs": prompt_logprobs,
-                "outputs": outputs,
-                "finished": finished,
-                "metrics": seq_group.metrics,
-                "lora_request": seq_group.lora_request,
-                "encoder_prompt": encoder_prompt,
-                "encoder_prompt_token_ids": encoder_prompt_token_ids,
-                "num_cached_tokens": num_cached_tokens,
-                "multi_modal_placeholders": seq_group.multi_modal_placeholders,
-            }
+        init_kwargs = {
+            "request_id": seq_group.request_id,
+            "prompt": prompt,
+            "prompt_token_ids": prompt_token_ids,
+            "prompt_logprobs": prompt_logprobs,
+            "outputs": outputs,
+            "finished": finished,
+            "metrics": seq_group.metrics,
+            "lora_request": seq_group.lora_request,
+            "encoder_prompt": encoder_prompt,
+            "encoder_prompt_token_ids": encoder_prompt_token_ids,
+            "num_cached_tokens": num_cached_tokens,
+            "multi_modal_placeholders": seq_group.multi_modal_placeholders,
+            "hidden_states": hidden_states,
+        }
 
         if use_cache:
             request_output = seq_group.cached_request_output
