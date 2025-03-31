@@ -1347,7 +1347,10 @@ class LLMEngine:
             last_outputs_tensor = None
             if self.last_record is not None:
                 last_output = self.last_record[0][0]
-                last_outputs_ids,  last_outputs_tensor = last_output.sampler_out_ids,  last_output.sampler_out_tenosr           
+                last_outputs_ids,  last_outputs_tensor = (
+                    last_output.sampler_out_ids,  
+                    last_output.sampler_out_tenosr 
+                    )          
                 self.async_d2h = last_outputs_tensor.to('cpu', non_blocking=True)
                 self.async_event.record()
                 self.q_recorder.put(self.last_record)

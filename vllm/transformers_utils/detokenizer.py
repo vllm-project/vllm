@@ -9,7 +9,7 @@ from .detokenizer_utils import (convert_prompt_ids_to_tokens,
                                 detokenize_incrementally)
 from .tokenizer import AnyTokenizer
 from .tokenizer_group import BaseTokenizerGroup
-
+import os
 
 class Detokenizer:
     """Provides methods to decode the output of a model into text."""

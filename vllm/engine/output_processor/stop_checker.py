@@ -6,8 +6,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceStatus
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-
-
+import os
 class StopChecker:
     """LLMEngine helper class which separates out the logic involving stop
     checking. This checks things such as: whether the eos token was emitted,
