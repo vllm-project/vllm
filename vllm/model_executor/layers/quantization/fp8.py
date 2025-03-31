@@ -39,16 +39,12 @@ logger = init_logger(__name__)
 
 allow_deep_gemm = False
 if envs.VLLM_USE_DEEP_GEMM:
-    if (current_platform.is_cuda()
-            and current_platform.has_device_capability(90)):
-        try:
-            import deep_gemm as dg
-            logger.info_once("Using DeepGemm for fp8 fused MoE.")
-            allow_deep_gemm = True
-        except ImportError:
-            logger.warning_once("Failed to import DeepGemm kernels.")
-    else:
-        logger.warning_once("DeepGemm not supported on the current platform.")
+    try:
+        import deep_gemm as dg
+        logger.info_once("Using DeepGemm for fp8 fused MoE.")
+        allow_deep_gemm = True
+    except ImportError:
+        logger.warning_once("Failed to import DeepGemm kernels.")
 
 
 def _is_col_major(x: torch.Tensor) -> bool:
@@ -442,6 +438,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
+
+        if allow_deep_gemm and not (
+                current_platform.is_cuda()
+                and current_platform.has_device_capability(90)):
+            logger.warning_once(
+                "DeepGemm not supported on the current platform.")
+            allow_deep_gemm = False
+
         self.allow_deep_gemm = allow_deep_gemm
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
