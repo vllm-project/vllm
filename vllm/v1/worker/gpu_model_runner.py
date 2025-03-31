@@ -24,8 +24,8 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, LazyLoader, cdiv, check_use_alibi,
-                        is_pin_memory_available)
+                        LayerBlockType, LazyLoader, GiB_bytes, cdiv,
+                        check_use_alibi, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -1196,7 +1196,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
         logger.info("Model loading took %.4f GiB and %.6f seconds",
-                    self.model_memory_usage / float(2**30),
+                    self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
 
     def _get_prompt_logprobs_dict(
