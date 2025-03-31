@@ -514,11 +514,10 @@ def parse_goodput(slo_pairs):
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
                                      results: dict[str, Any],
                                      file_name: str) -> None:
-    metrics = [
-        "median_ttft_ms", "mean_ttft_ms", "std_ttft_ms", "p99_ttft_ms",
-        "mean_tpot_ms", "median_tpot_ms", "std_tpot_ms", "p99_tpot_ms",
-        "median_itl_ms", "mean_itl_ms", "std_itl_ms", "p99_itl_ms"
-    ]
+    metrics = {}
+    for k, v in results.items():
+        if k.endswith('_ms'):
+            metrics[k] = [v]
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
     ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
@@ -687,15 +686,6 @@ def main(args: argparse.Namespace):
                         "Invalid metadata format. Please use KEY=VALUE format."
                     )
 
-        if not args.save_detailed:
-            # Remove fields with too many data points
-            for field in [
-                    "input_lens", "output_lens", "ttfts", "itls",
-                    "generated_texts", "errors"
-            ]:
-                if field in result_json:
-                    del result_json[field]
-
         # Traffic
         result_json["request_rate"] = (args.request_rate if args.request_rate
                                        < float("inf") else "inf")
@@ -704,6 +694,15 @@ def main(args: argparse.Namespace):
 
         # Merge with benchmark result
         result_json = {**result_json, **benchmark_result}
+
+        if not args.save_detailed:
+            # Remove fields with too many data points
+            for field in [
+                    "input_lens", "output_lens", "ttfts", "itls",
+                    "generated_texts", "errors"
+            ]:
+                if field in result_json:
+                    del result_json[field]
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
