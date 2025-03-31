@@ -681,13 +681,18 @@ def moe_align_block_size(
 
 
 def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
-                     w2: torch.Tensor) -> bool:
+                     w2: torch.Tensor,
+                     expert_map: Optional[torch.Tensor]) -> bool:
     """
     Check if the given problem size is supported by the DeepGemm grouped
     gemm kernel.  All of M, N, K and the quantization block_shape must be
     aligned by `dg.get_m_alignment_for_contiguous_layout()`.
     """
     if not has_deep_gemm:
+        return False
+
+    # Expert maps not supported yet.
+    if expert_map is not None:
         return False
 
     align = dg.get_m_alignment_for_contiguous_layout()
@@ -1378,7 +1383,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   block_shape: Optional[List[int]] = None,
                   allow_deep_gemm: bool = False) -> torch.Tensor:
     if (allow_deep_gemm and use_fp8_w8a8
-            and _valid_deep_gemm(hidden_states, w1, w2)):
+            and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
             w1=w1,
@@ -1840,6 +1845,8 @@ def deep_gemm_moe_fp8(
     Returns:
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
+
+    assert expert_map is None, "Expert maps not supported yet"
 
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
 
