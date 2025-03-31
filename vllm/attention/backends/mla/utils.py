@@ -219,9 +219,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 output = output_parallel
             return output
         else:
-            x = torch.einsum("bnl,lnv->bnv", x, self.W_UV)
-            return self.o_proj(x.reshape(-1,
-                                         self.num_heads * self.v_head_dim))[0]
+            # Convert from (B, N, L) to (N, B, L)
+            x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            x = torch.bmm(x, self.W_UV)
+            # Convert from (N, B, V) to (B, N * V)
+            x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+            return self.o_proj(x)[0]
 
     def _q_proj_and_k_up_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
@@ -249,10 +253,16 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             return torch.matmul(x, self.W_Q_UK)\
                 .view(-1, self.num_heads, self.kv_lora_rank)
         else:
-            x = torch.matmul(x, self.W_Q)\
-                .view(-1, self.num_heads, self.qk_nope_head_dim)
-            return torch.einsum("bnp,lnp->bnl", x, self.W_UK)\
-                .view(-1, self.num_heads, self.kv_lora_rank)
+            q_nope, q_pe = self.q_proj(x)[0]\
+                .view(-1, self.num_heads, self.qk_head_dim)\
+                .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+            # Convert from (B, N, P) to (N, B, P)
+            q_nope = q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            ql_nope = torch.bmm(q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            return ql_nope.transpose(0, 1), q_pe
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # TODO(lucas) This is very gross, we need a more wide scale refactor of
@@ -310,7 +320,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                         return layer.weight_scale
                     scales = get_scales(layer)
                     if len(scales.shape) == 1:
-                        ret = layer.weight.to(act_dtype) * scales.unsqueeze(1)
+                        ret = (layer.weight.to(act_dtype) * scales.unsqueeze(1)).to(act_dtype)
                         return ret
                 # NOTE: This should only be used offline, since it's O(N^3)
                 eye = torch.eye(layer.input_size_per_partition,
@@ -346,21 +356,20 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        q_proj_weight = get_and_maybe_dequant_weights(self.q_proj).T\
-                .view(-1, self.num_heads, self.qk_head_dim)
-
-        # can be W_Q or W_UQ depending q_lora_rank, the former if
-        # q_lora_rank is None, the latter otherwise. From the Attention backend
-        # perspective though we call these both W_Q and rely on the layer
-        # to pass in the correct matrix
-        W_Q = q_proj_weight[..., :self.qk_nope_head_dim]
-        self.W_QR = q_proj_weight[..., self.qk_nope_head_dim:]\
-            .flatten(start_dim=1).contiguous()
-
-        # W_QR is small so for simplicity we dont bother requantizing it
-        self.W_QR = self.W_QR.to(act_dtype)
-
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
+            q_proj_weight = get_and_maybe_dequant_weights(self.q_proj).T\
+                    .view(-1, self.num_heads, self.qk_head_dim)
+
+            # can be W_Q or W_UQ depending q_lora_rank, the former if
+            # q_lora_rank is None, the latter otherwise. From the Attention backend
+            # perspective though we call these both W_Q and rely on the layer
+            # to pass in the correct matrix
+            W_Q = q_proj_weight[..., :self.qk_nope_head_dim]
+            self.W_QR = q_proj_weight[..., self.qk_nope_head_dim:]\
+                .flatten(start_dim=1).contiguous()
+
+            # W_QR is small so for simplicity we dont bother requantizing it
+            self.W_QR = self.W_QR.to(act_dtype)
             requantization_enabled = not envs.VLLM_MLA_DISABLE_REQUANTIZATION
             if is_fp8(weight_dtype) and requantization_enabled:
                 # This assumes it wise to requantize using the same group shapes
@@ -435,13 +444,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
             self.tp_size = get_tensor_model_parallel_world_size()
         else:
-            if is_fp8(weight_dtype):
-                raise NotImplementedError(
-                    "Currently fp8 requires matrix absorption")
-
-            self.W_UV = W_UV
-            self.W_UK = W_UK
-            self.W_Q = W_Q.flatten(start_dim=1)
+            # Convert from (L, N, V) to (N, L, V)
+            self.W_UV = W_UV.transpose(0, 1)
+            # Convert from (L, N, P) to (N, P, L)
+            self.W_UK_T = W_UK.permute(1, 2, 0)
 
     @abstractmethod
     def _forward_prefill(
