@@ -1595,12 +1595,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No CPU offloading yet.
-        if self.cpu_offload_gb != EngineArgs.cpu_offload_gb:
-            _raise_or_fallback(feature_name="--cpu-offload-gb",
-                               recommend_to_remove=False)
-            return False
-
         # Only Fp16 and Bf16 dtypes since we only support FA.
         V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
         if model_config.dtype not in V1_SUPPORTED_DTYPES:
