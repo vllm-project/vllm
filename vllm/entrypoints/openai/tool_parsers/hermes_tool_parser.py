@@ -343,7 +343,7 @@ class Hermes2ProToolParser(ToolParser):
                 # isinstance(delta_text, str) 判断 delta_text 是不是字符串类型
                 logger.debug(" lei test delta_text1 %s", delta_text)
                 if isinstance(delta_text, str) and len(delta_text.rstrip(
-                )) > 1 and delta_text.rstrip()[-1] == '}':
+                )) >= 1 and delta_text.rstrip()[-1] == '}':
                     delta_text = delta_text.rstrip()[:-1]
 
                 logger.debug("got diff %s", delta_text)
