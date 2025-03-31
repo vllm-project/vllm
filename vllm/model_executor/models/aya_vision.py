@@ -353,8 +353,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "model"),
-            architectures=["Cohere2ForCausalLM"])
+            prefix=maybe_prefix(prefix, "model"))
 
     @property
     def dtype(self):
