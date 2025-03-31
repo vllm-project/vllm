@@ -301,7 +301,6 @@ class Scheduler(SchedulerInterface):
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
-
                 if (0 < self.scheduler_config.long_prefill_token_threshold <
                         num_new_tokens):
                     num_new_tokens = (
