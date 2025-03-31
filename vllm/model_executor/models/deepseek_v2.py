@@ -58,7 +58,7 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-SHARE_FUSION_REPLICA = envs.VLLM_ENABLE_SHARE_EXPERT_FUSION
+SHARE_FUSION_REPLICA = envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS
 
 
 class DeepseekV2MLP(nn.Module):

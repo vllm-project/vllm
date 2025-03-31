@@ -1504,7 +1504,7 @@ def fused_moe(
             renormalize,
             num_expert_group,
             topk_group,
-            share_fusion=envs.VLLM_ENABLE_SHARE_EXPERT_FUSION)
+            share_fusion=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS)
     elif custom_routing_function is None:
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             hidden_states, gating_output, topk, renormalize)
