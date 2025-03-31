@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 from torch.distributed import ProcessGroup
@@ -22,9 +22,23 @@ if current_platform.is_tpu():
     import torch_xla.core.xla_model as xm
     import torch_xla.runtime as xr
     from torch_xla._internal import pjrt
+    from torch_xla.distributed.xla_multiprocessing import (
+        create_optimized_replica_groups)
 
     if USE_RAY:
         from vllm.executor import ray_utils
+
+
+@torch.library.custom_op("tpu::all_reduce", mutates_args=())
+def tpu_all_reduce(input_: torch.Tensor,
+                   groups: Sequence[int]) -> torch.Tensor:
+    groups = [groups] if groups else None
+    return xm.all_reduce(xm.REDUCE_SUM, input_, groups=groups)
+
+
+@tpu_all_reduce.register_fake
+def _(input_: torch.Tensor, groups: Sequence[int]):
+    return torch.empty_like(input_)
 
 
 class TpuCommunicator(DeviceCommunicatorBase):
@@ -79,9 +93,10 @@ class TpuCommunicator(DeviceCommunicatorBase):
 
         pjrt.initialize_multiprocess(local_rank, local_world_size)
         xr._init_world_size_ordinal()
+        self.groups = create_optimized_replica_groups()
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        return xm.all_reduce(xm.REDUCE_SUM, input_)
+        return tpu_all_reduce(input_, groups=self.groups[0])
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         assert dim == -1, "TPUs only support dim=-1 for all-gather."
