@@ -801,6 +801,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
 
+    def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping, lora_requests) -> None:
+        super()._set_active_loras(prompt_lora_mapping, token_lora_mapping, lora_requests)
+        xm.mark_step()
+
     def capture_model(self) -> None:
         """Compile the model."""
 

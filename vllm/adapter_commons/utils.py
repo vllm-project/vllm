@@ -2,6 +2,8 @@
 
 from typing import Any, Callable, Dict, Optional, Set
 
+from vllm.platforms import current_platform
+
 
 ## model functions
 def deactivate_adapter(adapter_id: int, active_adapters: Dict[int, None],
@@ -52,6 +54,14 @@ def set_active_adapters_worker(requests: Set[Any], mapping: Optional[Any],
                                apply_adapters_func,
                                set_adapter_mapping_func) -> None:
     apply_adapters_func(requests)
+
+    # We need this to ensure that adapter loading/unloading and updating 
+    # metadata are compiled as 2 separate graphs on TPU, otherwise we get 
+    # runtime recompilations.
+    if current_platform.is_tpu():
+        import torch_xla.core.xla_model as xm
+        xm.mark_step()
+
     set_adapter_mapping_func(mapping)
 
 
