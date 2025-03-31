@@ -7,9 +7,6 @@ On the server side, run one of the following commands:
         --swap-space 16 \
         --disable-log-requests
 
-    (TGI backend)
-    ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
-
 On the client side, run:
     python benchmarks/benchmark_serving.py \
         --backend <backend> \
@@ -52,9 +49,10 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
-                               RandomDataset, SampleRequest, ShareGPTDataset,
-                               SonnetDataset, VisionArenaDataset)
+from benchmark_dataset import (BurstGPTDataset, ConversationDataset,
+                               InstructCoderDataset, RandomDataset,
+                               SampleRequest, ShareGPTDataset, SonnetDataset,
+                               VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -586,11 +584,17 @@ def main(args: argparse.Namespace):
                                             return_prompt_formatted=True)
 
     elif args.dataset_name == "hf":
-        # Choose between VisionArenaDataset
-        # and HuggingFaceDataset based on provided parameters.
-        dataset_class = (VisionArenaDataset if args.dataset_path
-                         == VisionArenaDataset.VISION_ARENA_DATASET_PATH
-                         and args.hf_subset is None else HuggingFaceDataset)
+        # all following datasets are implemented from the
+        # HuggingFaceDataset base class
+        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = VisionArenaDataset
+            args.hf_split = "train"
+            args.hf_subset = None
+        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = InstructCoderDataset
+            args.hf_split = "train"
+        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ConversationDataset
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
