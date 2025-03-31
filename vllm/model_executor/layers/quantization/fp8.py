@@ -39,12 +39,16 @@ logger = init_logger(__name__)
 
 allow_deep_gemm = False
 if envs.VLLM_USE_DEEP_GEMM:
-    try:
-        import deep_gemm as dg
-        logger.info("Using DeepGemm for fused MoE.")
-        allow_deep_gemm = True
-    except ImportError:
-        logger.warning("Failed to import DeepGemm kernels.")
+    if (current_platform.is_cuda()
+            and current_platform.has_device_capability(90)):
+        try:
+            import deep_gemm as dg
+            logger.info_once("Using DeepGemm for fp8 fused MoE.")
+            allow_deep_gemm = True
+        except ImportError:
+            logger.warning_once("Failed to import DeepGemm kernels.")
+    else:
+        logger.warning_once("DeepGemm not supported on the current platform.")
 
 
 def _is_col_major(x: torch.Tensor) -> bool:
