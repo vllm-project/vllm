@@ -837,6 +837,8 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
+    )
+
 # SkyworkR1V
 def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
