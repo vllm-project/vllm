@@ -117,7 +117,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
-    VLLM_ENABLE_SHARE_EXPERT_FUSION: bool = False
+    VLLM_SHARED_EXPERT_FUSION_REPLICAS: int = 0
 
 
 def get_default_cache_root():
@@ -773,7 +773,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
     if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
-    
+
     # Gap between padding buckets for the forward pass. So we have
     # 8, we will run forward pass with [16, 24, 32, ...].
     "VLLM_TPU_BUCKET_PADDING_GAP":
@@ -819,9 +819,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
     
     ## Enable Share Expert Fusion
-    "VLLM_ENABLE_SHARE_EXPERT_FUSION":
-    lambda: int(os.environ["VLLM_ENABLE_SHARE_EXPERT_FUSION"])
-    if "VLLM_ENABLE_SHARE_EXPERT_FUSION" in os.environ else 0
+    "VLLM_SHARED_EXPERT_FUSION_REPLICAS":
+    lambda: int(os.environ["VLLM_SHARED_EXPERT_FUSION_REPLICAS"])
+    if "VLLM_SHARED_EXPERT_FUSION_REPLICAS" in os.environ else 0
 }
 
 # end-env-vars-definition
