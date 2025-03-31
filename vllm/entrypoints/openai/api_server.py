@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import State
 from starlette.routing import Mount
 from typing_extensions import assert_never
@@ -67,7 +68,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
                                               UnloadLoRAAdapterRequest)
-from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -82,8 +82,10 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import load_aware_call, with_cancellation
+from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
+                                    with_cancellation)
 from vllm.logger import init_logger
+from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
@@ -310,6 +312,7 @@ def mount_metrics(app: FastAPI):
     # See https://prometheus.github.io/client_python/multiprocess/
     from prometheus_client import (CollectorRegistry, make_asgi_app,
                                    multiprocess)
+    from prometheus_fastapi_instrumentator import Instrumentator
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
@@ -317,6 +320,16 @@ def mount_metrics(app: FastAPI):
                      prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
+        Instrumentator(
+            excluded_handlers=[
+                "/metrics",
+                "/health",
+                "/load",
+                "/ping",
+                "/version",
+            ],
+            registry=registry,
+        ).add().instrument(app).expose(app)
 
         # Add prometheus asgi middleware to route /metrics requests
         metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
@@ -817,7 +830,8 @@ def build_app(args: Namespace) -> FastAPI:
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
-    if token := envs.VLLM_API_KEY or args.api_key:
+    # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
+    if token := args.api_key or envs.VLLM_API_KEY:
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):
@@ -844,6 +858,21 @@ def build_app(args: Namespace) -> FastAPI:
                 "X-Request-Id") or uuid.uuid4().hex
             response = await call_next(request)
             response.headers["X-Request-Id"] = request_id
+            return response
+
+    if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
+        logger.warning("CAUTION: Enabling log response in the API Server. "
+                       "This can include sensitive information and should be "
+                       "avoided in production.")
+
+        @app.middleware("http")
+        async def log_response(request: Request, call_next):
+            response = await call_next(request)
+            response_body = [
+                section async for section in response.body_iterator
+            ]
+            response.body_iterator = iterate_in_threadpool(iter(response_body))
+            logger.info("response_body={%s}", response_body[0].decode())
             return response
 
     for middleware in args.middleware:
@@ -1078,6 +1107,7 @@ if __name__ == "__main__":
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
     # entrypoints.
+    cli_env_setup()
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)

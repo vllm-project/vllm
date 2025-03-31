@@ -15,7 +15,6 @@ from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
-from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -69,6 +68,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+
+        from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
+        set_cpu_offload_max_bytes(
+            int(self.cache_config.cpu_offload_gb * 1024**3))
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -130,13 +133,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         # Multi-modal data support
-        self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
             scheduler_config=scheduler_config,
+            mm_registry=self.mm_registry,
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
@@ -674,7 +677,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # use two kernels for cascade attention. Let's imagine:
         # Request 3's input query: [D]
         # Request 3's kv cache: [A, B, C, D]
-        # Request 3's num_computed_tokens: 4 (i.e., [A, B, C, D])
+        # Request 3's num_computed_tokens: 3 (i.e., [A, B, C])
         # If we use [A, B, C, D] as the common prefix for Request 1-3,
         # then Request 3 will be processed only by the first kernel,
         # and the second kernel will get an empty input. While this is not
@@ -1122,16 +1125,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if max_gen_len == 1:
             # No spec decode tokens.
             valid_sampled_token_ids = sampled_token_ids.tolist()
-            # Mask out the sampled tokens that should not be sampled.
-            for i in discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[i].clear()
         else:
             # Includes spec decode tokens.
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 sampled_token_ids,
-                discard_sampled_tokens_req_indices,
                 self.input_batch.vocab_size,
             )
+        # Mask out the sampled tokens that should not be sampled.
+        for i in discard_sampled_tokens_req_indices:
+            valid_sampled_token_ids[i].clear()
 
         if not self.use_spec_decode:
             spec_token_ids = None
@@ -1439,9 +1441,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when
             # it supports multiple.
-            max_tokens_by_modality_dict = (
-                MULTIMODAL_REGISTRY.
-                get_max_tokens_per_item_by_nonzero_modality(self.model_config))
+            max_tokens_by_modality_dict = self.mm_registry \
+                .get_max_tokens_per_item_by_nonzero_modality(self.model_config)
             dummy_data_modality, max_tokens_per_mm_item = max(
                 max_tokens_by_modality_dict.items(), key=lambda item: item[1])
 
@@ -1473,24 +1474,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 encoder_budget, max_num_mm_items, dummy_data_modality)
 
             # Create dummy batch of multimodal inputs.
-            dummy_request_data = self.input_registry.dummy_data_for_profiling(
+            dummy_mm_kwargs = self.mm_registry.get_decoder_dummy_data(
                 model_config=self.model_config,
                 seq_len=self.max_num_tokens,
-                mm_registry=self.mm_registry,
-            )
-            dummy_mm_data = dummy_request_data.multi_modal_data
-            if not isinstance(dummy_mm_data, MultiModalKwargs):
-                # TODO: Delete this check once input mapper is fully removed.
-                raise RuntimeError(
-                    "Legacy input mapper is not supported in V1")
-
-            # Dummy data definition may contain multiple multimodal items
-            # (e.g, multiple images) for a single request, therefore here we
-            # always replicate first item by max_num_mm_items times since in V1
-            # they are scheduled to be processed separately.
-            dummy_mm_item = dummy_mm_data.get_item(
-                modality=dummy_data_modality, item_index=0)
-            dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
+                mm_counts={
+                    dummy_data_modality: 1
+                },
+            ).multi_modal_data
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
