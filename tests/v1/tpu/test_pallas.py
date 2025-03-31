@@ -48,10 +48,8 @@ def test_ragged_paged_attention():
   query = torch.zeros(num_tokens, num_heads * head_size)
   key = torch.zeros(num_tokens, num_kv_heads * head_size)
   value = torch.zeros(num_tokens, num_kv_heads * head_size)
-  key_cache = torch.zeros(num_blocks, block_size,
-                            num_kv_heads * head_size)
-  value_cache = torch.zeros(num_blocks, block_size,
-                            num_kv_heads * head_size)
+  kv_cache = torch.zeros(num_blocks, block_size,
+                            num_kv_heads *2, head_size)
   slot_mapping = torch.zeros(num_tokens, dtype=torch.int64)
   max_num_reqs = 8
   max_num_blocks_per_req = 8
@@ -79,18 +77,17 @@ def test_ragged_paged_attention():
         query=query,
         key=key,
         value=value,
-        kv_cache=(key_cache, value_cache),
+        kv_cache=kv_cache,
         attn_metadata=attn_metadata,
     )
     
     mock_ragged_paged_attention.assert_called_once_with(
-        ANY,
-        ANY,
-        ANY,
-        ANY,
-        ANY,
-        ANY,
-        ANY,
+        ANY,  # query
+        ANY,  # kv_cache
+        ANY,  # context_lens
+        ANY,  # block_tables
+        ANY,  # query_start_loc
+        ANY,  # num_seqs
         num_kv_pages_per_block=NUM_KV_PAGES_PER_BLOCK,
         num_queries_per_block=NUM_QUERIES_PER_BLOCK,
         vmem_limit_bytes=mock_vmem_limit_bytes,
