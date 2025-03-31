@@ -564,7 +564,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
 
         channel_type = envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE
-        if channel_type not in ["auto", "nccl", "shm"]:
+        if channel_type not in ("auto", "nccl", "shm"):
             raise ValueError(
                 "Invalid value for VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: "
                 f"{channel_type}. Valid values are: 'auto', 'nccl', or 'shm'.")
