@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Union
 
 import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationLevel
+from vllm.config import CompilationConfig, CompilationLevel
 from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test
 
 
-@pytest.fixture(params=None, name="model_info")
-def models_list_fixture(request):
+def models_list(all: bool):
     TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
         ("facebook/opt-125m", {}),
         ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", {
@@ -32,6 +31,9 @@ def models_list_fixture(request):
         }),
         ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
+
+    if not all:
+        return TEST_MODELS
 
     if is_quant_method_supported("aqlm"):
         TEST_MODELS.append(("ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf", {
@@ -77,7 +79,7 @@ def models_list_fixture(request):
     "optimization_level",
     [CompilationLevel.DYNAMO_ONCE, CompilationLevel.PIECEWISE],
 )
-@pytest.mark.parametrize("model_info", "", indirect=True)
+@pytest.mark.parametrize("model_info", models_list(all=True))
 @create_new_process_for_each_test()
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
@@ -91,25 +93,50 @@ def test_full_graph(
         m.setenv("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1")
         print(f"MODEL={model}")
 
-        prompts = [
-            "Hello, my name is",
-            "The president of the United States is",
-            "The capital of France is",
-            "The future of AI is",
-        ]
-        sampling_params = SamplingParams(temperature=0)
-        llm = LLM(
-            model=model,
-            enforce_eager=True,
-            tensor_parallel_size=1,
-            disable_custom_all_reduce=True,
-            compilation_config=optimization_level,
-            **model_kwargs,
-        )
-        outputs = llm.generate(prompts, sampling_params)
+        run_model(optimization_level, model, model_kwargs)
 
-        # Print the outputs.
-        for output in outputs:
-            prompt = output.prompt
-            generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+# TODO(luka) add other supported compilation config scenarios here
+@pytest.mark.parametrize(
+    "compilation_config",
+    # additional compile sizes
+    [
+        CompilationConfig(level=CompilationLevel.PIECEWISE,
+                          compile_sizes=[1, 2])
+    ])
+# only test some of the models
+@pytest.mark.parametrize("model_info", models_list(all=False))
+@create_new_process_for_each_test()
+def test_custom_compile_config(
+    model_info: tuple[str, dict[str, Any]],
+    compilation_config: CompilationConfig,
+):
+    model, model_kwargs = model_info
+    print(f"MODEL={model}")
+    run_model(compilation_config, model, model_kwargs)
+
+
+def run_model(compile_config: Union[int, CompilationConfig], model: str,
+              model_kwargs: dict[str, Any]):
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    sampling_params = SamplingParams(temperature=0)
+    llm = LLM(
+        model=model,
+        enforce_eager=True,
+        tensor_parallel_size=1,
+        disable_custom_all_reduce=True,
+        compilation_config=compile_config,
+        **model_kwargs,
+    )
+    outputs = llm.generate(prompts, sampling_params)
+
+    # Print the outputs.
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")

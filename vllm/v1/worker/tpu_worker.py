@@ -106,8 +106,8 @@ class TPUWorker:
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
-        # NOTE(woosuk): Usually, we compile 10-15 graphs for prefill and
-        # 30-40 graphs for decode. 128 is an arbitrary safe number.
+        # TODO (NickLucche) On gsm we compile 80+ graphs.
+        # Re-evaluate limit, with MM we may get close to this limit.
         torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): Set per-rank cache path since different ranks
@@ -137,10 +137,10 @@ class TPUWorker:
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                tpu_k_cache = torch.tensor([], dtype=dtype, device=self.device)
-                tpu_v_cache = torch.tensor([], dtype=dtype, device=self.device)
-
-                kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                tpu_kv_cache = torch.tensor([],
+                                            dtype=dtype,
+                                            device=self.device)
+                kv_caches[layer_name] = tpu_kv_cache
             else:
                 raise NotImplementedError
 
@@ -162,7 +162,13 @@ class TPUWorker:
         # intermediate activations.
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
-        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
+        current_mem = m["bytes_used"]
+        # Ideally we would use profiled = m["peak_bytes_used"] to
+        # get weights + activations. But there is memory used during
+        # compilation / weight loading that impacts the peak and
+        # there is no way to reset peak memory in XLA, So we
+        # use the heuristic of 2% of weights.
+        profiled = current_mem * 1.02
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
