@@ -52,7 +52,7 @@ python -m vllm.entrypoints.openai.api_server --host 0.0.0.0 --port 8000 --model 
 ```
 
 :::{warning}
-Note: Please use `--speculative_config` to set all configurations related to speculative decoding. The previous method of specifying the model through `--speculative_model` and adding related parameters (e.g., `--num_speculative_tokens`) separately will be deprecated in the next release.
+Note: Please use `--speculative_config` to set all configurations related to speculative decoding. The previous method of specifying the model through `--speculative_model` and adding related parameters (e.g., `--num_speculative_tokens`) separately has been deprecated now.
 :::
 
 Then use a client:

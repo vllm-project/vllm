@@ -54,8 +54,10 @@ def test_can_initialize(model_arch):
             model_info.default,
             tokenizer=model_info.tokenizer,
             tokenizer_mode=model_info.tokenizer_mode,
-            speculative_model=model_info.speculative_model,
-            num_speculative_tokens=1 if model_info.speculative_model else None,
+            speculative_config={
+                "model": model_info.speculative_model,
+                "num_speculative_tokens": 1,
+            } if model_info.speculative_model else None,
             trust_remote_code=model_info.trust_remote_code,
             load_format="dummy",
             hf_overrides=hf_overrides,
