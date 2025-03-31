@@ -6,7 +6,7 @@ requests >= 2.26.0
 tqdm
 blake3
 py-cpuinfo
-transformers >= 4.48.2  # Required for Bamba model and Transformers backend.
+transformers >= 4.50.3
 tokenizers >= 0.19.1  # Required for Llama 3.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
