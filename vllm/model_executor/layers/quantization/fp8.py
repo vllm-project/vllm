@@ -438,15 +438,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
+        self.allow_deep_gemm = allow_deep_gemm
 
-        if allow_deep_gemm and not (
+        if self.allow_deep_gemm and not (
                 current_platform.is_cuda()
                 and current_platform.has_device_capability(90)):
             logger.warning_once(
                 "DeepGemm not supported on the current platform.")
-            allow_deep_gemm = False
-
-        self.allow_deep_gemm = allow_deep_gemm
+            self.allow_deep_gemm = False
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
