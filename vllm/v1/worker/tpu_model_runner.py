@@ -770,9 +770,10 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
-            self.model(input_ids=input_ids,
-                       positions=position_ids,
-                       inputs_embeds=inputs_embeds)
+            out = self.model(input_ids=input_ids,
+                             positions=position_ids,
+                             inputs_embeds=inputs_embeds)
+        self._hidden_states_dtype = out.dtype
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -784,7 +785,7 @@ class TPUModelRunner:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(num_tokens)
             xm.mark_step()
-            xm.wait_device_ops()
+        xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
 
@@ -891,6 +892,7 @@ class TPUModelRunner:
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
+        # SamplingMetadata here for pruning output in LogitsProcessor, disabled.
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         def sample(
