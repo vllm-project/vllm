@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import abstractmethod
+from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, List, Optional, Tuple
-from dataclasses import dataclass
 
+import pplx_kernels as pplx
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
-
-import pplx_kernels as pplx
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
@@ -39,6 +38,7 @@ logger = init_logger(__name__)
 
 MOE_DP_CHUNK_SIZE = 256
 
+
 # Adapted from pplx-kernels tests/all_to_all_utils.py
 @dataclass
 class MoEConfig:
@@ -55,6 +55,7 @@ class MoEConfig:
     in_dtype: torch.dtype = torch.bfloat16
     out_dtype: torch.dtype = torch.bfloat16
     block_size: int = 128
+
 
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
@@ -92,9 +93,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> torch.Tensor:
         raise NotImplementedError
 
+
+#TODO: Every change in this class is a broken hack!!
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
+
     def __init__(self, moe: MoEConfig):
         self.all_to_all = pplx.AllToAll(
             max_num_tokens=MOE_DP_CHUNK_SIZE // moe.dp_size,
@@ -107,7 +111,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
             hidden_dim_scale_bytes=0,
         )
-
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -875,7 +878,7 @@ class FusedMoE(torch.nn.Module):
                                               self.layer_name)
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
-                           full_router_logits: torch.Tensor):
+                             full_router_logits: torch.Tensor):
         max_tokens_across_dp = get_forward_context(
         ).dp_metadata.max_tokens_across_dp
         cu_tokens_across_dp_cpu = get_forward_context(
@@ -891,21 +894,23 @@ class FusedMoE(torch.nn.Module):
 
         num_tokens_remaining_across_dp = num_tokens_across_dp
         chunk_start = 0
-        chunk_end = min(moe_dp_chunk_size_per_rank, full_hidden_states.shape[0])
+        chunk_end = min(moe_dp_chunk_size_per_rank,
+                        full_hidden_states.shape[0])
         full_final_hidden_states = torch.empty_like(full_hidden_states)
 
         for _ in range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank):
-            hidden_states = full_hidden_states[chunk_start:chunk_end,:]
-            router_logits = full_router_logits[chunk_start:chunk_end,:]
+            hidden_states = full_hidden_states[chunk_start:chunk_end, :]
+            router_logits = full_router_logits[chunk_start:chunk_end, :]
 
             cu_tokens_across_dp_this_iter = torch.cumsum(
-                num_tokens_remaining_across_dp.clamp(max=moe_dp_chunk_size_per_rank),
+                num_tokens_remaining_across_dp.clamp(
+                    max=moe_dp_chunk_size_per_rank),
                 dim=0)
 
-            hidden_states = self.naive_multicast(hidden_states,
-                cu_tokens_across_dp_this_iter)
-            router_logits = self.naive_multicast(router_logits,
-                cu_tokens_across_dp_this_iter)
+            hidden_states = self.naive_multicast(
+                hidden_states, cu_tokens_across_dp_this_iter)
+            router_logits = self.naive_multicast(
+                router_logits, cu_tokens_across_dp_this_iter)
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
@@ -926,7 +931,8 @@ class FusedMoE(torch.nn.Module):
             )
 
             if self.dp_size > 1:
-                start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_this_iter[self.dp_rank-1]
+                start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_this_iter[
+                    self.dp_rank - 1]
                 end = cu_tokens_across_dp_this_iter[self.dp_rank]
 
                 all_hidden_states = get_dp_group().all_reduce(
@@ -935,19 +941,25 @@ class FusedMoE(torch.nn.Module):
 
             if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
                 # Default set to False. (May have to add shared expert outputs.)
-                final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+                final_hidden_states = tensor_model_parallel_all_reduce(
+                    final_hidden_states)
 
-            full_final_hidden_states[chunk_start:chunk_end, :].copy_(final_hidden_states)
+            full_final_hidden_states[chunk_start:chunk_end, :].copy_(
+                final_hidden_states)
 
             # Update bounds
-            num_tokens_remaining_across_dp = torch.clamp(num_tokens_remaining_across_dp - moe_dp_chunk_size_per_rank, min=0)
+            num_tokens_remaining_across_dp = torch.clamp(
+                num_tokens_remaining_across_dp - moe_dp_chunk_size_per_rank,
+                min=0)
+
             def update_chunk_bound(x: int):
-                return min(x + moe_dp_chunk_size_per_rank, full_hidden_states.shape[0])
+                return min(x + moe_dp_chunk_size_per_rank,
+                           full_hidden_states.shape[0])
+
             chunk_start = update_chunk_bound(chunk_start)
             chunk_end = update_chunk_bound(chunk_end)
 
         return full_final_hidden_states
-
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
