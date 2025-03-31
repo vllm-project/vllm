@@ -454,7 +454,6 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._tokenizer = tokenizer
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
-        self._mm_registry = MULTIMODAL_REGISTRY
 
     @property
     def model_config(self) -> ModelConfig:
@@ -463,6 +462,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     @property
     def allowed_local_media_path(self):
         return self._model_config.allowed_local_media_path
+
+    @property
+    def mm_registry(self):
+        return MULTIMODAL_REGISTRY
 
     @staticmethod
     @cache
@@ -539,7 +542,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
-        mm_registry = self._mm_registry
+        mm_registry = self.mm_registry
         model_config = self.model_config
 
         input_modality = modality.replace("_embeds", "")
