@@ -7,6 +7,7 @@ from collections import deque
 from collections.abc import Iterable
 from typing import Optional, Union
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -533,6 +534,17 @@ class Scheduler(SchedulerInterface):
             if self.encoder_cache_manager.has_cache(request, i):
                 # The encoder input is already computed and cached.
                 continue
+
+            # If no encoder input chunking is allowed, we do not want to
+            # partially schedule a multimodal item. If the scheduled range would
+            # only cover part of the mm input, roll back to before the mm item.
+            if (not envs.VLLM_V1_MM_INPUT_CHUNKING
+                    and num_computed_tokens < start_pos
+                    and (num_computed_tokens + num_new_tokens)
+                    < (start_pos + num_encoder_tokens)):
+                num_new_tokens = start_pos - num_computed_tokens
+                break
+
             if (not self.encoder_cache_manager.can_allocate(request, i)
                     or num_encoder_tokens > encoder_budget):
                 # The encoder cache is full or the encoder budget is exhausted.

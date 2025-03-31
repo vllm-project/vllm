@@ -681,6 +681,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_BUCKET_PADDING_GAP":
     lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
     if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
+
+    # If set to false, we do not want to partially schedule a multimodal item.
+    # This ensures that if a request has a mixed prompt
+    # (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
+    # some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
+    # it will be scheduled as TTTT in one step and IIIIIIIIII in the next.
+    "VLLM_V1_MM_INPUT_CHUNKING":
+    lambda: os.environ.get("VLLM_V1_MM_INPUT_CHUNKING", "1") == "1",
 }
 
 # end-env-vars-definition
