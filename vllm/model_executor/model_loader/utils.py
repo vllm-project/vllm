@@ -36,10 +36,7 @@ def is_transformers_impl_compatible(
     mod = module or getattr(transformers, arch, None)
     if mod is None:
         return False
-    if hasattr(mod, "supports_backend"):
-        return mod.is_backend_compatible()
-    else:
-        return mod._supports_flex_attn
+    return mod.is_backend_compatible()
 
 
 def resolve_transformers_fallback(model_config: ModelConfig,
