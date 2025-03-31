@@ -130,11 +130,12 @@ class PromptUpdateDetails(Generic[_S]):
     ) -> "PromptUpdateDetails[_S]":
 
         def is_embed(full: "_BoundPromptSequence") -> torch.Tensor:
-            embed_token_id = encode_tokens(full.tokenizer, embed_token_text)
-            if len(embed_token_id) > 1:
-                raise ValueError(f"{embed_token_text} is not a single token")
+            embed_token_ids = encode_tokens(full.tokenizer, embed_token_text)
 
-            return torch.tensor(full.token_ids) == embed_token_id[0]
+            return torch.isin(
+                torch.tensor(full.token_ids),
+                torch.tensor(embed_token_ids),
+            )
 
         return PromptUpdateDetails(full=seq, is_embed=is_embed)
 
