@@ -32,14 +32,21 @@ class XPUPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
-        if selected_backend != _Backend.IPEX:
-            logger.info("Cannot use %s backend on XPU.", selected_backend)
+        if selected_backend not in [_Backend.IPEX, _Backend.IPEX_V1]:
+            logger.warning_once(
+                f"Cannot use {selected_backend} backend on XPU.")
         use_v1 = envs.VLLM_USE_V1
         if use_v1:
-            logger.info("Using IPEX_V1 attention backend.")
+            if selected_backend == _Backend.IPEX:
+                logger.warning_once("For v1 on XPU, should use "
+                                    "IPEX_V1 attention backend.")
+            logger.info_once("Using IPEX_V1 attention backend.")
             return "vllm.v1.attention.backends.ipex_attn.IPEXAttentionBackend"
         else:
-            logger.info("Using IPEX attention backend.")
+            if selected_backend == _Backend.IPEX:
+                logger.warning_once("For v0 on XPU, should use "
+                                    "IPEX attention backend.")
+            logger.info_once("Using IPEX attention backend.")
             return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
     @staticmethod

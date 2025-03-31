@@ -2276,7 +2276,8 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
             src = inspect.getsource(attr_func)
             if "NotImplementedError" in src:
                 unimplemented_methods.append(attr_name)
-        if unimplemented_methods:
+        from vllm.platforms import current_platform
+        if unimplemented_methods and not current_platform.is_xpu():
             method_names = ','.join(unimplemented_methods)
             msg = (f"Methods {method_names} not implemented in {self}")
             logger.warning(msg)
