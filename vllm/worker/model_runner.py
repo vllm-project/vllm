@@ -482,6 +482,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.last_sample_ids = None
         self.req_ids = []
 
+    def SetLastSamperData(self, last_sample_ids, last_sample_tensor):
+        self.last_sample_tensor = last_sample_tensor
+        self.last_sample_ids = last_sample_ids
+
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
         self.finished_requests_ids = finished_requests_ids
@@ -1214,7 +1218,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
+        last_outputs_ids: torch.Tensor = None,
+        last_output_sample: torch.Tensor = None,
     ) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -1240,7 +1246,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                            str(e)) from e
 
         self.builder.reset_cached_inter_data()
-
+        self.builder.SetLastSamperData(last_outputs_ids, last_output_sample)
         return self.builder.build()  # type: ignore
 
     @contextmanager
@@ -1663,6 +1669,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None,
+        last_outputs_ids: torch.Tensor = None,
+        last_output_sample: torch.Tensor = None,
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1678,7 +1686,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         If cuda graph is required, this API automatically pads inputs.
         """
         model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list, finished_requests_ids)
+            seq_group_metadata_list, finished_requests_ids, last_outputs_ids, last_output_sample)
         if get_pp_group().is_last_rank:
             # Sampling metadata is only required for the final pp group
             generators = self.get_generators(finished_requests_ids)
