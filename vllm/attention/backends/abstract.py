@@ -15,6 +15,7 @@ if TYPE_CHECKING:
                                                ModelRunnerInputBase,
                                                ModelRunnerInputBuilderBase)
 
+from vllm.multistream.base import MSAttentionMetadataSplitConfig
 
 class AttentionType:
     """
@@ -155,6 +156,12 @@ class AttentionMetadata:
             field.name: getattr(self, field.name)
             for field in fields(self) if field.name not in skip_fields
         }
+
+    def split_metadata_for_multistream(self,
+                                       ms_split_config: MSAttentionMetadataSplitConfig,
+                                       ) -> List["AttentionMetadata"]:
+        raise NotImplementedError
+
 
 
 T = TypeVar("T", bound=AttentionMetadata)

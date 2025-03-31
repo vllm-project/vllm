@@ -7,10 +7,20 @@ import torch.distributed
 
 from .parallel_state import get_tp_group
 
+from vllm.multistream.context import get_multistream_comm_context
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
-    return get_tp_group().all_reduce(input_)
+    current_ms_metadata = get_multistream_comm_context()
+    if current_ms_metadata is None:
+        output =  get_tp_group().all_reduce(input_)
+    else:
+        current_ms_metadata.before_comm_event.record()
+        with torch.cuda.stream(current_ms_metadata.comm_stream):
+            current_ms_metadata.before_comm_event.wait()
+            output = get_tp_group().all_reduce(input_)
+            current_ms_metadata.after_comm_event.record()
+    return output
 
 
 def tensor_model_parallel_all_gather(input_: torch.Tensor,

@@ -18,7 +18,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
-from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.attention import AttentionMetadata, get_attn_backend, verify_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import CompilationLevel, VllmConfig
@@ -473,6 +473,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 self.sliding_window + self.block_size - 1) // self.block_size
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
+
+        self.enable_multi_stream = (self.runner.model_config is not None
+                                    and self.runner.model_config.multistream_config is not None)
 
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
@@ -1070,6 +1073,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if self.attn_backend:
             self.attn_state = self.attn_backend.get_state_cls()(
                 weakref.proxy(self))
+            verify_attn_backend(self.attn_backend, model_config.multistream_config is not None)
         else:
             self.attn_state = CommonAttentionState(weakref.proxy(self))
 

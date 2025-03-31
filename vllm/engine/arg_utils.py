@@ -18,7 +18,7 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          ModelConfig, ModelImpl, ObservabilityConfig,
                          ParallelConfig, PoolerConfig, PromptAdapterConfig,
                          SchedulerConfig, SpeculativeConfig, TaskOption,
-                         TokenizerPoolConfig, VllmConfig)
+                         TokenizerPoolConfig, VllmConfig, MultiStreamConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -223,6 +223,8 @@ class EngineArgs:
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = None
     use_tqdm_on_load: bool = True
+
+    enable_multi_stream: bool = False
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -1127,6 +1129,13 @@ class EngineArgs:
             "Note that even if this is set to False, cascade attention will be "
             "only used when the heuristic tells that it's beneficial.")
 
+        parser.add_argument(
+            "--enable-multi-stream",
+            action='store_true',
+            default=EngineArgs.enable_multi_stream,
+            help="enable computation and communication operation overlap by using multi-stream in prefill phase"
+        )
+
         return parser
 
     @classmethod
@@ -1149,6 +1158,11 @@ class EngineArgs:
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
             self.load_format = LoadFormat.RUNAI_STREAMER
 
+        if self.enable_multi_stream:
+            logger.info("enable multi-stream mode")
+            multi_stream_config = MultiStreamConfig()
+        else:
+            multi_stream_config = None
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
@@ -1187,6 +1201,7 @@ class EngineArgs:
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
+            multistream_config=multi_stream_config,
         )
 
     def create_load_config(self) -> LoadConfig:

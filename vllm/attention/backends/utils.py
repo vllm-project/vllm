@@ -3,6 +3,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import accumulate
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Type, TypeVar, Union
 
 import numpy as np
@@ -14,6 +15,9 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+
+from vllm.multistream.base import MSAttentionMetadataSplitConfig
+
 
 logger = init_logger(__name__)
 
@@ -272,6 +276,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             enable_kv_scales_calculation=True,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
+            query_lens=query_lens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
@@ -327,6 +332,7 @@ class CommonAttentionState(AttentionState):
             slot_mapping=self._graph_slot_mapping[:batch_size],
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
+            query_lens=None,
             seq_lens=None,
             seq_lens_tensor=self._graph_seq_lens[:batch_size],
             max_query_len=1,
@@ -583,3 +589,197 @@ def get_num_prefill_decode_query_kv_tokens(
 
     return (num_prefill_query_tokens, num_prefill_kv_tokens,
             num_decode_query_tokens)
+
+
+def common_split_metadata_for_multistream(
+        ms_split_config: MSAttentionMetadataSplitConfig,
+        num_prefills: int,
+        num_prefill_tokens: int,
+        num_decode_tokens: int,
+        slot_mapping: torch.Tensor,
+        query_lens: List[int],
+        seq_lens: List[int],
+        multi_modal_placeholder_index_maps: Dict[str, MultiModalPlaceholderMap.IndexMap],
+        enable_kv_scales_calculation: bool,
+        seq_lens_tensor: torch.Tensor,
+        max_query_len: int,
+        max_prefill_seq_len: int,
+        max_decode_seq_len: int,
+        query_start_loc: torch.Tensor,
+        seq_start_loc: torch.Tensor,
+        context_lens_tensor: torch.Tensor,
+        block_tables: torch.Tensor,
+        use_cuda_graph: bool,
+        attn_metadata: "AttentionMetadata",
+        _metadata_cls: Type[TAttentionMetadata],
+        ) -> List[Any]:
+    assert 0 < ms_split_config.num_micro_batches < 3
+    assert ms_split_config.enable_request_split, "Only support causal attention yet."
+    # not support multi-stream for decode-only phase for now
+    if num_prefill_tokens == 0:
+        return [attn_metadata]
+
+    # get batches info
+    total_tokens = num_prefill_tokens + num_decode_tokens
+    if (total_tokens < ms_split_config.min_total_tokens_to_split or
+            num_prefill_tokens < ms_split_config.min_prefill_tokens_to_split):
+        return [attn_metadata]
+    mean_token_num = total_tokens // ms_split_config.num_micro_batches
+    token_imbalance_ratio = ms_split_config.imbalance_ratio
+
+    query_start_loc_cpu = np.zeros(shape=(len(query_lens) + 1,), dtype=int)
+    np.cumsum(query_lens, out=query_start_loc_cpu[1:])
+
+    # find a batch to split
+    split_batch_index = 0
+    need_chunk = False
+    for i in range(len(query_start_loc_cpu) - 1):
+        if query_start_loc_cpu[i] <= mean_token_num <= query_start_loc_cpu[i + 1] or i > num_prefills - 1:
+            split_batch_index = i
+            break
+
+    if split_batch_index > num_prefills - 1:
+        split_batch_index = split_batch_index - 1
+        need_chunk = False
+    else:
+        if abs(query_start_loc_cpu[split_batch_index] - mean_token_num) < total_tokens * token_imbalance_ratio:
+            split_batch_index = split_batch_index - 1
+        elif abs(query_start_loc_cpu[split_batch_index + 1] - mean_token_num) < total_tokens * token_imbalance_ratio:
+            split_batch_index = split_batch_index
+        else:
+            split_batch_index = split_batch_index
+            need_chunk = True
+
+    if not need_chunk:
+        # pre
+        num_prefills_pre = split_batch_index + 1
+        slot_mapping_pre = slot_mapping[:query_start_loc_cpu[split_batch_index + 1]]
+        num_prefills_tokens_pre = query_start_loc_cpu[split_batch_index + 1]
+        num_decode_tokens_pre = 0
+        query_lens_pre = query_lens[:split_batch_index + 1]
+        seq_lens_pre = seq_lens[:split_batch_index + 1]
+        seq_lens_tensor_pre = seq_lens_tensor[:split_batch_index + 1]
+        max_query_len_pre = max(query_lens[:split_batch_index + 1])
+        max_prefill_seq_len_pre = max(seq_lens_pre, default=0)
+        max_decode_query_len_pre = 1
+        max_decode_seq_len_pre = 0
+        query_start_loc_pre = deepcopy(query_start_loc[:split_batch_index + 2])
+        seq_start_loc_pre = deepcopy(seq_start_loc[:split_batch_index + 2])
+        context_lens_tensor_pre = context_lens_tensor[:split_batch_index + 1]
+        block_tables_pre = block_tables[:split_batch_index + 1]
+        use_cuda_graph_pre = use_cuda_graph
+        # post
+        num_prefills_post = num_prefills - num_prefills_pre
+        slot_mapping_post = slot_mapping[query_start_loc_cpu[split_batch_index + 1]:]
+        num_prefills_token_post = num_prefill_tokens - num_prefills_tokens_pre
+        num_decode_token_post = num_decode_tokens
+        seq_lens_post = seq_lens[split_batch_index + 1:]
+        seq_lens_tensor_post = seq_lens_tensor[split_batch_index + 1:]
+        query_lens_post = query_lens[split_batch_index + 1:]
+        max_query_len_post = max(query_lens_post)
+        max_prefill_seq_len_post = max(seq_lens_post[:num_prefills_post], default=0)
+        decode_query_lens = query_lens_post[num_prefills_post:]
+        if len(decode_query_lens) > 0:
+            max_decode_query_len_post = max(decode_query_lens, default=0)
+        else:
+            max_decode_query_len_post = 1
+        max_decode_seq_len_post = max_decode_seq_len
+        query_start_loc_post = deepcopy(query_start_loc[split_batch_index + 1:]) - \
+                               query_start_loc[split_batch_index + 1]
+        seq_start_loc_post = deepcopy(seq_start_loc[split_batch_index + 1:]) - \
+                             seq_start_loc[split_batch_index + 1]
+        context_lens_tensor_post = context_lens_tensor[split_batch_index + 1:]
+        block_tables_post = block_tables[split_batch_index + 1:]
+        use_cuda_graph_post = use_cuda_graph
+    else:  # split one prefill request
+        split_tokens_pre = mean_token_num - query_start_loc_cpu[split_batch_index]
+        split_tokens_post = query_start_loc_cpu[split_batch_index + 1] - mean_token_num
+        # pre
+        num_prefills_pre = split_batch_index + 1
+        slot_mapping_pre = slot_mapping[:mean_token_num]
+        num_prefills_tokens_pre = mean_token_num
+        num_decode_tokens_pre = 0
+        seq_lens_pre = deepcopy(seq_lens[:split_batch_index + 1])  # deepcopy
+        seq_lens_pre[-1] = seq_lens_pre[-1] - split_tokens_post
+        seq_lens_tensor_pre = deepcopy(seq_lens_tensor[:split_batch_index + 1])
+        seq_lens_tensor_pre[-1] = seq_lens_tensor_pre[-1] - split_tokens_post
+        query_lens_pre = query_lens[:split_batch_index] + [split_tokens_pre]
+        max_query_len_pre = max(query_lens_pre)
+        max_prefill_seq_len_pre = max(seq_lens_pre, default=0)
+        max_decode_query_len_pre = 1
+        max_decode_seq_len_pre = 0
+        query_start_loc_pre = deepcopy(query_start_loc[:split_batch_index + 2])
+        query_start_loc_pre[-1] = query_start_loc_pre[-1] - split_tokens_post
+        seq_start_loc_pre = deepcopy(seq_start_loc[:split_batch_index + 2])
+        seq_start_loc_pre[-1] = seq_start_loc_pre[-1] - split_tokens_post
+        context_lens_tensor_pre = context_lens_tensor[:split_batch_index + 1]
+        block_tables_pre = block_tables[:split_batch_index + 1]
+        use_cuda_graph_pre = use_cuda_graph
+        # post
+        num_prefills_post = num_prefills - num_prefills_pre + 1
+        slot_mapping_post = slot_mapping[mean_token_num:]
+        num_prefills_token_post = num_prefill_tokens - num_prefills_tokens_pre
+        num_decode_token_post = num_decode_tokens
+        seq_lens_post = seq_lens[split_batch_index:]
+        seq_lens_tensor_post = seq_lens_tensor[split_batch_index:]
+        query_lens_post = [split_tokens_post] + query_lens[split_batch_index + 1:]
+        max_query_len_post = max(query_lens_post)
+        max_prefill_seq_len_post = max(seq_lens_post[:num_prefills_post], default=0)
+        decode_query_lens = query_lens_post[num_prefills_post:]
+        if len(decode_query_lens) > 0:
+            max_decode_query_len_post = max(decode_query_lens, default=0)
+        else:
+            max_decode_query_len_post = 1
+        max_decode_seq_len_post = max_decode_seq_len
+        query_start_loc_post = deepcopy(query_start_loc[split_batch_index:]) - \
+                               query_start_loc[split_batch_index]
+        query_start_loc_post[1:] = query_start_loc_post[1:] - split_tokens_pre
+        seq_start_loc_post = deepcopy(seq_start_loc[split_batch_index:]) - \
+                             seq_start_loc[split_batch_index]
+        context_lens_tensor_post = deepcopy(context_lens_tensor[split_batch_index:])
+        context_lens_tensor_post[0] = context_lens_tensor_post[0] + split_tokens_pre
+        block_tables_post = block_tables[split_batch_index:]
+        use_cuda_graph_post = use_cuda_graph
+
+    attention_metadata_pre = _metadata_cls(
+        num_prefills=num_prefills_pre,
+        slot_mapping=slot_mapping_pre,
+        num_prefill_tokens=num_prefills_tokens_pre,
+        num_decode_tokens=num_decode_tokens_pre,
+        query_lens=query_lens_pre,
+        seq_lens=seq_lens_pre,
+        multi_modal_placeholder_index_maps=multi_modal_placeholder_index_maps,  # TODO maybe error
+        enable_kv_scales_calculation=enable_kv_scales_calculation,
+        seq_lens_tensor=seq_lens_tensor_pre,
+        max_query_len=max_query_len_pre,
+        max_decode_query_len=max_decode_query_len_pre,
+        max_prefill_seq_len=max_prefill_seq_len_pre,
+        max_decode_seq_len=max_decode_seq_len_pre,
+        query_start_loc=query_start_loc_pre,
+        seq_start_loc=seq_start_loc_pre,
+        context_lens_tensor=context_lens_tensor_pre,
+        block_tables=block_tables_pre,
+        use_cuda_graph=use_cuda_graph_pre,
+    )
+
+    attention_metadata_post = _metadata_cls(
+        num_prefills=num_prefills_post,
+        slot_mapping=slot_mapping_post,
+        num_prefill_tokens=num_prefills_token_post,
+        num_decode_tokens=num_decode_token_post,
+        query_lens=query_lens_post,
+        seq_lens=seq_lens_post,
+        multi_modal_placeholder_index_maps=multi_modal_placeholder_index_maps,
+        enable_kv_scales_calculation=enable_kv_scales_calculation,
+        seq_lens_tensor=seq_lens_tensor_post,
+        max_query_len=max_query_len_post,
+        max_decode_query_len=max_decode_query_len_post,
+        max_prefill_seq_len=max_prefill_seq_len_post,
+        max_decode_seq_len=max_decode_seq_len_post,
+        query_start_loc=query_start_loc_post,
+        seq_start_loc=seq_start_loc_post,
+        context_lens_tensor=context_lens_tensor_post,
+        block_tables=block_tables_post,
+        use_cuda_graph=use_cuda_graph_post,
+    )
+    return [attention_metadata_pre, attention_metadata_post]

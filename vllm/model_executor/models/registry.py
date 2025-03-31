@@ -23,7 +23,7 @@ from vllm.utils import is_in_doc_build
 
 from .interfaces import (has_inner_state, is_attention_free, is_hybrid,
                          supports_cross_encoding, supports_multimodal,
-                         supports_pp, supports_transcription, supports_v0_only)
+                         supports_pp, supports_transcription, supports_v0_only, supports_multistream)
 from .interfaces_base import is_text_generation_model
 
 logger = init_logger(__name__)
@@ -236,6 +236,7 @@ class _ModelInfo:
     is_hybrid: bool
     supports_transcription: bool
     supports_v0_only: bool
+    supports_multistream: bool
 
     @staticmethod
     def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
@@ -251,6 +252,7 @@ class _ModelInfo:
             is_hybrid=is_hybrid(model),
             supports_transcription=supports_transcription(model),
             supports_v0_only=supports_v0_only(model),
+            supports_multistream=supports_multistream(model),
         )
 
 

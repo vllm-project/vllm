@@ -22,6 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
+from audioop import error
 from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -30,7 +31,7 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, MultiStreamConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -48,12 +49,15 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsMultiStream
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
+from vllm.multistream.layers import (MultiStreamPreTransformerLayer, MultiStreamPostTransformerLayer)
+from vllm.multistream.metadata import make_multistream_metadata
+from vllm.multistream.decorators import support_multi_stream
 
 class LlamaMLP(nn.Module):
 
@@ -205,7 +209,14 @@ class LlamaAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
-
+@support_multi_stream(
+    dynamic_arg_ms={
+        "forward": ["positions", "hidden_states", "residual"],
+        "forward_attn": ["positions", "hidden_states", "residual"],
+        "forward_ffn": ["hidden_states", "residual"],
+    },
+    unpacked_arg={},
+)
 class LlamaDecoderLayer(nn.Module):
 
     def __init__(
@@ -284,6 +295,31 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
+    def forward_attn(self,
+                     positions: torch.Tensor,
+                     hidden_states: torch.Tensor,
+                     residual: Optional[torch.Tensor],
+    ):
+        # Self Attention
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states)
+        return hidden_states, residual
+
+    def forward_ffn(self,
+                    hidden_states: torch.Tensor,
+                    residual: Optional[torch.Tensor],):
+        # Fully Connected
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
+
 
 @support_torch_compile
 class LlamaModel(nn.Module):
@@ -333,6 +369,17 @@ class LlamaModel(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
+        multistream_config = vllm_config.model_config.multistream_config
+        self.multistream_metadata = make_multistream_metadata(
+            start_layer=self.start_layer,
+            end_layer=self.end_layer,
+            causal_lm=getattr(config, "causal_lm", True),
+            multistream_config=multistream_config,
+        )
+        self.ms_pre_layer = MultiStreamPreTransformerLayer(self.multistream_metadata)
+        self.ms_post_layer = MultiStreamPostTransformerLayer(self.multistream_metadata)
+
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -353,9 +400,17 @@ class LlamaModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+        # TODO attn_metadata need adjust
+        [positions, hidden_states, residual] = self.ms_pre_layer(
+            [positions, hidden_states, residual],
+        )
 
         for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(positions, hidden_states, residual)
+
+        [hidden_states, residual] = self.ms_post_layer(
+            [hidden_states, residual],
+        )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({

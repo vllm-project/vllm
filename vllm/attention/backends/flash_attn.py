@@ -21,7 +21,7 @@ from vllm.attention.backends.utils import (
     PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
     compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
     get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
-    is_all_encoder_attn_metadata_set, is_block_tables_empty)
+    is_all_encoder_attn_metadata_set, is_block_tables_empty, common_split_metadata_for_multistream)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
@@ -29,6 +29,8 @@ from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
 from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version)
+
+from vllm.multistream.base import MSAttentionMetadataSplitConfig
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -109,6 +111,9 @@ class FlashAttentionMetadata(AttentionMetadata):
     dynamically, it should be stored in tensor. The tensor has to be
     updated from `CUDAGraphRunner.forward` API.
     """
+    # (batch_size,). The query length per sequence. Query length means the
+    # new tokens
+    query_lens: Optional[List[int]]
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
     seq_lens: Optional[List[int]]
@@ -218,6 +223,8 @@ class FlashAttentionMetadata(AttentionMetadata):
                            self.query_start_loc[:self.num_prefills + 1])
         slot_mapping = (None if self.slot_mapping is None else
                         self.slot_mapping[:self.num_prefill_tokens])
+        query_lens = (None if self.query_lens is None else
+                      self.query_lens[:self.num_prefills])
         seq_lens = (None if self.seq_lens is None else
                     self.seq_lens[:self.num_prefills])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
@@ -237,6 +244,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
             enable_kv_scales_calculation=self.enable_kv_scales_calculation,
+            query_lens=query_lens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=self.max_query_len,
@@ -282,6 +290,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
+            query_lens=None,
             seq_lens=None,
             seq_lens_tensor=seq_lens_tensor,
             max_decode_query_len=self.max_decode_query_len,
@@ -347,6 +356,8 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.num_decode_tokens == num_seqs
         assert self.slot_mapping.shape == (num_seqs, )
 
+        assert self.query_lens is not None
+        assert len(self.query_lens) <= num_seqs
         assert self.seq_lens is not None
         assert len(self.seq_lens) == num_seqs
         assert self.seq_lens_tensor is not None
@@ -368,6 +379,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         # Update query lengths. Note that we update only queries and not seqs,
         # since tensors may be padded due to captured cuda graph batch size
         for i in range(num_queries):
+            self.query_lens[i] += 1
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
 
@@ -380,7 +392,33 @@ class FlashAttentionMetadata(AttentionMetadata):
                                    seq_lens=self.seq_lens_tensor,
                                    slot_mapping=self.slot_mapping,
                                    block_tables=self.block_tables)
-
+    def split_metadata_for_multistream(
+            self,
+            ms_split_config: MSAttentionMetadataSplitConfig,
+    ) -> List["FlashAttentionMetadata"]:
+        """Split metadata for multi-stream with FlashAttentionBackend"""
+        return common_split_metadata_for_multistream(
+            ms_split_config=ms_split_config,
+            num_prefills=self.num_prefills,
+            num_prefill_tokens=self.num_prefill_tokens,
+            num_decode_tokens=self.num_decode_tokens,
+            slot_mapping=self.slot_mapping,
+            query_lens=self.query_lens,
+            seq_lens=self.seq_lens,
+            multi_modal_placeholder_index_maps=self.multi_modal_placeholder_index_maps,  # TODO maybe error
+            enable_kv_scales_calculation=self.enable_kv_scales_calculation,
+            seq_lens_tensor=self.seq_lens_tensor,
+            max_query_len=self.max_query_len,
+            max_prefill_seq_len=self.max_prefill_seq_len,
+            max_decode_seq_len=self.max_decode_seq_len,
+            query_start_loc=self.query_start_loc,
+            seq_start_loc=self.seq_start_loc,
+            context_lens_tensor=self.context_lens_tensor,
+            block_tables=self.block_tables,
+            use_cuda_graph=self.use_cuda_graph,
+            attn_metadata=self,
+            _metadata_cls=FlashAttentionMetadata,
+        )
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):

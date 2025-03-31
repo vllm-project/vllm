@@ -184,3 +184,14 @@ def global_force_attn_backend_context_manager(
     finally:
         # Revert the original global backend override, if any
         global_force_attn_backend(original_value)
+
+
+def verify_attn_backend(
+    attention_backend: Type[AttentionBackend] = None,
+    enable_multi_stream: bool = False,
+):
+    if enable_multi_stream:
+        from vllm.attention.backends.flash_attn import FlashAttentionBackend
+        assert (attention_backend.get_name() == FlashAttentionBackend.get_name()), \
+            (f"enable_multi_stream only supports FlashAttentionBackend, "
+             f"now backend is {attention_backend.get_name()}")

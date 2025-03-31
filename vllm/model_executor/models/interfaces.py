@@ -526,3 +526,70 @@ def supports_v0_only(
         return isinstance(model, SupportsV0Only)
 
     return isinstance(model, SupportsV0Only)
+
+
+@runtime_checkable
+class SupportsMultiStream(Protocol):
+    """The interface required for all models that support Multi-stream."""
+
+    supports_multistream: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports Multi-stream.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+
+# We can't use runtime_checkable with ClassVar for issubclass checks
+# so we need to treat the class as an instance and use isinstance instead
+@runtime_checkable
+class _SupportsMultiStreamType(Protocol):
+    supports_multistream: Literal[True]
+
+
+@overload
+def supports_multistream(model: Type[object]) -> TypeIs[Type[SupportsMultiStream]]:
+    ...
+
+
+@overload
+def supports_multistream(model: object) -> TypeIs[SupportsMultiStream]:
+    ...
+
+
+def supports_multistream(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsMultiStream]], TypeIs[SupportsMultiStream]]:
+    result = _supports_multistream(model)
+
+    if not result:
+        ms_attrs = (
+            "supported_multistream_modules",
+        )
+        missing_attrs = tuple(attr for attr in ms_attrs
+                              if not hasattr(model, attr))
+
+        if getattr(model, "supports_multistream", False):
+            if missing_attrs:
+                logger.warning(
+                    "The model (%s) sets `supports_multistream=True`, "
+                    "but is missing MultiStream-specific attributes: %s",
+                    model,
+                    missing_attrs,
+                )
+        else:
+            if not missing_attrs:
+                logger.warning(
+                    "The model (%s) contains all MultiStream-specific attributes, "
+                    "but does not set `supports_multistream=True`.", model)
+
+    return result
+
+
+def _supports_multistream(model: Union[Type[object], object]) -> bool:
+    if isinstance(model, type):
+        return isinstance(model, _SupportsMultiStreamType)
+
+    return isinstance(model, SupportsMultiStream)
