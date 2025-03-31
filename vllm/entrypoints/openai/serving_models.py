@@ -76,7 +76,7 @@ class OpenAIServingModels:
         ):
             self.lora_resolvers.append(
                 LoRAResolverRegistry.get_resolver(lora_resolver_name))
-        self.lora_resolver_lock = defaultdict(Lock)
+        self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
         self.prompt_adapter_requests = []
         if prompt_adapters is not None:
