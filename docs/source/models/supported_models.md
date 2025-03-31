@@ -73,7 +73,7 @@ The Transformers fallback explicitly supports the following features:
 
 - <project:#quantization-index> (except GGUF)
 - <project:#lora-adapter>
-- <project:#distributed-serving> (requires `transformers>=4.49.0`)
+- <project:#distributed-serving>
 
 #### Remote code
 
