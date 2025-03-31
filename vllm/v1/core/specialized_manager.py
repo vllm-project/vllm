@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
 
+from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
@@ -92,6 +93,9 @@ class SlidingWindowManager(SpecializedManager):
                  block_pool: BlockPool):
         super().__init__(kv_cache_spec, block_pool)
         self.sliding_window = kv_cache_spec.sliding_window
+        # The number of contiguous blocks needed for prefix cache hit.
+        self.sliding_window_contiguous_blocks = cdiv(
+            (kv_cache_spec.sliding_window - 1), self.block_size)
         self._null_block = block_pool.null_block
 
     def find_longest_cache_hit(
@@ -101,21 +105,26 @@ class SlidingWindowManager(SpecializedManager):
         # O(len(block_hashes) / num_block_sliding_window +
         #   sliding_window / block_size)
         # which is good for low cache hit rate scenarios.
-        computed_blocks: list[KVCacheBlock] = [self._null_block
-                                               ] * len(block_hashes)
+        computed_blocks = [self._null_block] * len(block_hashes)
         num_contiguous_blocks = 0
 
+        # Search from right to left and early stop when a match is found.
         for i in range(len(block_hashes) - 1, -1, -1):
             if cached_block := self.block_pool.get_cached_block(
                     block_hashes[i]):
                 computed_blocks[i] = cached_block
                 num_contiguous_blocks += 1
-                if (num_contiguous_blocks * self.block_size
-                        >= self.sliding_window):
+                if (num_contiguous_blocks
+                        >= self.sliding_window_contiguous_blocks):
+                    # Trim the trailing blocks.
+                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
+                    # when sliding_window_contiguous_blocks=2.
                     del computed_blocks[i + num_contiguous_blocks:]
                     return computed_blocks
             else:
                 num_contiguous_blocks = 0
+        # The first `num_contiguous_blocks` is a cache hit even if
+        # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
         del computed_blocks[num_contiguous_blocks:]
         return computed_blocks
 
@@ -123,7 +132,7 @@ class SlidingWindowManager(SpecializedManager):
                               num_computed_tokens: int) -> list[KVCacheBlock]:
         # Remove the blocks that are no longer be in the sliding window and
         # skipped during the attention computation.
-        last_useful_token = num_computed_tokens - self.sliding_window
+        last_useful_token = num_computed_tokens - self.sliding_window + 1
         last_useful_block = last_useful_token // self.block_size
 
         removed_blocks: list[KVCacheBlock] = []

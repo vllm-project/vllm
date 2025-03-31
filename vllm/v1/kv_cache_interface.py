@@ -98,9 +98,10 @@ class SlidingWindowSpec(AttentionSpec):
             vllm_config.scheduler_config.max_num_batched_tokens)
 
         # During chunked prefill, we allocate KV cache for the last
-        # `self.sliding_window` computed tokens plus the newly scheduled tokens.
-        # And we won't allocate KV cache for more than `max_model_len` tokens.
-        num_tokens = min(self.sliding_window + max_num_batched_tokens,
+        # `self.sliding_window-1` computed tokens plus the newly scheduled
+        # tokens. And we won't allocate KV cache for more than `max_model_len`
+        # tokens.
+        num_tokens = min(self.sliding_window - 1 + max_num_batched_tokens,
                          max_model_len)
 
         # +1 here because the sliding window may not start from the beginning

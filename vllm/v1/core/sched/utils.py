@@ -57,7 +57,7 @@ def force_recompute_last_token_for_full_hit(
     else:
         # For layers other than full attention, the recomputation of the last
         # token may require a block that not cached. For example, request [ABCD]
-        # with block_size 1 and sliding_window_size 2, the cache may be [AxCD] (
+        # with block_size 1 and sliding_window_size 3, the cache may be [AxCD] (
         # x means cache miss). The recomputation of D requires B, which is not
         # cached, and the optimal choice is to recompute [BCD].
         # The logic is too complicated to implement here, so we just recompute

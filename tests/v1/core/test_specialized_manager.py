@@ -104,35 +104,35 @@ def test_sliding_window_remove_skipped_blocks():
     assert_block_id(removed, [])
     assert_block_id(block_table, original_block_ids)
 
-    # 5 tokens are computed. Only token 0 is out of the sliding window. As
+    # 4 tokens are computed. Only token 0 is out of the sliding window. As
     # block 1000 also contains token 1 that is in the sliding window, block 1000
     # cannot be removed.
-    removed = manager.remove_skipped_blocks(block_table, 5)
+    removed = manager.remove_skipped_blocks(block_table, 4)
     assert_block_id(removed, [])
     assert_block_id(block_table, original_block_ids)
 
-    # 6 tokens are computed. Token 0 & 1 are out of the sliding window.
+    # 5 tokens are computed. Token 0 & 1 are out of the sliding window.
     # Block 1000 can be removed.
-    removed = manager.remove_skipped_blocks(block_table, 6)
+    removed = manager.remove_skipped_blocks(block_table, 5)
     assert_block_id(removed, [original_block_ids[0]])
     assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
 
-    # 7 tokens are computed. Token 0-2 are out of the sliding window.
+    # 6 tokens are computed. Token 0-2 are out of the sliding window.
     # Cannot remove new block as the block 1001 is still used by token 3.
-    removed = manager.remove_skipped_blocks(block_table, 7)
+    removed = manager.remove_skipped_blocks(block_table, 6)
     assert_block_id(removed, [])
     assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
 
-    # 8 tokens are computed. Token 0-3 are out of the sliding window.
+    # 7 tokens are computed. Token 0-3 are out of the sliding window.
     # Block 1001 can be removed and block 1000 is already removed.
-    removed = manager.remove_skipped_blocks(block_table, 8)
+    removed = manager.remove_skipped_blocks(block_table, 7)
     assert_block_id(removed, [original_block_ids[1]])
     assert_block_id(block_table, [null_block_id] * 2 + original_block_ids[2:])
 
-    # 12 tokens are computed. Token 0-7 are out of the sliding window.
+    # 11 tokens are computed. Token 0-7 are out of the sliding window.
     # Block 1002 & 1003 can be removed now. Block 1003 represents a longer
     # sequence, and is expected to be evicted earlier than 1002, so the order
     # of removed blocks should be [1003, 1002].
-    removed = manager.remove_skipped_blocks(block_table, 12)
+    removed = manager.remove_skipped_blocks(block_table, 11)
     assert_block_id(removed, [original_block_ids[3], original_block_ids[2]])
     assert_block_id(block_table, [null_block_id] * 4 + original_block_ids[4:])
