@@ -24,7 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -276,8 +276,8 @@ def process_image(image: Any) -> Mapping[str, Any]:
             ("http://", "file://")) else f"file://{image}")
         return {"type": "image_url", "image_url": {"url": image_url}}
 
-    raise ValueError(
-        f"Invalid image input {image}. Must be a PIL.Image.Image or str.")
+    raise ValueError(f"Invalid image input {image}. Must be a PIL.Image.Image"
+                     " or str or dictionary with raw image bytes.")
 
 
 # -----------------------------------------------------------------------------
@@ -571,7 +571,7 @@ class BurstGPTDataset(BenchmarkDataset):
 class HuggingFaceDataset(BenchmarkDataset):
     """Base class for datasets hosted on HuggingFace."""
 
-    SUPPORTED_DATASET_PATHS: set[str] = set()
+    SUPPORTED_DATASET_PATHS: Union[set[str], dict[str, Callable]] = set()
 
     def __init__(
         self,
@@ -675,7 +675,10 @@ class VisionArenaDataset(HuggingFaceDataset):
 
     DEFAULT_OUTPUT_LEN = 128
     SUPPORTED_DATASET_PATHS = {
-        "lmarena-ai/VisionArena-Chat",
+        "lmarena-ai/VisionArena-Chat":
+        lambda x: x["conversation"][0][0]["content"],
+        "lmarena-ai/vision-arena-bench-v0.1":
+        lambda x: x["turns"][0][0]["content"]
     }
 
     def sample(
@@ -692,7 +695,11 @@ class VisionArenaDataset(HuggingFaceDataset):
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
-            prompt = item["conversation"][0][0]["content"]
+            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.dataset_path)
+            if parser_fn is None:
+                raise ValueError(
+                    f"Unsupported dataset path: {self.dataset_path}")
+            prompt = parser_fn(item)
             mm_content = process_image(item["images"][0])
             prompt_len = len(tokenizer(prompt).input_ids)
             if enable_multimodal_chat:

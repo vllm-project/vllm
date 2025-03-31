@@ -321,8 +321,8 @@ def get_requests(args, tokenizer):
     elif args.dataset_name == "hf":
         if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = VisionArenaDataset
-            common_kwargs['dataset_subset'] = args.hf_subset
-            common_kwargs['dataset_split'] = args.hf_split
+            common_kwargs['dataset_subset'] = None
+            common_kwargs['dataset_split'] = "train"
             sample_kwargs["enable_multimodal_chat"] = True
         elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = InstructCoderDataset

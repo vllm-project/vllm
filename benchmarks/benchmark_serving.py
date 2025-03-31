@@ -584,6 +584,8 @@ def main(args: argparse.Namespace):
                                             return_prompt_formatted=True)
 
     elif args.dataset_name == "hf":
+        # all following datasets are implemented from the
+        # HuggingFaceDataset base class
         if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = VisionArenaDataset
             args.hf_split = "train"
