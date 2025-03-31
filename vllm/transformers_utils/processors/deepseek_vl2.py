@@ -226,7 +226,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
         input_ids[input_ids < 0] = self.pad_id
 
         if inference_mode:
-            # 去掉结尾的eos token
+            # Remove the ending eos token
             assert input_ids[-1] == self.eos_id
             input_ids = input_ids[:-1]
             target_ids = target_ids[:-1]

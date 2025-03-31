@@ -207,10 +207,7 @@ class StatelessProcessGroup:
     def barrier(self):
         """A barrier to synchronize all ranks."""
         for i in range(self.world_size):
-            if i == self.rank:
-                self.broadcast_obj(None, src=self.rank)
-            else:
-                self.broadcast_obj(None, src=i)
+            self.broadcast_obj(None, src=i)
 
     @staticmethod
     def create(
