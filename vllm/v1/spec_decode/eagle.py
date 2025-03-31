@@ -203,7 +203,7 @@ def sample_token_ids(
         # All greedy.
         next_token_ids = logits.argmax(dim=-1)
     else:
-        logits.div_(sampling_metadata.temperature)
+        logits.div_(sampling_metadata.temperature.view(-1, 1))
         probs = logits.softmax(dim=-1, dtype=torch.float32)
 
         # TODO(woosuk): Consider seeds?
