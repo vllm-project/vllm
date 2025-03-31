@@ -134,8 +134,7 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
-        if hidden_states is not None:
-            self.hidden_states = hidden_states
+        self.hidden_states = hidden_states
 
     def add(self, next_output: "RequestOutput") -> None:
         """Merge subsequent RequestOutput into this one"""
