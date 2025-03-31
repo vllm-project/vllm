@@ -919,8 +919,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         image_features_flat = self.get_vision_hidden_states(image_input)
 
-        # Reconstruct the batch dimension
-        return image_features_flat.split(image_input["num_slices"].tolist())
+        num_slices = image_input["num_slices"]
+        return [
+            e.flatten(0, 1)
+            for e in image_features_flat.split(num_slices.tolist())
+        ]
 
     def _process_multimodal_inputs(self, modalities: dict):
         # The result multimodal_embeddings is tuple of tensors, with each

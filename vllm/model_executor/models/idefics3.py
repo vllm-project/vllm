@@ -733,7 +733,10 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_attention_mask=pixel_attention_mask,
         )
 
-    def _process_image_input(self, image_input: ImageInputs) -> torch.Tensor:
+    def _process_image_input(
+        self,
+        image_input: ImageInputs,
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -741,7 +744,9 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_features = self.model.connector(image_features)
 
         num_patches = image_input["num_patches"]
-        return image_features.split(num_patches.tolist())
+        return [
+            e.flatten(0, 1) for e in image_features.split(num_patches.tolist())
+        ]
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
