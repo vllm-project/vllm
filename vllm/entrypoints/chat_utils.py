@@ -33,6 +33,7 @@ from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
                           ProcessorMixin)
 from typing_extensions import Required, TypeAlias, TypedDict
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
@@ -452,8 +453,6 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         self._model_config = model_config
         self._tokenizer = tokenizer
-        self._allowed_items = (model_config.multimodal_config.limit_per_prompt
-                               if model_config.multimodal_config else {})
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
 
@@ -540,12 +539,19 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
-        allowed_count = self._allowed_items.get(modality, 1)
-        current_count = len(self._items_by_modality[modality]) + 1
-        if current_count > allowed_count:
-            raise ValueError(
-                f"At most {allowed_count} {modality}(s) may be provided in "
-                "one request.")
+        mm_config = self.model_config.multimodal_config
+        if mm_config is None:
+            raise ValueError("This model does not support multi-modal inputs")
+
+        if not envs.VLLM_USE_V1:
+            input_modality = modality.replace("_embeds", "")
+            allowed_count = mm_config.get_limit_per_prompt(input_modality)
+            current_count = len(self._items_by_modality[modality]) + 1
+            if current_count > allowed_count:
+                raise ValueError(
+                    f"At most {allowed_count} {modality}(s) may be provided in "
+                    "one request. You can set `--limit-mm-per-prompt` to "
+                    "increase this limit.")
 
         self._items_by_modality[modality].append(item)
 

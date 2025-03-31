@@ -15,6 +15,7 @@ import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
+import vllm.envs as envs
 from vllm.inputs import InputProcessingContext
 from vllm.jsontree import json_map_leaves, json_reduce_leaves
 from vllm.logger import init_logger
@@ -1083,13 +1084,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_items = self.data_parser.parse_mm_data(mm_data)
         mm_config = self.info.ctx.get_mm_config()
 
-        for modality, items in mm_items.items():
-            limit = mm_config.get_limit_per_prompt(modality)
-            if len(items) > limit:
-                raise ValueError(
-                    f"You set {modality}={limit} (or defaulted to 1) in "
-                    f"`--limit-mm-per-prompt`, but passed {len(items)} "
-                    f"{modality} items in the same prompt.")
+        if not envs.VLLM_USE_V1:
+            for modality, items in mm_items.items():
+                limit = mm_config.get_limit_per_prompt(modality)
+                if len(items) > limit:
+                    raise ValueError(
+                        f"You set {modality}={limit} (or defaulted to 1) in "
+                        f"`--limit-mm-per-prompt`, but passed {len(items)} "
+                        f"{modality} items in the same prompt.")
 
         return mm_items
 
