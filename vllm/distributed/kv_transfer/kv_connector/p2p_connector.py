@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Simple KV Cache Connector for Distributed Machine Learning Inference
 
-The SimpleConnector transfers KV caches between prefill vLLM worker (KV cache
-producer) and decode vLLM worker (KV cache consumer) using PyNcclPipe or
-MooncakePipe.
-
-But the logic can be extended to support other pipe and lookup buffer.
-"""
 import re
 from typing import TYPE_CHECKING, List, Tuple, Union
 
