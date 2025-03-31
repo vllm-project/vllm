@@ -395,13 +395,9 @@ class RequestOutputFactory:
         if seq_group.pooled_data is not None:
             return PoolingRequestOutput.from_seq_group(seq_group)
         else:
-            if hidden_states is not None:
-                return RequestOutput.from_seq_group(seq_group, use_cache,
-                                                    seq_id_to_seq_group,
-                                                    hidden_states)
-            else:
-                return RequestOutput.from_seq_group(seq_group, use_cache,
-                                                    seq_id_to_seq_group)
+            return RequestOutput.from_seq_group(seq_group, use_cache,
+                                                seq_id_to_seq_group,
+                                                hidden_states)
 
 
 @dataclass
