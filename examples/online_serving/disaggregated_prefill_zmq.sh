@@ -37,25 +37,34 @@ wait_for_server() {
 wait_for_disagg_server() {
   local log_file=$1
   timeout 1200 bash -c "
-    until grep -q 'zmq Server started at' $log_file; do
+    until grep -q 'PDWorker is ready' $log_file; do
       sleep 1
     done" && return 0 || return 1
 }
 
 
 # You can also adjust --kv-ip and --kv-port for distributed inference.
+MODEL=meta-llama/Llama-3.1-8B-Instruct
+CONTROLLER_ADDR=controller.ipc
+PREFILL_WORKER_ADDR=prefill.ipc
+DECODE_WORKER_ADDR=decode.ipc
+PORT=8001
 
 # prefilling instance, which is the KV producer
-CUDA_VISIBLE_DEVICES=0 vllm disagg meta-llama/Meta-Llama-3.1-8B-Instruct \
-    --zmq-server-addr testipc0 \
+CUDA_VISIBLE_DEVICES=0 python3 ../../vllm/entrypoints/disaggregated/worker.py \
+    --model $MODEL \
+    --controller-addr $CONTROLLER_ADDR \
+    --worker-addr $PREFILL_WORKER_ADDR \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
     '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}' > vllm_disagg_prefill.log 2>&1 &
 
 # decoding instance, which is the KV consumer
-CUDA_VISIBLE_DEVICES=1 vllm disagg meta-llama/Meta-Llama-3.1-8B-Instruct \
-    --zmq-server-addr testipc1 \
+CUDA_VISIBLE_DEVICES=1 python3 ../../vllm/entrypoints/disaggregated/worker.py \
+    --model $MODEL \
+    --controller-addr $CONTROLLER_ADDR \
+    --worker-addr $DECODE_WORKER_ADDR \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
@@ -63,33 +72,34 @@ CUDA_VISIBLE_DEVICES=1 vllm disagg meta-llama/Meta-Llama-3.1-8B-Instruct \
 
 # launch a proxy server that opens the service at port 8000
 # the workflow of this proxy:
-# - send the request to prefill vLLM instance (via zmq addr testipc0), change max_tokens
-#   to 1
-# - after the prefill vLLM finishes prefill, send the request to decode vLLM 
-#   instance (via zmq addr testipc1)
-vllm connect --port 8000 \
-    --prefill-addr testipc0 \
-    --decode-addr testipc1 &
+# - Send req to prefill instance, wait until complete.
+# - Send req to decode instance, streaming tokens.
+python3 ../../vllm/entrypoints/disaggregated/api_server.py \
+    --port $PORT \
+    --model $MODEL \
+    --controller-addr $CONTROLLER_ADDR \
+    --prefill-addr $PREFILL_WORKER_ADDR \
+    --decode-addr $DECODE_WORKER_ADDR &
 
 # wait until prefill, decode instances and proxy are ready
-wait_for_server 8000
+wait_for_server $PORT
 wait_for_disagg_server vllm_disagg_prefill.log
 wait_for_disagg_server vllm_disagg_decode.log 
 
 # serve two example requests
-output1=$(curl -X POST -s http://localhost:8000/v1/completions \
+output1=$(curl -X POST -s http://localhost:8001/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
-"model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+"model": "meta-llama/Llama-3.1-8B-Instruct",
 "prompt": "San Francisco is a",
 "max_tokens": 10,
 "temperature": 0
 }')
 
-output2=$(curl -X POST -s http://localhost:8000/v1/completions \
+output2=$(curl -X POST -s http://localhost:8001/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
-"model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+"model": "meta-llama/Llama-3.1-8B-Instruct",
 "prompt": "Santa Clara is a",
 "max_tokens": 10,
 "temperature": 0

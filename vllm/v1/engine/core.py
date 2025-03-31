@@ -21,9 +21,10 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
                         zmq_socket_ctx)
-from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
-from vllm.v1.core.scheduler import Scheduler as V1Scheduler
-from vllm.v1.core.scheduler import SchedulerOutput
+from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
+                                         unify_kv_cache_configs)
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
@@ -120,15 +121,27 @@ class EngineCore:
         # memory can be allocated for kv cache.
         available_gpu_memory = self.model_executor.determine_available_memory()
 
+        assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
-        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
-                                                available_gpu_memory)
-        num_gpu_blocks_set = set(config.num_blocks
-                                 for config in kv_cache_configs)
-        assert len(num_gpu_blocks_set) == 1, (
-            f"num_gpu_blocks need to be the same across workers, "
-            f"but they are different: {num_gpu_blocks_set}")
-        num_gpu_blocks = num_gpu_blocks_set.pop()
+        kv_cache_configs = [
+            get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
+                                available_gpu_memory_one_worker)
+            for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
+            zip(kv_cache_specs, available_gpu_memory)
+        ]
+
+        # Since we use a shared centralized controller, we need the
+        # `kv_cache_config` to be consistent across all workers to make sure
+        # all the memory operators can be applied to all workers.
+        unify_kv_cache_configs(kv_cache_configs)
+
+        # All workers have the same kv_cache_config except layer names, so use
+        # an arbitrary one to get the number of blocks.
+        assert all([
+            cfg.num_blocks == kv_cache_configs[0].num_blocks
+            for cfg in kv_cache_configs
+        ])
+        num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution

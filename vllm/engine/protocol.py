@@ -81,10 +81,7 @@ class EngineClient(ABC):
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
         else:
-            processed_inputs = preprocessor._prompt_to_llm_inputs(
-                prompt,
-                request_id=request_id,
-            )
+            processed_inputs = preprocessor._prompt_to_llm_inputs(prompt)
 
         prompt_token_ids = processed_inputs["prompt_token_ids"]
         prompt_text = processed_inputs.get("prompt")

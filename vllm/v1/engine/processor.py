@@ -120,7 +120,7 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = ["xgrammar"]
+        supported_backends = ["xgrammar", "xgrammar:disable-any-whitespace"]
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
             raise ValueError(f"Only {supported_backends} structured output is "
@@ -173,7 +173,6 @@ class Processor:
         # 3. Apply prompt adapter to prompt token ids if one exists.
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
-            request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=self.use_hash,
