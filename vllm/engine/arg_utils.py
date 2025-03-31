@@ -1530,7 +1530,7 @@ class EngineArgs:
         # Non-CUDA is supported on V1, but off by default for now.
         not_cuda = not current_platform.is_cuda()
         if not_cuda and _warn_or_fallback(  # noqa: SIM103
-                current_platform.device_type):
+                current_platform.device_name):
             return False
         #############################################################
 
