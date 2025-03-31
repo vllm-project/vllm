@@ -106,7 +106,7 @@ if TYPE_CHECKING:
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_USE_DEEP_GEMM: bool = False
-    VLLM_ENABLE_SHARE_EXPERT_FUSION: bool = False
+    VLLM_ENABLE_SHARE_EXPERT_FUSION: int = 0
 
 
 def get_default_cache_root():
