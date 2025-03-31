@@ -204,7 +204,7 @@ def scatter_patch_features(
             (e_is_patch.shape[0], patches_one.shape[-1]),
             fill_value=torch.nan,
         )
-        embed_one[e_is_patch] = patches_one.flatten(0, -2)
+        embed_one[e_is_patch] = patches_one
         return embed_one
 
     return tuple(
