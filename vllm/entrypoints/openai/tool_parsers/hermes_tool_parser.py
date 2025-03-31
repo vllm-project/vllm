@@ -342,12 +342,17 @@ class Hermes2ProToolParser(ToolParser):
             elif cur_arguments and prev_arguments:
                 # isinstance(delta_text, str) 判断 delta_text 是不是字符串类型
                 logger.debug(" lei test delta_text1 %s", delta_text)
-                isHalfBracket = len(delta_text.rstrip()) >= 1 and delta_text.strip() != '}'
+                isTemp = "";
+                isHalfBracket = len(delta_text.rstrip()) > 1 and delta_text.strip() != '}'
                 if isinstance(delta_text, str) and isHalfBracket and delta_text.rstrip()[-1] == '}':
                     # 删掉最后一个字符串
                     logger.debug(" lei test delta_text2 %s", delta_text)
                     delta_text = delta_text.rstrip()[:-1]
                     logger.debug(" lei test delta_text3 %s", delta_text)
+                else:
+                    isTemp += delta_text
+                    if delta_text.strip() != '}':
+                        delta_text = delta_text.rstrip()[:-1]
                 logger.debug("got diff %s", delta_text)
                 logger.debug("lei test 1: %s", cur_arguments)
                 logger.debug("lei test 2: %s", prev_arguments)
