@@ -235,7 +235,7 @@ def test_config_file(parser_with_config):
 
     with pytest.raises(ValueError):
         parser_with_config.parse_args(
-            ['serve', 'mymodel', '--config', './data/test_config.json'])
+            ['serve', 'mymodel', '--config', './config/test_config.json'])
 
     with pytest.raises(ValueError):
         parser_with_config.parse_args([
@@ -493,7 +493,7 @@ def test_model_specification(parser_with_config,
 
     # Test model from config file works
     args = parser_with_config.parse_args([
-        'serve', '--config', cli_config_file_with_model
+        'serve', '--config', cli_config_file_with_model,
     ])
     assert args.model == 'config-model'
     assert args.served_model_name == 'mymodel'
@@ -502,9 +502,19 @@ def test_model_specification(parser_with_config,
     with pytest.raises(ValueError, match="No model specified!"):
         parser_with_config.parse_args(['serve', '--config', cli_config_file])
 
+    # Test using --model option raises error
+    with pytest.raises(
+        ValueError,
+        match=(
+            "With `vllm serve`, you should provide the model as a positional "
+            "argument or in a config file instead of via the `--model` option."
+        ),
+    ):
+        parser_with_config.parse_args(['serve', '--model', 'my-model'])
+
     # Test other config values are preserved
     args = parser_with_config.parse_args([
-        'serve', 'cli-model', '--config', cli_config_file_with_model
+        'serve', 'cli-model', '--config', cli_config_file_with_model,
     ])
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code is True
