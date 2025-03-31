@@ -33,8 +33,8 @@ static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
 
 template <typename fp8_type>
 static __device__ __forceinline__ fp8_type float_to_fp8(float const x) {
-  float const r = fmax(-fp8_e4m3_adjusted_max_v<fp8_type>,
-                       fmin(x, fp8_e4m3_adjusted_max_v<fp8_type>));
+  float const r =
+      fmax(-quant_type_max_v<fp8_type>, fmin(x, quant_type_max_v<fp8_type>));
   return static_cast<fp8_type>(r);
 }
 
