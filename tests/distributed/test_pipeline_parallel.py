@@ -245,7 +245,7 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Llama-3.2-1B-Instruct",
-    # "ArthurZ/Ilama-3.2-1B", NOTE: Uncomment after #13905
+    "ArthurZ/Ilama-3.2-1B",
     "ibm/PowerLM-3b",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
