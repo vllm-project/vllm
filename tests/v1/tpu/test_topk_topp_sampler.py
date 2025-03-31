@@ -13,7 +13,7 @@ import torch_xla.core.xla_model as xm
 
 BATCH_SIZE = 1024
 VOCAB_SIZE = 128 * 1024
-TOLERANCE = 1e-4
+TOLERANCE = 1e-6
 
 
 def test_topp_result_sums_past_p():
@@ -89,9 +89,12 @@ def test_topp_with_ties():
                                        k=torch.tensor([4]),
                                        p=torch.tensor([0.2]))
 
-        # Expect math.log(0.3) to be the only selected element.
-        expected_result = torch.tensor([math.log(0.3)])
-        assert torch.allclose(expected_result, result[result.isfinite()])
+        # All tie values are included in the top-p set. Tie breaking is left
+        # to be done during final sampling (all tie tokens have equal
+        # probability of being chosen).
+        expected_result = logits.clone()
+        expected_result[0, 3] = float("-inf")
+        assert torch.allclose(expected_result, result)
 
 
 def test_both_topk_topp():

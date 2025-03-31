@@ -79,10 +79,6 @@ class TopKTopPSampler(nn.Module):
                     "which could be very slow.")
                 self.forward = self.forward_native
             else:
-                logger.info(
-                    "Using approximate top-p optimized for TPU. Result may in "
-                    "theory differ from the exact algorithm if there are "
-                    "tokens with near-identical probabilities (< 1e-9 diff).")
                 self.forward = self.forward_tpu
         else:
             self.forward = self.forward_native
@@ -136,52 +132,34 @@ def apply_top_k_top_p_tpu(
     k: torch.Tensor,
     p: torch.Tensor,
 ) -> torch.Tensor:
-    if k is not None:
-        logits = apply_top_k_only(logits, k)
-
-    if p is not None:
-        logits = apply_approx_top_p(logits, p)
-
-    return logits
-
-
-def apply_approx_top_p(
-    logits: torch.Tensor,
-    p: torch.Tensor,
-) -> torch.Tensor:
     """
-    Apply approximate top-p that is optimized for TPU.
+    Apply top-k and top-p optimized for TPU.
 
     This algorithm avoids using torch.scatter which is extremely slow on TPU.
     This is achieved by finding a "cut-off" element in the original logit, and
     after thresholding the logit using this cut-off, the remaining elements
     shall constitute the top-p set.
 
-    A caveat of the above approach is that ties are not correctly handled --
-    if there are duplicate cutoff elements present in the logit, then the
-    resulting top-p set will be incorrect. To address this problem, we
-    introduce a tiny perturbation to the probabilities (after softmax) to
-    break any potential ties. The added perturbation is tiny so it should
-    not alter the end results significantly, but it still makes this algorithm
-    approximate rather than an exact one.
+    Note: in the case of tie (i.e. multipple cut-off elements present in the
+    logit), all tie elements are included in the top-p set. In other words,
+    this function does not break ties. Instead, these tie tokens have equal
+    chance of being chosen during final sampling, so we can consider the tie
+    being broken then.
     """
-    probs = logits.softmax(dim=-1)
+    if k is not None:
+        logits = apply_top_k_only(logits, k)
 
-    # Add a small, random perturbation to the probabilities, and re-normalize.
-    epsilon = torch.empty(probs.shape,
-                          device=logits.device).uniform_(-1e-9, 1e-9)
-    probs += epsilon
-    probs /= probs.sum(dim=-1, keepdim=True)
+    if p is not None:
+        probs = logits.softmax(dim=-1)
+        probs_sort, _ = probs.sort(dim=-1, descending=False)
+        cumprob = torch.cumsum(probs_sort, dim=-1)
+        top_p_mask = cumprob <= 1 - p.unsqueeze(dim=1)
+        top_p_mask[:, -1] = False  # at least one
 
-    probs_sort, sorted_idx = probs.sort(dim=-1, descending=False)
-    cumprob = torch.cumsum(probs_sort, dim=-1)
-    top_p_mask = cumprob <= 1 - p.unsqueeze(dim=1)
-    top_p_mask[:, -1] = False  # at least one
-
-    top_p_count = top_p_mask.sum(dim=-1).unsqueeze(1)
-    top_p_cutoff = probs_sort.gather(-1, top_p_count)
-    elements_to_discard = probs < top_p_cutoff
-    logits.masked_fill_(elements_to_discard, -float("inf"))
+        top_p_count = top_p_mask.sum(dim=-1).unsqueeze(1)
+        top_p_cutoff = probs_sort.gather(-1, top_p_count)
+        elements_to_discard = probs < top_p_cutoff
+        logits.masked_fill_(elements_to_discard, -float("inf"))
 
     return logits
 
