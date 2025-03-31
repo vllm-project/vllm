@@ -189,7 +189,7 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
         return {
             "audio": self.get_max_audio_tokens(),
             "image": self.get_max_image_tokens(),
-            "video": self.get_max_video_tokens(seq_len),
+            "video": self.get_max_video_tokens(seq_len, mm_counts),
         }
 
 
@@ -218,7 +218,7 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         target_num_frames = \
-            self.info.get_num_frames_with_most_features(seq_len)
+            self.info.get_num_frames_with_most_features(seq_len, mm_counts)
 
         mm_data = {
             "audio":
@@ -262,7 +262,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
         if audios:
-            mm_data["audios"] = audios
+            # NOTE: Qwen2.5-Omni processor accept "audio"
+            mm_data["audio"] = audios
             mm_kwargs = dict(**mm_kwargs, )
 
         hf_inputs = super()._call_hf_processor(
