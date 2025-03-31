@@ -758,6 +758,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w2_input_scale = torch.nn.Parameter(
                         w2_input_scale, requires_grad=False)
             if current_platform.is_hpu():
+                if self.quant_config.activation_scheme == "static":
+                    num_experts = layer.w13_weight.shape[0]
+                    self.w13_weight_list = [layer.w13_weight.data[i,...] for i in range(num_experts)]
+                    self.w2_weight_list = [layer.w2_weight.data[i,...] for i in range(num_experts)]
+                    self.w13_weight_scale_list = [layer.w13_weight_scale_inv.data[i,...] for i in range(num_experts)]
+                    self.w2_weight_scale_list = [layer.w2_weight_scale_inv.data[i,...] for i in range(num_experts)]
+                    self.w2_input_scale_list = [layer.w2_input_scale.data.unsqueeze(0).repeat(num_experts)[i] for i in range(num_experts)]
                 return
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max then dequant and requant each expert.
@@ -945,38 +952,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         def do_dynamic_moe_with_static_scaling(x, topk_ids, topk_weights, w13_weight_fp8, w2_weight_fp8, moe_n_slice, n_expert_slice, w13_weight_scale_inv_fp8, w2_weight_scale_inv_fp8):
             x_scale = layer.w13_input_scale.data
-            w2_input_scale =  layer.w2_input_scale.data
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0/x_scale, False, False, torch.float8_e4m3fn)[0]
-            for i in range(moe_n_slice):
-                min_expert = i * n_expert_slice
-                max_expert = (i + 1) * n_expert_slice
-
-                w13_list_slice = [w13_weight_fp8[j, ...] for j in range(min_expert, max_expert)]
-                w2_list_slice = [w2_weight_fp8[j, ...] for j in range(min_expert, max_expert)]
-                w13_weight_scale = [w13_weight_scale_inv_fp8[j, ...] for j in range(min_expert, max_expert)]
-                w2_weight_scale = [w2_weight_scale_inv_fp8[j,...] for j in range(min_expert, max_expert)]
-                w2_input_scale_slice = [w2_input_scale.unsqueeze(0).repeat(n_expert_slice)[j] for j in range(n_expert_slice)]
-
-                current_hidden_states = torch.ops.hpu.mixture_of_experts(
-                                            hidden_states=x_fp8,
-                                            expert_routing_table=topk_ids.to(torch.int64),
-                                            router_weights=topk_weights.to(x.dtype),
-                                            w12=w13_list_slice,
-                                            w3=w2_list_slice,
-                                            d_scale_hidden_states=x_scale,
-                                            d_scale_intermediate_hidden_states=w2_input_scale_slice,
-                                            d_scale_w12=w13_weight_scale,
-                                            d_scale_w3=w2_weight_scale,
-                                            permuted_weights=True,
-                                            activation="silu",
-                                            experts_min=min_expert + ep_shift,
-                                            experts_max=max_expert - 1 + ep_shift)
-                htorch.core.mark_step()
-                if i == 0:
-                    final_hidden_states = current_hidden_states
-                else:
-                    final_hidden_states.add_(current_hidden_states)
-            return final_hidden_states
+            final_hidden_states = torch.ops.hpu.mixture_of_experts(
+                hidden_states=x_fp8,
+                expert_routing_table=(topk_ids.to(torch.int64) - ep_shift),
+                router_weights=topk_weights.to(x.dtype),
+                w12=self.w13_weight_list,
+                w3=self.w2_weight_list,
+                d_scale_hidden_states=x_scale,
+                d_scale_intermediate_hidden_states=self.w2_input_scale_list,
+                d_scale_w12=self.w13_weight_scale_list,
+                d_scale_w3=self.w2_weight_scale_list,
+                permuted_weights=True,
+                activation="silu",
+                experts_min=0,
+                experts_max=(num_experts - 1),
+            )
+            return final_hidden_states.view(-1, x.shape[1])
 
         def do_dynamic_moe_with_dynamic_scaling(x, topk_ids, topk_weights, w13_weight_fp8, w2_weight_fp8, moe_n_slice, n_expert_slice, w13_weight_scale_inv_fp8=None, w2_weight_scale_inv_fp8=None):
             x_fp8, x_scale = dynamic_quant(x, single_scale=True)
