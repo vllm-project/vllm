@@ -497,4 +497,5 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
     rel_diff = (torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
                 torch.mean(torch.abs(ref_out.to(torch.float32))))
+
     assert rel_diff < 0.03
