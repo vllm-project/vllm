@@ -394,6 +394,7 @@ def validate_args(args):
     if args.backend not in valid_backends:
         raise ValueError(f"Unsupported backend: {args.backend}")
 
+    # === Dataset Validation ===
     validate_dataset(args)
 
     # === LoRA Settings ===
