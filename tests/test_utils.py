@@ -235,7 +235,7 @@ def test_config_file(parser_with_config):
 
     with pytest.raises(ValueError):
         parser_with_config.parse_args(
-            ['serve', 'mymodel', '--config', './config/test_config.json'])
+            ['serve', 'mymodel', '--config', './data/test_config.json'])
 
     with pytest.raises(ValueError):
         parser_with_config.parse_args([
