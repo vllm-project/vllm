@@ -588,6 +588,7 @@ class AsyncMPClient(MPClient):
             try:
                 while True:
                     (frame, ) = await output_socket.recv_multipart(copy=False)
+                    self._validate_alive(frame.buffer)
                     outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
