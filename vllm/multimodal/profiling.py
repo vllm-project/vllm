@@ -124,12 +124,7 @@ class MultiModalProfiler(Generic[_I]):
         return self.processor.dummy_inputs
 
     def get_mm_limits(self) -> Mapping[str, int]:
-        allowed_mm_limits = self.processing_info.get_allowed_mm_limits()
-
-        return {
-            modality: 999 if limit is None else limit
-            for modality, limit in allowed_mm_limits.items()
-        }
+        return self.processing_info.get_allowed_mm_limits()
 
     def _get_dummy_mm_inputs(
         self,

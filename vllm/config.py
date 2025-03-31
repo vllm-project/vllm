@@ -2498,17 +2498,14 @@ class MultiModalConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    def get_limit_per_prompt(self, modality: str) -> int:
+    def get_limit_per_prompt(self, modality: str, *, default: int = 1) -> int:
         """
         Get the maximum number of input items allowed per prompt
         for the given modality.
 
-        If not set by the user, this defaults to `1`.
-
-        Note:
-            This is only used in V0.
+        If not set by the user, this defaults to :code:`default`.
         """
-        return self.limit_per_prompt.get(modality, 1)
+        return self.limit_per_prompt.get(modality, default)
 
     # TODO: Add configs to init vision tower or not.
 

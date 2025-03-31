@@ -1008,7 +1008,7 @@ class BaseProcessingInfo:
         """
         raise NotImplementedError
 
-    def get_allowed_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_allowed_mm_limits(self) -> Mapping[str, int]:
         """
         Return the maximum allowed number of items for each modality.
 
@@ -1019,12 +1019,15 @@ class BaseProcessingInfo:
         """
         supported_mm_limits = self.get_supported_mm_limits()
 
-        if envs.VLLM_USE_V1:
-            return supported_mm_limits
-
         mm_config = self.ctx.get_mm_config()
+        default_allowed_limit = 999 if envs.VLLM_USE_V1 else 1
+
         allowed_mm_limits = {
-            modality: mm_config.get_limit_per_prompt(modality)
+            modality:
+            mm_config.get_limit_per_prompt(
+                modality,
+                default=default_allowed_limit,
+            )
             for modality in supported_mm_limits
         }
 
@@ -1032,9 +1035,10 @@ class BaseProcessingInfo:
             limit = allowed_mm_limits[modality]
             if supported_limit is not None and supported_limit < limit:
                 raise ValueError(
-                    f"You set {modality}={limit} (or defaulted to 1) in "
-                    f"`--limit-mm-per-prompt`, but this model only supports "
-                    f"at most {supported_limit} {modality} items.")
+                    f"You set {modality}={limit} (or defaulted to "
+                    f"{default_allowed_limit}) in `--limit-mm-per-prompt`, "
+                    f"but this model only supports at most {supported_limit} "
+                    f"{modality} items.")
 
         return allowed_mm_limits
 
@@ -1126,7 +1130,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     f"{modality} items, but you passed {num_items} "
                     f"{modality} items in the same prompt.")
 
-            if allowed_limit is not None and num_items > allowed_limit:
+            if num_items > allowed_limit:
                 raise ValueError(
                     f"You set {modality}={allowed_limit} (or defaulted to 1) "
                     f"`in --limit-mm-per-prompt`, but passed {num_items} "
