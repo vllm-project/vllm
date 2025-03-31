@@ -18,8 +18,8 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Try building the docker image
-numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --tag cpu-test-"$BUILDKITE_BUILD_NUMBER" --target vllm-test -f Dockerfile.cpu .
-numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" --tag cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2 --target vllm-test -f Dockerfile.cpu .
+numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --tag cpu-test-"$BUILDKITE_BUILD_NUMBER" --target vllm-test -f docker/Dockerfile.cpu .
+numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" --tag cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2 --target vllm-test -f docker/Dockerfile.cpu .
 
 # Run the image, setting --shm-size=4g for tensor parallel.
 docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --cpuset-cpus="$CORE_RANGE"  \
