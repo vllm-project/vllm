@@ -69,9 +69,9 @@ class CustomAllreduce:
 
         if not custom_ar:
             # disable because of missing custom allreduce library
-            # e.g. in a non-cuda environment
-            logger.warning("Custom allreduce is disabled because "
-                           "of missing custom allreduce library")
+            # e.g. in a non-GPU environment
+            logger.info("Custom allreduce is disabled because "
+                        "of missing custom allreduce library")
             return
 
         self.group = group

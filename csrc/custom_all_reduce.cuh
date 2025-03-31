@@ -33,8 +33,7 @@ constexpr int kMaxBlocks = 36;
 // Default number of blocks in allreduce kernel.
 #ifndef USE_ROCM
 const int defaultBlockLimit = 36;
-CUpointer_attribute rangeStartAddrAttr =
-    CUDA_POINTER_ATTRIBUTE_RANGE_START_ADDR;
+CUpointer_attribute rangeStartAddrAttr = CU_POINTER_ATTRIBUTE_RANGE_START_ADDR;
 #else
 const int defaultBlockLimit = 16;
 hipPointer_attribute rangeStartAddrAttr =
@@ -196,7 +195,8 @@ static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
 // prior memory accesses. Note: volatile writes will not be reordered against
 // other volatile writes.
 template <int ngpus>
-DINLINE void start_sync(const RankSignals& sg, Signal* self_sg, int rank) {
+DINLINE void barrier_at_start(const RankSignals& sg, Signal* self_sg,
+                              int rank) {
   uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
   if (threadIdx.x < ngpus) {
     auto peer_counter_ptr = &sg.signals[threadIdx.x]->start[blockIdx.x][rank];
@@ -216,7 +216,7 @@ DINLINE void start_sync(const RankSignals& sg, Signal* self_sg, int rank) {
 // synchronization barrier, we don't need to make any visibility guarantees
 // for prior memory accesses.
 template <int ngpus, bool final_sync = false>
-DINLINE void end_sync(const RankSignals& sg, Signal* self_sg, int rank) {
+DINLINE void barrier_at_end(const RankSignals& sg, Signal* self_sg, int rank) {
   __syncthreads();
   uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
   if (threadIdx.x < ngpus) {
@@ -241,7 +241,8 @@ DINLINE void end_sync(const RankSignals& sg, Signal* self_sg, int rank) {
 #else
 
 template <int ngpus>
-DINLINE void start_sync(const RankSignals& sg, Signal* self_sg, int rank) {
+DINLINE void barrier_at_start(const RankSignals& sg, Signal* self_sg,
+                              int rank) {
   uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
   if (threadIdx.x < ngpus) {
     // simultaneously write to the corresponding flag of all ranks.
@@ -259,7 +260,7 @@ DINLINE void start_sync(const RankSignals& sg, Signal* self_sg, int rank) {
 }
 
 template <int ngpus, bool final_sync = false>
-DINLINE void end_sync(const RankSignals& sg, Signal* self_sg, int rank) {
+DINLINE void barrier_at_end(const RankSignals& sg, Signal* self_sg, int rank) {
   __syncthreads();
   uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
   if (threadIdx.x < ngpus) {
@@ -301,13 +302,13 @@ __global__ void __launch_bounds__(512, 1)
   // note: we don't reorder the address so the accumulation order is the same
   // for all ranks, ensuring bitwise identical results
   auto dp = *_dp;
-  start_sync<ngpus>(sg, self_sg, rank);
+  barrier_at_start<ngpus>(sg, self_sg, rank);
   // do the actual reduction
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
     ((P*)result)[idx] = packed_reduce<P, ngpus, A>((const P**)&dp.ptrs[0], idx);
   }
-  end_sync<ngpus, true>(sg, self_sg, rank);
+  barrier_at_end<ngpus, true>(sg, self_sg, rank);
 }
 
 template <typename P>
@@ -336,13 +337,13 @@ __global__ void __launch_bounds__(512, 1)
     tmps[i] = get_tmp_buf<P>(sg.signals[target]);
   }
   auto tmp_out = tmps[0];
-  start_sync<ngpus>(sg, self_sg, rank);
+  barrier_at_start<ngpus>(sg, self_sg, rank);
 
   // stage 1: reduce scatter
   for (int idx = start + tid; idx < end; idx += stride) {
     tmp_out[idx - start] = packed_reduce<P, ngpus, A>(ptrs, idx);
   }
-  end_sync<ngpus>(sg, self_sg, rank);
+  barrier_at_end<ngpus>(sg, self_sg, rank);
 
   // stage 2: allgather. Note: it's important to match the tid between
   // the two stages, because visibility across devices is only guaranteed
