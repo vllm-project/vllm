@@ -36,7 +36,7 @@ from typing_extensions import Required, TypeAlias, TypedDict
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -455,6 +455,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._tokenizer = tokenizer
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
+        self._mm_registry = MULTIMODAL_REGISTRY
 
     @property
     def model_config(self) -> ModelConfig:
@@ -539,19 +540,26 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
-        mm_config = self.model_config.multimodal_config
-        if mm_config is None:
-            raise ValueError("This model does not support multi-modal inputs")
+        input_modality = modality.replace("_embeds", "")
 
-        if not envs.VLLM_USE_V1:
-            input_modality = modality.replace("_embeds", "")
+        if envs.VLLM_USE_V1:
+            mm_processor = self._mm_registry.create_processor(self.model_config)
+            allowed_counts = mm_processor.info.get_allowed_mm_limits()
+            allowed_count = allowed_counts.get(input_modality, 0)
+        else:
+            mm_config = self.model_config.multimodal_config
+            if mm_config is None:
+                msg = "This model does not support multi-modal inputs"
+                raise ValueError(msg)
+
             allowed_count = mm_config.get_limit_per_prompt(input_modality)
-            current_count = len(self._items_by_modality[modality]) + 1
-            if current_count > allowed_count:
-                raise ValueError(
-                    f"At most {allowed_count} {modality}(s) may be provided in "
-                    "one request. You can set `--limit-mm-per-prompt` to "
-                    "increase this limit.")
+
+        current_count = len(self._items_by_modality[modality]) + 1
+        if current_count > allowed_count:
+            raise ValueError(
+                f"At most {allowed_count} {modality}(s) may be provided in "
+                "one request. You can set `--limit-mm-per-prompt` to "
+                "increase this limit if the model supports it.")
 
         self._items_by_modality[modality].append(item)
 
