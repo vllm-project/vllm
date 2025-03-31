@@ -57,7 +57,7 @@ class NVLMProcessor(BaseInternVLProcessor):
         # when trying to find "<tile" as a subsequence of "<Image><tile"
         repl = "<Image>" + features + "</Image>"
 
-        return PromptUpdateDetails.select_token_text(repl, IMG_PAD)
+        return PromptUpdateDetails.select_text(repl, IMG_PAD)
 
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):

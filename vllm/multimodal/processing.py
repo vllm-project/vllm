@@ -124,13 +124,13 @@ class PromptUpdateDetails(Generic[_S]):
         return PromptUpdateDetails(full=seq)
 
     @staticmethod
-    def select_token_text(
+    def select_text(
         seq: _S,
-        embed_token_text: str,
+        embed_text: str,
     ) -> "PromptUpdateDetails[_S]":
 
         def is_embed(full: "_BoundPromptSequence") -> torch.Tensor:
-            embed_token_ids = encode_tokens(full.tokenizer, embed_token_text)
+            embed_token_ids = encode_tokens(full.tokenizer, embed_text)
 
             return torch.isin(
                 torch.tensor(full.token_ids),

@@ -672,7 +672,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             image_size = images.get_image_size(item_idx)
 
-            return PromptUpdateDetails.select_token_text(
+            return PromptUpdateDetails.select_text(
                 self.get_image_prompt_texts(image_size, item_idx),
                 "<unk>",
             )
@@ -684,7 +684,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             frame_size = videos.get_frame_size(item_idx)
             num_frames = videos.get_num_frames(item_idx)
 
-            return PromptUpdateDetails.select_token_text(
+            return PromptUpdateDetails.select_text(
                 self.get_video_prompt_texts(frame_size, num_frames),
                 "<unk>",
             )

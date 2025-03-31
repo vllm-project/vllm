@@ -340,7 +340,7 @@ class MiniCPMOMultiModalProcessor(
             else:
                 audio_len = audios.get_audio_length(item_idx)
 
-            return PromptUpdateDetails.select_token_text(
+            return PromptUpdateDetails.select_text(
                 self.get_audio_prompt_texts(audio_len),
                 "<unk>",
             )

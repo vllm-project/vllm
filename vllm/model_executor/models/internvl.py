@@ -439,7 +439,7 @@ class InternVLProcessor(BaseInternVLProcessor):
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
 
-        return PromptUpdateDetails.select_token_text(repl_full, IMG_CONTEXT)
+        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
 
 class BaseInternVLProcessingInfo(BaseProcessingInfo):

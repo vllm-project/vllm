@@ -398,9 +398,9 @@ class Idefics3MultiModalProcessor(
                 processor=hf_processor,
             )
 
-            return PromptUpdateDetails.select_token_text(
+            return PromptUpdateDetails.select_text(
                 image_repl,
-                embed_token_text=image_token,
+                embed_text=image_token,
             )
 
         return [
