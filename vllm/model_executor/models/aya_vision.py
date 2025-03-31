@@ -400,8 +400,9 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_features = self._image_pixels_to_features(
             self.vision_tower, pixel_values=pixel_values)
         image_embeds = self.multi_modal_projector(image_features)
-        x = [e.flatten(0, 2) for e in image_embeds.split(num_patches.tolist())]
-        return x
+        return [
+            e.flatten(0, 2) for e in image_embeds.split(num_patches.tolist())
+        ]
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
