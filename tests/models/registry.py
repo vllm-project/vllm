@@ -34,6 +34,16 @@ class _HfExamplesInfo:
     The minimum version of HF Transformers that is required to run this model.
     """
 
+    max_transformers_version: Optional[str] = None
+    """
+    The maximum version of HF Transformers that this model runs on.
+    """
+
+    transformers_version_reason: Optional[str] = None
+    """
+    The reason for the minimum/maximum version requirement.
+    """
+
     is_available_online: bool = True
     """
     Set this to ``False`` if the name of this architecture no longer exists on
@@ -57,21 +67,28 @@ class _HfExamplesInfo:
         If the installed transformers version does not meet the requirements,
         perform the given action.
         """
-        if self.min_transformers_version is None:
+        if (self.min_transformers_version is None
+                and self.max_transformers_version is None):
             return
 
         current_version = TRANSFORMERS_VERSION
-        required_version = self.min_transformers_version
-        if Version(current_version) < Version(required_version):
-            msg = (
-                f"You have `transformers=={current_version}` installed, but "
-                f"`transformers>={required_version}` is required to run this "
-                "model")
+        min_version = self.min_transformers_version
+        max_version = self.max_transformers_version
+        msg = f"`transformers=={current_version}` installed, but `transformers"
+        if min_version and Version(current_version) < Version(min_version):
+            msg += f">={min_version}` is required to run this model."
+        elif max_version and Version(current_version) > Version(max_version):
+            msg += f"<={max_version}` is required to run this model."
+        else:
+            return
 
-            if on_fail == "error":
-                raise RuntimeError(msg)
-            else:
-                pytest.skip(msg)
+        if self.transformers_version_reason:
+            msg += f" Reason: {self.transformers_version_reason}"
+
+        if on_fail == "error":
+            raise RuntimeError(msg)
+        else:
+            pytest.skip(msg)
 
     def check_available_online(
         self,
@@ -112,7 +129,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Cohere2ForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r7b-12-2024", # noqa: E501
                                          trust_remote_code=True),
     "DbrxForCausalLM": _HfExamplesInfo("databricks/dbrx-instruct"),
-    "DeciLMForCausalLM": _HfExamplesInfo("Deci/DeciLM-7B-instruct",
+    "DeciLMForCausalLM": _HfExamplesInfo("nvidia/Llama-3_3-Nemotron-Super-49B-v1", # noqa: E501
                                          trust_remote_code=True),
     "DeepseekForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-llm-7b-chat"),
     "DeepseekV2ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V2-Lite-Chat",  # noqa: E501
