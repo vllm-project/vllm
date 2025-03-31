@@ -67,6 +67,8 @@ def test_fused_moe(
         e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
         w1 = w1[e_ids]
         w2 = w2[e_ids]
+        print(e_ids)
+        print(e_map)
     else:
         e_map = None
 

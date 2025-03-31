@@ -740,15 +740,9 @@ def _fp8_quantize(
 
 def find_contiguous_segments(t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     non_matching = t[:-1] != t[1:]
-    #index_range = torch.arange(1, t.numel(), device=t.device).flatten()
-    #ends = index_range[non_matching]
-    if True or non_matching.numel() > 0:
-        ends = non_matching.nonzero().flatten() + 1
-        starts = torch.concat((torch.tensor([0], device=t.device), ends))
-        ends = torch.concat((ends, torch.tensor([t.numel()], device=t.device)))
-    else:
-        starts = torch.tensor([0], device=t.device)
-        ends = torch.tensor([t.numel()], device=t.device)
+    ends = non_matching.nonzero().flatten() + 1
+    starts = torch.concat((torch.tensor([0], device=t.device), ends))
+    ends = torch.concat((ends, torch.tensor([t.numel()], device=t.device)))
     return starts, ends
 
 
@@ -765,29 +759,35 @@ def put_a_bird_on_it(
     #expanded_expert_ids = torch.repeat_interleave(expert_ids, 128, dim=0)
 
     # chunk by non-negative expert_ids
-    starts, ends = find_contiguous_segments(expert_ids)
+    positive = expert_ids >= 0
+    starts, ends = find_contiguous_segments(positive)
     #starts = torch.arange(0, expert_ids.numel(), device=expert_ids.device)
     #ends = torch.arange(1, expert_ids.numel()+1, device=expert_ids.device)
 
-    positive = expert_ids >= 0
-
-    # print(f"\nstarts = {starts}")
+    # print("\n\nXXXX")
+    # print(f"eids = {expert_ids}")
+    # print(f"starts = {starts}")
     # print(f"ends = {ends}")
-    # print(f"valid = {positive}")
-    # print(f"ids = {expert_ids}")
+    # print(f"positive = {positive}")
 
-    for start, end, valid in zip(starts, ends, positive):
+    assert starts[0] == 0
+    assert ends[-1] * 128 == A.shape[0]
+    valid_chunks = expert_ids[starts] >= 0
+    assert valid_chunks.numel() == starts.numel()
+
+    expanded_expert_ids = torch.repeat_interleave(expert_ids, 128, dim=0)
+
+    for start, end in zip(starts, ends):
         start128 = start * 128
         end128 = end * 128
-        if valid:
-            if False:
-                chunk_expert_ids = expanded_expert_ids[start128:end128]
-            else:
-                chunk_expert_ids = torch.repeat_interleave(expert_ids[start:end], 128, dim=0)
+        if positive[start]:
+            chunk_expert_ids = expanded_expert_ids[start128:end128]
+            #print(f"compute {start}:{end}/{start128}:{end128}, A = {A.shape}/{A[start128:end128].shape}, C = {C.shape}/{C[start128:end128].shape} {expert_ids[start:end]}")
             dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
                 (A[start128:end128], A_scale[start128:end128]), (B, B_scale),
                 C[start128:end128], chunk_expert_ids)
         else:
+            #print(f"skip {start}:{end}/{start128}:{end128}, C={C[start128:end128].shape} {expert_ids[start:end]}")
             C[start128:end128].fill_(0)
 
 
@@ -1687,10 +1687,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     if inplace:
         out_hidden_states = hidden_states
     else:
-        if False and expert_map is not None and use_dg:
-            out_hidden_states = torch.zeros_like(hidden_states)
-        else:
-            out_hidden_states = torch.empty_like(hidden_states)
+        out_hidden_states = torch.empty_like(hidden_states)
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,

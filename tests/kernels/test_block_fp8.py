@@ -242,11 +242,9 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 
 @pytest.mark.parametrize(
     "M,N,K,E,topk,ep_size,block_size,dtype,seed",
-    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, EP_SIZE, BLOCK_SIZE,
-                      DTYPES, SEEDS))
+    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, EP_SIZE, BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
-def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype,
-                                  seed):
+def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, seed):
     if topk > E: # or ep_size > E:
         pytest.skip(f"Skipping test; topk={topk} > E={E}")
 
@@ -481,6 +479,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
     block_size = [block_m, block_m]
     dtype = torch.bfloat16
 
+    # Skip ep_size > E?
+
     # only aligned sizes
     if (N % block_m != 0 or K % block_m != 0 or topk > E):
         pytest.skip(
@@ -535,7 +535,9 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         n_local_experts[ep_rank], expert_map[ep_rank] = determine_expert_map(ep_size, ep_rank, E)
         e_map = expert_map[ep_rank]
         if e_map is not None:
-            e_ids[ep_rank] = e_map[e_map >= 0]
+            e_ids[ep_rank] = (e_map >= 0).nonzero().flatten()
+
+    torch.set_printoptions(profile="full")
 
     ref_out: Optional[torch.Tensor] = None
     out: Optional[torch.Tensor] = None
@@ -567,6 +569,10 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
                                global_num_experts=E,
                                expert_map=expert_map[ep_rank]
                                        )
+
+            #print(f"\nRANK {ep_rank}: {e_ids[ep_rank]} {expert_map[ep_rank]}")
+            #print(f"ref_out[{ep_rank}] {ep_ref_out}")
+            #print(f"out[{ep_rank}] {ep_out}")
 
             if ref_out is None:
                 ref_out = ep_ref_out
