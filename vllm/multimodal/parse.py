@@ -427,6 +427,8 @@ class MultiModalDataParser:
             if k not in subparsers:
                 raise ValueError(f"Unsupported modality: {k}")
 
-            mm_items[k] = subparsers[k](v)
+            # ignore empty embedding data
+            if parsed_data := subparsers[k](v):
+                mm_items[k] = parsed_data
 
         return mm_items
