@@ -49,7 +49,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
+from benchmark_dataset import (BurstGPTDataset, ConversationDataset,
                                InstructCoderDataset, RandomDataset,
                                SampleRequest, ShareGPTDataset, SonnetDataset,
                                VisionArenaDataset)
@@ -584,16 +584,17 @@ def main(args: argparse.Namespace):
                                             return_prompt_formatted=True)
 
     elif args.dataset_name == "hf":
-        # Choose between VisionArenaDataset
-        # and HuggingFaceDataset based on provided parameters.
-        dataset_class = HuggingFaceDataset
-        if args.dataset_path == VisionArenaDataset.VISION_ARENA_DATASET_PATH:
-            assert args.hf_subset is None, "VisionArenaDataset needs hf_subset to be None."  #noqa: E501
+        # all following datasets are implemented from the
+        # HuggingFaceDataset base class
+        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = VisionArenaDataset
-        elif args.dataset_path == "likaixin/InstructCoder":
+            args.hf_split = "train"
+            args.hf_subset = None
+        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = InstructCoderDataset
             args.hf_split = "train"
-
+        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ConversationDataset
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
