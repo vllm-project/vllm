@@ -35,7 +35,7 @@ else
     date "+%s" > /tmp/neuron-docker-build-timestamp
 fi
 
-docker build -t "${image_name}" -f Dockerfile.neuron .
+docker build -t "${image_name}" -f docker/Dockerfile.neuron .
 
 # Setup cleanup
 remove_docker_container() {

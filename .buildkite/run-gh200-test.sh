@@ -9,6 +9,7 @@ python3 use_existing_torch.py
 
 # Try building the docker image
 DOCKER_BUILDKIT=1 docker build . \
+  --file docker/Dockerfile \
   --target vllm-openai \
   --platform "linux/arm64" \
   -t gh200-test \

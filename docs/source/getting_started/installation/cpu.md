@@ -177,7 +177,7 @@ Currently, there are no pre-built CPU wheels.
 ### Build image from source
 
 ```console
-$ docker build -f Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
+$ docker build -f docker/Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
 
 # Launching OpenAI server 
 $ docker run --rm \
@@ -193,11 +193,11 @@ $ docker run --rm \
 ```
 
 ::::{tip}
-For ARM or Apple silicon, use `Dockerfile.arm`
+For ARM or Apple silicon, use `docker/Dockerfile.arm`
 ::::
 
 ::::{tip}
-For IBM Z (s390x), use `Dockerfile.s390x` and in `docker run` use flag `--dtype float`
+For IBM Z (s390x), use `docker/Dockerfile.s390x` and in `docker run` use flag `--dtype float`
 ::::
 
 ## Supported features
