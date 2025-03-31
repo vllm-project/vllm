@@ -393,16 +393,15 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         raise ValueError(f"Unexpected select feature strategy: {strategy}")
 
     def _process_image_input(self, image_input: AyaVisionImagePixelInputs,
-                             **kwargs) -> tuple[torch.Tensor, ...]:
+                             **kwargs) -> list[torch.Tensor]:
         assert self.vision_tower is not None
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
         image_features = self._image_pixels_to_features(
             self.vision_tower, pixel_values=pixel_values)
-        image_embeds = self.multi_modal_projector(
-            torch.concat(image_features) if isinstance(image_features, tuple
-                                                       ) else image_features)
-        return image_embeds.split(num_patches.tolist())
+        image_embeds = self.multi_modal_projector(image_features)
+        x = [e.flatten(0, 2) for e in image_embeds.split(num_patches.tolist())]
+        return x
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
