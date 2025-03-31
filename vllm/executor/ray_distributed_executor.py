@@ -562,6 +562,13 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE)
         logger.info("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM = %s",
                     envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
+
+        channel_type = envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE
+        if channel_type not in ["auto", "nccl", "shm"]:
+            raise ValueError(
+                "Invalid value for VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: "
+                f"{channel_type}. Valid values are: 'auto', 'nccl', or 'shm'.")
+
         # Enlarge the default value of "RAY_CGRAPH_get_timeout" to 300 seconds
         # (it is 10 seconds by default). This is a Ray environment variable to
         # control the timeout of getting result from a compiled graph execution,
