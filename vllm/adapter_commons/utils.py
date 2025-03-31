@@ -55,8 +55,8 @@ def set_active_adapters_worker(requests: Set[Any], mapping: Optional[Any],
                                set_adapter_mapping_func) -> None:
     apply_adapters_func(requests)
 
-    # We need this to ensure that adapter loading/unloading and updating 
-    # metadata are compiled as 2 separate graphs on TPU, otherwise we get 
+    # We need this to ensure that adapter loading/unloading and updating
+    # metadata are compiled as 2 separate graphs on TPU, otherwise we get
     # runtime recompilations.
     if current_platform.is_tpu():
         import torch_xla.core.xla_model as xm

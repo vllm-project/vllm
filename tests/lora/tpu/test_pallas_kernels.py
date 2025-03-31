@@ -85,6 +85,7 @@ def test_bgmv_correctness(T, D, L, N, dtype, op_type, seed):
     # Compare with reference output
     assert torch.allclose(output, ref_output, rtol=1e-2, atol=1e-2)
 
+
 # Parameterize tests with various shapes and dtypes
 @pytest.mark.parametrize("T", N_TOKENS)
 @pytest.mark.parametrize("D", HIDDEN_SIZES)
@@ -100,12 +101,7 @@ def test_lora_laning_correctness(T, D, L, N, dtype, seed):
     r2 = ref_bgmv(r1, loras_b, idxs)
 
     o1 = torch.ops.xla.bgmv_shrink(inputs, loras_a, idxs)
-    o2 = torch.ops.xla.bgmv_expand(
-        o1,
-        loras_b.transpose(2, 3),
-        idxs,
-        True
-    )
+    o2 = torch.ops.xla.bgmv_expand(o1, loras_b.transpose(2, 3), idxs, True)
 
     # Compare with reference output
     assert torch.allclose(o2, r2, rtol=1e-2, atol=1e-2)

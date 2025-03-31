@@ -311,7 +311,7 @@ def bgmv_shrink_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
         loras = loras.squeeze(axis=1)
 
     N, L, _ = loras.shape
-    
+
     LORA_BLOCK = 256
     N_LORA_LANES = math.ceil(LORA_BLOCK / L)
     if N_LORA_LANES > 1 and N > 1:

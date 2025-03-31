@@ -67,28 +67,26 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     ):
         return bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
 
-    def expand(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        add_inputs: bool,
-        enable_laning: bool
-    ):
-        return bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs, enable_laning=enable_laning)
+    def expand(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor,
+               add_inputs: bool, enable_laning: bool):
+        return bgmv_expand(x,
+                           w_t_all,
+                           y,
+                           self.token_lora_indices,
+                           add_inputs,
+                           enable_laning=enable_laning)
 
-    def expand_slice(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        y_offset: int,
-        y_slice_size: int,
-        add_inputs: bool,
-        enable_laning: bool
-    ) -> torch.Tensor:
-        return bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices,
-                                 y_offset, y_slice_size, add_inputs, enable_laning=enable_laning)
+    def expand_slice(self, y: torch.Tensor, x: torch.Tensor,
+                     w_t_all: torch.Tensor, y_offset: int, y_slice_size: int,
+                     add_inputs: bool, enable_laning: bool) -> torch.Tensor:
+        return bgmv_expand_slice(x,
+                                 w_t_all,
+                                 y,
+                                 self.token_lora_indices,
+                                 y_offset,
+                                 y_slice_size,
+                                 add_inputs,
+                                 enable_laning=enable_laning)
 
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
                    x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
@@ -157,15 +155,13 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             y = self._apply_bias(self.token_lora_indices, y, output_slices,
                                  lora_bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
-            y = self.expand_slice(
-                y,
-                x[slice_idx],
-                lora_b_stacked[slice_idx],
-                offset_left,
-                output_slices[slice_idx],
-                add_inputs=add_inputs,
-                enable_laning=kwargs["enable_laning"]
-            )
+            y = self.expand_slice(y,
+                                  x[slice_idx],
+                                  lora_b_stacked[slice_idx],
+                                  offset_left,
+                                  output_slices[slice_idx],
+                                  add_inputs=add_inputs,
+                                  enable_laning=kwargs["enable_laning"])
             offset_left += output_slices[slice_idx]
         return y.view_as(y_org)
 
@@ -189,7 +185,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         """
 
         # Embedding layer only needs the expand op
-        return self.expand(y, x, lora_b_stacked, add_inputs, enable_laning=False)
+        return self.expand(y,
+                           x,
+                           lora_b_stacked,
+                           add_inputs,
+                           enable_laning=False)
 
     def add_lora_linear(self,
                         y: torch.Tensor,
@@ -276,7 +276,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             buffer (Optional[torch.Tensor]):Default to None.
         """
         return y
-        
+
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
