@@ -67,6 +67,7 @@ class UltravoxConfig(transformers.PretrainedConfig):
     """
 
     model_type = "ultravox"
+    audio_token = "<|audio|>"
     is_composition = False
 
     def __init__(
@@ -133,8 +134,8 @@ class UltravoxConfig(transformers.PretrainedConfig):
         self.text_model_lora_config = text_model_lora_config or {}
         self.audio_model_lora_config = audio_model_lora_config or {}
 
-        self.vocab_size = text_config.vocab_size
+        self.vocab_size = text_config_obj.vocab_size
 
-        self.initializer_range = text_config.initializer_range
+        self.initializer_range = text_config_obj.initializer_range
 
         super().__init__(**kwargs)
