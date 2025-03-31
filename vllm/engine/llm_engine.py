@@ -1105,19 +1105,12 @@ class LLMEngine:
             return_hidden_states = False
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
-                if self.model_config.task == "generate" and hasattr(
-                        outputs_by_sequence_group[0][0], 'hidden_states'):
-                    return_hidden_states = True
-                    for k in range(len(outputs_by_sequence_group[i])):
-                        output[k].hidden_states = outputs_by_sequence_group[i][
-                            k].hidden_states
             else:
                 output = [outputs_by_sequence_group[0][i]]
-                if self.model_config.task == "generate" and hasattr(
-                        outputs_by_sequence_group[0], 'hidden_states'):
-                    return_hidden_states = True
-                    output[0].hidden_states = outputs_by_sequence_group[
-                        0].hidden_states
+
+            if self.model_config.task == "generate":
+                return_hidden_states = any(output_group.hidden_states is not None
+                                           for output_group in output)
 
             if not is_async:
                 if self.scheduler_config.is_multi_step:
