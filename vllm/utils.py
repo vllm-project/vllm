@@ -1391,15 +1391,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             if isinstance(action, StoreBoolean)
         ]
 
-        # Skip model from config if it's provided as positional argument
-        skip_model = (hasattr(self, '_parsed_args') and self._parsed_args
-                      and len(self._parsed_args) > 1
-                      and self._parsed_args[0] == 'serve'
-                      and not self._parsed_args[1].startswith('-'))
-
         for key, value in config.items():
-            if skip_model and key == 'model':
-                continue
             if isinstance(value, bool) and key not in store_boolean_arguments:
                 if value:
                     processed_args.append('--' + key)
