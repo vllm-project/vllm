@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Tuple
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.utils import PAD_SLOT_ID
 
 
@@ -31,9 +30,7 @@ class ConstantSizeCache(ABC):
         """Copy cache data from one index to another"""
         pass
 
-    def current_run_tensors(self, input_ids: torch.Tensor,
-                            attn_metadata: AttentionMetadata,
-                            **kwargs) -> Tuple:
+    def current_run_tensors(self, **kwargs) -> Tuple:
         """
         Return the tensors for the current run's conv and ssm state.
         """

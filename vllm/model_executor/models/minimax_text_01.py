@@ -380,8 +380,11 @@ class MiniMaxText01LinearAttention(nn.Module):
 
         slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(
             self.num_heads)
-        self.slope_rate = slope_rate * (1 - layer_idx /
-                                        (num_hidden_layer - 1) + 1e-5)
+        if num_hidden_layer <= 1:
+            self.slope_rate = slope_rate * (1 + 1e-5)
+        else:
+            self.slope_rate = slope_rate * (1 - layer_idx /
+                                            (num_hidden_layer - 1) + 1e-5)
         self.tp_slope = self.slope_rate[self.tp_rank *
                                         self.tp_heads:(self.tp_rank + 1) *
                                         self.tp_heads].contiguous()
@@ -902,8 +905,7 @@ class MiniMaxText01Model(nn.Module):
         (
             minimax_cache_tensors,
             state_indices_tensor,
-        ) = self.minimax_cache.current_run_tensors(input_ids, attn_metadata,
-                                                   **kwargs)
+        ) = self.minimax_cache.current_run_tensors(**kwargs)
         if getattr(attn_metadata, "num_prefills", 0) > 0:
             self._clear_prefill_cache(attn_metadata, minimax_cache_tensors,
                                       **kwargs)
