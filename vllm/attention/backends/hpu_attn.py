@@ -4,6 +4,7 @@
 # Copyright (C) 2024-2025 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -209,8 +210,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         key_cache = None
         value_cache = None
         if attn_metadata.is_prompt and self.attn_type \
-           is not AttentionType.ENCODER_ONLY \
-           and attn_metadata.block_list is None:
+                is not AttentionType.ENCODER_ONLY \
+            and (attn_metadata.block_list is None
+                 if os.getenv("VLLM_USE_V1") == 1 else True):
             key = key.unflatten(0, (block_indices.size(0), -1))
             value = value.unflatten(0, (block_indices.size(0), -1))
         if kv_cache is not None and isinstance(kv_cache, tuple):
