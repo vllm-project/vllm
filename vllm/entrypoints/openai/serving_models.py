@@ -2,6 +2,8 @@
 
 import json
 import pathlib
+from asyncio import Lock
+from collections import defaultdict
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Optional, Union
@@ -74,6 +76,7 @@ class OpenAIServingModels:
         ):
             self.lora_resolvers.append(
                 LoRAResolverRegistry.get_resolver(lora_resolver_name))
+        self.lora_resolver_lock = defaultdict(Lock)
 
         self.prompt_adapter_requests = []
         if prompt_adapters is not None:
@@ -241,25 +244,29 @@ class OpenAIServingModels:
 
         return None
 
-    async def resolve_lora(self, lora_name: str) -> Union[ErrorResponse, str]:
+    async def resolve_lora(self, lora_name: str) -> Optional[LoRARequest]:
         """Attempt to resolve a LoRA adapter using available resolvers.
 
         Args:
             lora_name: Name/identifier of the LoRA adapter
 
         Returns:
-            Success message if successful, ErrorResponse otherwise.
+            Optional[LoRARequest]: LoRA request if found, None otherwise
         """
-        for resolver in self.lora_resolvers:
-            lora_adapter_request = await resolver.resolve_lora(lora_name)
-            if lora_adapter_request is not None:
-                return await self.load_lora_adapter(lora_adapter_request)
+        async with self.lora_resolver_lock[lora_name]:
+            # First check if this LoRA is already loaded
+            for existing in self.lora_requests:
+                if existing.lora_name == lora_name:
+                    return existing
 
-        return create_error_response(
-            message=(f"Failed to resolve LoRA adapter '{lora_name}' with any "
-                     "available resolver"),
-            err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND)
+            # Try to resolve using available resolvers
+            for resolver in self.lora_resolvers:
+                lora_request = await resolver.resolve_lora(lora_name)
+                if lora_request is not None:
+                    self.lora_requests.append(lora_request)
+                    return lora_request
+
+            return None
 
 
 def create_error_response(

@@ -4,8 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import AbstractSet, Dict, Optional
 
-from vllm.entrypoints.openai.protocol import LoadLoRAAdapterRequest
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 
 logger = init_logger(__name__)
 
@@ -15,27 +15,23 @@ class LoRAResolver(ABC):
     
     This class defines the interface for resolving and fetching LoRA adapters.
     Implementations of this class should handle the logic for locating and 
-    downloading LoRA adapters from various sources (e.g., local filesystem, 
-    cloud storage, etc.).
+    downloading LoRA adapters from various sources (e.g. S3, cloud storage,
+    etc.).
     """
 
     @abstractmethod
-    async def resolve_lora(self,
-                           lora_name: str) -> Optional[LoadLoRAAdapterRequest]:
+    async def resolve_lora(self, lora_name: str) -> Optional[LoRARequest]:
         """Abstract method to resolve and fetch a LoRA model adapter.
-        
-        This method should implement the logic to locate and download LoRA 
-        adapter based on the provided name. Implementations might fetch from 
-        a blob storage or other sources.
-         
+
+        Implements logic to locate and download LoRA adapter based on the name.
+        Implementations might fetch from a blob storage or other sources.
+
         Args:
-            lora_name: str - The name or identifier of the LoRA model to 
-                resolve.
-        
+            lora_name: The name or identifier of the LoRA model to resolve.
+
         Returns:
-            Optional[LoadLoRAAdapterRequest]: A LoadLoRAAdapterRequest object
-                containing the resolved LoRA model information, or None if 
-                the LoRA model cannot be found.
+            Optional[LoRARequest]: The resolved LoRA model information, or None
+            if the LoRA model cannot be found.
         """
         pass
 
