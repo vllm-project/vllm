@@ -422,7 +422,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             self.model = get_model(vllm_config=self.vllm_config)
 
         self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
+        logger.info("Loading model weights took %.4f GiB",
                     self.model_memory_usage / float(2**30))
 
     def get_model(self) -> nn.Module:

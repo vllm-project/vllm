@@ -1143,7 +1143,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
-        logger.info("Model loading took %.4f GB and %.6f seconds",
+        logger.info("Model loading took %.4f GiB and %.6f seconds",
                     self.model_memory_usage / float(2**30),
                     time_after_load - time_before_load)
         if self.prompt_adapter_config:
