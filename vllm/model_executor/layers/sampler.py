@@ -475,7 +475,9 @@ def _greedy_sample(
             assert num_parent_seqs == 1 # not support muti seqences in seqence group
             next_token_ids = [0] #place holder token id
         else:
-            next_token_ids = [samples_lst[sample_idx]]
+            next_token_ids = [
+                samples_lst[sample_idx]  # 缩进4空格，总行长降至42字符
+            ]
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     return results
@@ -519,7 +521,8 @@ def _random_sample(
                 next_token_ids = [0] * sampling_params.n  #place holder token id
             else:
                 next_token_ids = random_samples[
-                    sample_idx, :sampling_params.n].tolist()
+                    sample_idx, :sampling_params.n
+                    ].tolist()
         else:
             # Generation phase.
             parent_ids = list(range(num_parent_seqs))
@@ -527,8 +530,10 @@ def _random_sample(
                 assert num_parent_seqs == 1 # not support muti seqences in seqence group
                 next_token_ids = [0] * num_parent_seqs  #place holder token id
             else:
-                next_token_ids = random_samples[sample_idx:sample_idx +
-                                                num_parent_seqs, 0].tolist()
+                next_token_ids = random_samples[
+                    sample_idx:sample_idx +num_parent_seqs, 
+                    0
+                    ].tolist()
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     return results
