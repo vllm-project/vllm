@@ -158,6 +158,7 @@ class Fp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
+        self.out_dtype = torch.get_default_dtype()
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -279,7 +280,7 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.register_parameter("input_scale", None)
 
-    def add_padding_to_weight(self, weight: torch.Tensor) -> torch.Tensor:
+    def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
         # can benefit from tensors located far enough from one another in memory
         if (envs.VLLM_ROCM_FP8_PADDING and current_platform.is_rocm()
@@ -303,7 +304,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight = layer.weight.data
                 weight_scale_inv = layer.weight_scale_inv.data
 
-            weight = self.add_padding_to_weight(weight)
+            weight = self._maybe_pad_weight(weight)
 
             # Torch.compile cannot use Parameter subclasses.
             layer.weight = Parameter(weight, requires_grad=False)
@@ -371,7 +372,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     logical_widths=layer.logical_widths,
                 )
 
-            weight = self.add_padding_to_weight(weight)
+            weight = self._maybe_pad_weight(weight)
             # Update layer with new values.
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
@@ -558,6 +559,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        # Lazy import to avoid importing triton too early.
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            expand_weights, is_rocm_aiter_block_scaled_moe_enabled,
+            is_rocm_aiter_moe_enabled, shuffle_weights)
+
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
@@ -583,6 +589,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
+            if is_rocm_aiter_block_scaled_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight.data, layer.w2_weight.data)
+
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
             return
 
         # If checkpoint is fp16, quantize in place.
@@ -610,6 +625,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
+            if is_rocm_aiter_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
+                w13_scales, w2_scales = expand_weights(
+                    layer.w13_weight_scale.data,
+                    layer.w2_weight_scale.data,
+                    expansion_dims=[
+                        layer.w13_weight.shape[1], layer.w2_weight.shape[1]
+                    ])
+                layer.w13_weight_scale = torch.nn.Parameter(
+                    w13_scales.contiguous(), requires_grad=False)
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales.contiguous(), requires_grad=False)
+
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
+
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
             return
 
         # If checkpoint is fp8, we need to handle that the
@@ -676,6 +711,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         start:start + shard_size, :], _ = ops.scaled_fp8_quant(
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
+
+            if is_rocm_aiter_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
+                expansion_dims = [
+                    layer.w13_weight.shape[1], layer.w2_weight.shape[1]
+                ]
+                max_w13_scales, w2_scales = expand_weights(
+                    max_w13_scales,
+                    layer.w2_weight_scale.data,
+                    expansion_dims=expansion_dims)
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales.contiguous(), requires_grad=False)
+
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
+
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
 
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)

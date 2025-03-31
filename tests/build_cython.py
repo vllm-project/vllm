@@ -35,4 +35,4 @@ setup(ext_modules=cythonize(infiles,
                                 'infer_types': True
                             }))
 
-# example usage: python3 setup_cython.py build_ext --inplace
+# example usage: python3 build_cython.py build_ext --inplace

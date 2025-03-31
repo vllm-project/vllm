@@ -8,7 +8,6 @@ from tests.kernels.utils import override_backend_env_variable
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
-from ....test_utils import xfail_if_rocm62
 from .conftest import get_text_from_llm_generator
 
 # relatively small model with 4k sliding window
@@ -82,7 +81,6 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
     assert sum(cmp) > 0.7 * len(cmp)
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{

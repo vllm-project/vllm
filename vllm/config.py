@@ -38,10 +38,10 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
     try_get_generation_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
-from vllm.transformers_utils.utils import is_s3
+from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, is_mi250, is_navi, random_uuid,
-                        resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, is_mi250, is_navi,
+                        random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -222,6 +222,9 @@ class ModelConfig:
         factors.append(self.trust_remote_code)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
+        # rope cos/sin cache depends on the max_position_embeddings
+        factors.append(
+            getattr(self.hf_config, "max_position_embeddings", "None"))
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __init__(
@@ -264,9 +267,13 @@ class ModelConfig:
         override_generation_config: Optional[dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
-        self.model = model
+        self.model = maybe_model_redirect(model)
+        self.tokenizer = maybe_model_redirect(tokenizer)
+
         self.hf_config_path = hf_config_path
-        self.tokenizer = tokenizer
+        if isinstance(hf_config_path, str):
+            self.hf_config_path = maybe_model_redirect(hf_config_path)
+
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
         self.allowed_local_media_path = allowed_local_media_path
@@ -311,7 +318,7 @@ class ModelConfig:
             raise ValueError(
                 "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
                 "module was not found."
-                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile"
+                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile "
                 "for instructions on how to install it.")
 
         # The tokenizer version is consistent with the model version by default.
@@ -404,6 +411,7 @@ class ModelConfig:
 
         self.is_attention_free = self._init_attention_free()
         self.is_hybrid = self._init_is_hybrid()
+        self.has_noops = self._init_has_noops()
         self.has_inner_state = self._init_has_inner_state()
 
         if current_platform.is_neuron():
@@ -502,6 +510,10 @@ class ModelConfig:
 
     def _init_is_hybrid(self) -> bool:
         return self.registry.is_hybrid_model(self.architectures)
+
+    def _init_has_noops(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return self.registry.is_noops_model(architectures)
 
     def _init_has_inner_state(self) -> bool:
         return self.registry.model_has_inner_state(self.architectures)
@@ -684,8 +696,9 @@ class ModelConfig:
 
     def _verify_bnb_config(self) -> None:
         """
-        The current version of bitsandbytes (0.44.0) with 8-bit models does not
+        The current version of bitsandbytes (0.45.3) with 8-bit models does not
         yet support CUDA graph.
+        # TODO Remove this when bitsandbytes supports.
         """
         is_bitsandbytes = self.quantization == "bitsandbytes"
         has_quantization_config = (getattr(self.hf_config,
@@ -700,8 +713,9 @@ class ModelConfig:
                 not self.enforce_eager,
         ]):
             logger.warning(
-                "CUDA graph is not supported on BitAndBytes 8bit yet, "
+                "CUDA graph is not supported on BitsAndBytes 8bit yet, "
                 "fallback to the eager mode.")
+
             self.enforce_eager = True
 
     def _verify_with_expert_parallelism(self) -> None:
@@ -807,10 +821,18 @@ class ModelConfig:
 
     @property
     def is_deepseek_mla(self) -> bool:
-        return (hasattr(self.hf_text_config, "model_type")) \
-                and (self.hf_text_config.model_type in \
-                    ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'))\
-                and (self.hf_text_config.kv_lora_rank is not None)
+        if not hasattr(self.hf_text_config, "model_type"):
+            return False
+        elif self.hf_text_config.model_type in \
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'):
+            return self.hf_text_config.kv_lora_rank is not None
+        elif self.hf_text_config.model_type == 'eagle':
+            # if the model is an EAGLE module, check for the
+            # underlying architecture
+            return self.hf_text_config.model.model_type in \
+                    ('deepseek_v2', 'deepseek_v3') \
+                and self.hf_text_config.kv_lora_rank is not None
+        return False
 
     def get_head_size(self) -> int:
         # TODO remove hard code
@@ -863,6 +885,14 @@ class ModelConfig:
         if self.hf_config.model_type == "dbrx":
             return getattr(self.hf_config.attn_config, "kv_n_heads",
                            self.hf_config.num_attention_heads)
+
+        if self.hf_config.model_type == "nemotron-nas":
+            for block in self.hf_config.block_configs:
+                if not block.attention.no_op:
+                    return self.hf_config.num_attention_heads \
+                        // block.attention.n_heads_in_group
+
+            raise RuntimeError("Couldn't determine number of kv heads")
 
         if self.is_attention_free:
             return 0
@@ -932,7 +962,9 @@ class ModelConfig:
         # This function relies on 'layers_block_type' in hf_config,
         # for w/o this attribute, we will need to have workarounds like so
         attn_block_type = block_type == LayerBlockType.attention
-        is_transformer = not self.is_hybrid and not self.is_attention_free
+        is_transformer = not self.is_hybrid and \
+                            not self.has_noops and \
+                            not self.is_attention_free
         start, end = self.get_layers_start_end_indices(parallel_config)
 
         if is_transformer:
@@ -943,6 +975,10 @@ class ModelConfig:
             # Note that this code assumes there
             # is only one type of attention-free block type.
             return 0 if attn_block_type else end - start
+        elif self.has_noops:
+            block_configs = self.hf_config.block_configs
+            return sum(not bc.attention.no_op
+                       for bc in block_configs[start:end])
         else:
             # Hybrid model
             layers_block_type_value = getattr(self.hf_config,
@@ -1110,7 +1146,8 @@ class CacheConfig:
         factors: list[Any] = []
         factors.append(self.cache_dtype)
         # `cpu_offload_gb` does not use `torch.compile` yet.
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def __init__(
@@ -1123,6 +1160,7 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        prefix_caching_hash_algo: str = "builtin",
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
     ) -> None:
@@ -1134,6 +1172,7 @@ class CacheConfig:
         self.is_attention_free = is_attention_free
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
+        self.prefix_caching_hash_algo = prefix_caching_hash_algo
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
         self._verify_args()
@@ -1184,6 +1223,13 @@ class CacheConfig:
                 "Prefix caching is not supported with sliding window. "
                 "Run with --disable-sliding-window to use prefix caching.")
 
+        if self.enable_prefix_caching and self.prefix_caching_hash_algo not in (
+                "builtin", "sha256"):
+            raise ValueError(
+                "Unknown prefix caching hash algorithm: "
+                f"{self.prefix_caching_hash_algo}. Must be either "
+                "'builtin' or 'sha256'.")
+
     def verify_with_parallel_config(
         self,
         parallel_config: "ParallelConfig",
@@ -1233,7 +1279,8 @@ class TokenizerPoolConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
@@ -1344,7 +1391,8 @@ class LoadConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
@@ -1372,6 +1420,8 @@ class ParallelConfig:
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
     data_parallel_size: int = 1  # Number of data parallel groups.
     data_parallel_rank: int = 0  # Rank of the data parallel group.
+    # Local rank of the data parallel group, defaults to global rank.
+    data_parallel_rank_local: Optional[int] = None
     # IP of the data parallel master.
     data_parallel_master_ip: str = "127.0.0.1"
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
@@ -1476,10 +1526,18 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        self.data_parallel_size = envs.VLLM_DP_SIZE
-        self.data_parallel_rank = envs.VLLM_DP_RANK
-        self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
-        self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+        if self.data_parallel_size > 1:
+            # Data parallel was specified in the engine args.
+            self.data_parallel_master_port = get_open_port()
+            # TODO multi-node
+        else:
+            # Otherwise fall back to env vars (e.g. for offline SPMD case).
+            self.data_parallel_size = envs.VLLM_DP_SIZE
+            self.data_parallel_rank = envs.VLLM_DP_RANK
+            self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
+            self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
+            self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+
         self.world_size_across_dp = self.world_size * self.data_parallel_size
 
         if self.distributed_executor_backend == "external_launcher":
@@ -1676,7 +1734,8 @@ class SchedulerConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self) -> None:
@@ -1812,7 +1871,8 @@ class DeviceConfig:
         # the device/platform information will be summarized
         # by torch/vllm automatically.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def __init__(self, device: str = "auto") -> None:
@@ -1985,7 +2045,8 @@ class SpeculativeConfig:
         # no factors to consider.
         # spec decode does not use `torch.compile` yet.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     @classmethod
@@ -2360,7 +2421,8 @@ class LoRAConfig:
         factors.append(self.lora_extra_vocab_size)
         factors.append(self.long_lora_scaling_factors)
         factors.append(self.bias_enabled)
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
@@ -2395,12 +2457,6 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
-        if model_config.quantization and model_config.quantization not in [
-                "awq", "gptq"
-        ]:
-            # TODO support marlin
-            logger.warning("%s quantization is not tested with LoRA yet.",
-                           model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
         # Reminder: Please update docs/source/features/compatibility_matrix.md
@@ -2432,7 +2488,8 @@ class PromptAdapterConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
@@ -2477,7 +2534,8 @@ class MultiModalConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:
@@ -2543,7 +2601,8 @@ class PoolerConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     @staticmethod
@@ -2824,16 +2883,22 @@ class DecodingConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
-        valid_guided_backends = [
-            'outlines', 'lm-format-enforcer', 'xgrammar', 'guidance'
+        v0_valid_guided_backends = [
+            'outlines', 'lm-format-enforcer', 'xgrammar'
         ]
+        v1_valid_guided_backends = ['xgrammar', 'guidance', 'auto']
 
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
+        if envs.VLLM_USE_V1:
+            valid_guided_backends = v1_valid_guided_backends
+        else:
+            valid_guided_backends = v0_valid_guided_backends
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
                              f" must be one of {valid_guided_backends}")
@@ -2869,7 +2934,8 @@ class ObservabilityConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
@@ -2931,7 +2997,8 @@ class KVTransferConfig(BaseModel):
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     @classmethod
@@ -2958,12 +3025,6 @@ class KVTransferConfig(BaseModel):
     def is_kv_transfer_instance(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in ["kv_producer", "kv_consumer", "kv_both"]
-
-    @property
-    def need_kv_parallel_group(self) -> bool:
-        # for those database-based connector, vLLM does not need to create
-        # parallel group, and in that case the kv parallel size will be 1.
-        return self.kv_connector is not None and self.kv_parallel_size > 1
 
     @property
     def is_kv_producer(self) -> bool:
@@ -3428,7 +3489,8 @@ class VllmConfig:
             vllm_factors.append("None")
         factors.append(vllm_factors)
 
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()[:10]
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()[:10]
         return hash_str
 
     def pad_for_cudagraph(self, batch_size: int) -> int:
@@ -3544,9 +3606,10 @@ class VllmConfig:
 
         if self.cache_config is not None and \
             self.cache_config.cpu_offload_gb > 0 and \
-            self.compilation_config.level != CompilationLevel.NO_COMPILATION:
+            self.compilation_config.level != CompilationLevel.NO_COMPILATION \
+                and not envs.VLLM_USE_V1:
             logger.warning(
-                "CPU offload is not supported with `torch.compile` yet."
+                "CPU offload is not supported with `torch.compile` in v0 yet."
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 

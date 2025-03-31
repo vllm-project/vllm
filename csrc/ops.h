@@ -122,6 +122,8 @@ void advance_step_flashinfer(
     torch::Tensor& paged_kv_indices, torch::Tensor& paged_kv_indptr,
     torch::Tensor& paged_kv_last_page_len, torch::Tensor& block_table_bounds);
 
+torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
+
 #ifndef USE_ROCM
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
@@ -167,6 +169,7 @@ int64_t ggml_moe_get_block_size(int64_t type);
 bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
+bool cutlass_group_gemm_supported(int64_t cuda_device_capability);
 
 void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor const& A,
                            torch::Tensor const& B, torch::Tensor const& A_sf,
@@ -177,6 +180,19 @@ void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales,
                        std::optional<torch::Tensor> const& bias);
+
+void cutlass_moe_mm(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides);
+
+void get_cutlass_moe_mm_data(
+    const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
+    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
+    torch::Tensor& input_permutation, torch::Tensor& output_permutation,
+    const int64_t num_experts, const int64_t n, const int64_t k);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,

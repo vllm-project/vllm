@@ -51,6 +51,16 @@ def cutlass_block_fp8_supported() -> bool:
     return ops.cutlass_scaled_mm_supports_block_fp8(capability)
 
 
+def cutlass_group_gemm_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_group_gemm_supported(capability)
+
+
 CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
 CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
@@ -180,6 +190,8 @@ class Fp8LinearOp:
 
         # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
         if self.cutlass_fp8_supported:
+            assert input.dtype != current_platform.fp8_dtype(
+            ), "FP8 input to cutlass is not currently implemented"
             qinput, x_scale = ops.scaled_fp8_quant(
                 input_2d,
                 input_scale,
@@ -189,7 +201,7 @@ class Fp8LinearOp:
             # Fused GEMM_DQ
             output = ops.cutlass_scaled_mm(qinput,
                                            weight,
-                                           out_dtype=input.dtype,
+                                           out_dtype=out_dtype,
                                            scale_a=x_scale,
                                            scale_b=weight_scale,
                                            bias=bias)
@@ -198,7 +210,7 @@ class Fp8LinearOp:
         # torch.scaled_mm supports per tensor weights + activations only
         # so fallback to naive if per channel or per token
         else:
-            if input.dtype != torch.float8_e4m3fnuz:
+            if input.dtype != current_platform.fp8_dtype():
                 # Maybe apply padding to output, see comment in __init__
                 qinput, x_scale = ops.scaled_fp8_quant(
                     input_2d,
@@ -239,7 +251,7 @@ class Fp8LinearOp:
                 # Fused GEMM_DQ Rowwise GEMM
                 output = torch._scaled_mm(qinput,
                                           weight,
-                                          out_dtype=input.dtype,
+                                          out_dtype=out_dtype,
                                           scale_a=x_scale,
                                           scale_b=weight_scale.t(),
                                           bias=bias)
