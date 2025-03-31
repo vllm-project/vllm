@@ -105,10 +105,10 @@ async def handle_request():
         global prefill_instances
         global prefill_cv
         with prefill_cv:
-            prefill_address, prefill_zmq_addr = random.choice(
+            prefill_addr, prefill_zmq_addr = random.choice(
                 list(prefill_instances.items()))
             print("handle_request, prefill_addr: %s, zmq_addr: %s",
-                  prefill_address, prefill_zmq_addr)
+                  prefill_addr, prefill_zmq_addr)
 
         global decode_instances
         global decode_cv
@@ -123,9 +123,8 @@ async def handle_request():
         )
 
         # finish prefill
-        async for _ in forward_request(
-            f'http://{prefill_address}/v1/completions', prefill_request,
-            request_id):
+        async for _ in forward_request(f'http://{prefill_addr}/v1/completions',
+                                       prefill_request, request_id):
             continue
 
         # return decode
