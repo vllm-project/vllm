@@ -192,7 +192,7 @@ def test_linear_decode_forward_triton_with_padding(
                             head_size,
                             dtype=dtype,
                             device="cuda")
-    
+
     kv_caches_copy = kv_caches.clone()
 
     slope_rate = torch.zeros(num_heads, device="cuda")
