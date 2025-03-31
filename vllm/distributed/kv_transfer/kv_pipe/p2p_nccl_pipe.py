@@ -281,4 +281,3 @@ class P2pNcclPipe:
     def close(self) -> None:
         self._listener_thread.join()
         self._ping_thread.join()
-        pass
