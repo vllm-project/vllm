@@ -132,13 +132,14 @@ class RayDistributedExecutor(DistributedExecutorBase):
             "Shutting down Ray distributed executor. If you see error log "
             "from logging.cc regarding SIGTERM received, please ignore because "
             "this is the expected termination process in Ray.")
-        if getattr(self, 'shutdown_workers', False):
-            self._run_workers("shutdown")
-            self.shutdown_workers = False
-        if getattr(self, 'terminate_ray', False):
-            for worker in self.workers:
-                worker.__ray_terminate__.remote()
-            self.terminate_ray = False
+        if (self.model_config.quantization == 'inc'):
+            if getattr(self, 'shutdown_workers', False):
+                self.shutdown_workers = False
+                self._run_workers('shutdown_inc')
+            if getattr(self, 'terminate_ray', False):
+                self.terminate_ray = False
+                for worker in self.workers:
+                    worker.__ray_terminate__.remote()
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
             import ray
