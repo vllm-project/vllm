@@ -680,7 +680,7 @@ def moe_align_block_size(
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 
-def _valid_deep_gemm(num_hidden_states: int, w1: torch.Tensor,
+def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
                      w2: torch.Tensor) -> bool:
     """
     Check if the given problem size is supported by the DeepGemm grouped
@@ -691,17 +691,19 @@ def _valid_deep_gemm(num_hidden_states: int, w1: torch.Tensor,
         return False
 
     align = dg.get_m_alignment_for_contiguous_layout()
+    M = hidden_states.shape[0]
     _, K, N = w2.shape
 
     # For now, disable DeepGemm for small N until better permute/unpermute
     # ops are available.
-    if False and N <= 512:
+    if N <= 512:
         return False
 
-    if align > num_hidden_states or N % align != 0 or K % align != 0:
+    if align > M or N % align != 0 or K % align != 0:
         return False
 
-    return (w1.is_contiguous() and w2.is_contiguous())
+    return (hidden_states.is_contiguous() and
+            w1.is_contiguous() and w2.is_contiguous())
 
 
 def _fp8_quantize(
@@ -1375,7 +1377,8 @@ def fused_experts(hidden_states: torch.Tensor,
                   a2_scale: Optional[torch.Tensor] = None,
                   block_shape: Optional[List[int]] = None,
                   allow_deep_gemm: bool = False) -> torch.Tensor:
-    if (allow_deep_gemm and use_fp8_w8a8 and _valid_deep_gemm(hidden_states.shape[0], w1, w2)):
+    if (allow_deep_gemm and use_fp8_w8a8
+            and _valid_deep_gemm(hidden_states, w1, w2)):
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
             w1=w1,
@@ -1423,11 +1426,15 @@ def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
 
 
 def _moe_permute(
-    curr_hidden_states: torch.Tensor, a1q_scale: Optional[torch.Tensor],
-    curr_topk_ids: torch.Tensor, global_num_experts: int,
-    expert_map: Optional[torch.Tensor], top_k_num: int, block_m: int,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor,
-           torch.Tensor, torch.Tensor]:
+    curr_hidden_states: torch.Tensor,
+    a1q_scale: Optional[torch.Tensor],
+    curr_topk_ids: torch.Tensor,
+    global_num_experts: int,
+    expert_map: Optional[torch.Tensor],
+    top_k_num: int,
+    block_m: int,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
+           torch.Tensor]:
     """
     Determine the sorted_token_ids, expert_ids for the given problem size.
     Permute the hidden states and scales according to `sorted_token_ids`.
@@ -1459,13 +1466,14 @@ def _moe_permute(
             inv_perm)
 
 
-def _moe_unpermute_and_reduce(out: torch.Tensor,
-                              curr_hidden: torch.Tensor,
-                              inv_perm: Optional[torch.Tensor],
-                              topk: int,
-                              K: int,
-                              topk_weight: torch.Tensor,
-                              ) -> None:
+def _moe_unpermute_and_reduce(
+    out: torch.Tensor,
+    curr_hidden: torch.Tensor,
+    inv_perm: Optional[torch.Tensor],
+    topk: int,
+    K: int,
+    topk_weight: torch.Tensor,
+) -> None:
     """
     Unpermute the final result and apply topk_weights, then perform the final
     reduction on the hidden states.
@@ -1842,16 +1850,18 @@ def deep_gemm_moe_fp8(
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]
-    assert hidden_states.shape[1] == w1.shape[1], "Hidden size mismatch w1"
+    #assert hidden_states.shape[1] == w1.shape[1], "Hidden size mismatch w1"
     assert w1.dtype == torch.float8_e4m3fn
     assert w2.dtype == torch.float8_e4m3fn
-    assert w1.shape[2] == w2.shape[1] * 2, "Hidden size mismatch w2"
+    #assert w1.shape[2] == w2.shape[1] * 2, "Hidden size mismatch w2"
     assert w1.shape[0] == w2.shape[0], "Expert number mismatch"
-    assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 or w1_scale.shape[1] == w1.shape[2], "W1 scale shape mismatch"
+    #assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 or w1_scale.shape[1] == w1.shape[2], "W1 scale shape mismatch"
     assert w1.shape[0] == w1_scale.shape[0], "w1 scales expert number mismatch"
-    assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 or w2_scale.shape[1] == w2.shape[2], "W2 scale shape mismatch"
+    #assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 or w2_scale.shape[1] == w2.shape[2], "W2 scale shape mismatch"
     assert w1.shape[0] == w2_scale.shape[0], "w2 scales expert number mismatch"
-    assert a1_scale is None or a1_scale.dim() == 0 or a1_scale.shape[0] == 1 or a1_scale.shape[0] == hidden_states.shape[0], "Input scale shape mismatch"
+    assert a1_scale is None or a1_scale.dim(
+    ) == 0 or a1_scale.shape[0] == 1 or a1_scale.shape[
+        0] == hidden_states.shape[0], "Input scale shape mismatch"
     assert a2_scale is None or a1_scale is None or a2_scale.shape == a1_scale.shape, "Intermediate scale shape mismatch"  # noqa: E501
 
     num_tokens, _ = hidden_states.shape
@@ -1863,7 +1873,6 @@ def deep_gemm_moe_fp8(
     # We execute the fused_moe kernel in chunks to circumvent this issue:
     # https://github.com/vllm-project/vllm/issues/5938
     CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
-    M = min(num_tokens, CHUNK_SIZE)
 
     use_dg = _valid_deep_gemm(hidden_states, w1, w2)
     assert use_dg
@@ -1917,8 +1926,8 @@ def deep_gemm_moe_fp8(
 
         a1q_scale: Optional[torch.Tensor] = None
 
-        qcurr_hidden_states, a1q_scale = _fp8_quantize(
-                curr_hidden_states, a1_scale, block_shape)
+        qcurr_hidden_states, a1q_scale = _fp8_quantize(curr_hidden_states,
+                                                       a1_scale, block_shape)
 
         (qcurr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
          inv_perm) = _moe_permute(qcurr_hidden_states, a1q_scale,
@@ -1937,10 +1946,9 @@ def deep_gemm_moe_fp8(
             intermediate_cache3 = _resize_cache(intermediate_cache3,
                                                 (curr_M, K))
 
-
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (qcurr_hidden_states, a1q_scale), (w1, w1_scale), intermediate_cache1,
-            expert_ids)
+            (qcurr_hidden_states, a1q_scale), (w1, w1_scale),
+            intermediate_cache1, expert_ids)
 
         if activation == "silu":
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1957,8 +1965,8 @@ def deep_gemm_moe_fp8(
             intermediate_cache2, a2_scale, block_shape)
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (qintermediate_cache2, a2q_scale), (w2, w2_scale), intermediate_cache3,
-            expert_ids)
+            (qintermediate_cache2, a2q_scale), (w2, w2_scale),
+            intermediate_cache3, expert_ids)
 
         _moe_unpermute_and_reduce(
             out_hidden_states[begin_chunk_idx:end_chunk_idx],

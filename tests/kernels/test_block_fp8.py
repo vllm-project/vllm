@@ -10,7 +10,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk, moe_align_block_size, deep_gemm_moe_fp8)
+    deep_gemm_moe_fp8, fused_topk, moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
@@ -38,7 +38,7 @@ K = [256, 4096, 5120, 3884, 13824, 16384]
 # and its hidden size is 7168.
 M_moe = [1, 2, 7, 83, 128, 512, 2048]
 M_moe_dg = [128, 192, 512, 1335, 2048]
-N_moe = [128, 256, 4608]  # [13824]
+N_moe = [128, 256, 1024, 4608]  # [13824]
 K_moe = [256, 512, 7168]  # [13824]
 BLOCK_SIZE = [[128, 128]]
 E = [2, 8, 16, 24]  # [128, 256]
@@ -422,19 +422,23 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
 
 @pytest.mark.parametrize(
-    "M,N,K,E,topk,block_size,dtype,seed",
-    itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES,
-                      SEEDS))
+    "M,N,K,E,topk,seed",
+    itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, SEEDS))
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
-def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
-                                            dtype, seed):
+def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
+
+    block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
+    block_size = [block_m, block_m]
+    dtype = torch.bfloat16
 
     # only aligned sizes
-    if (N % 128 != 0 or K % 128 != 0 or topk > E or block_size != [128, 128]):
+    if (N % block_m != 0 or K % block_m != 0 or topk > E):
         pytest.skip(
-            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}, "
-            f"block_size={block_size}")
+            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
+
+    if (N <= 512):
+        pytest.skip("Skipping N <= 512 until performance issues solved.")
 
     vllm_config = VllmConfig()
 
@@ -485,13 +489,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
 
         topk_weights, topk_ids = fused_topk(a, score.float(), topk, False)
 
-        out = deep_gemm_moe_fp8(a,
-                                w1,
-                                w2,
-                                w1_s,
-                                w2_s,
-                                topk_weights,
-                                topk_ids)
+        out = deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids)
 
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
