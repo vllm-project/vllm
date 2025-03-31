@@ -490,8 +490,24 @@ def get_pip_packages(run_lambda, patterns=None):
                          if any(name in line for name in patterns))
 
     pip_version = 'pip3' if sys.version[0] == '3' else 'pip'
-    out = run_with_pip([sys.executable, '-mpip'])
 
+    try:
+        import importlib.util
+        pip_spec = importlib.util.find_spec('pip')
+        pip_available = pip_spec is not None
+    except ImportError:
+        pip_available = False
+    if pip_available:
+        out = run_with_pip([sys.executable, '-mpip'])
+    else:
+        try:
+            # check if user use uv
+            if os.environ.get("UV") is not None:
+                print("uv is set")
+                out = run_with_pip(["uv", 'pip'])
+        except Exception:
+            print("Could not collect pip list output (pip or uv module not available)")
+            raise
     return pip_version, out
 
 
