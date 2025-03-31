@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
 import pickle
-import socket
 import threading
 import time
 import typing
@@ -63,8 +62,6 @@ class P2pNcclPipe:
         self.recv_store_cv = threading.Condition()
         self.comm_cv = threading.Condition()
 
-        logger.info(f"P2pNcclPipe, {self._hostname=}, {self._port=}, {port_offset=}, {self.zmq_address=}, {self.http_address=}, {self.proxy_address=}")
-
         self._listener_thread = threading.Thread(
             target=self._listen_for_requests, daemon=True)
         self._listener_thread.start()
@@ -86,7 +83,8 @@ class P2pNcclPipe:
             sock.connect(f"tcp://{remote_address}")
             self.socks[remote_address] = sock
             if remote_address in self.comms:
-                logger.info("comm exists, remote_address: %s, comms: %s", remote_address, self.comms)
+                logger.info("comm exists, remote_address: %s, comms: %s",
+                            remote_address, self.comms)
                 return sock, self.comms[remote_address]
 
             unique_id = self.nccl.ncclGetUniqueId()
