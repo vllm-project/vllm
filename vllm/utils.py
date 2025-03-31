@@ -1338,7 +1338,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             if not model_in_cli and not model_in_config:
                 raise ValueError(
                     "No model specified! Please specify model either "
-                    "as a positional argument or in config file.")
+                    "as a positional argument or in a config file.")
 
             if model_in_cli:
                 # Model specified as positional arg, keep CLI version
