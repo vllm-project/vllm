@@ -33,6 +33,7 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
@@ -43,7 +44,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .blip2 import Blip2QFormerModel
-from .interfaces import SupportsLoRA, SupportsPP, SupportsV0Only
+from .interfaces import SupportsLoRA, SupportsPP, SupportsMultiModal
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 ###########################################################
@@ -378,6 +379,7 @@ class GraniteSpeechConformerBlock(nn.Module):
 # === Audio Inputs === #
 class GraniteSpeechAudioInputs(TypedDict):
     input_features: torch.Tensor
+    input_features_mask: torch.Tensor
     """Shape: `TODO`"""
 
 
@@ -395,7 +397,7 @@ class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
         return {"audio": self.get_max_audio_tokens()}
 
     def get_max_audio_tokens(self):
-        return 10000
+        return 10000 # should this be 16000000 because it's the max we get from the encoder? probably not right...
 
 
 class GraniteSpeechMultiModalProcessor(
@@ -499,7 +501,6 @@ class GraniteSpeechForConditionalGeneration(
         #SupportsMultiModal,
         SupportsPP,
         SupportsLoRA,
-        SupportsV0Only,
 ):
 
     packed_modules_mapping = {
@@ -542,10 +543,35 @@ class GraniteSpeechForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
+
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> Optional[GraniteSpeechAudioInputs]:
-        raise NotImplementedError(
-            "Audio input parsing and validation not implemented")
+        input_features = kwargs.pop('input_features', None)
+        input_features_mask = kwargs.pop('input_features_mask', None)
+        if input_features is None:
+            return None
+
+        if not isinstance(input_features, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of audio input features. "
+                             f"Got type: {type(input_features)}")
+
+        if not isinstance(input_features_mask, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of audio input features mask. "
+                             f"Got type: {type(input_features)}")
+
+        return GraniteSpeechAudioInputs(
+            input_features=input_features,
+            input_features_mask=input_features_mask,
+        )
+
+
+        def get_input_embeddings(
+            self,
+            input_ids: torch.Tensor,
+            multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        ) -> torch.Tensor:
+            raise NotImplementedError("Get input embeddings not implemented")
+
 
     def forward(
         self,
