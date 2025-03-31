@@ -1187,17 +1187,13 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         )
         pooling_size = processor.pooling_size
 
-        base_image_input_size = processor.base_image_input_size
-        base_image_input_d = processor.image_patch_size
+        image_token_length_w = processor.image_token_length_w
+        image_token_length_h = processor.image_token_length_h
 
-        crop_patches = base_image_input_size[0] // base_image_input_d
+        extra = image_token_length_w * image_token_length_h
+        joint = ((ncols + 1) // pooling_size) * ((nrows + 1) // pooling_size)
 
-        per_row = ncols // pooling_size + 1
-        joint = per_row * (nrows // pooling_size) + 2
-        image_token_length = (crop_patches + pooling_size - 1) // pooling_size
-        resize = (image_token_length + 1) * image_token_length + 2
-
-        return resize + joint
+        return extra + joint
 
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
