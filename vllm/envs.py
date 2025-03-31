@@ -390,6 +390,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "auto": use the default channel type
     # - "nccl": use NCCL for communication
     # - "shm": use shared memory and gRPC for communication
+    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
     lambda: os.getenv("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto"),
 
