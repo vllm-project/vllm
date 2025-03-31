@@ -383,13 +383,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_COMPILED_DAG":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
 
-    # If the env var is set, it uses NCCL for communication in
-    # Ray's Compiled Graph. This flag is ignored if
-    # VLLM_USE_RAY_COMPILED_DAG is not set.
-    "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
-    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
-                 ),
-
     # If the env var is set, Ray Compiled Graph uses the specified
     # channel type to communicate between workers belonging to
     # different pipeline-parallel stages.
