@@ -256,7 +256,8 @@ __global__ void sgl_moe_align_block_size_kernel(
     }
   }
 }
-
+// taken and modified from
+// https://github.com/sgl-project/sglang/commit/cdae77b03dfc6fec3863630550b45bbfc789f957
 // This kernel is used for experts more than 256, which is required to enable
 // shared expert fusion.
 template <typename scalar_t>
