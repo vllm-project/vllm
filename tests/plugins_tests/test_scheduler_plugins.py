@@ -6,7 +6,7 @@ from vllm.core.scheduler import Scheduler
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.scheduler import Scheduler as V1Scheduler
+from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
 
 

@@ -3,8 +3,6 @@
 
 Run `pytest tests/models/test_transformers.py`.
 """
-from contextlib import nullcontext
-
 import pytest
 
 from ..conftest import HfRunner, VllmRunner
@@ -42,7 +40,6 @@ def check_implementation(
     "model,model_impl",
     [
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
-        ("openai-community/gpt2", "transformers"),
         ("ArthurZ/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
     ])  # trust_remote_code=True by default
 def test_models(
@@ -52,20 +49,11 @@ def test_models(
     model: str,
     model_impl: str,
 ) -> None:
-
-    maybe_raises = nullcontext()
-    if model == "openai-community/gpt2" and model_impl == "transformers":
-        # Model is not backend compatible
-        maybe_raises = pytest.raises(
-            ValueError,
-            match="The Transformers implementation.*not compatible with vLLM")
-
-    with maybe_raises:
-        check_implementation(hf_runner,
-                             vllm_runner,
-                             example_prompts,
-                             model,
-                             model_impl=model_impl)
+    check_implementation(hf_runner,
+                         vllm_runner,
+                         example_prompts,
+                         model,
+                         model_impl=model_impl)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -84,7 +72,6 @@ def test_distributed(
         "meta-llama/Llama-3.2-1B-Instruct",
         {
             "quantization": "bitsandbytes",
-            "load_format": "bitsandbytes",
         },
     ),
 ])

@@ -665,6 +665,13 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
         return cast(BatchedTensorInputs, json_mapped)
 
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key)
+
+        for items in self._items_by_modality.values():
+            for item in items:
+                item.pop(key, None)
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False
@@ -736,7 +743,7 @@ class MultiModalInputs(TypedDict):
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: NotRequired[Optional["MultiModalHashDict"]]
+    mm_hashes: Optional["MultiModalHashDict"]
     """The hashes of the multi-modal data."""
 
     mm_placeholders: MultiModalPlaceholderDict

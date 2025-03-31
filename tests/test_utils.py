@@ -2,6 +2,8 @@
 # ruff: noqa
 
 import asyncio
+import hashlib
+import pickle
 import socket
 from collections.abc import AsyncIterator
 from unittest.mock import patch
@@ -14,7 +16,8 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
                         PlaceholderModule, StoreBoolean, bind_kv_cache,
                         deprecate_kwargs, get_open_port, memory_profiling,
-                        merge_async_iterators, supports_kw, swap_dict_values)
+                        merge_async_iterators, sha256, supports_kw,
+                        swap_dict_values)
 
 from .utils import create_new_process_for_each_test, error_on_warning
 
@@ -507,3 +510,22 @@ def test_model_specification(parser_with_config,
     assert args.trust_remote_code is True
     assert args.multi_step_stream_outputs is False
     assert args.port == 12312
+
+
+@pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
+                                    (None, bool, [1, 2, 3])])
+@pytest.mark.parametrize("output", [0, 1, 2])
+def test_sha256(input: tuple, output: int):
+    hash = sha256(input)
+    assert hash is not None
+    assert isinstance(hash, int)
+    assert hash != 0
+
+    bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    assert hash == int.from_bytes(hashlib.sha256(bytes).digest(), byteorder="big")
+
+    # hashing again, returns the same value
+    assert hash == sha256(input)
+
+    # hashing different input, returns different value
+    assert hash != sha256(input + (1, ))
