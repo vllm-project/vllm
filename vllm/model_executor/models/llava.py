@@ -35,7 +35,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import flatten_2d_lists
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -73,11 +72,8 @@ class PixtralHFImagePixelInputs(TypedDict):
     A boolean mask indicating which image embeddings correspond
     to patch tokens.
     
-    Shape: `(batch_size, num_images, num_embeds)`
+    Shape: `(batch_size * num_images, num_embeds)`
     """
-
-    num_embeds: Union[torch.Tensor, list[torch.Tensor]]
-    """Shape: `(batch_size, num_images)`"""
 
 
 class LlavaImageEmbeddingInputs(TypedDict):
@@ -358,15 +354,10 @@ class PixtralHFMultiModalProcessor(
                     image_height=pixel_value.shape[-2],
                 ) for pixel_value in processed_outputs["pixel_values"]
             ]
-            num_embeds = torch.tensor([(ncols + 1) * nrows
-                                       for ncols, nrows in tile_sizes])
-            # Each image may result to masks of different sizes, so we need to
-            # later use `num_embeds` to get per-image masks.
             embed_is_patch = [
                 torch.tensor(([True] * ncols + [False]) * nrows)
                 for ncols, nrows in tile_sizes
             ]
-            processed_outputs["num_embeds"] = num_embeds
             processed_outputs["embed_is_patch"] = embed_is_patch
 
         return processed_outputs
@@ -378,7 +369,6 @@ class PixtralHFMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            num_embeds=MultiModalFieldConfig.batched("image"),
             embed_is_patch=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
@@ -627,16 +617,12 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                     raise ValueError("Incorrect type of embed_is_patch. "
                                      f"Got type: {type(embed_is_patch)}")
 
-                num_embeds = kwargs.pop("num_embeds")
-                if not isinstance(num_embeds, (torch.Tensor, list)):
-                    raise ValueError("Incorrect type of num_embeds. "
-                                     f"Got type: {type(num_embeds)}")
+                embed_is_patch = flatten_bn(embed_is_patch)
 
                 return PixtralHFImagePixelInputs(
                     type="pixel_values_pixtral",
                     pixel_values=flatten_bn(pixel_values),
                     embed_is_patch=embed_is_patch,
-                    num_embeds=num_embeds,
                 )
 
             return LlavaImagePixelInputs(
@@ -728,19 +714,16 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         if image_input is None:
             return None
 
-        vision_embeddings = self._process_image_input(image_input)
+        image_features = self._process_image_input(image_input)
 
-        if (kwargs.get("v0_path", False)
-                or image_input["type"] != "pixel_values_pixtral"):
+        if image_input["type"] != "pixel_values_pixtral":
             # The path is used for pixtral (V0 only) and llava (V0/V1)
-            return vision_embeddings
+            return image_features
 
-        return flatten_2d_lists(
-            scatter_patch_features(*args) for args in zip(
-                vision_embeddings,
-                image_input["num_embeds"],
-                image_input["embed_is_patch"],
-            ))
+        return scatter_patch_features(
+            image_features,
+            image_input["embed_is_patch"],
+        )
 
     def get_input_embeddings(
         self,
@@ -806,7 +789,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
-            kwargs.update({"v0_path": True})
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
@@ -886,6 +868,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
         mm_kwargs = result["mm_kwargs"]
+        mm_hashes = result["mm_hashes"]
 
         # We reimplement the functionality of MLlavaProcessor from
         # https://github.com/TIGER-AI-Lab/Mantis.git
@@ -934,6 +917,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
 
