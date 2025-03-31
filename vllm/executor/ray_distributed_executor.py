@@ -140,9 +140,26 @@ class RayDistributedExecutor(DistributedExecutorBase):
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
-        def retain_envs(var_name):
-            retain_var_list = ['GLOO_SOCKET_IFNAME']
-            return ('HPU' in var_name or 'RAY' in var_name or 'VLLM' in var_name or var_name in retain_var_list)
+        def should_sync_env(name):
+            """Check if an environment variable should be synchronized.
+
+            Args:
+            name (str): The name of the environment variable.
+
+            Returns:
+            bool: True if the environment variable should be synchronized, False otherwise.
+            """
+            forced_envs = set()
+            excluded_envs = {'VLLM_HOST_IP', 'GLOO_SOCKET_IFNAME'}
+            return (
+            name not in excluded_envs and
+            (
+                'HPU' in name or
+                'RAY' in name or
+                'VLLM' in name or
+                name in forced_envs
+            )
+            )
 
         if (self.parallel_config.tensor_parallel_size == 1
                 and self.parallel_config.pipeline_parallel_size == 1):
@@ -209,7 +226,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
                                            rpc_rank=rank)
             else:
-                runtime_env_vars = {k:v for k, v in os.environ.items() if retain_envs(k)}
+                runtime_env_vars = {k:v for k, v in os.environ.items() if should_sync_env(k)}
                 logger.info(f"setting ray env with {runtime_env_vars}")
                 worker = ray.remote(
                     num_cpus=0,
