@@ -13,6 +13,7 @@ import torch_xla.runtime as xr
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -581,12 +582,11 @@ class TPUModelRunner:
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
-                kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
             )
         num_reqs = self.input_batch.num_reqs
-        selected_token_ids = self.model.compute_logits(hidden_states,
-                                                       logits_indices, None)
+        selected_token_ids = self.compute_logits(hidden_states, logits_indices,
+                                                 None)
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
         # Then, let's update the cache state.
@@ -669,15 +669,10 @@ class TPUModelRunner:
         model = model.eval()
         xm.mark_step()
         xm.wait_device_ops()
-        model = ModelWrapperV1(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        self.model = model
 
     def _dummy_run(
         self,
-        kv_caches,
         num_tokens: int,
     ) -> None:
         if self.is_multimodal_model:
@@ -732,7 +727,6 @@ class TPUModelRunner:
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=position_ids,
-                kv_caches=kv_caches,
                 inputs_embeds=inputs_embeds,
             )
             num_reqs = _get_padded_num_reqs_with_upper_limit(
@@ -749,7 +743,7 @@ class TPUModelRunner:
                 )
                 torch._dynamo.mark_dynamic(hidden_states, 0)
                 torch._dynamo.mark_dynamic(logits_indices, 0)
-                self.model.compute_logits(hidden_states, logits_indices, None)
+                self.compute_logits(hidden_states, logits_indices, None)
                 if num_reqs >= self.max_num_reqs:
                     break
                 num_reqs = _get_padded_num_reqs_with_upper_limit(
@@ -763,7 +757,7 @@ class TPUModelRunner:
         start = time.perf_counter()
         num_tokens = 16
         while True:
-            self._dummy_run(self.kv_caches, num_tokens)
+            self._dummy_run(num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
             xm.wait_device_ops()
@@ -812,57 +806,23 @@ class TPUModelRunner:
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
-
-class ModelWrapperV1(nn.Module):
-
-    def __init__(self, model: nn.Module):
-        super().__init__()
-        self.model = model
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: list[torch.Tensor],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Executes the forward pass of the model and samples the next token.
-
-        Args:
-            input_ids: The input token IDs of shape [num_tokens].
-            positions: The input position IDs of shape [num_tokens].
-            kv_caches: The key and value caches. They can be None during the
-                memory profiling at initialization.
-            inputs_embeds: The input embeddings of shape [num_tokens,
-                hidden_size]. It is used for multimodal models.
-        """
-
-        assert self.model is not None
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            inputs_embeds=inputs_embeds,
-        )
-
-        return hidden_states
-
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        logits_indices: torch.Tensor,
-        sampling_metadata,
-    ) -> Optional[torch.Tensor]:
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       logits_indices: torch.Tensor, sampling_metadata):
         hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
         selected_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
         return selected_token_ids
 
-    def get_multimodal_embeddings(self, *args, **kwargs):
-        return self.model.get_multimodal_embeddings(*args, **kwargs)
-
-    def get_input_embeddings(self, *args, **kwargs):
-        return self.model.get_input_embeddings(*args, **kwargs)
+    def reset_dynamo_cache(self):
+        # TODO(lsy323): Support multimodal models, the backbone language model
+        # is stored in a different member.
+        compiled_model = self.model.model
+        if isinstance(compiled_model, TorchCompileWrapperWithCustomDispatcher):
+            logger.info("Clear dynamo cache and cached dynamo bytecode.")
+            torch._dynamo.eval_frame.remove_from_cache(
+                compiled_model.original_code_object)
+            compiled_model.compiled_codes.clear()
 
 
 def _get_padded_number(n: int, multiple: int) -> int:
