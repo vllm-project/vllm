@@ -870,7 +870,7 @@ class TPUModelRunner:
             self.kv_caches)
 
     def reset_dynamo_cache(self):
-        # TODO(lsy323): Support multimodal model, the backbone language model
+        # TODO(lsy323): Support multimodal models, the backbone language model
         # is stored in a different member.
         compiled_model = self.model.model
         if isinstance(compiled_model, TorchCompileWrapperWithCustomDispatcher):
