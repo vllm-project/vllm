@@ -10,7 +10,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk, moe_align_block_size)
+    fused_topk, moe_align_block_size, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
@@ -37,7 +37,7 @@ K = [256, 4096, 5120, 3884, 13824, 16384]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
 M_moe = [1, 2, 7, 83, 128, 512, 2048]
-M_moe_dg = [1, 128, 192, 512, 1335, 2048]
+M_moe_dg = [128, 192, 512, 1335, 2048]
 N_moe = [128, 256, 4608]  # [13824]
 K_moe = [256, 512, 7168]  # [13824]
 BLOCK_SIZE = [[128, 128]]
@@ -483,17 +483,15 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
             ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
                                                topk, block_size)
 
-        out = fused_moe(a,
-                        w1,
-                        w2,
-                        score,
-                        topk,
-                        renormalize=False,
-                        use_fp8_w8a8=True,
-                        w1_scale=w1_s,
-                        w2_scale=w2_s,
-                        block_shape=block_size,
-                        allow_deep_gemm=True)
+        topk_weights, topk_ids = fused_topk(a, score.float(), topk, False)
+
+        out = deep_gemm_moe_fp8(a,
+                                w1,
+                                w2,
+                                w1_s,
+                                w2_s,
+                                topk_weights,
+                                topk_ids)
 
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
