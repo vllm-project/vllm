@@ -69,6 +69,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
+        from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
+        set_cpu_offload_max_bytes(
+            int(self.cache_config.cpu_offload_gb * 1024**3))
+
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
