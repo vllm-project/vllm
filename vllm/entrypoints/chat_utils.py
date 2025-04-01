@@ -487,7 +487,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|endoftext10|>"  # 200010 (see vocab.json in hf model)
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
-            if model_type in ("blip-2", "fuyu", "paligemma", "pixtral"):
+            if model_type in ("blip-2", "fuyu", "paligemma", "pixtral",
+                              "mistral3"):
                 # These models do not use image tokens in the prompt
                 return None
             if model_type == "qwen":

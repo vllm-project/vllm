@@ -85,7 +85,7 @@ class EngineCore:
         # This warning can be removed once the V1 Scheduler interface is
         # finalized and we can maintain support for scheduler classes that
         # implement it
-        if Scheduler is not V1Scheduler:
+        if Scheduler is V1Scheduler:
             logger.warning(
                 "Using configured V1 scheduler class %s. "
                 "This scheduler interface is not public and "
