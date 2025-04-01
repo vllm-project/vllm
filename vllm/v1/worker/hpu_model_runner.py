@@ -372,7 +372,7 @@ class HpuModelAdapter:
                               module,
                               parent_module=None,
                               module_name=None):
-        if isinstance(module, torch.nn.Modulelist):
+        if isinstance(module, torch.nn.ModuleList):
             for children_name, children_module in module.named_children():
                 self._compile_region(module, children_name, children_module)
         elif any(
