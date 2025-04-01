@@ -355,7 +355,7 @@ INFO 08-02 17:38:43 hpu_executor.py:91] init_cache_engine took 37.92 GiB of devi
       - batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`): `min(max_num_seqs, 64)`
       - sequence length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
       - sequence length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
-      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
+      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `1024`
 
     - Decode:
 
@@ -364,10 +364,22 @@ INFO 08-02 17:38:43 hpu_executor.py:91] init_cache_engine took 37.92 GiB of devi
       - batch size max (`VLLM_DECODE_BS_BUCKET_MAX`): `max_num_seqs`
       - block size min (`VLLM_DECODE_BLOCK_BUCKET_MIN`): `block_size`
       - block size step (`VLLM_DECODE_BLOCK_BUCKET_STEP`): `block_size`
-      - block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max(128, (max_num_seqs*max_model_len)/block_size)`
+      - block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max(128, (max_num_seqs*2048)/block_size)`
+  - Recommended Values:
+    - Prompt:
+
+      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
+    - Decode:
+
+      - block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max(128, (max_num_seqs*max_model_len/block_size)`
+
+> [!NOTE]
+> Model config may report very high max_model_len,
+> please set it to max input_tokens+output_tokens rounded up to multiple of block_size as per actual requirements.
+
 - `VLLM_HANDLE_TOPK_DUPLICATES`, if ``true`` - handles duplicates that are outside of top-k. `false` by default.
 - `VLLM_CONFIG_HIDDEN_LAYERS` - configures how many hidden layers to run in a HPUGraph for model splitting among hidden layers when TP is 1. The default is 1.
-   It helps improve throughput by reducing inter-token latency limitations in some models.
+    It helps improve throughput by reducing inter-token latency limitations in some models.
 
 Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM execution:
 

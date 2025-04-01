@@ -1,0 +1,24 @@
+name: Sync Branches
+on:
+    push:
+        branches:
+            - habana_main
+jobs:
+    sync-branches:
+        runs-on: generic-runner
+        steps:
+            - name: Checkout source branch
+              uses: actions/checkout@v4
+              with:
+                ref: habana_main
+                token: ${{ secrets.GH_PAT }}
+            - name: Pull target branch
+              run: |
+                git fetch origin master_next
+                git checkout master_next
+            - name: Overwrite source branch into target branch
+              run: |
+                git reset --hard habana_main
+            - name: Push changes to target branch
+              run: |
+                git push origin master_next --force

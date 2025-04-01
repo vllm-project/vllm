@@ -4,6 +4,7 @@
 # Copyright (C) 2024-2025 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -11,8 +12,7 @@ import torch
 import vllm_hpu_extension.kernels as kernels
 import vllm_hpu_extension.ops as ops
 from vllm_hpu_extension.flags import enabled_flags
-from vllm_hpu_extension.utils import (Matmul, ModuleFusedSDPA, Softmax,
-                                      VLLMKVCache)
+from vllm_hpu_extension.utils import Matmul, Softmax, VLLMKVCache
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
@@ -87,7 +87,6 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     cross_slot_mapping: Optional[torch.Tensor] = None
     cross_block_mapping: Optional[torch.Tensor] = None
     cross_block_groups: Optional[torch.Tensor] = None
-    cross_block_scales: Optional[torch.Tensor] = None
     cross_block_usage: Optional[torch.Tensor] = None
     cross_attn_bias: Optional[torch.Tensor] = None
 
@@ -134,9 +133,16 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.block2batch_matmul = Matmul()
         self.k_cache = VLLMKVCache()
         self.v_cache = VLLMKVCache()
-        HPUFusedSDPA = kernels.fsdpa()
-        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
-            else ModuleFusedSDPA(HPUFusedSDPA)
+        self.fused_scaled_dot_product_attention = kernels.fsdpa()
+
+        self.prefill_impl = 'naive'
+        if "flex_attention" in enabled_flags():
+            self.prefill_impl = 'flex'
+        if "fsdpa" in enabled_flags():
+            assert alibi_slopes is None, \
+                'Prefill with FusedSDPA not supported with alibi slopes!'
+            self.prefill_impl = 'fsdpa'
+
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
         self.alibi_slopes = alibi_slopes
@@ -146,20 +152,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             self.alibi_slopes = alibi_slopes_tensor
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        self.prefill_use_fusedsdpa = "fsdpa" in enabled_flags()
-        if self.prefill_use_fusedsdpa:
-            assert alibi_slopes is None, \
-                'Prefill with FusedSDPA not supported with alibi slopes!'
-            try:
-                from habana_frameworks.torch.hpex.kernels import FusedSDPA
-                self.fused_scaled_dot_product_attention = ModuleFusedSDPA(
-                    FusedSDPA)
-            except ImportError:
-                logger().warning("Could not import HPU FusedSDPA kernel. "
-                                 "vLLM will use native implementation.")
-
-        self.prefill_use_flex_attention = "flex_attention" in enabled_flags()
 
         suppored_head_sizes = HPUPagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
@@ -215,9 +207,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         value = value.view(-1, self.num_kv_heads, self.head_size)
         block_indices = attn_metadata.block_indices
         block_offsets = attn_metadata.block_offsets
+        key_cache = None
+        value_cache = None
         if attn_metadata.is_prompt and self.attn_type \
-            is not AttentionType.ENCODER_ONLY \
-            and attn_metadata.block_list is None:
+                is not AttentionType.ENCODER_ONLY \
+            and (attn_metadata.block_list is None
+                 if os.getenv("VLLM_USE_V1") == 1 else True):
             key = key.unflatten(0, (block_indices.size(0), -1))
             value = value.unflatten(0, (block_indices.size(0), -1))
         if kv_cache is not None and isinstance(kv_cache, tuple):
@@ -238,46 +233,24 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             kv_shape = (batch_size, seq_len_kv, self.num_kv_heads,
                         self.head_size)
 
+            attn_bias = attn_metadata.attn_bias
+            if attn_bias is not None and self.alibi_slopes is not None:
+                position_bias = _make_alibi_bias(self.alibi_slopes,
+                                                 self.num_kv_heads,
+                                                 attn_bias.dtype,
+                                                 attn_bias.shape[-1])
+                attn_bias = attn_bias.tile((1, self.num_kv_heads, 1, 1))
+                attn_bias.add_(position_bias)
             if attn_metadata is None or attn_metadata.block_list is None:
-                if (not self.prefill_use_fusedsdpa
-                        and not self.prefill_use_flex_attention):
-                    # TODO: move this outside of model
-                    assert attn_metadata.attn_bias is not None, \
-                            'attn_bias must be set before calling model.forward'
-                    attn_bias = attn_metadata.attn_bias
-                    if self.alibi_slopes is not None:
-                        position_bias = _make_alibi_bias(
-                            self.alibi_slopes, self.num_kv_heads,
-                            attn_bias.dtype, attn_bias.shape[-1])
-                        attn_bias = attn_bias.tile(
-                            (1, self.num_kv_heads, 1, 1))
-                        attn_bias.add_(position_bias)
-                else:
-                    attn_bias = attn_metadata.attn_bias
-
-                if not self.prefill_use_flex_attention:
-                    out = ops.prompt_attention(
-                        query.view(query_shape),
-                        key.view(kv_shape),
-                        value.view(kv_shape),
-                        attn_bias=attn_bias,
-                        p=0.0,
-                        scale=self.scale,
-                        matmul_qk_op=self.matmul_qk,
-                        softmax_op=self.softmax,
-                        matmul_av_op=self.matmul_av,
-                        valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                        fsdpa_op=self.fused_scaled_dot_product_attention
-                        if self.prefill_use_fusedsdpa else None,
-                    )
-                else:
-                    out = ops.flex_attention(
-                        query.view(query_shape),
-                        key.view(kv_shape),
-                        value.view(kv_shape),
-                        scale=self.scale,
-                    )
-
+                out = ops.prompt_attention(
+                    impl=self.prefill_impl,
+                    query=query.view(query_shape),
+                    key=key.view(kv_shape),
+                    value=value.view(kv_shape),
+                    is_causal=True,
+                    attn_bias=attn_bias,
+                    valid_seq_lengths=attn_metadata.seq_lens_tensor,
+                    **self.common_attention_args())
             else:
                 # TODO: enable FusedSDPA
                 out = HPUPagedAttention.forward_prefix(
@@ -288,12 +261,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                     value_cache=value_cache,
                     block_list=attn_metadata.block_list,
                     attn_bias=attn_metadata.attn_bias,
-                    scale=self.scale,
-                    matmul_qk_op=self.matmul_qk,
-                    matmul_av_op=self.matmul_av,
-                    softmax_op=self.softmax,
-                    keys_fetch_func=self.k_cache.fetch_from_cache,
-                    values_fetch_func=self.v_cache.fetch_from_cache)
+                    **self.common_attention_args())
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
@@ -304,17 +272,25 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 block_list=attn_metadata.block_list,
                 block_mapping=attn_metadata.block_mapping,
                 block_bias=attn_metadata.attn_bias,
-                block_scales=attn_metadata.block_scales,
                 block_groups=attn_metadata.block_groups,
-                scale=self.scale,
-                matmul_qk_op=self.matmul_qk,
-                matmul_av_op=self.matmul_av,
-                batch2block_matmul_op=self.batch2block_matmul,
-                block2batch_matmul_op=self.block2batch_matmul,
-                keys_fetch_func=self.k_cache.fetch_from_cache,
-                values_fetch_func=self.v_cache.fetch_from_cache)
+                **self.common_attention_args())
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
+
+    def common_attention_args(self):
+        fsdpa_op = self.fused_scaled_dot_product_attention.apply \
+            if self.fused_scaled_dot_product_attention is not None else None
+        return {
+            'scale': self.scale,
+            'matmul_qk_op': self.matmul_qk,
+            'matmul_av_op': self.matmul_av,
+            'batch2block_matmul_op': self.batch2block_matmul,
+            'block2batch_matmul_op': self.block2batch_matmul,
+            'fsdpa_op': fsdpa_op,
+            'keys_fetch_func': self.k_cache.fetch_from_cache,
+            'values_fetch_func': self.v_cache.fetch_from_cache,
+            'softmax_op': self.softmax,
+        }
 
     def forward_encoder_decoder(
         self,
@@ -366,13 +342,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            if (key is not None) and (value is not None):
-                # During cross-attention decode, key & value will be None,
-                # we don't need to cache them.
-                key_cache = self.k_cache(key, key_cache, block_indices,
-                                         block_offsets)
-                value_cache = self.v_cache(value, value_cache, block_indices,
-                                           block_offsets)
+            key_cache = self.k_cache(key, key_cache, block_indices,
+                                     block_offsets)
+            value_cache = self.v_cache(value, value_cache, block_indices,
+                                       block_offsets)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -380,34 +353,19 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
             query_shape = (batch_size, -1, self.num_heads, self.head_size)
             kv_shape = (batch_size, -1, self.num_kv_heads, self.head_size)
-            # Just a workaround, to make ops.prompt_attention go into the
-            # torch ops assembly path.
-            # TODO: add new prompt_attention op in vllm_hpu_extension
-            # which calls FusedSDPA with causal = False.
-            attn_bias = torch.zeros((batch_size, 1, 1, 1),
-                                    device=query.device,
-                                    dtype=torch.bool)
-
-            out = ops.prompt_attention(
-                query.view(query_shape),
-                key.view(kv_shape),
-                value.view(kv_shape),
-                attn_bias=attn_bias,
-                p=0.0,
-                scale=self.scale,
-                matmul_qk_op=self.matmul_qk,
-                softmax_op=self.softmax,
-                matmul_av_op=self.matmul_av,
-                fsdpa_op=self.fused_scaled_dot_product_attention
-                if self.prefill_use_fusedsdpa else None,
-            )
+            out = ops.prompt_attention(impl=self.prefill_impl,
+                                       query=query.view(query_shape),
+                                       key=key.view(kv_shape),
+                                       value=value.view(kv_shape),
+                                       attn_bias=None,
+                                       is_causal=False,
+                                       **self.common_attention_args())
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Enc/dec cross-attention KVs match encoder sequence length;
             # cross-attention utilizes special "cross" block tables
             block_list = attn_metadata.cross_block_list
             block_mapping = attn_metadata.cross_block_mapping
-            block_scales = attn_metadata.cross_block_scales
             block_groups = attn_metadata.cross_block_groups
             attn_bias = attn_metadata.cross_attn_bias
             # Decoding run.
@@ -418,15 +376,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 block_list=block_list,
                 block_mapping=block_mapping,
                 block_bias=attn_bias,
-                block_scales=block_scales,
                 block_groups=block_groups,
-                scale=self.scale,
-                matmul_qk_op=self.matmul_qk,
-                matmul_av_op=self.matmul_av,
-                batch2block_matmul_op=self.batch2block_matmul,
-                block2batch_matmul_op=self.block2batch_matmul,
-                keys_fetch_func=self.k_cache.fetch_from_cache,
-                values_fetch_func=self.v_cache.fetch_from_cache)
+                **self.common_attention_args())
         # Reshape the output tensor.
         return output.view(batch_size, -1, hidden_size)
 

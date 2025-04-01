@@ -1,0 +1,33 @@
+name: Clean Temporary Branches
+on:
+  schedule:
+    - cron:  "0 0 */14 * 0" 
+  workflow_dispatch:  
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install GitHub CLI
+        run: |
+          sudo apt update
+          sudo apt install -y gh
+
+      - name: Delete branches with specific prefix
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          PREFIX: "pr-"
+        run: |
+          gh api repos/${{ github.repository }}/branches \
+          --paginate \
+          | jq -r ".[].name" \
+          | grep "^$PREFIX" \
+          | while read -r branch; do
+              echo "Deleting branch: ${branch}"
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$branch"
+            done

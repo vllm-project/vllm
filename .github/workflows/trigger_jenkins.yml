@@ -297,9 +297,9 @@ jobs:
           with:
             fetch-depth: 0
             token: ${{ secrets.GH_PAT }}
-        - name: Delete Temp Branch
-          run: |
-              git push origin --delete ${{ needs.read_codeowners.outputs.pr_branch }}
+        # - name: Delete Temp Branch
+        #   run: |
+        #       git push origin --delete ${{ needs.read_codeowners.outputs.pr_branch }}
         - name: Check Test Results
           run: |
             test_result="${{ needs.TestRun.result }}"

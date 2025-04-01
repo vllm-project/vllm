@@ -1,0 +1,3 @@
+Meta-Llama-3.1-8B-Instruct-fp8.yaml
+granite-8b-fp8.yaml
+granite-20b-fp8.yaml

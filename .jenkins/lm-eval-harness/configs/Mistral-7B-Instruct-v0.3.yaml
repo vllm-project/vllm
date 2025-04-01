@@ -1,0 +1,11 @@
+model_name: "/mnt/weka/data/pytorch/mistral/Mistral-7B-Instruct-v0.3"
+tasks:
+- name: "gsm8k_cot"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.4905
+  - name: "exact_match,flexible-extract"
+    value: 0.5284
+limit: 500
+num_fewshot: 8
+dtype: "bfloat16"
