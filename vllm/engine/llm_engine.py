@@ -1107,19 +1107,25 @@ class LLMEngine:
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
                 if self.model_config.task == "generate" and \
-                        output[0].hidden_states is not None:
+                        outputs_by_sequence_group[0][0].hidden_states is not None:
                     return_hidden_states = True
-                    hidden_states = []
-                    for k in range(len(output)):
-                        hidden_states.append(
-                            outputs_by_sequence_group[i][k].hidden_states)
+                    dev = outputs_by_sequence_group[i][0].hidden_states.device
+                    dim1 = len(outputs_by_sequence_group[i])
+                    dim2 = outputs_by_sequence_group[i][
+                            0].hidden_states.shape[0]
+                    dim3 = outputs_by_sequence_group[i][
+                            0].hidden_states.shape[1]
+                    hidden_states = torch.zeros(dim1, dim2, dim3, device = dev)
+                    for k in range(dim1):
+                        hidden_states[k] = outputs_by_sequence_group[i][
+                            k].hidden_states
             else:
                 output = [outputs_by_sequence_group[0][i]]
                 if self.model_config.task == "generate" and \
                         outputs_by_sequence_group[0].hidden_states is not None:
                     return_hidden_states = True
-                    hidden_states = outputs_by_sequence_group[0].hidden_states
-
+                    hidden_states = outputs_by_sequence_group[
+                        0].hidden_states 
             if not is_async:
                 if self.scheduler_config.is_multi_step:
                     # Updates happen only if the sequence is prefill
