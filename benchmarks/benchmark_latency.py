@@ -51,7 +51,7 @@ def main(args: argparse.Namespace):
 
     sampling_params = SamplingParams(
         n=args.n,
-        temperature=1.0,
+        temperature=0,
         top_p=1.0,
         ignore_eos=True,
         max_tokens=args.output_len,
