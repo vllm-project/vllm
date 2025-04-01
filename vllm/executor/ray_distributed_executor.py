@@ -318,7 +318,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         n_ips = len(all_ips)
         n_nodes = len(node_workers)
 
-        if n_nodes != n_ips:
+        if self.parallel_config.data_parallel_size <= 1 and n_nodes != n_ips:
             raise RuntimeError(
                 f"Every node should have a unique IP address. Got {n_nodes}"
                 f" nodes with node ids {list(node_workers.keys())} and "

@@ -370,7 +370,7 @@ class MPClient(EngineCoreClient):
         # Paths and sockets for IPC.
         self.output_path = get_open_zmq_ipc_path()
 
-        new_core_engine = lambda index, local_dp_rank=None: CoreEngine(
+        new_core_engine = lambda index, local_dp_rank: CoreEngine(
             vllm_config, executor_class, log_stats, self.ctx, self.output_path,
             index, local_dp_rank)
 
@@ -393,9 +393,8 @@ class MPClient(EngineCoreClient):
 
         # Default case - single core engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
-        local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         core_engine = new_core_engine(
-            dp_rank, local_dp_rank if local_dp_rank is not None else dp_rank)
+            dp_rank, dp_rank)
         core_engines.append(core_engine)
         self.core_engine = core_engine
 
@@ -734,11 +733,12 @@ class DPAsyncMPClient(AsyncMPClient):
         else:
             # Send request to chosen engine and dp start loop
             # control message to all other engines.
-            self.num_engines_running += len(self.core_engines)
+            engines = [engine for engine in self.core_engines if engine is chosen_engine or not engine.num_reqs_in_flight]
+            self.num_engines_running += len(engines)
             await asyncio.gather(*[
                 engine.send_multipart(msg if engine is
                                       chosen_engine else self.start_dp_msg)
-                for engine in self.core_engines
+                for engine in engines
             ])
 
         self._ensure_output_queue_task()
@@ -761,11 +761,11 @@ class DPAsyncMPClient(AsyncMPClient):
                 # If there are requests in flight here, they must have
                 # been sent after the engines paused. We must make
                 # sure to start the other engines:
-                self.num_engines_running = len(self.core_engines)
+                engines = [engine for engine in self.core_engines if not engine.num_reqs_in_flight]
+                self.num_engines_running += len(engines)
                 coros = [
                     engine.send_multipart(self.start_dp_msg)
-                    for engine in self.core_engines
-                    if not engine.num_reqs_in_flight
+                    for engine in engines
                 ]
                 if coros:
                     await asyncio.gather(*coros)

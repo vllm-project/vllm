@@ -184,7 +184,7 @@ def _verify_bundles(placement_group: "PlacementGroup",
         node_id_to_bundle[node_id].append(bundles[bundle_idx])
     driver_node_id = ray.get_runtime_context().get_node_id()
 
-    if driver_node_id not in node_id_to_bundle:
+    if parallel_config.data_parallel_size <= 1 and (driver_node_id not in node_id_to_bundle):
         raise RuntimeError(
             f"driver node id {driver_node_id} is not included in a placement "
             f"group {placement_group.id}. Node id -> bundles "
@@ -351,8 +351,49 @@ def initialize_ray_cluster(
         # vLLM engine is also a worker to execute model with an accelerator,
         # so it requires to have the device in a current node. Check if
         # the current node has at least one device.
-        current_ip = get_ip()
-        current_node_id = ray.get_runtime_context().get_node_id()
+
+
+        head_ip = get_ip()
+
+        def sort_by_driver_then_worker_ip(ip_and_id):
+            ip = ip_and_id[0]
+            return (0 if ip == head_ip else 1, ip)
+
+        def _get_gpu_mapping():
+            nodes = ray.nodes()
+            node_gpu_mapping = []
+            for node_info in nodes:
+                if node_info.get("alive", False):
+                    node_id = node_info["NodeID"]
+                    ip = node_info["NodeManagerAddress"]
+                    num_gpus = node_info["Resources"].get("GPU", 0)
+                    node_gpu_mapping.append((ip, node_id, int(num_gpus)))
+            node_gpu_mapping = sorted(node_gpu_mapping, key=sort_by_driver_then_worker_ip)
+            return node_gpu_mapping
+
+        def _find_target_gpu(node_gpu_mapping, dp_rank):
+            accumulated_gpus = 0
+            world_size = parallel_config.world_size
+            logger.info(f"for initialize_ray_cluster, world_size = {world_size}")
+            for ip, node_id, num_gpus in node_gpu_mapping:
+                if dp_rank * world_size < accumulated_gpus + num_gpus:
+                    gpu_index = dp_rank * world_size - accumulated_gpus
+                    return (ip, node_id, gpu_index)
+                accumulated_gpus += num_gpus
+            raise ValueError(f"dp_rank {dp_rank} exceeds the num_gpus {accumulated_gpus}")
+
+        node_gpu_mapping = _get_gpu_mapping()
+        current_dp_rank = parallel_config.data_parallel_rank
+        selected_node_ip, selected_node_id, gpu_index = _find_target_gpu(node_gpu_mapping, current_dp_rank)
+        logger.debug(f"selected_node_ip = {selected_node_ip}, selected_node_id = {selected_node_id}, gpu_index = {gpu_index}")
+
+        current_ip = selected_node_ip
+        current_node_id = selected_node_id
+
+        # current_ip = get_ip()
+        # current_node_id = ray.get(get_remote_node_id.remote())
+
+
         current_node_resource = available_resources_per_node()[current_node_id]
         if current_node_resource.get(device_str, 0) < 1:
             raise ValueError(

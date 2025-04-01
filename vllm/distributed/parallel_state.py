@@ -828,11 +828,12 @@ def init_distributed_environment(
         # adjust the world size to take into account data parallelism
         world_size = parallel_config.world_size_across_dp
         ip = parallel_config.data_parallel_master_ip
-        port = parallel_config.get_next_dp_init_port()
+        # port = parallel_config.get_next_dp_init_port()
+        port = parallel_config.data_parallel_master_port
         distributed_init_method = f"tcp://{ip}:{port}"  # noqa
         logger.info(
-            "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
-            world_size, rank, distributed_init_method)
+            "Adjusting world_size=%d rank=%d local_rank=%d distributed_init_method=%s for DP",
+            world_size, rank, local_rank, distributed_init_method)
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "

@@ -1520,6 +1520,7 @@ class ParallelConfig:
         if self.data_parallel_size > 1:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
+            self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             # TODO multi-node
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
@@ -1539,7 +1540,7 @@ class ParallelConfig:
         ray_only_devices: list[str] = []
         from vllm.platforms import current_platform
         if (current_platform.device_type in ray_only_devices
-                and self.world_size > 1):
+                and self.world_size_across_dp > 1):
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
             if self.distributed_executor_backend != "ray":
@@ -1547,18 +1548,20 @@ class ParallelConfig:
                     f"{current_platform.device_type.upper()} backend only "
                     "supports Ray for distributed inference.")
 
-        if self.distributed_executor_backend is None and self.world_size > 1:
+        if self.distributed_executor_backend is None and self.world_size_across_dp > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
 
             from vllm.executor import ray_utils
             backend = "mp"
+            if self.data_parallel_size > 1:
+                backend = "ray"
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_neuron():
                 # neuron uses single process to control multiple devices
                 backend = "uni"
             elif (current_platform.is_cuda()
-                  and cuda_device_count_stateless() < self.world_size):
+                  and cuda_device_count_stateless() < self.world_size_across_dp):
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
                                      "required for multi-node inference, "
@@ -1578,7 +1581,7 @@ class ParallelConfig:
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
 
-        if self.distributed_executor_backend is None and self.world_size == 1:
+        if self.distributed_executor_backend is None and self.world_size_across_dp == 1:
             self.distributed_executor_backend = "uni"
 
         self._verify_args()
