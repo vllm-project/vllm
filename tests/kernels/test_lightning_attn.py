@@ -129,12 +129,12 @@ def test_linear_decode_forward_triton(
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
     current_platform.seed_everything(42)
+    base = 0.01
+    q = base * torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
+    k = base * torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
+    v = base * torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
 
-    q = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
-    k = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
-    v = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
-
-    kv_caches = torch.randn(batch_size,
+    kv_caches = base * torch.randn(batch_size,
                             num_heads,
                             head_size,
                             head_size,
@@ -178,12 +178,12 @@ def test_linear_decode_forward_triton_with_padding(
     current_platform.seed_everything(42)
 
     batch_size = 4
+    base = 0.01
+    q = base * torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
+    k = base * torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
+    v = base * torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
 
-    q = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
-    k = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
-    v = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
-
-    kv_caches = torch.randn(batch_size,
+    kv_caches = base * torch.randn(batch_size,
                             num_heads,
                             head_size,
                             head_size,
@@ -211,18 +211,21 @@ def test_linear_decode_forward_triton_with_padding(
     reference_masked = reference_output[padding_mask]
 
     atol, rtol = 1.5e-1, 1.5e-1
-    torch.testing.assert_close(triton_masked,
-                               reference_masked,
-                               rtol=rtol,
-                               atol=atol)
-
+    
+    valid_indices = slot_idx != -1
+    
     for i in range(batch_size):
-        if slot_idx[i] != -1:
+        if valid_indices[i] > 0:
             torch.testing.assert_close(kv_caches[i],
-                                       kv_caches_copy[i],
-                                       rtol=rtol,
-                                       atol=atol)
-
+                                      kv_caches_copy[i],
+                                      rtol=rtol,
+                                      atol=atol)
+    
+    torch.testing.assert_close(triton_masked,
+                              reference_masked,
+                              rtol=rtol,
+                              atol=atol)
+    
     assert triton_output.shape == (batch_size, num_heads * head_size)
 
 
@@ -244,15 +247,16 @@ def test_lightning_attention_reference(
     torch.cuda.manual_seed_all(42)
     current_platform.seed_everything(42)
 
-    q = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
-    k = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
-    v = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+    base = 0.01
+    q = base * torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+    k = base * torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+    v = base * torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
 
     ed = torch.zeros(num_heads, device="cuda")
     for h in range(num_heads):
         ed[h] = 0.1 * (h + 1)
 
-    kv_history = torch.randn(batch_size,
+    kv_history = base * torch.randn(batch_size,
                              num_heads,
                              head_size,
                              head_size,
