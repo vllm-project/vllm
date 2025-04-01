@@ -330,3 +330,60 @@ def test_guided_json_object(llm, guided_decoding_backend: str):
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
             assert isinstance(parsed_json, dict)
+
+
+@pytest.mark.skip_global_cleanup
+def test_guidance_no_additional_properties(llm):
+    schema = {
+        'type': 'object',
+        'properties': {
+            'a1': {
+                'type': 'string'
+            },
+            'a2': {
+                'type': 'string'
+            },
+            'a3': {
+                'type': 'string'
+            }
+        },
+        'required': ['a1', 'a2', 'a3'],
+    }
+
+    prompt = (
+        "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a "
+        "helpful assistant.<|im_end|>\n<|im_start|>user\nPlease generate a "
+        "large JSON object with key-value pairs a1=b1, a2=b2, ..., a20=b20"
+        "<|im_end|>\n<|im_start|>assistant\n")
+
+    def generate_with_backend(backend):
+        guided_params = GuidedDecodingParams(json=schema, backend=backend)
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=256,
+                                         guided_decoding=guided_params)
+
+        outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
+        assert outputs is not None
+        generated_text = outputs[0].outputs[0].text
+        assert generated_text is not None
+        parsed_json = json.loads(generated_text)
+        assert isinstance(parsed_json, dict)
+        jsonschema.validate(instance=parsed_json, schema=schema)
+        return parsed_json
+
+    base_generated = generate_with_backend('guidance')
+    assert "a1" in base_generated
+    assert "a2" in base_generated
+    assert "a3" in base_generated
+    # by default additional keys are generated
+    assert "a4" in base_generated
+    assert "a5" in base_generated
+    assert "a6" in base_generated
+
+    generated = generate_with_backend('guidance:no-additional-properties')
+    assert "a1" in generated
+    assert "a2" in generated
+    assert "a3" in generated
+    assert "a4" not in generated
+    assert "a5" not in generated
+    assert "a6" not in generated
