@@ -578,7 +578,7 @@ def get_open_port() -> int:
         dp_port = envs.VLLM_DP_MASTER_PORT
         while True:
             port = _get_open_port()
-            if port >= dp_port and port < dp_port + 10:
+            if dp_port <= port < dp_port + 10:
                 continue
             return port
     return _get_open_port()
@@ -793,6 +793,14 @@ def create_kv_caches_with_random(
 def is_pin_memory_available() -> bool:
     from vllm.platforms import current_platform
     return current_platform.is_pin_memory_available()
+
+
+@cache
+def is_uva_available() -> bool:
+    """Check if Unified Virtual Addressing (UVA) is available."""
+    # UVA requires pinned memory.
+    # TODO: Add more requirements for UVA if needed.
+    return is_pin_memory_available()
 
 
 class DeviceMemoryProfiler:
@@ -1212,7 +1220,7 @@ class StoreBoolean(argparse.Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(argparse.HelpFormatter):
+class SortedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def add_arguments(self, actions):
@@ -1643,6 +1651,14 @@ def weak_ref_tensors(
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
     raise ValueError("Invalid type for tensors")
+
+
+def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Get a CUDA view of a CPU tensor using Unified Virtual Addressing (UVA).
+    """
+    assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+    return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
 def is_in_doc_build() -> bool:
@@ -2176,11 +2192,11 @@ def make_zmq_socket(
     if socket_type == zmq.constants.PULL:
         socket.setsockopt(zmq.constants.RCVHWM, 0)
         socket.setsockopt(zmq.constants.RCVBUF, buf_size)
-        socket.connect(path)
+        socket.bind(path)
     elif socket_type == zmq.constants.PUSH:
         socket.setsockopt(zmq.constants.SNDHWM, 0)
         socket.setsockopt(zmq.constants.SNDBUF, buf_size)
-        socket.bind(path)
+        socket.connect(path)
     else:
         raise ValueError(f"Unknown Socket Type: {socket_type}")
 
@@ -2188,7 +2204,11 @@ def make_zmq_socket(
 
 
 @contextlib.contextmanager
-def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
+def zmq_socket_ctx(
+    path: str,
+    socket_type: Any,
+    linger: int = 0,
+) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
@@ -2199,7 +2219,7 @@ def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
         logger.debug("Got Keyboard Interrupt.")
 
     finally:
-        ctx.destroy(linger=0)
+        ctx.destroy(linger=linger)
 
 
 def is_in_ray_actor():
