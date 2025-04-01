@@ -19,6 +19,10 @@ def get_reasoner(tokenizer: PreTrainedTokenizer,
         return None
     elif reasoning_backend == "deepseek_r1":
         return DeepSeekReasoner.from_tokenizer(tokenizer)
+    elif reasoning_backend == "granite":
+        logger.warning(
+            "Granite reasoner not yet implemented for structured outputs")
+        return None
     else:
         # Raise a warning for unknown reasoning backend and return None
         # We cannot raise an error here because some reasoning models

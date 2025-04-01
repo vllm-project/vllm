@@ -218,6 +218,28 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_mistral3(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+    # Adjust this as necessary to fit in GPU
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        tensor_parallel_size=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "[IMG]" * len(image_urls)
+    prompt = f"<s>[INST]{question}\n{placeholders}[/INST]"
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_mllama(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 
@@ -229,8 +251,8 @@ def load_mllama(question: str, image_urls: list[str]) -> ModelRequestData:
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
-    placeholders = "<|image|>" * len(image_urls)
-    prompt = f"{placeholders}<|begin_of_text|>{question}"
+    img_prompt = "Given the first image <|image|> and the second image<|image|>"
+    prompt = f"<|begin_of_text|>{img_prompt}, {question}?"
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
@@ -509,6 +531,7 @@ model_example_map = {
     "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
+    "mistral3": load_mistral3,
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
     "phi3_v": load_phi3v,
