@@ -299,6 +299,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
                                 extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
+    "Mistral3ForConditionalGeneration": _HfExamplesInfo("mistralai/Mistral-Small-3.1-24B-Instruct-2503",  # noqa: E501
+                                                        min_transformers_version="4.50",  # noqa: E501
+                                                        extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"}),  # noqa: E501
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
                                         max_transformers_version="4.48",
                                         transformers_version_reason="Use of private method which no longer exists.",  # noqa: E501
@@ -348,7 +351,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
 }
 
-_FALLBACK_MODEL = {
+_TRANSFORMERS_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
 }
 
@@ -358,7 +361,7 @@ _EXAMPLE_MODELS = {
     **_CROSS_ENCODER_EXAMPLE_MODELS,
     **_MULTIMODAL_EXAMPLE_MODELS,
     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
-    **_FALLBACK_MODEL,
+    **_TRANSFORMERS_MODELS,
 }
 
 
