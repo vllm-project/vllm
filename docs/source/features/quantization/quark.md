@@ -32,7 +32,7 @@ The Quark quantization process can be listed for 5 steps as below:
 
 ### 1. Load the Model
 
-Quark use [Transformers](https://huggingface.co/docs/transformers/en/index)
+Quark uses [Transformers](https://huggingface.co/docs/transformers/en/index)
 to fetch model and tokenizer.
 
 ```python
@@ -52,7 +52,7 @@ tokenizer.pad_token = tokenizer.eos_token
 
 ### 2. Prepare the Calibration Dataloader
 
-Quark use the [PyTorch Dataloader](https://pytorch.org/tutorials/beginner/basics/data_tutorial.html)
+Quark uses the [PyTorch Dataloader](https://pytorch.org/tutorials/beginner/basics/data_tutorial.html)
 to load calibration data. For more details about how to use calibration datasets efficiently, please refer
 to [Adding Calibration Datasets](https://quark.docs.amd.com/latest/pytorch/calibration_datasets.html).
 
