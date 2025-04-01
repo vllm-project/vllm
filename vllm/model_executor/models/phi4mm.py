@@ -1549,6 +1549,19 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
         max_side = vit_image_size * self.dynamic_hd
         return ImageSize(height=max_side, width=vit_image_size)
+    
+    def get_audio_feature_nums(self, audio_len: int, sr: float):
+        if sr >= 16000:
+            win_length = 400
+            hop_length = 160
+        elif 8000 <= sr < 16000:
+            win_length = 200
+            hop_length = 80
+        else:
+            raise RuntimeError(f"Input data using an unsupported sample rate: {sr}")
+
+        # Spec 1: SpeechLib cut remaining sample insufficient for a hop
+        return (audio_len - win_length) // hop_length + 1
 
 
 class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
@@ -1619,8 +1632,8 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             processed_outputs["num_img_tokens"] = num_img_tokens
             processed_outputs["pixel_values"] = processed_outputs.pop('input_image_embeds')
             if "audios" in mm_data:
-                feature_sizes = [size.item() * 8 for size in processed_outputs['audio_embed_sizes']]
                 audio_features = processed_outputs['input_audio_embeds']
+                feature_sizes = [self.info.get_audio_feature_nums(len(audio), sr) for audio, sr in mm_data['audios']]
                 processed_outputs['input_audio_embeds'] = [audio_features[idx, :size] for idx, size in enumerate(feature_sizes)]
         else:
             tokenizer = self.info.get_tokenizer()
