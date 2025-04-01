@@ -1512,10 +1512,6 @@ class EngineArgs:
                 and _warn_or_fallback("Engine in background thread")):
             return False
 
-        # LoRA is supported on V1, but off by default for now.
-        if self.enable_lora and _warn_or_fallback("LORA"):
-            return False
-
         # PP is supported on V1 with Ray distributed executor,
         # but off for MP distributed executor for now.
         if (self.pipeline_parallel_size > 1
@@ -1530,7 +1526,7 @@ class EngineArgs:
         # Non-CUDA is supported on V1, but off by default for now.
         not_cuda = not current_platform.is_cuda()
         if not_cuda and _warn_or_fallback(  # noqa: SIM103
-                current_platform.device_type):
+                current_platform.device_name):
             return False
         #############################################################
 

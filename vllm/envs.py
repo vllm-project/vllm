@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
-    VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL: bool = True
+    VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -381,15 +381,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (previously known as ADAG) API which optimizes the
     # control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
+    # Note that this variable is set to 1 in V1 by default
+    # when ray distributed executor is used.
     "VLLM_USE_RAY_COMPILED_DAG":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
 
-    # If the env var is set, it uses NCCL for communication in
-    # Ray's Compiled Graph. This flag is ignored if
-    # VLLM_USE_RAY_COMPILED_DAG is not set.
-    "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
-    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
-                 ),
+    # If the env var is set, Ray Compiled Graph uses the specified
+    # channel type to communicate between workers belonging to
+    # different pipeline-parallel stages.
+    # Available options:
+    # - "auto": use the default channel type
+    # - "nccl": use NCCL for communication
+    # - "shm": use shared memory and gRPC for communication
+    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
+    "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
+    lambda: os.getenv("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto"),
 
     # If the env var is set, it enables GPU communication overlap
     # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
