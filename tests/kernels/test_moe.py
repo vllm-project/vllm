@@ -5,6 +5,8 @@ Run `pytest tests/kernels/test_moe.py`.
 """
 import pytest
 import torch
+from torch.nn import Parameter
+from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
@@ -37,6 +39,7 @@ TOP_KS = [2, 6]
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("padding", [True, False])
 def test_fused_moe(
     m: int,
     n: int,
@@ -45,6 +48,7 @@ def test_fused_moe(
     topk: int,
     ep_size: int,
     dtype: torch.dtype,
+    padding: bool,
 ):
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -65,16 +69,7 @@ def test_fused_moe(
     else:
         e_map = None
 
-    triton_output = fused_moe(a,
-                              w1,
-                              w2,
-                              score,
-                              topk,
-                              global_num_experts=e,
-                              expert_map=e_map,
-                              renormalize=False)
     torch_output = torch_moe(a, w1, w2, score, topk, e_map)
-    torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
     iterative_output = iterative_moe(a,
                                      w1,
                                      w2,
@@ -83,6 +78,23 @@ def test_fused_moe(
                                      global_num_experts=e,
                                      expert_map=e_map,
                                      renormalize=False)
+
+    # Pad the weight if moe padding is enabled
+    if padding:
+        w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
+        torch.cuda.empty_cache()
+        w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
+        torch.cuda.empty_cache()
+
+    triton_output = fused_moe(a,
+                              w1,
+                              w2,
+                              score,
+                              topk,
+                              global_num_experts=e,
+                              expert_map=e_map,
+                              renormalize=False)
+    torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
     torch.testing.assert_close(iterative_output,
                                torch_output,
                                atol=2e-2,
@@ -202,10 +214,17 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
 
 @pytest.mark.parametrize("dtype",
                          [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("padding", [True, False])
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
 @torch.inference_mode()
-def test_mixtral_moe(dtype: torch.dtype):
+def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
+                     monkeypatch):
     """Make sure our Mixtral MoE implementation agrees with the one from
     huggingface."""
+
+    if use_rocm_aiter:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Instantiate our and huggingface's MoE blocks
     config = MixtralConfig()
@@ -233,6 +252,17 @@ def test_mixtral_moe(dtype: torch.dtype):
     # vLLM uses 1D query [num_tokens, hidden_dim]
     vllm_inputs = hf_inputs.flatten(0, 1)
 
+    # Pad the weight if moe padding is enabled
+    if padding:
+        vllm_moe.experts.w13_weight = Parameter(F.pad(
+            vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[..., 0:-128],
+                                                requires_grad=False)
+        torch.cuda.empty_cache()
+        vllm_moe.experts.w2_weight = Parameter(F.pad(
+            vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
+                                               requires_grad=False)
+        torch.cuda.empty_cache()
+
     # Run forward passes for both MoE blocks
     hf_states, _ = hf_moe.forward(hf_inputs)
     vllm_states = vllm_moe.forward(vllm_inputs)
@@ -243,10 +273,18 @@ def test_mixtral_moe(dtype: torch.dtype):
         torch.bfloat16: 1e-2,
     }
 
-    torch.testing.assert_close(hf_states.flatten(0, 1),
-                               vllm_states,
-                               rtol=mixtral_moe_tol[dtype],
-                               atol=mixtral_moe_tol[dtype])
+    if use_rocm_aiter:
+        # The values of rtol and atol are set based on the tests in ROCM AITER package. # noqa: E501
+        # https://github.com/ROCm/aiter/blob/dfed377f4be7da96ca2d75ac0761f569676f7240/op_tests/test_moe.py#L174  # noqa: E501
+        torch.testing.assert_close(hf_states.flatten(0, 1),
+                                   vllm_states,
+                                   rtol=0.01,
+                                   atol=100)
+    else:
+        torch.testing.assert_close(hf_states.flatten(0, 1),
+                                   vllm_states,
+                                   rtol=mixtral_moe_tol[dtype],
+                                   atol=mixtral_moe_tol[dtype])
 
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222])

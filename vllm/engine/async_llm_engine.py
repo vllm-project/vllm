@@ -492,7 +492,6 @@ class _AsyncLLMEngine(LLMEngine):
 
         preprocessed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
-            request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
@@ -546,7 +545,7 @@ async def build_guided_decoding_logits_processor_async(
     sampling_params = copy.copy(sampling_params)
     guided_decoding = sampling_params.guided_decoding
 
-    logger.info(
+    logger.debug(
         "Building guided decoding logits processor. "
         "guided_decoding: %s%s", guided_decoding,
         f", reasoning_backend: {reasoning_backend}"
