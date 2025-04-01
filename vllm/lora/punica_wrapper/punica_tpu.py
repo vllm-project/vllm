@@ -37,7 +37,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self._sampler_indices = self._sampler_indices.to(dtype=torch.int32)
         self._sampler_indices_padded = self._sampler_indices_padded.to(
             dtype=torch.int32)
-        
+
         # Debug only
         self.disable_add_lora_logits = True
 

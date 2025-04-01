@@ -101,7 +101,7 @@ class TPUSupportedSamplingMetadata:
         # copy_slice(input_batch.top_k_cpu_tensor, input_batch.top_k)
         copy_slice(input_batch.min_p_cpu_tensor, input_batch.min_p,
                    DEFAULT_SAMPLING_PARAMS["min_p"])
-        
+
         xm.mark_step()
         xm.wait_device_ops()
 
