@@ -1245,6 +1245,31 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                 output_tensor[i, :t.size(0)] = t
             return output_tensor
 
+    def unpack_data(self,
+                    image_data: Union[List[torch.Tensor], torch.Tensor],
+                    padding_value=0) -> torch.Tensor:
+        if isinstance(image_data, torch.Tensor):
+            # torch.Tensor
+            return image_data
+        else:
+            assert isinstance(
+                image_data[0],
+                torch.Tensor), "Image data is not properly batched."
+            # List[torch.Tensor]
+            bsz = len(image_data)
+            max_length = max(t.size(0) for t in image_data)
+            trailing_dims = image_data[0].shape[1:]
+            for data in image_data:
+                cur_trailing_dims = data.shape[1:]
+                assert cur_trailing_dims == trailing_dims
+            output_tensor = torch.full((bsz, max_length, *trailing_dims),
+                                       padding_value,
+                                       dtype=image_data[0].dtype,
+                                       device=image_data[0].device)
+            for i, t in enumerate(image_data):
+                output_tensor[i, :t.size(0)] = t
+            return output_tensor
+
     def _parse_and_validate_image_input(self, **kwargs: object):
         # tensor with the same shape will be batched together by
         # MultiModalKwargs.batch, so pixel_values here can be:
