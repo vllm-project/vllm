@@ -345,7 +345,7 @@ class Hermes2ProToolParser(ToolParser):
                 # 多了一个等于号len(delta_text.rstrip()) >= 1 把'}'这种情况给过滤成空了。
                 if isinstance(delta_text, str) and len(delta_text.rstrip()) >= 1 and delta_text.rstrip()[-1] == '}':
                     if delta_text.rstrip() == '}':
-                        logger.debug("Exceptional condition: %s",delta_text)
+                        logger.debug("Exceptional condition: %s", delta_text)
                     delta_text = delta_text.rstrip()[:-1]
 
                 logger.debug("got diff %s", delta_text)
