@@ -190,6 +190,7 @@ _MULTIMODAL_MODELS = {
     # [Encoder-decoder]
     "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
+    "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
 
@@ -201,7 +202,7 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _FALLBACK_MODEL = {
-    "TransformersModel": ("transformers", "TransformersModel"),
+    "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
 
@@ -425,7 +426,7 @@ class _ModelRegistry:
 
         # make sure Transformers fallback are put at the last
         if len(normalized_arch) != len(architectures):
-            normalized_arch.append("TransformersModel")
+            normalized_arch.append("TransformersForCausalLM")
         return normalized_arch
 
     def inspect_model_cls(
