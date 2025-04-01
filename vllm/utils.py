@@ -2564,3 +2564,10 @@ def sha256(input) -> int:
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
     return int.from_bytes(hashlib.sha256(input_bytes).digest(),
                           byteorder="big")
+
+
+def check_option() -> bool:
+    """Check if -h/--help or -v/--version option or no any options/args."""
+    return any(arg in sys.argv
+               for arg in ["-h", "--help", "-v", "--version"]) or len(
+                   sys.argv) == 1

@@ -27,7 +27,8 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, StoreBoolean, is_in_ray_actor
+from vllm.utils import (FlexibleArgumentParser, StoreBoolean, check_option,
+                        is_in_ray_actor)
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -1680,8 +1681,10 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
-        from vllm.platforms import current_platform
-        current_platform.pre_register_and_update(parser)
+        # Skip to avoid triggering platform detection
+        if not check_option():
+            from vllm.platforms import current_platform
+            current_platform.pre_register_and_update(parser)
         return parser
 
 
