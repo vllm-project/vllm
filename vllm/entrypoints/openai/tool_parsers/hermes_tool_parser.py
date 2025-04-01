@@ -341,16 +341,13 @@ class Hermes2ProToolParser(ToolParser):
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
                 # isinstance(delta_text, str) 判断 delta_text 是不是字符串类型
-                logger.debug(" lei test delta_text1 %s", delta_text)
                 # 多了一个等于号len(delta_text.rstrip()) >= 1 把'}'这种情况给过滤成空了。
                 if isinstance(delta_text, str) and len(delta_text.rstrip()) > 1 and delta_text.rstrip()[-1] == '}':
-                    if delta_text.rstrip() == '}':
+                    if delta_text.replace('\n', '').replace('\r', '') == '}':
                         logger.debug("Exceptional condition: %s", delta_text)
                     delta_text = delta_text.rstrip()[:-1]
 
                 logger.debug("got diff %s", delta_text)
-                logger.debug("lei test 1: %s", cur_arguments)
-                logger.debug("lei test 2: %s", prev_arguments)
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
