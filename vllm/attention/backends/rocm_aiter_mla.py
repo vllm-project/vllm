@@ -16,7 +16,8 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
+from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
+                                               get_aiter_mla_metadata)
 from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 
 if TYPE_CHECKING:
@@ -76,6 +77,7 @@ class AiterMLAMetadata(MLACommonMetadata):
                 .paged_kv_last_page_lens = self.paged_kv_last_page_lens
             prefill_metadata.block_table_bound = self.block_table_bound
 
+            # update the cache
             self._cached_prefill_metadata = self.__class__(
                 **prefill_metadata.__dict__)
 
@@ -94,6 +96,7 @@ class AiterMLAMetadata(MLACommonMetadata):
                 .paged_kv_last_page_lens = self.paged_kv_last_page_lens
             decode_metadata.block_table_bound = self.block_table_bound
 
+            # update the cache
             self._cached_decode_metadata = self.__class__(
                 **decode_metadata.__dict__)
 
@@ -134,6 +137,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         super().__init__(input_builder)
+        assert self.runner.model_config.max_model_len == 32768,\
+                "AITER MLA requires max model len to be set to 32768"
         assert self.block_size == 1, "AITER MLA requires only block size 1."
 
     def prepare(self):
@@ -280,13 +285,15 @@ class AiterMLAState(MLACommonState[AiterMLAMetadata]):
 
     @contextmanager
     def graph_capture(self, max_batch_size: int):
-        self._paged_kv_indices_tensor = torch.from_numpy(
-            self.runner.paged_kv_indices).to(device=self.runner.device)
-        self._paged_kv_indptr_tensor = torch.zeros(max_batch_size + 1,
-                                                   dtype=torch.int32,
-                                                   device=self.runner.device)
-        self._paged_kv_last_page_lens_tensor = torch.full(
-            (max_batch_size, ), self.runner.block_size, dtype=torch.int32)
+        kv_indices, kv_indptr, last_page_lens = get_aiter_mla_metadata(
+            max_batch_size=max_batch_size,
+            block_size=self.runner.block_size,
+            max_block_per_batch=self.runner.get_max_block_per_batch(),
+            device=self.runner.device)
+        self._paged_kv_indices_tensor = kv_indices
+        self._paged_kv_indptr_tensor = kv_indptr
+        self._paged_kv_last_page_lens_tensor = last_page_lens
+
         with super().graph_capture(max_batch_size):
             yield
 

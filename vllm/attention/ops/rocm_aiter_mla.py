@@ -6,15 +6,18 @@ import torch
 
 
 def get_aiter_mla_metadata(max_batch_size: int, block_size: int,
+                           max_block_per_batch: int,
                            device: torch.device) -> tuple[torch.Tensor, ...]:
-
-    paged_kv_indptr_tensor = torch.zeros(max_batch_size + 1,
-                                         dtype=torch.int32,
-                                         device=device)
-    paged_kv_last_page_lens_tensor = torch.full((max_batch_size, ),
-                                                block_size,
-                                                dtype=torch.int32)
-    return paged_kv_indptr_tensor, paged_kv_last_page_lens_tensor
+    paged_kv_indices = torch.zeros(max_batch_size * max_block_per_batch,
+                                   dtype=torch.int32,
+                                   device=device)
+    paged_kv_indptr = torch.zeros(max_batch_size + 1,
+                                  dtype=torch.int32,
+                                  device=device)
+    paged_kv_last_page_lens = torch.full((max_batch_size, ),
+                                         block_size,
+                                         dtype=torch.int32)
+    return paged_kv_indices, paged_kv_indptr, paged_kv_last_page_lens
 
 
 def aiter_mla_decode_fwd(
