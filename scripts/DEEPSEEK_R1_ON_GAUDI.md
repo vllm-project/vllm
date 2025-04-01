@@ -1,7 +1,11 @@
 # install
 
 ```
-docker run -d -it --runtime=habana --name deepseek-vllm-1.20  -v `pwd`:/workspace/vllm/  -v /data:/data -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --ipc=host --net=host -e HF_HOME=/data/huggingface artifactory-kfs.habana-labs.com/docker-local/1.20.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:1.20.0-521 /bin/bash
+docker run -d -it --runtime=habana --name deepseek-vllm-1.20  -v `pwd`:/workspace/vllm/  -v /data:/data -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --ipc=host --net=host -e HF_HOME=/data/huggingface vault.habana.ai/gaudi-docker/1.20.0/ubuntu24.04/habanalabs/pytorch-installer-2.6.0:latest /bin/bash
+```
+or use 1.21 engineering build => better performance
+```
+docker run -d -it --runtime=habana --name deepseek-vllm-1.20  -v `pwd`:/workspace/vllm/  -v /data:/data -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --ipc=host --net=host -e HF_HOME=/data/huggingface artifactory-kfs.habana-labs.com/docker-local/1.21.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:1.21.0-275 /bin/bash
 ```
 
 ```
