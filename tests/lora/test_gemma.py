@@ -39,7 +39,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-# The V1 lora test for this model requires more than 24GB.
 @pytest.mark.skip_v1
 @pytest.mark.xfail(current_platform.is_rocm(),
                    reason="There can be output mismatch on ROCm")
