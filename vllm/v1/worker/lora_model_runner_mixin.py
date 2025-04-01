@@ -14,6 +14,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
@@ -126,7 +127,10 @@ class LoRAModelRunnerMixin:
                 yield
 
             # __exit__ code
-            self.lora_manager.remove_all_adapters()
+            # Disabling remove_all_adapters on the TPU backend allows us to save
+            # quite a bit of RAM. E.g. we save 2.22 GB with Llama3.1 8B
+            if not current_platform.is_tpu():
+                self.lora_manager.remove_all_adapters()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if not self.lora_manager:

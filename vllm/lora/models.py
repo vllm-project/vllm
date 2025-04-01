@@ -51,7 +51,6 @@ def maybe_compile_xla_graph(func):
         result = func(*args, **kwargs)
         
         xm.mark_step()
-        xm.wait_device_ops()
         return result
     return wrapper
 
@@ -412,6 +411,7 @@ class LoRAModelManager(AdapterModelManager):
         logger.debug("Activating LoRA. int id: %d, slot index: %d",
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
+        # return True
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
