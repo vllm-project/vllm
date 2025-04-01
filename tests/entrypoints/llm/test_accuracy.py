@@ -44,7 +44,9 @@ def run_test(model_name, more_args=None):
     )
 
     measured_value = results["results"][TASK][FILTER]
-    assert model_name in EXPECTED_VALUES, f"Cannot find the expected value for the model {model_name=}"
+    assert model_name in EXPECTED_VALUES, (
+        f"Cannot find the expected value for the model {model_name=}"
+    )
     expected_value = EXPECTED_VALUES[model_name]
     assert (measured_value - RTOL < expected_value
             and measured_value + RTOL > expected_value
@@ -82,4 +84,4 @@ def test_lm_eval_accuracy_v0_engine(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "0")
-        run_test()
+        run_test("Qwen/Qwen2-1.5B-Instruct")
