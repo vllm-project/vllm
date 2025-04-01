@@ -1117,7 +1117,8 @@ class LLMEngine:
                 output = [outputs_by_sequence_group[0][i]]
                 if self.model_config.task == "generate" and \
                         hasattr(outputs_by_sequence_group[0], "hidden_states") \
-                        and outputs_by_sequence_group[0].hidden_states is not None:
+                        and outputs_by_sequence_group[0].hidden_states \
+                        is not None:
                     return_hidden_states = True
                     hidden_states = outputs_by_sequence_group[0].hidden_states
 
