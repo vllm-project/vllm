@@ -39,9 +39,18 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    def __post_init__(self):
+        self.num_prompt_tokens = len(self.prompt_token_ids)
+
     @property
     def num_tokens(self) -> int:
-        return len(self.prompt_token_ids) + len(self.output_token_ids)
+        return self.num_prompt_tokens + len(self.output_token_ids)
+
+    def get_token_id(self, idx: int) -> int:
+        if idx < self.num_prompt_tokens:
+            return self.prompt_token_ids[idx]
+        else:
+            return self.output_token_ids[idx - self.num_prompt_tokens]
 
 
 class InputBatch:
