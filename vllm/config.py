@@ -1116,8 +1116,7 @@ class CacheConfig:
         is_attention_free: Whether the model is attention-free.
         num_gpu_blocks_override: Number of GPU blocks to use. This overrides the
             profiled num_gpu_blocks if specified. Does nothing if None.
-        sliding_window: Sliding window size for the KV cache. Can not work with
-            prefix caching enabled.
+        sliding_window: Sliding window size for the KV cache.
         enable_prefix_caching: Whether to enable prefix caching.
         cpu_offload_gb: Size of the CPU offload buffer in GiB.
     """
@@ -2360,12 +2359,10 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        if self.prompt_lookup_max is not None and self.prompt_lookup_max > 0:
-            draft_model = "ngram"
-        else:
-            draft_model = self.draft_model_config.model
+        method = self.method
+        model = None if method == "ngram" else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
+        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
 
 
 @dataclass
@@ -2719,6 +2716,10 @@ def _get_and_verify_max_len(
             max_len_key = key if max_len < derived_max_model_len \
                 else max_len_key
             derived_max_model_len = min(derived_max_model_len, max_len)
+    # For Command-R / Cohere, Cohere2 / Aya Vision models
+    if tmp_max_len := getattr(hf_config, "model_max_length", None):
+        max_len_key = "model_max_length"
+        derived_max_model_len = tmp_max_len
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
