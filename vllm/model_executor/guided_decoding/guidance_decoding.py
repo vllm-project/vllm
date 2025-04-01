@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import json
 from re import escape as regex_escape
 
 import llguidance
@@ -20,9 +21,18 @@ def get_local_guidance_guided_decoding_logits_processor(
     grm = ""
     any_whitespace = 'disable-any-whitespace' not in \
         guided_params.backend_options()
-    if guided_params.json:
+    if (guide_json := guided_params.json) is not None:
+        # Optionally set additionalProperties to False at the top-level
+        # By default, other backends do not allow additional top-level
+        # properties, so this makes guidance more similar to other backends
+        if 'no-additional-properties' in guided_params.backend_options():
+            if isinstance(guide_json, str):
+                guide_json = json.loads(guide_json)
+            if 'additionalProperties' not in guide_json:
+                guide_json['additionalProperties'] = False
+
         grm = llguidance.LLMatcher.grammar_from_json_schema(
-            guided_params.json,
+            guide_json,
             overrides={"whitespace_pattern": guided_params.whitespace_pattern},
             defaults={
                 "whitespace_flexible": any_whitespace,
