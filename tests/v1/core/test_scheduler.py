@@ -2,12 +2,15 @@
 from typing import Optional
 
 import pytest
+import torch
 
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
@@ -20,9 +23,10 @@ def create_scheduler(
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
     enable_prefix_caching: Optional[bool] = None,
+    long_prefill_token_threshold: int = 0,
 ) -> Scheduler:
     '''Create scheduler under test.
-    
+
     Args:
       model: model under test
       max_num_seqs: max sequences to schedule
@@ -38,6 +42,7 @@ def create_scheduler(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_num_batched_tokens,
+        long_prefill_token_threshold=long_prefill_token_threshold,
     )
     model_config = ModelConfig(
         model=model,
@@ -64,13 +69,21 @@ def create_scheduler(
         model_config=model_config,
         cache_config=cache_config,
     )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10000,  # A large number of blocks to hold all requests
+        tensors={},
+        kv_cache_groups=[
+            KVCacheGroupSpec(['layer'],
+                             FullAttentionSpec(16, 1, 1, torch.float32, False))
+        ],
+    )
     cache_config.num_gpu_blocks = 10000
     return Scheduler(
         scheduler_config,
         model_config,
         cache_config,
-        speculative_config=None,
         lora_config=None,
+        kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
@@ -242,7 +255,9 @@ def test_schedule_partial_requests():
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[0] for _ in range(len(requests))],
+        # Only the first request has a sampled token id because
+        # the rest requests are still being prefilled.
+        sampled_token_ids=[[0], [], []],
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -261,6 +276,86 @@ def test_schedule_partial_requests():
     assert output.num_scheduled_tokens[requests[0].request_id] == 1
     assert output.num_scheduled_tokens[requests[1].request_id] == 700
     assert requests[2].request_id not in output.num_scheduled_tokens
+
+
+@pytest.mark.parametrize("enable_prefix_caching", [True, False])
+def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
+    """Test scheduling behavior with concurrent partial requests.
+
+    This test verifies that: there are multiple long prefill requests in the
+    RUNNING state, and we can schedule them together.
+
+    """
+    scheduler = create_scheduler(
+        model="facebook/opt-125m",
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+        enable_prefix_caching=enable_prefix_caching,
+    )
+    requests = create_requests(
+        num_requests=3,
+        num_tokens=800,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 3
+    assert len(output.scheduled_cached_reqs) == 0
+    assert len(output.finished_req_ids) == 0
+
+    # The first request is scheduled partially - 400.
+    assert output.num_scheduled_tokens[requests[0].request_id] == 400
+    # The second request is scheduled partially - 400.
+    assert output.num_scheduled_tokens[requests[1].request_id] == 400
+    # The third request is also scheduled partially - 1024 - 400 - 400 = 224.
+    assert output.num_scheduled_tokens[requests[2].request_id] == 224
+    req_to_index = {
+        request.request_id: i
+        for i, request in enumerate(requests)
+    }
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[] for _ in range(len(requests))],
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    # Schedule the next step. All three requests are running.
+    # Processed the remaining prefills of the first and second requests.
+    output1 = scheduler.schedule()
+    assert len(scheduler.running) == 3
+    assert len(output1.scheduled_new_reqs) == 0
+    assert len(output1.scheduled_cached_reqs) == 3
+    assert len(output1.finished_req_ids) == 0
+    assert output1.num_scheduled_tokens[requests[0].request_id] == 400
+    assert output1.num_scheduled_tokens[requests[1].request_id] == 400
+    assert output1.num_scheduled_tokens[requests[2].request_id] == 224
+
+    # Schedule the third step. All three requests are running.
+    # First and second requests are in the decode stage.
+    # All the remaining tokens in the third request are processed.
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0], [0]] + [[] for _ in range(len(requests) - 2)],
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+    scheduler.update_from_output(output1, model_runner_output)
+    output2 = scheduler.schedule()
+    assert len(scheduler.running) == 3
+    assert len(output2.scheduled_new_reqs) == 0
+    assert len(output2.scheduled_cached_reqs) == 3
+    assert len(output2.finished_req_ids) == 0
+    assert output2.num_scheduled_tokens[requests[0].request_id] == 1
+    assert output2.num_scheduled_tokens[requests[1].request_id] == 1
+    assert output2.num_scheduled_tokens[
+        requests[2].request_id] == 800 - 224 - 224
 
 
 def test_stop_via_update_from_output():
