@@ -498,6 +498,29 @@ def run_minicpmv(questions: list[str], modality: str) -> ModelRequestData:
     return run_minicpmv_base(questions, modality, "openbmb/MiniCPM-V-2_6")
 
 
+# Mistral-3 HF-format
+def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+    # NOTE: Need L40 (or equivalent) to avoid OOM
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        tensor_parallel_size=2,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
+
+    prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # LLama 3.2
 def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -859,6 +882,7 @@ model_example_map = {
     "mantis": run_mantis,
     "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
+    "mistral3": run_mistral3,
     "mllama": run_mllama,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,
