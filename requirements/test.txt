@@ -93,8 +93,6 @@ datasets==3.0.2
     #   lm-eval
 decorator==5.1.1
     # via librosa
-decord==0.6.0
-    # via -r requirements/test.in
 dill==0.3.8
     # via
     #   datasets
@@ -276,7 +274,6 @@ numpy==1.26.4
     #   contourpy
     #   cupy-cuda12x
     #   datasets
-    #   decord
     #   einx
     #   encodec
     #   evaluate
@@ -337,8 +334,10 @@ nvidia-nvjitlink-cu12==12.4.127
     #   torch
 nvidia-nvtx-cu12==12.4.127
     # via torch
-opencv-python-headless==4.10.0.84
-    # via mistral-common
+opencv-python-headless==4.11.0.86
+    # via
+    #   -r requirements/test.in
+    #   mistral-common
 packaging==24.1
     # via
     #   accelerate
