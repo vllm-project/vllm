@@ -668,7 +668,10 @@ class Qwen2_5OmniConditionalGenerationMixin:
         if audio_feature_lengths.ndim == 2:
             assert audio_feature_lengths.shape[
                 0] == 1 or audio_feature_lengths.shape[1] == 1
-            audio_feature_lengths = audio_feature_lengths.squeeze(0)
+            if audio_feature_lengths.shape[0] == 1:
+                audio_feature_lengths = audio_feature_lengths.squeeze(0)
+            else:
+                audio_feature_lengths = audio_feature_lengths.squeeze(1)
 
         audio_feat_lengths, audio_output_lengths = (
             self.audio_tower._get_feat_extract_output_lengths(
