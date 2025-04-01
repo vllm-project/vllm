@@ -866,9 +866,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                   'false').strip().lower() in ("1", "true")
             if os.getenv('VLLM_REGIONAL_COMPILATION',
                          'true').strip().lower() in ("1", "true"):
-                compiled_methods = [
-                    self.model._set_block_scales, self.model._set_block_mapping
-                ]
+                compiled_methods = [self.model._set_block_mapping]
                 for method in compiled_methods:
                     method = torch.compile(method,
                                            backend='hpu_backend',
