@@ -27,7 +27,7 @@ The Quark quantization process can be listed for 5 steps as below:
 2. Prepare the calibration dataloader
 3. Set the quantization configuration
 4. Quantize the model and export
-5. Evaluate the accuracy in vLLM
+5. Evaluation in vLLM
 
 ### 1. Load the Model
 
@@ -37,14 +37,16 @@ to fetch model and tokenizer.
 ```python
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
+MODEL_ID = "meta-llama/Llama-2-70b-chat-hf"
 MAX_SEQ_LEN = 512
 
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID, device_map="auto", torch_dtype="auto",
 )
 model.eval()
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, model_max_length=MAX_SEQ_LEN)
+tokenizer.pad_token = tokenizer.eos_token
 ```
 
 ### 2. Prepare the Calibration Dataloader
@@ -60,7 +62,7 @@ from torch.utils.data import DataLoader
 BATCH_SIZE = 1
 NUM_CALIBRATION_DATA = 512
 
-# Load the dataset and get calibration data
+# Load the dataset and get calibration data.
 dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
 text_data = dataset["text"][:NUM_CALIBRATION_DATA]
 
@@ -94,11 +96,11 @@ from quark.torch.quantization import (Config, QuantizationConfig,
 FP8_PER_TENSOR_SPEC = FP8E4M3PerTensorSpec(observer_method="min_max",
     is_dynamic=False).to_quantization_spec()
 
-# Define global quantization config, activation and weight follow FP8_PER_TENSOR_SPEC.
+# Define global quantization config, input tensors and weight apply FP8_PER_TENSOR_SPEC.
 global_quant_config = QuantizationConfig(input_tensors=FP8_PER_TENSOR_SPEC,
     weight=FP8_PER_TENSOR_SPEC)
 
-# Define quantization config for kv-cache layers, follows FP8_PER_TENSOR_SPEC.
+# Define quantization config for kv-cache layers, output tensors apply FP8_PER_TENSOR_SPEC.
 KV_CACHE_SPEC = FP8_PER_TENSOR_SPEC
 kv_cache_layer_names_for_llama = ["*k_proj", "*v_proj"]
 kv_cache_quant_config = {name :
@@ -108,18 +110,18 @@ kv_cache_quant_config = {name :
     for name in kv_cache_layer_names_for_llama}
 layer_quant_config = kv_cache_quant_config.copy()
 
-# Define algorithm config with config file.
+# Define algorithm config by config file.
 LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE =
     'examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json'
 algo_config = load_quant_algo_config_from_file(LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE)
 
 EXCLUDE_LAYERS = ["lm_head"]
 quant_config = Config(
-        global_quant_config=global_quant_config,
-        layer_quant_config=layer_quant_config,
-        kv_cache_quant_config=kv_cache_quant_config,
-        exclude=EXCLUDE_LAYERS,
-        algo_config=algo_config)
+    global_quant_config=global_quant_config,
+    layer_quant_config=layer_quant_config,
+    kv_cache_quant_config=kv_cache_quant_config,
+    exclude=EXCLUDE_LAYERS,
+    algo_config=algo_config)
 ```
 
 ### 4. Quantize the Model and Export
@@ -131,6 +133,7 @@ HuggingFace `safetensors`, you can refer to
 for more exporting format details.
 
 ```python
+import torch
 from quark.torch import ModelQuantizer, ModelExporter
 from quark.torch.export import ExporterConfig, JsonExporterConfig
 
@@ -153,46 +156,55 @@ with torch.no_grad():
         quant_config=quant_config, tokenizer=tokenizer)
 ```
 
-### 5. Evaluate the Accuracy in vLLM
+### 5. Evaluation in vLLM
 
-Now, you can load and run the quantized model directly through the LLM entrypoint:
+Now, you can load and run the Quark quantized model directly through the LLM entrypoint:
 
 ```python
-from vllm import LLM
-llm = LLM(model="Meta-Llama-3-8B-Instruct-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant",
-          add_bos_token=True,quantization='quark')
+from vllm import LLM, SamplingParams
+
+# Sample prompts.
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+# Create a sampling params object.
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+# Create an LLM.
+llm = LLM(model="Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant",
+          kv_cache_dtype='fp8',quantization='quark')
+# Generate texts from the prompts. The output is a list of RequestOutput objects
+# that contain the prompt, generated text, and other information.
+outputs = llm.generate(prompts, sampling_params)
+# Print the outputs.
+print("\nGenerated Outputs:\n" + "-" * 60)
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt:    {prompt!r}")
+    print(f"Output:    {generated_text!r}")
+    print("-" * 60)
 ```
 
 Or, you can use `lm_eval` to evaluate accuracy:
 
 ```console
 $ lm_eval --model vllm \
-  --model_args pretrained="Meta-Llama-3-8B-Instruct-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant,\
-                           add_bos_token=True,quantization=quark" \
+  --model_args pretrained=Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant,kv_cache_dtype='fp8',quantization='quark' \
   --tasks gsm8k
 ```
-
-:::{note}
-Quantized models can be sensitive to the presence of the `bos` token. Make sure to
-include the `add_bos_token=True` argument when running evaluations.
-:::
-
-Here is the resulting scores of models quantized with different Quark quantization configurations.
-All the quantization scheme is per-tensor of activation, weight and kv-cache.
-| model | Meta-Llama-3-8B-Instruct |Meta-Llama-3-8B-Instruct-FP8-Dynamic | Meta-Llama-3-8B-Instruct-FP8-Static | Meta-Llama-3-8B-Instruct-FP8-Static-Autosmoothquant |
-|----------|----------|----------|----------|----------|
-| gsm8k/flexible-extract | xxx | xxx | xxx | xxx |
-| gsm8k/strict-match | xxx | xxx | xxx | xxx |
-
 
 ## Quark Quantization Script
 In addition to the example of Python API above, Quark also offers a
 [quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html)
 to quantize large language models more conveniently. It supports quantizing models with variety
-of different quantization schemes and optimization algorithms. And it can export the quantized model
-and run evaluation on the fly. With the script, the example above can be:
+of different quantization schemes and optimization algorithms. It can export the quantized model
+and run evaluation tasks on the fly. With the script, the example above can be:
 ```console
-python3 quantize_quark.py --model_dir /path/to/Meta-Llama-3-8B-Instruct  \
+python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
                           --output_dir /path/to/output \
                           --quant_scheme w_fp8_a_fp8 \
                           --kv_cache_dtype fp8 \
