@@ -346,7 +346,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
 }
 
-_FALLBACK_MODEL = {
+_TRANSFORMERS_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
 }
 
@@ -356,7 +356,7 @@ _EXAMPLE_MODELS = {
     **_CROSS_ENCODER_EXAMPLE_MODELS,
     **_MULTIMODAL_EXAMPLE_MODELS,
     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
-    **_FALLBACK_MODEL,
+    **_TRANSFORMERS_MODELS,
 }
 
 

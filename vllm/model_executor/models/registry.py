@@ -202,7 +202,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
 
-_FALLBACK_MODEL = {
+_TRANSFORMERS_MODELS = {
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
@@ -213,7 +213,7 @@ _VLLM_MODELS = {
     **_CROSS_ENCODER_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
-    **_FALLBACK_MODEL,
+    **_TRANSFORMERS_MODELS,
 }
 
 # This variable is used as the args for subprocess.run(). We
@@ -427,7 +427,7 @@ class _ModelRegistry:
         normalized_arch = list(
             filter(lambda model: model in self.models, architectures))
 
-        # make sure Transformers fallback are put at the last
+        # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):
             normalized_arch.append("TransformersForCausalLM")
         return normalized_arch

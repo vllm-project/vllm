@@ -401,7 +401,7 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    # FIXME(Isotr0py): Don't use any weights mapper for Transformers fallback,
+    # FIXME(Isotr0py): Don't use any weights mapper for Transformers backend,
     # this makes thing complicated. We need to remove this mapper after refactor
     # `TransformersModel` in the future.
     @property
