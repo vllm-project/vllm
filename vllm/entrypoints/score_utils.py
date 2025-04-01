@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from typing import Union
 
+from fastapi import HTTPException
 from torch.nn import CosineSimilarity
 
 from vllm.outputs import PoolingRequestOutput
@@ -51,14 +52,14 @@ def _validate_score_input_lens(
 
 def _validate_truncation_size(max_model_len: int,
                               truncate_prompt_tokens: int) -> int:
-    if truncate_prompt_tokens is not None and truncate_prompt_tokens == -1:
+    if truncate_prompt_tokens == -1:
         truncate_prompt_tokens = max_model_len
         return truncate_prompt_tokens
 
-    if truncate_prompt_tokens is not None \
-                            and truncate_prompt_tokens > max_model_len:
-        raise ValueError(
-            f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
+    if truncate_prompt_tokens > max_model_len:
+        raise HTTPException(
+            status_code=400,
+            detail=f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
             f"is greater than max_model_len ({max_model_len})."
             f" Please, select a smaller truncation size.")
 

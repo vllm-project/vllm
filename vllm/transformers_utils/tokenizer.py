@@ -55,12 +55,14 @@ def encode_tokens(
     Backend-agnostic equivalent of HF's
     :code:`tokenizer.encode(text, add_special_tokens=...)`.
     """
-    if add_special_tokens is not None:
-        return tokenizer.encode(text,
-                                max_length=max_length,
-                                truncation=truncation,
-                                add_special_tokens=add_special_tokens)
-    return tokenizer.encode(text, truncation=truncation, max_length=max_length)
+    if add_special_tokens is None:
+        add_special_tokens = tokenizer.encode.__kwdefaults__[
+            "add_special_tokens"]
+
+    return tokenizer.encode(text,
+                            max_length=max_length,
+                            truncation=truncation,
+                            add_special_tokens=add_special_tokens)
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:

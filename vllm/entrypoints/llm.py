@@ -920,13 +920,12 @@ class LLM:
             # Use default pooling params.
             pooling_params = PoolingParams()
 
+        tokenization_kwargs: dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
             truncate_prompt_tokens = _validate_truncation_size(
                 self.llm_engine.model_config.max_model_len,
                 truncate_prompt_tokens)
 
-        tokenization_kwargs: dict[str, Any] = {}
-        if truncate_prompt_tokens is not None:
             tokenization_kwargs["truncation"] = True
             tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
