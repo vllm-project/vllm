@@ -67,6 +67,7 @@ class RejectionSampler(nn.Module):
                 Shape is [num_tokens, vocab_size]. Here, probabilities from
                 different requests are flattened into a single tensor because
                 this is the shape of the output logits.
+                NOTE: `target_logits` can be updated in place to save memory.
             bonus_token_ids_tensor (torch.Tensor):
                 A tensor containing bonus tokens. Shape is [batch_size, 1].
                 Bonus tokens are added to the end of the sequence if all
@@ -83,6 +84,8 @@ class RejectionSampler(nn.Module):
         '''
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         # [num_tokens, vocab_size]
+        # NOTE(woosuk): `target_logits` can be updated in place inside the
+        # `compute_probs` function.
         target_probs = compute_probs(
             target_logits,
             metadata.cu_num_draft_tokens,
@@ -106,6 +109,18 @@ class RejectionSampler(nn.Module):
         output_token_ids: torch.Tensor,
         vocab_size: int,
     ) -> list[list[int]]:
+        """Parse the output of the rejection sampler.
+
+        Args:
+            output_token_ids: The sampled token IDs in shape
+                [batch_size, max_spec_len + 1]. The rejected tokens are
+                replaced with `PLACEHOLDER_TOKEN_ID` by the rejection sampler
+                and will be filtered out in this function.
+            vocab_size: The size of the vocabulary.
+
+        Returns:
+            A list of lists of token IDs.
+        """
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
         valid_mask = ((output_token_ids_np != PLACEHOLDER_TOKEN_ID) &
@@ -252,8 +267,8 @@ def compute_probs(
         replace_from=GREEDY_TEMPERATURE,
         replace_to=1,
     )
-    # TODO(woosuk): Consider using in-place op to reduce memory usage.
-    logits = logits / temperature.unsqueeze(-1)
+    # NOTE(woosuk): Update `logits` in place to avoid allocating a new tensor.
+    logits.div_(temperature.unsqueeze(-1))
 
     # Get expanded top_k and top_p tensors.
     top_k = None
