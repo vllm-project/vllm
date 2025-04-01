@@ -83,8 +83,8 @@ class AutoTuner:
                 f"Last acceptance rate: {acceptance_rate:.2f}",
                 f"Last match ratio: {self.past_match_ratios[-1]:.2f}",
                 f"Global acceptance rate: {self.acceptance_rate:.2f}",
-                ("Global match ratio:",
-                 f"{self.match_cnt / (self.total_cnt + 1e-5):.2f}"),
+                "Global match ratio:",
+                f"{self.match_cnt / (self.total_cnt + 1e-5):.2f}",
             )
 
         self.past_acceptance_rates.append(acceptance_rate)
