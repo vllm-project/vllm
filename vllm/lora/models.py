@@ -396,7 +396,6 @@ class LoRAModelManager(AdapterModelManager):
         logger.debug("Activating LoRA. int id: %d, slot index: %d",
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
-        # return True
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
