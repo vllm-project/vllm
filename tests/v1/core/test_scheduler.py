@@ -2,12 +2,15 @@
 from typing import Optional
 
 import pytest
+import torch
 
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
@@ -66,12 +69,21 @@ def create_scheduler(
         model_config=model_config,
         cache_config=cache_config,
     )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10000,  # A large number of blocks to hold all requests
+        tensors={},
+        kv_cache_groups=[
+            KVCacheGroupSpec(['layer'],
+                             FullAttentionSpec(16, 1, 1, torch.float32, False))
+        ],
+    )
     cache_config.num_gpu_blocks = 10000
     return Scheduler(
         scheduler_config,
         model_config,
         cache_config,
         lora_config=None,
+        kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
