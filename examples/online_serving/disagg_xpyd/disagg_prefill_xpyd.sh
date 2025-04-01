@@ -29,7 +29,7 @@ MODEL_NAME=${HF_MODEL_NAME:-meta-llama/Meta-Llama-3.1-8B-Instruct}
 #    --max-model-len 8192 \
 #    --gpu-memory-utilization 0.8 \
 #    --kv-transfer-config \
-#    '{"proxy_ip":"0.0.0.0","proxy_port":"30001","kv_connector":"P2pConnector","kv_role":"kv_producer","http_port":"20001","kv_port":"21001"}' &
+#    '{"kv_connector":"P2pConnector","kv_role":"kv_producer","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"0.0.0.0","proxy_port":"30001","http_port":"20001"}}' &
 #
 ## prefilling instance, which is the KV producer
 #CUDA_VISIBLE_DEVICES=5 vllm serve $MODEL_NAME \
@@ -39,7 +39,7 @@ MODEL_NAME=${HF_MODEL_NAME:-meta-llama/Meta-Llama-3.1-8B-Instruct}
 #    --max-model-len 8192 \
 #    --gpu-memory-utilization 0.8 \
 #    --kv-transfer-config \
-#    '{"proxy_ip":"0.0.0.0","proxy_port":"30001","kv_connector":"P2pConnector","kv_role":"kv_producer","http_port":"20002","kv_port":"22001"}' &
+#    '{"kv_connector":"P2pConnector","kv_role":"kv_producer","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"0.0.0.0","proxy_port":"30001","http_port":"20002"}}' &
 #
 ## decoding instance, which is the KV consumer
 #CUDA_VISIBLE_DEVICES=6 vllm serve $MODEL_NAME \
@@ -49,7 +49,7 @@ MODEL_NAME=${HF_MODEL_NAME:-meta-llama/Meta-Llama-3.1-8B-Instruct}
 #    --max-model-len 8192 \
 #    --gpu-memory-utilization 0.8 \
 #    --kv-transfer-config \
-#    '{"proxy_ip":"0.0.0.0","proxy_port":"30001","kv_connector":"P2pConnector","kv_role":"kv_consumer","http_port":"20003","kv_port":"23001"}' &
+#    '{"kv_connector":"P2pConnector","kv_role":"kv_consumer","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"0.0.0.0","proxy_port":"30001","http_port":"20003"}}' &
 #
 ## decoding instance, which is the KV consumer
 #CUDA_VISIBLE_DEVICES=7 vllm serve $MODEL_NAME \
@@ -59,7 +59,7 @@ MODEL_NAME=${HF_MODEL_NAME:-meta-llama/Meta-Llama-3.1-8B-Instruct}
 #    --max-model-len 8192 \
 #    --gpu-memory-utilization 0.8 \
 #    --kv-transfer-config \
-#    '{"proxy_ip":"0.0.0.0","proxy_port":"30001","kv_connector":"P2pConnector","kv_role":"kv_consumer","http_port":"20004","kv_port":"24001"}' &
+#    '{"kv_connector":"P2pConnector","kv_role":"kv_consumer","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"0.0.0.0","proxy_port":"30001","http_port":"20004"}}' &
 
 
 # 2P2D, TP=2
@@ -72,7 +72,7 @@ CUDA_VISIBLE_DEVICES=0,1 vllm serve $MODEL_NAME \
     --max-model-len 8192 \
     --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
-    '{"proxy_ip":"0.0.0.0","proxy_port":"30001","kv_connector":"P2pConnector","kv_role":"kv_producer","http_port":"20001","kv_port":"21001"}' &
+    '{"kv_connector":"P2pConnector","kv_role":"kv_producer","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"0.0.0.0","proxy_port":"30001","http_port":"20001"}}' &
 
 # prefilling instance, which is the KV producer
 CUDA_VISIBLE_DEVICES=2,3 vllm serve $MODEL_NAME \
@@ -83,7 +83,7 @@ CUDA_VISIBLE_DEVICES=2,3 vllm serve $MODEL_NAME \
     --max-model-len 8192 \
     --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
-    '{"proxy_ip":"0.0.0.0","proxy_port":"30001","kv_connector":"P2pConnector","kv_role":"kv_producer","http_port":"20002","kv_port":"22001"}' &
+    '{"kv_connector":"P2pConnector","kv_role":"kv_producer","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"0.0.0.0","proxy_port":"30001","http_port":"20002"}}' &
 
 # decoding instance, which is the KV consumer
 CUDA_VISIBLE_DEVICES=4,5 vllm serve $MODEL_NAME \
@@ -94,7 +94,7 @@ CUDA_VISIBLE_DEVICES=4,5 vllm serve $MODEL_NAME \
     --max-model-len 8192 \
     --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
-    '{"proxy_ip":"0.0.0.0","proxy_port":"30001","kv_connector":"P2pConnector","kv_role":"kv_consumer","http_port":"20003","kv_port":"23001"}' &
+    '{"kv_connector":"P2pConnector","kv_role":"kv_consumer","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"0.0.0.0","proxy_port":"30001","http_port":"20003"}}' &
 
 # decoding instance, which is the KV consumer
 CUDA_VISIBLE_DEVICES=6,7 vllm serve $MODEL_NAME \
@@ -105,4 +105,4 @@ CUDA_VISIBLE_DEVICES=6,7 vllm serve $MODEL_NAME \
     --max-model-len 8192 \
     --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
-    '{"proxy_ip":"0.0.0.0","proxy_port":"30001","kv_connector":"P2pConnector","kv_role":"kv_consumer","http_port":"20004","kv_port":"24001"}' &
+    '{"kv_connector":"P2pConnector","kv_role":"kv_consumer","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"0.0.0.0","proxy_port":"30001","http_port":"20004"}}' &

@@ -2939,15 +2939,6 @@ class KVTransferConfig(BaseModel):
     # The KV connector port, used to build distributed connection
     kv_port: int = 14579
 
-    # The HTTP port used by OpenAI is the same as the `--port` parameter.
-    http_port: int = 20001
-
-    # The IP of the proxy.
-    proxy_ip: str = "127.0.0.1"
-
-    # The Port of the proxy.
-    proxy_port: int = 30001
-
     # any extra config that the connector may need
     kv_connector_extra_config: dict[str, Any] = {}
 
