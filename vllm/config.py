@@ -2717,6 +2717,10 @@ def _get_and_verify_max_len(
             max_len_key = key if max_len < derived_max_model_len \
                 else max_len_key
             derived_max_model_len = min(derived_max_model_len, max_len)
+    # For Command-R / Cohere, Cohere2 models
+    if tmp_max_len := getattr(hf_config, "model_max_length", None):
+        max_len_key = "model_max_length"
+        derived_max_model_len = tmp_max_len
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
