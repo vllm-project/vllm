@@ -24,7 +24,23 @@ GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
+def monkeypatch_module():
+    from _pytest.monkeypatch import MonkeyPatch
+    mpatch = MonkeyPatch()
+    yield mpatch
+    mpatch.undo()
+
+
+@pytest.fixture(scope="module", params=[False, True])
+def server(
+        request,
+        monkeypatch_module,
+        zephyr_lora_files,  #noqa: F811
+        zephyr_lora_added_tokens_files):  # noqa: F811
+
+    use_v1 = request.param
+    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
+
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -47,6 +63,13 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
+
+
+@pytest.fixture
+def is_v1_server(server):
+    import os
+    assert os.environ['VLLM_USE_V1'] in ['0', '1']
+    return os.environ['VLLM_USE_V1'] == '1'
 
 
 @pytest_asyncio.fixture
@@ -471,8 +494,13 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_choice_chat(client: openai.AsyncOpenAI,
+                                  is_v1_server: bool,
                                   guided_decoding_backend: str,
                                   sample_guided_choice):
+
+    if is_v1_server and guided_decoding_backend != 'xgrammar':
+        pytest.skip("Only xgrammar backend is supported with V1")
+
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -511,9 +539,13 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_json_chat(client: openai.AsyncOpenAI,
+async def test_guided_json_chat(client: openai.AsyncOpenAI, is_v1_server: bool,
                                 guided_decoding_backend: str,
                                 sample_json_schema):
+
+    if is_v1_server:
+        pytest.skip("sample_json_schema has features unsupported in V1")
+
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -559,7 +591,12 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_regex_chat(client: openai.AsyncOpenAI,
+                                 is_v1_server: bool,
                                  guided_decoding_backend: str, sample_regex):
+
+    if is_v1_server and guided_decoding_backend != 'xgrammar':
+        pytest.skip("Only xgrammar backend is supported with V1")
+
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -617,8 +654,13 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
+                                           is_v1_server: bool,
                                            guided_decoding_backend: str,
                                            sample_guided_choice):
+
+    if is_v1_server and guided_decoding_backend != 'xgrammar':
+        pytest.skip("Only xgrammar backend is supported with V1")
+
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -648,9 +690,13 @@ async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_named_tool_use(client: openai.AsyncOpenAI,
+async def test_named_tool_use(client: openai.AsyncOpenAI, is_v1_server: bool,
                               guided_decoding_backend: str,
                               sample_json_schema):
+
+    if is_v1_server:
+        pytest.skip("sample_json_schema has features unsupported on V1")
+
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -742,6 +788,10 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 async def test_required_tool_use_not_yet_supported(client: openai.AsyncOpenAI,
                                                    sample_json_schema):
+
+    if is_v1_server:
+        pytest.skip("sample_json_schema has features unsupported on V1")
+
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -787,6 +837,10 @@ async def test_required_tool_use_not_yet_supported(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 async def test_inconsistent_tool_choice_and_tools(client: openai.AsyncOpenAI,
                                                   sample_json_schema):
+
+    if is_v1_server:
+        pytest.skip("sample_json_schema has features unsupported on V1")
+
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
