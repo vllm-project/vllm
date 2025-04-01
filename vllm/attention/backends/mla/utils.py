@@ -313,7 +313,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
-                if current_platform.is_hpu() and layer.quant_method.quant_config.activation_scheme == "static":
+                if current_platform.is_hpu():
                     def get_scales(layer: LinearBase) -> torch.Tensor:
                         if hasattr(layer, "weight_scale_inv"):
                             return layer.weight_scale_inv
