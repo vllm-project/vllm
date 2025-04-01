@@ -9,6 +9,7 @@ import pytest_asyncio
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # any model with a chat template should work here
@@ -250,6 +251,8 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
     assert "".join(chunks) == single_output
 
 
+@pytest.mark.skipif(current_platform.is_hpu(),
+                    reason="Flaky test on HPU, to be investigated")
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",

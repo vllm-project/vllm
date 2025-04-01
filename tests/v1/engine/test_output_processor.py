@@ -521,7 +521,10 @@ def test_stop_token(include_stop_str_in_output: bool,
         dummy_test_vectors: dummy engine core outputs and other data structures
     """
     model_id = dummy_test_vectors.tokenizer.name_or_path
-    if model_id != 'meta-llama/Llama-3.2-1B':
+    if model_id not in [
+            'meta-llama/Llama-3.2-1B',
+            '/mnt/weka/data/pytorch/llama3.2/Meta-Llama-3.2-1B'
+    ]:
         raise AssertionError("Test requires meta-llama/Llama-3.2-1B but "
                              f"{model_id} is in use.")
     do_logprobs = num_sample_logprobs is not None

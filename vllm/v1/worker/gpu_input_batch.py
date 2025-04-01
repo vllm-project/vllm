@@ -648,7 +648,11 @@ class InputBatch:
             top_p=None if self.no_top_p else self.top_p[req_indices],
             top_k=None if self.no_top_k else self.top_k[req_indices],
             min_p=None if self.no_min_p else self.min_p[req_indices],
-            generators=self.generators,
+            generators={
+                i: self.generators[req_idx]
+                for i, req_idx in enumerate(req_indices)
+                if self.generators.get(req_idx, None) is not None
+            },
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
             frequency_penalties=self.frequency_penalties[req_indices],
@@ -656,8 +660,8 @@ class InputBatch:
             repetition_penalties=self.repetition_penalties[req_indices],
             output_token_ids=cast(list[list[int]], output_token_ids),
             min_tokens={
-                req_idx: self.min_tokens[req_idx]
-                for req_idx in req_indices
+                i: self.min_tokens[req_idx]
+                for i, req_idx in enumerate(req_indices)
                 if self.min_tokens.get(req_idx, None) is not None
             },
             no_penalties=self.no_penalties,
