@@ -1108,16 +1108,10 @@ class LLMEngine:
                 if self.model_config.task == "generate" and \
                         outputs_by_sequence_group[0][0].hidden_states is not None:
                     return_hidden_states = True
-                    dev = outputs_by_sequence_group[i][0].hidden_states.device
-                    n = len(outputs_by_sequence_group[i])
-                    m = outputs_by_sequence_group[i][
-                            0].hidden_states.shape[0]
-                    l = outputs_by_sequence_group[i][
-                            0].hidden_states.shape[1]
-                    hidden_states = torch.zeros(n, m, l, device = dev)
+                    hidden_states = []
                     for k in range(n):
-                        hidden_states[k] = outputs_by_sequence_group[i][
-                            k].hidden_states
+                        hidden_states.append(outputs_by_sequence_group[i][
+                            k].hidden_states)
             else:
                 output = [outputs_by_sequence_group[0][i]]
                 if self.model_config.task == "generate" and \
