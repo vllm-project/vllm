@@ -80,10 +80,11 @@ def test_memory_usage_no_spec():
             if seq.is_finished():
                 batch_sequences.remove(seq)
 
-        # At this point, we are always at the case where we have finished processing
-        # some number of requests from the batch after running several _no_spec
-        # executions. The memory should not have increased between the previous time 
-        # this was recorded and the current time.
+        # At this point, we are always at the case where we have finished 
+        # processing some number of requests from the batch after running 
+        # several _no_spec executions. The memory should not have 
+        # increased between the previous  time this was recorded and the 
+        # current time.
         if previous_memory_allocated is None:
             previous_memory_allocated = torch.cuda.memory_allocated()
         else:
