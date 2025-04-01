@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
-import importlib.metadata
 import inspect
 import json
 import types
 from typing import Any, Callable, Dict, Optional, Union
 
 import torch
-from packaging.version import Version
 from torch import fx
 
-if Version(importlib.metadata.version('torch')) >= Version("2.6"):
+from vllm.utils import is_torch_equal_or_newer
+
+if is_torch_equal_or_newer("2.6"):
     from torch._inductor.custom_graph_pass import CustomGraphPass
 else:
     # CustomGraphPass is not present in 2.5 or lower, import our version
