@@ -223,7 +223,12 @@ class RequestOutput:
             if delta:
                 # Slice logprobs delta if applicable
                 if output_logprobs:
-                    output_logprobs = output_logprobs[-num_output_tokens:]
+                    # num_output_tokens can be 0 when n > 1 and request finishes
+                    # before the others
+                    if num_output_tokens > 0:
+                        output_logprobs = output_logprobs[-num_output_tokens:]
+                    else:
+                        output_logprobs = None
                 # Don't include prompt if this is after the first output
                 # containing decode token ids
                 if include_prompt and seq.get_output_len() > num_output_tokens:

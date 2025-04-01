@@ -158,6 +158,22 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 0
 
+        # Sending duplicate requests with same request_id
+        req0 = make_request()
+        req1 = make_request()
+        req0.request_id = req1.request_id = "test"
+        engine_core.add_request(req0)
+
+        while len(engine_core.step().outputs) > 0:
+            pass
+
+        engine_core.add_request(req1)
+        while len(engine_core.step().outputs) > 0:
+            pass
+
+        assert len(engine_core.scheduler.waiting) == 0
+        assert len(engine_core.scheduler.running) == 0
+
 
 @create_new_process_for_each_test()
 def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
@@ -215,8 +231,10 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
     Test that the engine can handle multiple concurrent batches.
     """
 
-    def make_request_with_max_tokens(max_tokens: int) -> EngineCoreRequest:
+    def make_request_with_max_tokens(req_id: int,
+                                     max_tokens: int) -> EngineCoreRequest:
         request = make_request()
+        request.request_id = req_id
         request.sampling_params.max_tokens = max_tokens
         return request
 
@@ -263,6 +281,8 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             # Avoid all requests being scheduled once.
             enable_prefix_caching=False,
             max_num_batched_tokens=10,
+            # Reduce startup time.
+            enforce_eager=True,
         )
         vllm_config = engine_args.create_engine_config()
         engine_core = EngineCore(vllm_config=vllm_config,
@@ -270,13 +290,13 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
                                  executor_class=DummyExecutor)
         assert engine_core.batch_queue is not None
 
-        # Add two requests in a row.
-        req = make_request_with_max_tokens(5)
-        engine_core.add_request(req)
-        req = make_request_with_max_tokens(5)
-        engine_core.add_request(req)
+        # Add two requests in a row. Each request have 12 prompt tokens.
+        req0 = make_request_with_max_tokens(0, 5)
+        engine_core.add_request(req0)
+        req1 = make_request_with_max_tokens(1, 5)
+        engine_core.add_request(req1)
 
-        # First saturate the batch queue.
+        # Schedule Batch 1: (10, req0)
         assert engine_core.step_with_batch_queue() is None
         assert engine_core.batch_queue.qsize() == 1
         assert engine_core.step_with_batch_queue() is None

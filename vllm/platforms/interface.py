@@ -12,9 +12,10 @@ import torch
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
 else:
+    ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
 
@@ -29,10 +30,10 @@ def in_wsl() -> bool:
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
     FLASH_ATTN_VLLM_V1 = enum.auto()
+    TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
-    OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
     FLASHMLA = enum.auto()  # Supported by V1
@@ -52,7 +53,6 @@ class PlatformEnum(enum.Enum):
     XPU = enum.auto()
     CPU = enum.auto()
     NEURON = enum.auto()
-    OPENVINO = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -112,6 +112,8 @@ class Platform:
 
     supported_quantization: list[str] = []
 
+    additional_env_vars: list[str] = []
+
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
@@ -132,9 +134,6 @@ class Platform:
 
     def is_neuron(self) -> bool:
         return self._enum == PlatformEnum.NEURON
-
-    def is_openvino(self) -> bool:
-        return self._enum == PlatformEnum.OPENVINO
 
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
@@ -372,6 +371,13 @@ class Platform:
         return (envs.VLLM_USE_V1
                 or parallel_config.distributed_executor_backend
                 == "external_launcher")
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        """Returns whether the current platform can support v1 for the supplied
+        model configuration.
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):
