@@ -17,6 +17,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -42,7 +43,7 @@ class DummyOutputNorm(nn.Module):
             return x + residual, None
 
 
-class EAGLE(nn.Module):
+class EAGLE(nn.Module, SupportsPP):
     """This class implements the EAGLE draft model from the paper: https://arxiv.org/pdf/2401.15077
     Reference implementation: https://github.com/SafeAILab/EAGLE
     

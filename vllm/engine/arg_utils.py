@@ -181,7 +181,7 @@ class EngineArgs:
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
 
-    speculative_config: Optional[Dict[str, Any]] = None
+    speculative_config: Optional[Union[str, Dict[str, Any]]] = None
 
     qlora_adapter_name_or_path: Optional[str] = None
     show_hidden_metrics_for_version: Optional[str] = None
@@ -1189,6 +1189,7 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            virtual_engine_size=self.pipeline_parallel_size,
             data_parallel_size=self.data_parallel_size,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,

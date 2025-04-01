@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.distributed.communication_op import (broadcast_tensor_dict,
                                                get_tp_group,
                                                tensor_model_parallel_gather)
@@ -23,12 +24,13 @@ from vllm.model_executor.layers.typical_acceptance_sampler import (
 from vllm.platforms import current_platform
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, ExecuteModelRequest,
-                           HiddenStates, SequenceGroupMetadata,
+                           HiddenStates, IntermediateTensors,
+                           SequenceGroupMetadata,
                            get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 
 if current_platform.is_cuda_alike():
-    from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+    from vllm.spec_decode.draft_model_runner import TP1PP1DraftModelRunner
 
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
@@ -39,7 +41,8 @@ from vllm.spec_decode.mqa_scorer import MQAScorer
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
-from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
+from vllm.spec_decode.smaller_tp_pp_proposer_worker import (
+    SmallerTpPpProposerWorker)
 from vllm.spec_decode.target_model_runner import TargetModelRunner
 from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    create_sequence_group_output,
@@ -59,10 +62,6 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     vllm_config: VllmConfig = kwargs.get("vllm_config")
     speculative_config: SpeculativeConfig = vllm_config.speculative_config
     assert speculative_config is not None
-
-    if vllm_config.parallel_config.pipeline_parallel_size > 1:
-        raise NotImplementedError("Speculative decoding is currently "
-                                  "incompatible with pipeline parallelism")
 
     draft_worker_kwargs = kwargs.copy()
 
@@ -176,21 +175,23 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         else:
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
+            draft_pp = draft_parallel_config.pipeline_parallel_size
+            target_pp = scorer_worker.parallel_config.pipeline_parallel_size
 
             if draft_model_config.hf_config.model_type == "mlp_speculator":
                 proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
             elif draft_model_config.hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
-                if draft_tp == 1:
+                if draft_tp == 1 and draft_pp == 1:
                     if current_platform.is_cuda_alike():
                         draft_worker_kwargs[
-                            "model_runner_cls"] = TP1DraftModelRunner
+                            "model_runner_cls"] = TP1PP1DraftModelRunner
                 else:
                     if draft_model_config.hf_config.model_type == "eagle":
                         raise NotImplementedError(
                             f"{draft_model_config.hf_config.model_type} "
-                            "does not support TP > 1 yet")
+                            "does not support TP > 1 or PP > 1 yet")
 
                     allow_zero_draft_token_step = False
 
@@ -203,8 +204,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     num_spec_prefill_steps = \
                         draft_model_config.hf_config.n_predict
 
-            proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
-                proposer_worker, draft_tp, target_tp)
+            proposer_worker = SmallerTpPpProposerWorker.maybe_wrap_worker(
+                proposer_worker, draft_tp, target_tp, draft_pp, target_pp)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
@@ -354,12 +355,21 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self.proposer_worker.load_model()
 
         if self._enable_lm_head_weight_load:
-            # NOTE(Shangming): gather lm_head weight when tp enabled
-            target_lm_head_weight: torch.Tensor = tensor_model_parallel_gather(
-                self.scorer_worker.model_runner.model_runner.model.lm_head.\
-                    weight.data,
-                    dim=0,
-            )
+            if get_pp_group().is_last_rank:
+                # NOTE(Shangming): gather lm_head weight when tp enabled
+                target_lm_head_weight: torch.Tensor = \
+                    tensor_model_parallel_gather(
+                        self.scorer_worker.model_runner.model_runner.model.lm_head.weight.data,
+                        dim=0,
+                    )
+                # Send target_lm_head_weight to the first pp rank
+                tensors = {"target_lm_head_weight": target_lm_head_weight}
+                get_pp_group().send_tensor_dict(tensors, dst=self._driver_rank)
+            else:
+                # Receive target_lm_head_weight from the last pp rank
+                tensors = get_pp_group().recv_tensor_dict(
+                    src=get_pp_group().world_size - 1)
+                target_lm_head_weight = tensors["target_lm_head_weight"]
 
             self.proposer_worker.maybe_load_lm_head_weight(
                 target_lm_head_weight)
@@ -457,7 +467,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     ) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
-        if self.rank != self._driver_rank:
+        if self.rank % self.tensor_parallel_size != self._driver_rank:
             self._run_non_driver_rank()
             return []
 
@@ -671,17 +681,41 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         """
 
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
-        assert len(sampler_output) == 1
-        sampler_output = sampler_output[0]
 
-        # Store hidden states from target model execution, BxD.
-        hidden_states = sampler_output.hidden_states
+        if get_pp_group().is_last_rank:
+            assert len(sampler_output) == 1
+            sampler_output = sampler_output[0]
+
+            # Store hidden states from target model execution, BxD.
+            sampled_token_ids = sampler_output.sampled_token_ids
+            hidden_states = sampler_output.hidden_states
+            prefill_hidden_states = sampler_output.prefill_hidden_states
+            tensors = {
+                "sampled_token_ids": sampled_token_ids,
+                "hidden_states": hidden_states,
+                "prefill_hidden_states": prefill_hidden_states
+            }
+            get_pp_group().broadcast_tensor_dict(
+                tensors, src=get_pp_group().world_size - 1)
+        else:
+            tensors = get_pp_group().broadcast_tensor_dict(
+                src=get_pp_group().world_size - 1)
+            sampled_token_ids = tensors["sampled_token_ids"]
+            hidden_states = tensors["hidden_states"]
+            prefill_hidden_states = tensors["prefill_hidden_states"]
+            sampler_output = SamplerOutput(
+                outputs=None,
+                sampled_token_ids=sampled_token_ids,
+                hidden_states=hidden_states,
+                prefill_hidden_states=prefill_hidden_states)
+
+        # Only decodes and prefill terminal chunks need a hidden state.
+        seq_group_meta_with_hidden = [
+            sg for sg in execute_model_req.seq_group_metadata_list
+            if sg.do_sample
+        ]
+
         if hidden_states is not None:
-            # Only decodes and prefill terminal chunks need a hidden state.
-            seq_group_meta_with_hidden = [
-                sg for sg in execute_model_req.seq_group_metadata_list
-                if sg.do_sample
-            ]
             if any(seq.is_prompt for seq in seq_group_meta_with_hidden):
                 # Drop hidden_states with no prediction (eg non-terminal chunks)
                 hidden_states = hidden_states[
@@ -770,23 +804,55 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         Returns a list of SamplerOutput, each containing a single token per
         sequence.
         """
-        # With prefill chunking, expect requests to have prompts first
-        # so that backend gets prefill|decode.
-        assert num_lookahead_slots == execute_model_req.num_lookahead_slots
+        if self.previous_hidden_states is not None:
+            self.previous_hidden_states.seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+        if get_pp_group().is_first_rank:
+            # With prefill chunking, expect requests to have prompts first
+            # so that backend gets prefill|decode.
+            assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
-        # Pass last hidden states from target model to proposer
-        execute_model_req.previous_hidden_states = self.previous_hidden_states
-        self.previous_hidden_states = None
+            # Pass last hidden states from target model to proposer
+            execute_model_req.previous_hidden_states = \
+                self.previous_hidden_states
+            self.previous_hidden_states = None
 
-        with Timer() as proposal_timer:
-            # Generate proposals using draft worker.
-            proposals = self.proposer_worker.get_spec_proposals(
-                execute_model_req, self._seq_with_bonus_token_in_last_step)
+            with Timer() as proposal_timer:
+                # Generate proposals using draft worker.
+                proposals = self.proposer_worker.get_spec_proposals(
+                    execute_model_req, self._seq_with_bonus_token_in_last_step)
 
-        if not self._allow_zero_draft_token_step and proposals.no_proposals:
-            #TODO: Fix it #5814
-            raise RuntimeError("Cannot handle cases where distributed draft "
-                               "workers generate no tokens")
+            if not self._allow_zero_draft_token_step and proposals.no_proposals:
+                #TODO: Fix it #5814
+                raise RuntimeError(
+                    "Cannot handle cases where distributed draft "
+                    "workers generate no tokens")
+
+            proposal_execute_time = \
+                proposal_timer.elapsed_time_ms / num_lookahead_slots
+            intermediate_tensors = IntermediateTensors({
+                "proposal_token_ids":
+                proposals.proposal_token_ids,
+                "proposal_probs":
+                proposals.proposal_probs,
+                "proposal_lens":
+                proposals.proposal_lens,
+                "proposal_execute_time":
+                proposal_execute_time,
+            })
+            get_pp_group().broadcast_tensor_dict(intermediate_tensors.tensors,
+                                                 src=self._driver_rank)
+        else:
+            intermediate_tensors = IntermediateTensors(
+                get_pp_group().broadcast_tensor_dict(src=self._driver_rank))
+            proposal_token_ids = intermediate_tensors["proposal_token_ids"]
+            proposal_probs = intermediate_tensors["proposal_probs"]
+            proposal_lens = intermediate_tensors["proposal_lens"]
+            proposal_execute_time = intermediate_tensors[
+                "proposal_execute_time"]
+            proposals = SpeculativeProposals(
+                proposal_token_ids=proposal_token_ids,
+                proposal_probs=proposal_probs,
+                proposal_lens=proposal_lens)
 
         execute_model_req.previous_hidden_states = None
 
@@ -820,8 +886,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 execute_model_req.seq_group_metadata_list, proposal_scores,
                 proposals, execute_model_req.num_lookahead_slots)
 
-        stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
-                       scoring_timer.elapsed_time_ms,
+        stage_times = (proposal_execute_time, scoring_timer.elapsed_time_ms,
                        verification_timer.elapsed_time_ms)
 
         return self._create_output_sampler_list(
@@ -902,6 +967,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
         # B x K+1 x D
+        # if get_pp_group().is_last_rank:
         hidden_states = proposal_scores.hidden_states
         if hidden_states is not None:
             # Only get terminal hidden states for next step
@@ -1261,6 +1327,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     @property
     def rank(self):
         return self.scorer_worker.rank
+
+    @property
+    def tensor_parallel_size(self):
+        return self.scorer_worker.parallel_config.tensor_parallel_size
 
     @property
     def device(self):

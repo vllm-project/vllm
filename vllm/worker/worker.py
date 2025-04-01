@@ -312,11 +312,11 @@ class Worker(LocalOrDistributedWorkerBase):
         self.cache_engine = [
             CacheEngine(self.cache_config, self.model_config,
                         self.parallel_config, self.device_config)
-            for _ in range(self.parallel_config.pipeline_parallel_size)
+            for _ in range(self.parallel_config.virtual_engine_size)
         ]
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
-            for ve in range(self.parallel_config.pipeline_parallel_size)
+            for ve in range(self.parallel_config.virtual_engine_size)
         ]
         bind_kv_cache(self.compilation_config.static_forward_context,
                       self.gpu_cache)

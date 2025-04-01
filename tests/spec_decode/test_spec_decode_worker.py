@@ -12,7 +12,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import ExecuteModelRequest, SequenceOutput
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
-from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+from vllm.spec_decode.draft_model_runner import TP1PP1DraftModelRunner
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.metrics import (AsyncMetricsCollector,
                                       SpecDecodeWorkerMetrics)
@@ -929,7 +929,7 @@ def test_correctly_load_weight_for_eagle():
         block_size,
         num_gpu_blocks,
         seed,
-        model_runner_cls=TP1DraftModelRunner,
+        model_runner_cls=TP1PP1DraftModelRunner,
     )
 
     spec_decode_sampler = mock_spec_decode_sampler("rejection_sampler")
