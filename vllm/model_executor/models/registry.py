@@ -21,9 +21,10 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.utils import is_in_doc_build
 
-from .interfaces import (has_inner_state, is_attention_free, is_hybrid,
-                         supports_cross_encoding, supports_multimodal,
-                         supports_pp, supports_transcription, supports_v0_only)
+from .interfaces import (has_inner_state, has_noops, is_attention_free,
+                         is_hybrid, supports_cross_encoding,
+                         supports_multimodal, supports_pp,
+                         supports_transcription, supports_v0_only)
 from .interfaces_base import is_text_generation_model
 
 logger = init_logger(__name__)
@@ -44,7 +45,7 @@ _TEXT_GENERATION_MODELS = {
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
-    "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
+    "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
@@ -118,7 +119,7 @@ _EMBEDDING_MODELS = {
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
-    "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
+    "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "GritLM": ("gritlm", "GritLM"),
@@ -190,6 +191,7 @@ _MULTIMODAL_MODELS = {
     # [Encoder-decoder]
     "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
+    "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
 
@@ -200,7 +202,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
 
-_FALLBACK_MODEL = {
+_TRANSFORMERS_MODELS = {
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
@@ -211,7 +213,7 @@ _VLLM_MODELS = {
     **_CROSS_ENCODER_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
-    **_FALLBACK_MODEL,
+    **_TRANSFORMERS_MODELS,
 }
 
 # This variable is used as the args for subprocess.run(). We
@@ -234,6 +236,7 @@ class _ModelInfo:
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
+    has_noops: bool
     supports_transcription: bool
     supports_v0_only: bool
 
@@ -251,6 +254,7 @@ class _ModelInfo:
             is_hybrid=is_hybrid(model),
             supports_transcription=supports_transcription(model),
             supports_v0_only=supports_v0_only(model),
+            has_noops=has_noops(model),
         )
 
 
@@ -423,7 +427,7 @@ class _ModelRegistry:
         normalized_arch = list(
             filter(lambda model: model in self.models, architectures))
 
-        # make sure Transformers fallback are put at the last
+        # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):
             normalized_arch.append("TransformersForCausalLM")
         return normalized_arch
@@ -509,6 +513,13 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_hybrid
+
+    def is_noops_model(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.has_noops
 
     def is_transcription_model(
         self,

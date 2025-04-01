@@ -125,8 +125,13 @@ class ShmRingBuffer:
                        lambda *args, **kwargs: None):
                 try:
                     self.shared_memory = shared_memory.SharedMemory(name=name)
-                    assert (
-                        self.shared_memory.size == self.total_bytes_of_buffer)
+                    # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
+                    # Some platforms allocate memory based on page size,
+                    # so the shared memory block size may be larger or equal
+                    # to the requested size. The size parameter is ignored
+                    # when attaching to an existing block.
+                    assert (self.shared_memory.size
+                            >= self.total_bytes_of_buffer)
                 except FileNotFoundError:
                     # we might deserialize the object in a different node
                     # in this case, this object is not used,
