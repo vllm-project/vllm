@@ -2360,12 +2360,10 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        if self.prompt_lookup_max is not None and self.prompt_lookup_max > 0:
-            draft_model = "ngram"
-        else:
-            draft_model = self.draft_model_config.model
+        method = self.method
+        model = None if method == "ngram" else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
+        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
 
 
 @dataclass
