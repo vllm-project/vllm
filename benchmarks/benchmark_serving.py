@@ -260,6 +260,7 @@ async def benchmark(
     goodput_config_dict: dict[str, float],
     max_concurrency: Optional[int],
     lora_modules: Optional[Iterable[str]],
+    extra_body: Optional[dict],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -287,6 +288,7 @@ async def benchmark(
         logprobs=logprobs,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
+        extra_body=extra_body,
     )
 
     test_output = await request_func(request_func_input=test_input)
@@ -313,7 +315,8 @@ async def benchmark(
                                          output_len=test_output_len,
                                          logprobs=logprobs,
                                          multi_modal_content=test_mm_content,
-                                         ignore_eos=ignore_eos)
+                                         ignore_eos=ignore_eos,
+                                         extra_body=extra_body)
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
@@ -363,7 +366,8 @@ async def benchmark(
                                               output_len=output_len,
                                               logprobs=logprobs,
                                               multi_modal_content=mm_content,
-                                              ignore_eos=ignore_eos)
+                                              ignore_eos=ignore_eos,
+                                              extra_body=extra_body)
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
@@ -652,6 +656,19 @@ def main(args: argparse.Namespace):
             raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
     goodput_config_dict = check_goodput_args(args)
 
+    # Collect the sampling parameters.
+    sampling_params = {
+        k: v
+        for k, v in {
+            'top_p': args.top_p,
+            'top_k': args.top_k,
+            'min_p': args.min_p,
+            'temperature': args.temperature
+        }.items() if v is not None
+    }
+    # If the dictionary is empty, set it to None
+    sampling_params = sampling_params if sampling_params else None
+
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
     gc.freeze()
@@ -678,6 +695,7 @@ def main(args: argparse.Namespace):
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
             lora_modules=args.lora_modules,
+            extra_body=sampling_params,
         ))
 
     # Save config and results to json
@@ -999,6 +1017,24 @@ if __name__ == "__main__":
         help="Output length for each request. Overrides the output lengths "
         "from the sampled HF dataset.",
     )
+
+    sampling_group = parser.add_argument_group("sampling parameters")
+    sampling_group.add_argument("--top-p",
+                                type=float,
+                                default=None,
+                                help="Top-p sampling parameter.")
+    sampling_group.add_argument("--top-k",
+                                type=int,
+                                default=None,
+                                help="Top-k sampling parameter.")
+    sampling_group.add_argument("--min-p",
+                                type=float,
+                                default=None,
+                                help="Min-p sampling parameter.")
+    sampling_group.add_argument("--temperature",
+                                type=float,
+                                default=None,
+                                help="Temperature sampling parameter.")
 
     parser.add_argument(
         '--tokenizer-mode',
