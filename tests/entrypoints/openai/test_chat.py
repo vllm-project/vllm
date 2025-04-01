@@ -543,8 +543,8 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI, is_v1_server: bool,
                                 guided_decoding_backend: str,
                                 sample_json_schema):
 
-    if is_v1_server and guided_decoding_backend != 'xgrammar':
-        pytest.skip("Only xgrammar backend is supported with V1")
+    if is_v1_server:
+        pytest.skip("sample_json_schema has features unsupported in V1")
 
     messages = [{
         "role": "system",
@@ -694,8 +694,8 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, is_v1_server: bool,
                               guided_decoding_backend: str,
                               sample_json_schema):
 
-    if is_v1_server and guided_decoding_backend != 'xgrammar':
-        pytest.skip("Only xgrammar backend is supported with V1")
+    if is_v1_server:
+        pytest.skip("sample_json_schema has features unsupported on V1")
 
     messages = [{
         "role": "system",
@@ -788,6 +788,10 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, is_v1_server: bool,
 @pytest.mark.asyncio
 async def test_required_tool_use_not_yet_supported(client: openai.AsyncOpenAI,
                                                    sample_json_schema):
+
+    if is_v1_server:
+        pytest.skip("sample_json_schema has features unsupported on V1")
+
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -833,6 +837,10 @@ async def test_required_tool_use_not_yet_supported(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 async def test_inconsistent_tool_choice_and_tools(client: openai.AsyncOpenAI,
                                                   sample_json_schema):
+
+    if is_v1_server:
+        pytest.skip("sample_json_schema has features unsupported on V1")
+
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
