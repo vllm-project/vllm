@@ -27,7 +27,7 @@ def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
 
     # Use clone() to ensure an independent copy
     if kv_history is None:
-        kv_cache = torch.zeros((B, H, D, E), dtype=dtype, device=q.device)
+        kv_cache = torch.randn((B, H, D, E), dtype=dtype, device=q.device)
     else:
         kv_cache = kv_history.clone()
 
@@ -133,11 +133,11 @@ def test_linear_decode_forward_triton(
     torch.cuda.manual_seed_all(42)
     current_platform.seed_everything(42)
 
-    q = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
-    k = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
-    v = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
+    q = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
+    k = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
+    v = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
 
-    kv_caches = torch.zeros(batch_size,
+    kv_caches = torch.randn(batch_size,
                             num_heads,
                             head_size,
                             head_size,
@@ -182,11 +182,11 @@ def test_linear_decode_forward_triton_with_padding(
 
     batch_size = 4
 
-    q = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
-    k = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
-    v = torch.zeros(batch_size, num_heads, 1, head_size, dtype=dtype)
+    q = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
+    k = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
+    v = torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
 
-    kv_caches = torch.zeros(batch_size,
+    kv_caches = torch.randn(batch_size,
                             num_heads,
                             head_size,
                             head_size,
@@ -247,15 +247,15 @@ def test_lightning_attention_reference(
     torch.cuda.manual_seed_all(42)
     current_platform.seed_everything(42)
 
-    q = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
-    k = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
-    v = torch.zeros(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+    q = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+    k = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
+    v = torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)
 
     ed = torch.zeros(num_heads, device="cuda")
     for h in range(num_heads):
         ed[h] = 0.1 * (h + 1)
 
-    kv_history = torch.zeros(batch_size,
+    kv_history = torch.randn(batch_size,
                              num_heads,
                              head_size,
                              head_size,
