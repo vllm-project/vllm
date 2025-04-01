@@ -1116,8 +1116,7 @@ class CacheConfig:
         is_attention_free: Whether the model is attention-free.
         num_gpu_blocks_override: Number of GPU blocks to use. This overrides the
             profiled num_gpu_blocks if specified. Does nothing if None.
-        sliding_window: Sliding window size for the KV cache. Can not work with
-            prefix caching enabled.
+        sliding_window: Sliding window size for the KV cache.
         enable_prefix_caching: Whether to enable prefix caching.
         cpu_offload_gb: Size of the CPU offload buffer in GiB.
     """
