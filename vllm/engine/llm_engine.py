@@ -431,7 +431,7 @@ class LLMEngine:
             self.last_record = None
             self.async_event = torch.cuda.Event(enable_timing=False)
             self.zero_thread = threading.Thread(target=self.thread_zero_overhead)
-            self.q_recorder = queue.Queue()
+            self.q_recorder: queue.Queue[Optional[list[Any]]] = queue.Queue()
             self.q_recorder.put(None) # None is use for first step ignore
             self.thread_running = True
             self.sem_m2s = threading.Semaphore(0) # main to scheduler thread
@@ -1265,6 +1265,7 @@ class LLMEngine:
             scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
         
         #sample_out_list = output[0].sampler_out_tenosr.cpu().tolist()
+        assert output[0].sampler_out_ids is not None
         sample_out_list = self.async_d2h.tolist()
         sample_out_ids = output[0].sampler_out_ids.tolist()
         for seq_group_metadata, sequence_group_outputs, scheduled_seq_group in \

@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass, field
 from functools import reduce
-from typing import Any, Callable, Optional, Union,Tuple
+from typing import Any, Callable, Optional, Union,tuple
 import os
 import msgspec
 import torch
@@ -385,7 +385,7 @@ class SequenceData(msgspec.Struct,
     def get_prompt_token_ids(self) -> tuple[int, ...]:
         return self.prompt_token_ids
 
-    def zero_overhead_get_output_token_ids(self) -> Tuple[int, ...]:
+    def zero_overhead_get_output_token_ids(self) -> tuple[int, ...]:
         return self.output_token_ids[:self._effective_length]
 
     def get_output_token_ids(self) -> tuple[int, ...]:

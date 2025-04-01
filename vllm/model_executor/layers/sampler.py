@@ -137,6 +137,10 @@ class SamplerOutput(
     # block/sync across workers, cpu-gpu sync time and sampling time.
     model_execute_time: Optional[float] = None
 
+    sampler_out_tenosr : Optional[torch.Tensor] = None
+
+    sampler_out_ids : Optional[torch.Tensor] = None
+
     def __getitem__(self, idx: int) -> CompletionSequenceGroupOutput:
         return self.outputs[idx]
 
@@ -164,7 +168,10 @@ class SamplerOutput(
             f"SamplerOutput(outputs={self.outputs}, "
             f"sampled_token_probs={sampled_token_probs_repr}, "
             f"sampled_token_ids={sampled_token_ids_repr}, "
-            f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
+            f"spec_decode_worker_metrics={self.spec_decode_worker_metrics}, "
+            f"sampler_out_tenosr={self.sampler_out_tenosr}, "
+            f"sampler_out_ids={self.sampler_out_ids}, "
+            f")")
 
 
 class Sampler(nn.Module):
@@ -197,6 +204,7 @@ class Sampler(nn.Module):
         self.include_gpu_probs_tensor = False
         self.should_modify_greedy_probs_inplace = False
         self.zero_overhead = os.environ.get('VLLM_ZERO_OVERHEAD') == '1'
+        d2d_data.zero_overhead = self.zero_overhead
 
     def _init_sampling_tensors(
         self,
@@ -476,7 +484,7 @@ def _greedy_sample(
             next_token_ids = [0] #place holder token id
         else:
             next_token_ids = [
-                samples_lst[sample_idx]  # 缩进4空格，总行长降至42字符
+                samples_lst[sample_idx]
             ]
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
@@ -641,8 +649,10 @@ def get_pythonized_sample_results(
             continue
         (seq_group_id, seq_groups) = sample_metadata[sampling_type]
         if sampling_type == SamplingType.GREEDY:
+            d2d_data.random_samples = greedy_samples
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
+            d2d_data.random_samples = multinomial_samples[sampling_type]
             sample_results = _random_sample(seq_groups,
                                             multinomial_samples[sampling_type])
         sample_results_dict.update(zip(seq_group_id, sample_results))
@@ -677,8 +687,10 @@ def _sample_with_torch(
         t: []
         for t in SamplingType
     }
+    d2d_data.seq_id = torch.zeros(len(sampling_metadata.seq_groups))
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
+        d2d_data.seq_id[i] = seq_group.seq_ids[0]
         sampling_params = seq_group.sampling_params
         sampling_type = sampling_params.sampling_type
         categorized_seq_group_ids[sampling_type].append(i)
@@ -1214,7 +1226,9 @@ def _build_sampler_output(
         sampled_token_probs=sampled_token_probs,
         sampled_token_ids=sampled_token_ids,
         logprobs=logprobs_tensor,
-        deferred_sample_results_args=deferred_sample_results_args)
+        deferred_sample_results_args=deferred_sample_results_args,
+        sampler_out_tenosr = d2d_data.random_samples,
+        sampler_out_ids = d2d_data.seq_id)
 
 
 def _get_next_prompt_tokens(
