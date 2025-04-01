@@ -24,12 +24,13 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, LazyLoader, cdiv, check_use_alibi,
-                        is_pin_memory_available)
+                        GiB_bytes, LayerBlockType, LazyLoader, cdiv,
+                        check_use_alibi, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -40,6 +41,8 @@ from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+
+from .utils import sanity_check_mm_encoder_outputs
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -68,6 +71,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+
+        from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
+        set_cpu_offload_max_bytes(
+            int(self.cache_config.cpu_offload_gb * 1024**3))
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -863,6 +870,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
 
+            sanity_check_mm_encoder_outputs(
+                curr_group_outputs,
+                expected_num_items=len(grouped_mm_inputs),
+            )
+
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
 
@@ -1195,8 +1207,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                   self.device)
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
-        logger.info("Model loading took %.4f GB and %.6f seconds",
-                    self.model_memory_usage / float(2**30),
+        logger.info("Model loading took %.4f GiB and %.6f seconds",
+                    self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
 
     def _get_prompt_logprobs_dict(
@@ -1486,12 +1498,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Run multimodal encoder.
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
                 **batched_dummy_mm_inputs)
-            assert len(dummy_encoder_outputs) == max_num_mm_items, (
-                "Expected dimension 0 of encoder outputs to match the number "
-                f"of multimodal data items: {max_num_mm_items}, got "
-                f"{len(dummy_encoder_outputs)=} instead. This is most likely "
-                "due to the 'get_multimodal_embeddings' method of the model "
-                "not implemented correctly.")
+
+            sanity_check_mm_encoder_outputs(
+                dummy_encoder_outputs,
+                expected_num_items=max_num_mm_items,
+            )
 
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
@@ -1562,7 +1573,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # different GPUs, and `kv_cache_config.num_blocks` is set to
                 # the min of all `num_blocks`. Verify it here.
                 assert num_blocks >= kv_cache_config.num_blocks
-                if isinstance(kv_cache_spec, FullAttentionSpec):
+                if isinstance(kv_cache_spec, AttentionSpec):
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
@@ -1601,12 +1612,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention
             assert isinstance(attn_module, Attention)
             if attn_module.attn_type == AttentionType.DECODER:
-                kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=attn_module.num_kv_heads,
-                    head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype,
-                    use_mla=use_mla)
+                if attn_module.sliding_window is not None:
+                    kv_cache_spec[layer_name] = SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        sliding_window=attn_module.sliding_window,
+                        use_mla=use_mla)
+                else:
+                    kv_cache_spec[layer_name] = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
