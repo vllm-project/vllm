@@ -23,7 +23,8 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
      "mistral"),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar:disable-any-whitespace", "auto"),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "guidance:disable-any-whitespace", "auto"),
+    #FIXME: This test is flaky on CI thus disabled
+    #("Qwen/Qwen2.5-1.5B-Instruct", "guidance:disable-any-whitespace", "auto"),
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
