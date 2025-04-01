@@ -611,3 +611,98 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         prompt_logprobs_dict={},
     )
     scheduler.update_from_output(scheduler_output1, model_runner_output)
+
+
+# Note - these test cases mirror some of those in test_rejection_sampler.py
+@pytest.mark.parametrize(
+    "spec_tokens,output_tokens,expected",
+    [
+        ([[1, 2, 3]], [[1, 2, 3, 4]], (3, 3)),  # perfect match
+        ([[1, 2, 3]], [[1, 5]], (3, 1)),  # early mismatch
+        ([[1, 2], [3]], [[1, 2, 5], [3, 4]], (3, 3)),  # multiple sequences
+        ([[1]], [[1, 2]], (1, 1)),  # single token sequence
+        ([[]], [[5]], (0, 0)),  # empty sequence
+        ([[1, 2, 3], [4, 5, 6]], [[1, 2, 7], [4, 8]],
+         (6, 3)),  # multiple mismatches
+    ])
+def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
+    """Test scheduling behavior with speculative decoding.
+
+    This test verifies that:
+    1. Speculated tokens get scheduled correctly
+    2. Spec decoding stats properly count number of draft and accepted tokens
+    """
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=len(spec_tokens), num_tokens=1)
+    req_ids = []
+    req_to_index = {}
+    for i, request in enumerate(requests):
+        scheduler.add_request(request)
+        req_ids.append(request.request_id)
+        req_to_index[request.request_id] = i
+
+    # Schedule a decode, which will also draft speculative tokens
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == len(requests)
+    assert output.total_num_scheduled_tokens == len(requests)
+    for i in range(len(requests)):
+        req_id = requests[i].request_id
+        assert output.num_scheduled_tokens[req_id] == 1
+        assert req_id not in output.scheduled_spec_decode_tokens
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0] for _ in range(len(requests))],
+        spec_token_ids=spec_tokens,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+    engine_core_outputs = scheduler.update_from_output(output,
+                                                       model_runner_output)
+
+    for i in range(len(requests)):
+        running_req = scheduler.running[i]
+        # The prompt token
+        assert running_req.num_computed_tokens == 1
+        # The prompt token and the sampled token
+        assert running_req.num_tokens == 2
+        # The prompt token, the sampled token, and the speculated tokens
+        assert running_req.num_tokens_with_spec == 2 + len(spec_tokens[i])
+
+    # No draft or accepted tokens counted yet
+    assert engine_core_outputs.scheduler_stats.spec_decoding_stats is not None
+    stats = engine_core_outputs.scheduler_stats.spec_decoding_stats
+    assert stats.num_draft_tokens == 0
+    assert stats.num_accepted_tokens == 0
+
+    # Schedule the speculated tokens for validation
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 0
+    # The sampled token and speculated tokens
+    assert output.total_num_scheduled_tokens == \
+        len(requests) + sum(len(ids) for ids in spec_tokens)
+    for i in range(len(requests)):
+        req_id = requests[i].request_id
+        assert output.num_scheduled_tokens[req_id] == 1 + len(spec_tokens[i])
+        if spec_tokens[i]:
+            assert len(output.scheduled_spec_decode_tokens[req_id]) == \
+                len(spec_tokens[i])
+        else:
+            assert req_id not in output.scheduled_spec_decode_tokens
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_to_index,
+        sampled_token_ids=output_tokens,
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+    engine_core_outputs = scheduler.update_from_output(output,
+                                                       model_runner_output)
+
+    assert engine_core_outputs.scheduler_stats.spec_decoding_stats is not None
+    stats = engine_core_outputs.scheduler_stats.spec_decoding_stats
+    assert stats.num_draft_tokens == expected[0]
+    assert stats.num_accepted_tokens == expected[1]
