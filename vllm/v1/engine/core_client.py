@@ -292,7 +292,7 @@ class BackgroundResources:
 
     def __call__(self):
         """Clean up background resources."""
-
+        print("\n\n\nHYPERBANANA\n\n\n")
         for core_engine in self.core_engines:
             core_engine.close()
 
@@ -578,7 +578,7 @@ class AsyncMPClient(MPClient):
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
         output_handler = self.outputs_handler
-        _self_ref = weakref.ref(self) if output_handler else None
+        _self_ref = weakref.ref(self)
         output_path = self.output_path
         output_socket = make_zmq_socket(self.ctx, output_path,
                                         zmq.constants.PULL)
@@ -586,9 +586,13 @@ class AsyncMPClient(MPClient):
 
         async def process_outputs_socket():
             try:
+                _self = _self_ref()
+                if not _self:
+                    # Client has been garbage collected, abort.
+                    return
                 while True:
                     (frame, ) = await output_socket.recv_multipart(copy=False)
-                    self._validate_alive(frame.buffer)
+                    _self._validate_alive(frame.buffer)
                     outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
@@ -606,7 +610,8 @@ class AsyncMPClient(MPClient):
                     if outputs.outputs or outputs.scheduler_stats:
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
-                self.outputs_queue.put_nowait(e)
+                if _self:
+                    _self.outputs_queue.put_nowait(e)
 
         self.queue_task = asyncio.create_task(process_outputs_socket(),
                                               name="EngineCoreOutputQueueTask")
