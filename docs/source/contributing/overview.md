@@ -45,7 +45,7 @@ pytest tests/
 ```
 
 :::{tip}
-Since the <gh-file:Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
+Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
 
 Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 :::
