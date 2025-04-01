@@ -313,7 +313,7 @@ class EngineCoreProc(EngineCore):
                                             Any]] = queue.Queue()
         self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
-                         args=(input_path, ),
+                         args=(input_path, engine_index),
                          daemon=True).start()
         threading.Thread(target=self.process_output_socket,
                          args=(output_path, engine_index),
@@ -462,14 +462,18 @@ class EngineCoreProc(EngineCore):
             and not isinstance(v, p.annotation) else v
             for v, p in zip(args, arg_types))
 
-    def process_input_socket(self, input_path: str):
+    def process_input_socket(self, input_path: str, engine_index: int):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
         generic_decoder = MsgpackDecoder()
+        identity = engine_index.to_bytes(length=2, byteorder="little")
 
-        with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(input_path,
+                            zmq.DEALER,
+                            identity=identity,
+                            bind=False) as socket:
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)
