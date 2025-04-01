@@ -165,9 +165,12 @@ class Plamo2MambaMixer(nn.Module):
         # time step projection (discretization) -
         # In the forward we need to apply dt_proj without the bias,
         # as the bias is added in the selective scan kernel.
-        self.dt_proj = ColumnParallelLinear(self.time_step_rank,
-                                            self.num_heads,
-                                            bias=False)
+        self.dt_proj = ColumnParallelLinear(
+            self.time_step_rank,
+            self.num_heads,
+            bias=False,
+            prefix=f"{prefix}.dt_proj",
+        )
         self.dt_bias = torch.nn.Parameter(get_initial_dt_bias(self.num_heads))
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -189,6 +192,7 @@ class Plamo2MambaMixer(nn.Module):
             self.hidden_size,
             bias=self.use_bias,
             input_is_parallel=True,
+            prefix=f"{prefix}.out_proj",
         )
         # The activation function is fixed to SiLU.
         self.activation = "silu"
@@ -459,7 +463,9 @@ class Plamo2DecoderLayer(nn.Module):
                                               max_model_len=max_model_len,
                                               prefix=f"{prefix}.mixer")
 
-        self.mlp = DenseMLP(config=config, quant_config=quant_config)
+        self.mlp = DenseMLP(config=config,
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.mlp")
         self.pre_mixer_norm = RMSNorm(config.hidden_size,
                                       eps=config.rms_norm_eps)
         self.post_mixer_norm = RMSNorm(config.hidden_size,
