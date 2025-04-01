@@ -183,7 +183,7 @@ class TPUModelRunner:
             min_token_size=16,
             max_token_size=self.max_num_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
-        
+
         # Get maximum number of mm items per modality (batch size).
         self.max_num_mm_items_by_modality = dict()
         if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
@@ -239,7 +239,6 @@ class TPUModelRunner:
             "Recompilation after warm up is detected during {}."
             " num_xla_graphs = {} curr_cached_graph = {}".format(
                 case_str, self.num_xla_graphs, curr_cached_graph))
-
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
