@@ -155,11 +155,17 @@ def validate_dataset(args: argparse.Namespace, ):
                       stacklevel=2)
     elif args.dataset_name == "hf":
         if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm-chat", "VisionArenaDataset needs to use vllm-chat as the backend."  #noqa: E501
+            assert getattr(
+                args, 'backend', None
+            ) and args.backend == "vllm-chat", "VisionArenaDataset needs to use vllm-chat as the backend."  #noqa: E501
         elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm", "InstructCoder dataset needs to use vllm as the backend."  #noqa: E501
+            assert getattr(
+                args, 'backend', None
+            ) and args.backend == "vllm", "InstructCoder dataset needs to use vllm as the backend."  #noqa: E501
         elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm-chat", "ConversationDataset needs to use vllm-chat as the backend."  #noqa: E501
+            assert getattr(
+                args, 'backend', None
+            ) and args.backend == "vllm-chat", "ConversationDataset needs to use vllm-chat as the backend."  #noqa: E501
         else:
             raise ValueError(
                 f"{args.dataset_path} is not supported by hf dataset.")
