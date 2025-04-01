@@ -40,19 +40,21 @@ logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
 
+
 def maybe_compile_xla_graph(func):
     if not current_platform.is_tpu():
         return func
-    
+
     import torch_xla.core.xla_model as xm
 
     def wrapper(*args, **kwargs):
-        logger.warning("compiling with xla")
         result = func(*args, **kwargs)
-        
+
         xm.mark_step()
         return result
+
     return wrapper
+
 
 @dataclass
 class LongContextLoRAContext:
@@ -213,7 +215,7 @@ class LoRAModel(AdapterModel):
         weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
-        
+
         Args:
             lora_dir: The local path that has lora data.
             expected_lora_modules: Name of modules that are expected to be
@@ -621,7 +623,7 @@ class LoRAModelManager(AdapterModelManager):
     def _filter_unsupported_mm_module(self, module_name: str) -> bool:
         """
         Regarding multimodal models, vLLM currently only supports adding LoRA to
-        language model. LoRA for other modules, such as the vision tower, will 
+        language model. LoRA for other modules, such as the vision tower, will
         be filtered out.
         """
         if self.supports_mm:

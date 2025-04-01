@@ -118,5 +118,5 @@ class TPUSupportedSamplingMetadata:
 
         xm.mark_step()
         xm.wait_device_ops()
-        
+
         return input_batch

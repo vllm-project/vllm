@@ -784,7 +784,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             num_seqs=num_seqs,
         )
 
-        xm.mark_step() # Capture tensors created when setting up
+        xm.mark_step()  # Capture tensors created when setting up
 
         if self.is_multimodal_model:
             torch._dynamo.mark_dynamic(inputs_embeds, 0)
@@ -807,7 +807,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                           lora_requests) -> None:
         super()._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                   lora_requests)
-        xm.mark_step() # Captures metadata updates
+        xm.mark_step()  # Captures metadata updates
 
     def capture_model(self) -> None:
         """Compile the model."""
