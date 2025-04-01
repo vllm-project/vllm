@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
@@ -552,6 +553,7 @@ class Scheduler(SchedulerInterface):
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
+        spec_decoding_stats = SpecDecodingStats() if self.log_stats else None
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         new_running: list[Request] = []
@@ -583,6 +585,11 @@ class Scheduler(SchedulerInterface):
                 num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
                                        len(generated_token_ids))
                 request.num_computed_tokens -= num_tokens_rejected
+
+                if spec_decoding_stats is not None:
+                    spec_decoding_stats.observe(
+                        num_draft_tokens=len(scheduled_spec_token_ids),
+                        num_accepted_tokens=len(generated_token_ids) - 1)
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
@@ -657,7 +664,7 @@ class Scheduler(SchedulerInterface):
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
-            scheduler_stats=self.make_stats(),
+            scheduler_stats=self.make_stats(spec_decoding_stats),
         )
         if self.include_finished_set:
             #TODO currently sending duplicates here, improve this
@@ -724,7 +731,10 @@ class Scheduler(SchedulerInterface):
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()
 
-    def make_stats(self) -> Optional[SchedulerStats]:
+    def make_stats(
+        self,
+        spec_decoding_stats: Optional[SpecDecodingStats] = None,
+    ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
         return SchedulerStats(
@@ -732,4 +742,5 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             gpu_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=self.kv_cache_manager.make_prefix_cache_stats(),
+            spec_decoding_stats=spec_decoding_stats,
         )
