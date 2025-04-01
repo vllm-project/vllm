@@ -1103,23 +1103,22 @@ class LLMEngine:
 
             output: List[SequenceGroupOutput]
             return_hidden_states = False
+
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
                 if self.model_config.task == "generate" and \
-                        outputs_by_sequence_group[0][0].hidden_states is not None:
+                        output[0].hidden_states is not None:
                     return_hidden_states = True
                     hidden_states = []
-                    for k in range(n):
-                        hidden_states.append(outputs_by_sequence_group[i][
-                            k].hidden_states)
+                    for k in range(len(output)):
+                        hidden_states.append(
+                            outputs_by_sequence_group[i][k].hidden_states)
             else:
                 output = [outputs_by_sequence_group[0][i]]
                 if self.model_config.task == "generate" and \
                         outputs_by_sequence_group[0].hidden_states is not None:
                     return_hidden_states = True
-                    hidden_states = outputs_by_sequence_group[
-                        0].hidden_states 
-
+                    hidden_states = outputs_by_sequence_group[0].hidden_states
 
             if not is_async:
                 if self.scheduler_config.is_multi_step:
@@ -1157,8 +1156,7 @@ class LLMEngine:
 
             if seq_group.is_finished():
                 finished_now.append(i)
-       
-      
+
         # Generate outputs for the requests that finished this iteration
         for i in finished_now:
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
@@ -1167,12 +1165,13 @@ class LLMEngine:
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)
-      
+
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs,
-                hidden_states=hidden_states if return_hidden_states else None,
+                hidden_states=hidden_states
+                if return_hidden_states is not None else None,
             )
             if request_output:
                 ctx.request_outputs.append(request_output)
