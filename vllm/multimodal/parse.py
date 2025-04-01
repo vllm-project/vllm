@@ -328,10 +328,6 @@ class MultiModalDataParser:
             return len(data) == 0
         if isinstance(data, (np.ndarray, torch.Tensor)):
             return data.size == 0
-        # single audio
-        if isinstance(data, tuple) and len(data) == 2 and isinstance(
-                data[0], np.ndarray):
-            return data[0].size == 0
 
         return False
 
@@ -354,7 +350,9 @@ class MultiModalDataParser:
         self,
         data: ModalityData[AudioItem],
     ) -> Optional[ModalityDataItems[Any, Any]]:
-        if self._is_empty(data):
+        # also check single audio item with sampling rate
+        if self._is_empty(data) or (isinstance(data, tuple)
+                                    and self._is_empty(data[0])):
             return None
 
         if self._is_embeddings(data):
