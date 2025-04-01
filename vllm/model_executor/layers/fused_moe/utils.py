@@ -6,6 +6,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.utils import cdiv
 
+
 def _fp8_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],

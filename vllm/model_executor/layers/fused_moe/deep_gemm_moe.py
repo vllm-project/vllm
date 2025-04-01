@@ -8,6 +8,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import moe_align_block_size
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
                                                         _fp8_quantize)
@@ -60,7 +61,7 @@ def _moe_permute(
     expert_map: Optional[torch.Tensor],
     block_m: int,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
-           torch.Tensor]:
+           Optional[torch.Tensor]]:
     """
     Determine the sorted_token_ids, expert_ids for the given problem size.
     Permute the hidden states and scales according to `sorted_token_ids`.
@@ -233,15 +234,15 @@ def deep_gemm_moe_fp8(
 
     # We can reuse the memory between cache1 and cache3 because by the time
     # we need cache3, we're done with cache1
-    cache13 = torch.empty(M_sum * max(N, K),
+    workspace13 = torch.empty(M_sum * max(N, K),
                           device=hidden_states.device,
                           dtype=hidden_states.dtype)
 
-    intermediate_cache1 = cache13[:M_sum * N].view(M_sum, N)
-    intermediate_cache2 = torch.empty((M_sum, N // 2),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
-    intermediate_cache3 = cache13[:M_sum * K].view(M_sum, K)
+    workspace1 = workspace13[:M_sum * N].view(M_sum, N)
+    workspace2 = torch.empty((M_sum, N // 2),
+                             device=hidden_states.device,
+                             dtype=hidden_states.dtype)
+    workspace3 = workspace13[:M_sum * K].view(M_sum, K)
 
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
@@ -271,175 +272,171 @@ def deep_gemm_moe_fp8(
         # and config are already set correctly and do not need to be adjusted.
         if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
             curr_M = sorted_token_ids.numel()
-            intermediate_cache1 = _resize_cache(intermediate_cache1,
-                                                (curr_M, N))
-            intermediate_cache2 = _resize_cache(intermediate_cache2,
-                                                (curr_M, N // 2))
-            intermediate_cache3 = _resize_cache(intermediate_cache3,
-                                                (curr_M, K))
+            workspace1 = _resize_cache(workspace1, (curr_M, N))
+            workspace2 = _resize_cache(workspace2, (curr_M, N // 2))
+            workspace3 = _resize_cache(workspace3, (curr_M, K))
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (qcurr_hidden_states, a1q_scale), (w1, w1_scale),
-            intermediate_cache1, expert_ids)
+            workspace1, expert_ids)
 
         if activation == "silu":
-            torch.ops._C.silu_and_mul(intermediate_cache2,
-                                      intermediate_cache1.view(-1, N))
+            torch.ops._C.silu_and_mul(workspace2, workspace1.view(-1, N))
         elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(intermediate_cache2,
-                                      intermediate_cache1.view(-1, N))
+            torch.ops._C.gelu_and_mul(workspace2, workspace1.view(-1, N))
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
         a2q_scale: Optional[torch.Tensor] = None
 
-        qintermediate_cache2, a2q_scale = _fp8_quantize(
-            intermediate_cache2, a2_scale, block_shape)
+        qworkspace2, a2q_scale = _fp8_quantize(
+            workspace2, a2_scale, block_shape)
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (qintermediate_cache2, a2q_scale), (w2, w2_scale),
-            intermediate_cache3, expert_ids)
+            (qworkspace2, a2q_scale), (w2, w2_scale),
+            workspace3, expert_ids)
 
         _moe_unpermute_and_reduce(
             out_hidden_states[begin_chunk_idx:end_chunk_idx],
-            intermediate_cache3.view(*intermediate_cache3.shape), inv_perm,
+            workspace3.view(*workspace3.shape), inv_perm,
             curr_topk_weights)
 
     return out_hidden_states
 
 
-#TODO make the grouped gemm kernel consistent with scaled gemm kernel
-def cutlass_moe_fp8(
-    a: torch.Tensor,
-    w1_q: torch.Tensor,
-    w2_q: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    ab_strides1: torch.Tensor,
-    c_strides1: torch.Tensor,
-    ab_strides2: torch.Tensor,
-    c_strides2: torch.Tensor,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    out_dtype: torch.dtype = torch.half,
-) -> torch.Tensor:
-    """
-    This function computes a a8w8-quantized Mixture of Experts (MoE) layer
-    using two sets of quantized weights, w1_q and w2_q, and top-k gating
-    mechanism. The matrix multiplications are implemented with CUTLASS
-    grouped gemm.
+class DeepGemmDispatch(mk.FusedMoEDispatchQuantize):
+    def __init__(self):
+        super().__init__()
+        import deep_gemm as dg
+        block_m = dg.get_m_alignment_for_contiguous_layout()
+        self.block_shape = [block_m, block_m]
 
-    Parameters:
-    - a (torch.Tensor): The input tensor to the MoE layer.
-        Shape: [M, K]
-    - w1_q (torch.Tensor): The first set of fp8-quantized expert weights.
-        Shape: [num_experts, K, 2N] (the weights are passed transposed)
-    - w2_q (torch.Tensor): The second set of fp8-quantized expert weights.
-        Shape: [num_experts, N, K] (the weights are passed transposed)
-    - w1_scale (torch.Tensor): The fp32 scale to dequantize w1_q.
-        Shape: [num_experts] or [num_experts, 2N]
-    - w2_scale (torch.Tensor): The fp32 scale to dequantize w2_q.
-        Shape: [num_experts] or [num_experts, K]
-    - gating_output (torch.Tensor): The output of the gating operation
-        (before softmax).
-    - topk_weights (torch.Tensor): The weights of each token->expert mapping.
-    - ab_strides1 (torch.Tensor): The input and weights strides of the first
-        grouped gemm.
-    - c_strides1 (torch.Tensor): The output strides of the first grouped gemm.
-    - ab_strides2 (torch.Tensor): The input and weights strides of the second
-        grouped gemm.
-    - c_strides2 (torch.Tensor): The output strides of the second grouped gemm.
-    - a1_scale (Optional[torch.Tensor]): The optional fp32 scale to quantize a.
-        Shape: scalar or [M]
-    - a2_scale (Optional[torch.Tensor]): The optional fp32 scale to
-        quantize the intermediate result between the gemms.
-        Shape: scalar or [M]
-    - out_dtype (torch.Tensor): The output tensor type.
+    def apply(
+            self,
+            hidden_states: torch.Tensor,
+            hidden_states_scale: Optional[torch.Tensor],
+            topk_ids: torch.Tensor,
+            num_experts: int,
+            expert_map: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor]]:
+        q_hidden_states, q_hidden_states_scale = _fp8_quantize(
+            hidden_states,
+            hidden_states_scale,
+            self.block_shape,
+        )
 
-    Returns:
-    - torch.Tensor: The fp16 output tensor after applying the MoE layer.
-    """
+        q_hidden_states, q_hidden_states_scale, _, expert_ids, inv_perm = _moe_permute(
+            q_hidden_states,
+            q_hidden_states_scale,
+            topk_ids,
+            num_experts,
+            expert_map,
+            self.block_shape[0],
+        )
 
-    assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
-    assert w1_q.dtype == torch.float8_e4m3fn
-    assert w2_q.dtype == torch.float8_e4m3fn
-    assert a.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
-    assert w1_q.shape[2] == w2_q.shape[1] * 2, "Hidden size mismatch w2"
-    assert w1_q.shape[0] == w2_q.shape[0], "Expert number mismatch"
-    assert a1_scale is None or a1_scale.dim(
-    ) == 0 or a1_scale.shape[0] == 1 or a1_scale.shape[0] == a.shape[
-        0], "Input scale shape mismatch"
-    assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 or w1_scale.shape[
-        1] == w1_q.shape[2], "W1 scale shape mismatch"
-    assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 or w2_scale.shape[
-        1] == w2_q.shape[2], "W2 scale shape mismatch"
-    assert w1_q.shape[0] == w2_q.shape[0], "Weights expert number mismatch"
-    assert w1_q.shape[0] == w1_scale.shape[
-        0], "w1 scales expert number mismatch"
-    assert w1_q.shape[0] == w2_scale.shape[
-        0], "w2 scales expert number mismatch"
-    assert a2_scale is None or a1_scale is None or a2_scale.shape == a1_scale.shape, "Intermediate scale shape mismatch"  # noqa: E501
-    assert ab_strides1.shape[0] == w1_q.shape[
-        0], "AB Strides 1 expert number mismatch"
-    assert c_strides1.shape[0] == w1_q.shape[
-        0], "C Strides 1 expert number mismatch"
-    assert ab_strides2.shape[0] == w2_q.shape[
-        0], "AB Strides 2 expert number  mismatch"
-    assert c_strides2.shape[0] == w2_q.shape[
-        0], "C Strides 2 expert number mismatch"
-    assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
+        return q_hidden_states, q_hidden_states_scale, expert_ids, inv_perm
 
-    num_experts = w1_q.size(0)
-    m = a.size(0)
-    k = w1_q.size(1)
-    n = w2_q.size(1)
 
-    topk = topk_ids.size(1)
-    per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-        a2_scale.numel() != 1 if a2_scale is not None else False)
+class DeepGemmExperts(mk.FusedMoEExperts):
+    def __init__(self):
+        super().__init__()
+        import deep_gemm as dg
+        block_m = dg.get_m_alignment_for_contiguous_layout()
+        self.block_shape = [block_m, block_m]
 
-    a_q, a1_scale = ops.scaled_fp8_quant(
-        a, a1_scale, use_per_token_if_dynamic=per_act_token)
-    device = a_q.device
+    def workspace_shapes(
+            self,
+            M: int,
+            N: int,
+            K: int,
+            topk: int,
+            num_experts: int
+    ) -> Tuple[int, int]:
+        block_m = self.block_shape[0]
+        M_sum = (M * topk) + num_experts * (block_m - 1)
+        M_sum = round_up(M_sum, block_m)
+        workspace1 = M_sum * max(N, K)
+        workspace2 = M_sum * (N // 2)
+        # return tuples????
+        return (workspace1, workspace2)
 
-    expert_offsets = torch.empty((num_experts + 1),
-                                 dtype=torch.int32,
-                                 device=device)
-    problem_sizes1 = torch.empty((num_experts, 3),
-                                 dtype=torch.int32,
-                                 device=device)
-    problem_sizes2 = torch.empty((num_experts, 3),
-                                 dtype=torch.int32,
-                                 device=device)
+    def apply(
+            self,
+            q_hidden_states: torch.Tensor,
+            w1: torch.Tensor,
+            w2: torch.Tensor,
+            inplace: bool,
+            activation: str,
+            expert_ids: torch.Tensor,
+            w1_scale: Optional[torch.Tensor],
+            w2_scale: Optional[torch.Tensor],
+            a1_scale: Optional[torch.Tensor],
+            a2_scale: Optional[torch.Tensor],
+            workspace13: torch.Tensor,
+            workspace2: torch.Tensor,
+    ) -> torch.Tensor: # or None?  assume inplace?
+        import deep_gemm as dg
 
-    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+        # chunking in here or in ModularFusedMoEKernel? ignore for now
+        M_sum = q_hidden_states.shape[0]  # double check this
+        E, N, _ = w1.shape
+        _, K, _ = w2.shape
 
-    ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
-                                problem_sizes2, a_map, c_map, num_experts, n,
-                                k)
+        #print(f"M_sum = {M_sum}")
 
-    rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
-    rep_a1_scales = a1_scale[a_map] if per_act_token else a1_scale
+        workspace1 = _resize_cache(workspace13, (M_sum, N))
+        workspace2 = _resize_cache(workspace2, (M_sum, N // 2))
+        workspace3 = _resize_cache(workspace13, (M_sum, K))
 
-    c1 = torch.empty((m * topk, n * 2), device=device, dtype=out_dtype)
-    c2 = torch.empty((m * topk, k), device=device, dtype=out_dtype)
+        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            (q_hidden_states, a1_scale), (w1, w1_scale),
+            workspace1,
+            expert_ids)
 
-    ops.cutlass_moe_mm(c1, rep_a_q, w1_q, rep_a1_scales, w1_scale,
-                       expert_offsets[:-1], problem_sizes1, ab_strides1,
-                       ab_strides1, c_strides1)
+        if activation == "silu":
+            torch.ops._C.silu_and_mul(workspace2,
+                                      workspace1.view(-1, N))
+        elif activation == "gelu":
+            torch.ops._C.gelu_and_mul(workspace2,
+                                      workspace1.view(-1, N))
+        else:
+            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
-    intermediate = torch.empty((m * topk, n), device=device, dtype=out_dtype)
-    torch.ops._C.silu_and_mul(intermediate, c1)
+        a2q_scale: Optional[torch.Tensor] = None
 
-    intemediate_q, a2_scale = ops.scaled_fp8_quant(
-        intermediate, a2_scale, use_per_token_if_dynamic=per_act_token)
+        qworkspace2, a2q_scale = _fp8_quantize(
+            workspace2, a2_scale, self.block_shape)
 
-    ops.cutlass_moe_mm(c2, intemediate_q, w2_q, a2_scale, w2_scale,
-                       expert_offsets[:-1], problem_sizes2, ab_strides2,
-                       ab_strides2, c_strides2)
+        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            (qworkspace2, a2q_scale), (w2, w2_scale),
+            workspace3, expert_ids)
 
-    return (c2[c_map].view(m, topk, k) *
-            topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)
+        return workspace3
+
+
+class DeepGemmUnpermuteCombine(mk.FusedMoEUnpermuteCombine):
+    def __init__(self):
+        super().__init__()
+
+    def apply(
+            self,
+            out: torch.Tensor,
+            hidden_states: torch.Tensor,
+            topk_weights: torch.Tensor,
+            inv_perm: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        _moe_unpermute_and_reduce(
+            out,
+            hidden_states,
+            inv_perm,
+            topk_weights
+        )
+        return out
+
+
+def modular_deep_gemm_fused_moe_fp8() -> mk.ModularFusedMoEKernel:
+    return mk.ModularFusedMoEKernel(
+        DeepGemmDispatch(),
+        DeepGemmExperts(),
+        DeepGemmUnpermuteCombine(),
+    )
