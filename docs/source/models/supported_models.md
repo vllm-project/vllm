@@ -566,7 +566,7 @@ you should explicitly specify the task type to ensure that the model is used in 
   *
 - * `XLMRobertaModel`
   * XLM-RoBERTa-based
-  * `intfloat/multilingual-e5-large`, etc.
+  * `intfloat/multilingual-e5-large`, `jinaai/jina-reranker-v2-base-multilingual`, etc.
   *
   *
 :::
