@@ -110,7 +110,7 @@ def paged_attention_rocm(
     scale: float,
     block_tables: torch.Tensor,
     seq_lens: torch.Tensor,
-    query_start_loc: torch.Tensor,
+    query_start_loc: Optional[torch.Tensor],
     block_size: int,
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
