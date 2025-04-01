@@ -613,8 +613,8 @@ class TPUModelRunner:
             num_computed_tokens = req_state.num_computed_tokens
             mm_positions = req_state.mm_positions
             for i, pos_info in enumerate(mm_positions):
-                start_pos = pos_info["offset"]
-                num_encoder_tokens = pos_info["length"]
+                start_pos = pos_info.offset
+                num_encoder_tokens = pos_info.length
 
                 # The encoder output is needed if the two ranges overlap:
                 # [num_computed_tokens,

@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalInputs, MultiModalKwargs,
-                     MultiModalPlaceholderDict, get_num_embeds)
+                     MultiModalPlaceholderDict)
 from .processing import BaseMultiModalProcessor, BaseProcessingInfo
 
 logger = init_logger(__name__)
@@ -180,7 +180,7 @@ class MultiModalProfiler(Generic[_I]):
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         total_placeholders_by_modality = {
-            modality: sum(get_num_embeds(item) for item in placeholders)
+            modality: sum(item.get_num_embeds() for item in placeholders)
             for modality, placeholders in placeholders_by_modality.items()
         }
         expected_placeholders_by_modality = {
