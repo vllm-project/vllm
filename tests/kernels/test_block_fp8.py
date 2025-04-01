@@ -308,7 +308,6 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, ep_size, block_size, dtype, 
                 block_shape=block_size,
                 global_num_experts=E,
                 expert_map=expert_map[ep_rank],
-                allow_deep_gemm=False,
             )
 
             ep_ref_out = torch_w8a8_block_fp8_moe(
