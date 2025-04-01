@@ -1,18 +1,18 @@
 ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.3.1-complete
-ARG HIPBLASLT_BRANCH="4d40e36"
+ARG HIPBLASLT_BRANCH="db8e93b4"
 ARG HIPBLAS_COMMON_BRANCH="7c1566b"
 ARG LEGACY_HIPBLASLT_OPTION=
 ARG RCCL_BRANCH="648a58d"
 ARG RCCL_REPO="https://github.com/ROCm/rccl"
 ARG TRITON_BRANCH="e5be006"
 ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
-ARG PYTORCH_BRANCH="3a585126"
-ARG PYTORCH_VISION_BRANCH="v0.19.1"
+ARG PYTORCH_BRANCH="295f2ed4"
+ARG PYTORCH_VISION_BRANCH="v0.21.0"
 ARG PYTORCH_REPO="https://github.com/pytorch/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
-ARG FA_BRANCH="b7d29fb"
-ARG FA_REPO="https://github.com/ROCm/flash-attention.git"
-ARG AITER_BRANCH="21d47a9"
+ARG FA_BRANCH="1a7f4dfa"
+ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
+ARG AITER_BRANCH="8970b25b"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
@@ -20,7 +20,7 @@ FROM ${BASE_IMAGE} AS base
 ENV PATH=/opt/rocm/llvm/bin:$PATH
 ENV ROCM_PATH=/opt/rocm
 ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
-ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942
+ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx1100;gfx1101;gfx1200;gfx1201
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 
 ARG PYTHON_VERSION=3.12
@@ -31,7 +31,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less \
+    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
@@ -42,7 +42,7 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging cmake ninja wheel setuptools pybind11 Cython
+RUN pip install -U packaging 'cmake<4' ninja wheel setuptools pybind11 Cython
 
 FROM base AS build_hipblaslt
 ARG HIPBLASLT_BRANCH
@@ -60,7 +60,8 @@ RUN cd hipBLAS-common \
 RUN git clone https://github.com/ROCm/hipBLASLt
 RUN cd hipBLASLt \
     && git checkout ${HIPBLASLT_BRANCH} \
-    && ./install.sh -d --architecture ${PYTORCH_ROCM_ARCH} ${LEGACY_HIPBLASLT_OPTION} \
+    && apt-get install -y llvm-dev \
+    && ./install.sh -dc --architecture ${PYTORCH_ROCM_ARCH} ${LEGACY_HIPBLASLT_OPTION} \
     && cd build/release \
     && make package
 RUN mkdir -p /app/install && cp /app/hipBLASLt/build/release/*.deb /app/hipBLAS-common/build/*.deb /app/install
@@ -110,10 +111,23 @@ RUN git clone ${FA_REPO}
 RUN cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
-    && MAX_JOBS=64 GPU_ARCHS=${PYTORCH_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist
+    && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist
 RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
     && cp /app/vision/dist/*.whl /app/install \
     && cp /app/flash-attention/dist/*.whl /app/install
+
+FROM base AS build_aiter
+ARG AITER_BRANCH
+ARG AITER_REPO
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install /install/*.whl
+RUN git clone --recursive ${AITER_REPO}
+RUN cd aiter \
+    && git checkout ${AITER_BRANCH} \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt
+RUN pip install pyyaml && cd aiter && PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py bdist_wheel --dist-dir=dist && ls /app/aiter/dist/*.whl
+RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 FROM base AS final
 RUN --mount=type=bind,from=build_hipblaslt,src=/app/install/,target=/install \
@@ -130,19 +144,12 @@ RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     pip install /install/*.whl
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
     pip install /install/*.whl
-
-ARG AITER_REPO
-ARG AITER_BRANCH
-RUN git clone --recursive ${AITER_REPO}
-RUN cd aiter \
-    && git checkout ${AITER_BRANCH} \
-    && git submodule update --init --recursive \
-    && pip install -r requirements.txt \
-    && PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py develop && pip show aiter 
+RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
+    pip install /install/*.whl
 
 ARG BASE_IMAGE
-ARG HIPBLASLT_BRANCH
 ARG HIPBLAS_COMMON_BRANCH
+ARG HIPBLASLT_BRANCH
 ARG LEGACY_HIPBLASLT_OPTION
 ARG RCCL_BRANCH
 ARG RCCL_REPO
@@ -154,6 +161,8 @@ ARG PYTORCH_REPO
 ARG PYTORCH_VISION_REPO
 ARG FA_BRANCH
 ARG FA_REPO
+ARG AITER_BRANCH
+ARG AITER_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "HIPBLAS_COMMON_BRANCH: ${HIPBLAS_COMMON_BRANCH}" >> /app/versions.txt \
     && echo "HIPBLASLT_BRANCH: ${HIPBLASLT_BRANCH}" >> /app/versions.txt \
@@ -167,6 +176,5 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTORCH_REPO: ${PYTORCH_REPO}" >> /app/versions.txt \
     && echo "PYTORCH_VISION_REPO: ${PYTORCH_VISION_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
-    && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt
