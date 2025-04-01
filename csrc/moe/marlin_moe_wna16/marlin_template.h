@@ -534,9 +534,12 @@ __global__ void Marlin(
   int64_t B_expert_off = 0;
 
   int4* sh_block_sorted_ids_int4 = sh;
-  int32_t* sh_block_sorted_ids = reinterpret_cast<int*>(sh_block_sorted_ids_int4);
-  int4* sh_block_topk_weights_int4 = sh_block_sorted_ids_int4 + moe_block_size / 4;
-  scalar_t2* sh_block_topk_weights = reinterpret_cast<scalar_t2*>(sh_block_topk_weights_int4);
+  int32_t* sh_block_sorted_ids =
+      reinterpret_cast<int*>(sh_block_sorted_ids_int4);
+  int4* sh_block_topk_weights_int4 =
+      sh_block_sorted_ids_int4 + moe_block_size / 4;
+  scalar_t2* sh_block_topk_weights =
+      reinterpret_cast<scalar_t2*>(sh_block_topk_weights_int4);
   int4* sh_new = sh_block_topk_weights_int4 + moe_block_size / 4;
 
   int32_t block_num_valid_tokens = 0;
@@ -562,8 +565,8 @@ __global__ void Marlin(
     block_num_valid_tokens = moe_block_size;
   #pragma unroll
     for (int i = 0; i < moe_block_size / 4; i++) {
-      int4 sorted_token_ids_int4 = reinterpret_cast<const int4*>(sorted_token_ids_ptr)[
-        block_id * moe_block_size / 4 + i];
+      int4 sorted_token_ids_int4 = reinterpret_cast<const int4*>(
+          sorted_token_ids_ptr)[block_id * moe_block_size / 4 + i];
       int* sorted_token_ids = reinterpret_cast<int*>(&sorted_token_ids_int4);
   #pragma unroll
       for (int j = 0; j < 4; j++) {
@@ -578,14 +581,14 @@ __global__ void Marlin(
     __syncthreads();
     int tid4 = threadIdx.x / 4;
     if (threadIdx.x % 4 == 0 && threadIdx.x < block_num_valid_tokens) {
-      sh_block_sorted_ids_int4[tid4] = reinterpret_cast<const int4*>(sorted_token_ids_ptr)[
-        block_id * moe_block_size / 4 + tid4];
+      sh_block_sorted_ids_int4[tid4] = reinterpret_cast<const int4*>(
+          sorted_token_ids_ptr)[block_id * moe_block_size / 4 + tid4];
 
       if (mul_topk_weights) {
   #pragma unroll
         for (int i = 0; i < 4; i++) {
           sh_block_topk_weights[tid4 * 4 + i] = Dtype::float2num(
-            topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]]);
+              topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]]);
         }
       }
     }
@@ -1696,8 +1699,7 @@ __global__ void Marlin(
         int64_t sorted_row = sh_block_sorted_ids[row];
         int64_t true_idx = sorted_row * c_gl_stride + c_gl_wr % c_gl_stride;
         scalar_t2 topk_weight_score;
-        if (mul_topk_weights)
-          topk_weight_score = sh_block_topk_weights[row];
+        if (mul_topk_weights) topk_weight_score = sh_block_topk_weights[row];
         if (use_atomic_add && slice_count > 1 || mul_topk_weights) {
           scalar_t2* C_half2 = reinterpret_cast<scalar_t2*>(&C[true_idx]);
           scalar_t2* sh_red_half2 =
