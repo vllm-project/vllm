@@ -53,11 +53,6 @@ _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
 _AUDIO_PLACEHOLDER_TOKEN_ID = 200011
 
 _AUDIO_MAX_SOUNDFILE_SIZE = 241_000
-DUMMY_SAMPLING_FREQUENCY = 16_000  # kHz
-
-DYNAMIC_HD = 16
-AUDIO_TOKEN_PATTERN = r"<\|audio_(\d+)\|>"
-IMAGE_TOKEN_PATTERN = r"<\|image_(\d+)\|>"
 
 SIGLIP_NAME = "siglip-so400m-patch14-448"
 VISION_ENCODER_TO_PROCESSING_CONFIG = {
@@ -67,15 +62,6 @@ VISION_ENCODER_TO_PROCESSING_CONFIG = {
         'vit_patch_size': 14,
         'token_compression_factor': 2,
     },
-}
-logger = logging.get_logger(__name__)
-# This is a workaround to prevent text (user input) + audio + image
-# from being used in the same prompt.
-# It includes token ids for "/n" and tokens in added_tokens_decoder
-# from the tokenizer_confg.json file.
-NON_USER_INPUT_TOKENS = {
-    198, 200010, 200011, 199999, 200018, 200019, 200020, 200021, 200022,
-    200023, 200024, 200025, 200026, 200027, 200028
 }
 
 
@@ -116,7 +102,6 @@ def _find_target_aspect_ratio(orig_width: int, orig_height: int, image_size: int
         # calculate the target width and height
         target_width = image_size * target_aspect_ratio[0]
         target_height = image_size * target_aspect_ratio[1]
-        logger.debug("target_aspect_ratio: %s", target_aspect_ratio)
     else:
         target_width = image_size * w_crop_num
         target_height = image_size * h_crop_num
@@ -588,45 +573,6 @@ def _compute_num_image_tokens(
             num_hd_newline_tokens + num_global_image_newline_tokens)
 
 
-def compute_logfbank_output_size(wav_length: int, fs: int) -> Tuple[int, int]:
-    """
-    Compute the output size of the `extract_features` method.
-
-    Args:
-        wav_length (int): Length of the input waveform in samples.
-        fs (int): Sampling rate of the waveform, either 16000 or 8000.
-
-    Returns:
-        tuple (int, int): Output size as (T, D), where:
-            T: Number of time frames.
-            D: Number of Mel filterbank bins (80).
-    """
-
-    # Resample to 16000 or 8000 if needed
-    if fs > 16000:
-        wav_length //= fs // 16000
-        fs = 16000
-    elif 8000 <= fs < 16000:
-        # We'll resample to 16K from 8K
-        wav_length *= 2
-        fs = 16000
-    elif fs < 8000:
-        raise RuntimeError(f"Unsupported sample rate {fs}")
-
-    # Spectrogram parameters for 16 kHz
-    win_length = 400  # Frame length in samples
-    hop_length = 160  # Frame shift in samples
-    mel_bins = 80  # Number of mel filterbank bins
-
-    # Calculate number of frames (T)
-    T = (wav_length - win_length) // hop_length + 1
-    if T < 1:
-        raise ValueError("Waveform too short for given parameters.")
-
-    # Return time frames (T) and mel bins (D)
-    return T, mel_bins
-
-
 def _compute_audio_embed_size(hf_config: PretrainedConfig, audio_frames: int) -> int:
     """
     Compute the audio embedding size based on the audio frames and
@@ -755,18 +701,40 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         max_side = vit_image_size * self.dynamic_hd
         return ImageSize(height=max_side, width=vit_image_size)
     
-    def get_audio_feature_nums(self, audio_len: int, sr: float):
-        if sr >= 16000:
-            win_length = 400
-            hop_length = 160
-        elif 8000 <= sr < 16000:
-            win_length = 200
-            hop_length = 80
-        else:
-            raise RuntimeError(f"Input data using an unsupported sample rate: {sr}")
+    def get_audio_feature_nums(self, audio_len: int, sr: float) -> int:
+        """
+        Compute the output size of the `extract_features` method.
 
-        # Spec 1: SpeechLib cut remaining sample insufficient for a hop
-        return (audio_len - win_length) // hop_length + 1
+        Args:
+            audio_len (int): Length of the input waveform in samples.
+            sr (float): Sampling rate of the waveform, either 16000 or 8000.
+
+        Returns:
+            tuple (int, int): Output size as (T, D), where:
+                T: Number of time frames.
+                D: Number of Mel filterbank bins (80).
+        """
+
+        # Resample to 16000 or 8000 if needed
+        if sr > 16000:
+            audio_len //= sr // 16000
+        elif 8000 <= sr < 16000:
+            # We'll resample to 16K from 8K
+            audio_len *= 2
+        elif sr < 8000:
+            raise RuntimeError(f"Unsupported sample rate {sr}")
+
+        # Spectrogram parameters for 16 kHz
+        win_length = 400  # Frame length in samples
+        hop_length = 160  # Frame shift in samples
+
+        # Calculate number of frames (T)
+        T = (audio_len - win_length) // hop_length + 1
+        if T < 1:
+            raise ValueError("Waveform too short for given parameters.")
+
+        # Return time frames (T)
+        return T
 
 
 class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
@@ -870,6 +838,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
     ) -> Sequence[PromptUpdate]:
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
+        feature_extractor = self.info.get_feature_extractor()
 
         def get_image_replacement_phi4mm(item_idx: int):
             images = mm_items.get_items(
@@ -892,7 +861,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             # TODO(Isotr0py): support embedding inputs
             audio_len = audios.get_audio_length(item_idx)
-            audio_frames, _ = compute_logfbank_output_size(audio_len, DUMMY_SAMPLING_FREQUENCY)
+            audio_frames = self.info.get_audio_feature_nums(audio_len, feature_extractor.sampling_rate)
             audio_embed_size = _compute_audio_embed_size(self.info.get_hf_config(), audio_frames)
 
             audio_tokens = [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
