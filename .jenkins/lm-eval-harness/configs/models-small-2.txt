@@ -1,0 +1,2 @@
+granite-8b.yaml
+granite-20b.yaml

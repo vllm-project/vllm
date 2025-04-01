@@ -1,0 +1,12 @@
+model_name: "/mnt/weka/data/pytorch/granite/granite-20b"
+tasks:
+- name: "gsm8k_cot"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.5291
+  - name: "exact_match,flexible-extract"
+    value: 0.5564
+limit: 500
+num_fewshot: 8
+dtype: "bfloat16"
+fp8: true
