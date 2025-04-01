@@ -42,12 +42,10 @@ class P2pNcclPipe:
         self.zmq_address = f"{self._hostname}:{self._port}"
         self.http_address = (
             f"{self._hostname}:"
-            f"{self.config.kv_connector_extra_config["http_port"]}"
-        )
+            f"{self.config.kv_connector_extra_config['http_port']}")
         self.proxy_address = (
-            f"{self.config.kv_connector_extra_config["proxy_ip"]}:"
-            f"{self.config.kv_connector_extra_config["proxy_port"]}"
-        )
+            f"{self.config.kv_connector_extra_config['proxy_ip']}:"
+            f"{self.config.kv_connector_extra_config['proxy_port']}")
         self.context = zmq.Context()
         self.router_socket = self.context.socket(zmq.ROUTER)
         self.router_socket.bind(f"tcp://{self.zmq_address}")
