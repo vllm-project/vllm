@@ -658,7 +658,6 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        max_shared_mem);
-
   kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
       A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
       sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
