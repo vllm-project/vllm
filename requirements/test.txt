@@ -160,8 +160,9 @@ httpcore==1.0.6
     # via httpx
 httpx==0.27.2
     # via -r requirements/test.in
-huggingface-hub==0.26.2
+huggingface-hub==0.30.1
     # via
+    #   -r requirements/test.in
     #   accelerate
     #   datasets
     #   evaluate
