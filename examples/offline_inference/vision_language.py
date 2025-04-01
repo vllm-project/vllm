@@ -68,7 +68,7 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
-        model="Salesforce/blip2-opt-2.7b",
+        model="Salesforce/blip2-opt-6.7b",
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
@@ -128,7 +128,8 @@ def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="microsoft/Florence-2-large",
         tokenizer="facebook/bart-large",
-        max_num_seqs=8,
+        max_model_len=4096,
+        max_num_seqs=2,
         trust_remote_code=True,
         dtype="bfloat16",
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
@@ -511,7 +512,7 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=4096,
-        max_num_seqs=16,
+        max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
@@ -700,7 +701,7 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     # NOTE: Need L40 (or equivalent) to avoid OOM
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=8192,
+        max_model_len=6144,
         max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
@@ -804,6 +805,41 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# SkyworkR1V
+def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "Skywork/Skywork-R1V-38B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    messages = [[{
+        'role': 'user',
+        'content': f"<image>\n{question}"
+    }] for question in questions]
+    prompts = tokenizer.apply_chat_template(messages,
+                                            tokenize=False,
+                                            add_generation_prompt=True)
+
+    # Stop tokens for SkyworkR1V
+    # https://huggingface.co/Skywork/Skywork-R1V-38B/blob/main/conversation.py
+    stop_tokens = ["<｜end▁of▁sentence｜>", "<|endoftext|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
+    )
+
+
 model_example_map = {
     "aria": run_aria,
     "blip-2": run_blip2,
@@ -834,6 +870,7 @@ model_example_map = {
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
+    "skywork_chat": run_skyworkr1v,
 }
 
 

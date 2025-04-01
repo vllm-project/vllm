@@ -258,6 +258,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
     ) -> DummyDecoderData:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -266,7 +267,7 @@ class MultiModalRegistry:
         """
         processor = self.create_processor(model_config, disable_cache=True)
         profiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_decoder_dummy_data(seq_len)
+        dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts)
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids
@@ -281,6 +282,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
     ) -> DummyEncoderData:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -289,7 +291,7 @@ class MultiModalRegistry:
         """
         processor = self.create_processor(model_config, disable_cache=True)
         profiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_encoder_dummy_data(seq_len)
+        dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts)
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids
