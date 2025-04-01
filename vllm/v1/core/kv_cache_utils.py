@@ -4,7 +4,7 @@ import os
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -12,24 +12,13 @@ from vllm.utils import sha256
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroupSpec,
                                         KVCacheSpec, KVCacheTensor)
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request
+from vllm.v1.request import BlockHashType
+
+if TYPE_CHECKING:
+
+    from vllm.lora.request import LoRARequest
 
 logger = init_logger(__name__)
-
-
-class BlockHashType(NamedTuple):
-    """Hash value of a block (int), the token IDs in the block, and extra keys.
-    We keep a tuple of token IDs and extra keys to reduce the likelihood of
-    hash collisions when the hash value is the same. By using SHA256 however,
-    hash collisions are practically impossible.
-    """
-    # Hash value of the block in an integer.
-    hash_value: int
-    # Token IDs in the block.
-    token_ids: tuple[int, ...]
-    # Extra keys for the block.
-    extra_keys: Optional[Any] = None
-
 
 # The hash seed for the first block of the prefix block sequence.
 #
@@ -262,11 +251,13 @@ class FreeKVCacheBlockQueue:
         return ret
 
 
-def need_extra_keys(request: Request) -> bool:
+def need_extra_keys(mm_positions: Optional[list[dict[str, int]]],
+                    lora_request: Optional["LoRARequest"]) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
 
     Args:
-        request (Request): The request.
+        mm_positions: The multi-modal positions.
+        lora_request: The LoRA request.
 
     Returns:
         bool: Whether blocks allocated to this request need extra hash keys.
@@ -274,11 +265,12 @@ def need_extra_keys(request: Request) -> bool:
 
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA ID.
-    return bool(request.mm_positions) or (request.lora_request is not None)
+    return bool(mm_positions) or (lora_request is not None)
 
 
-def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
-                            end_token_idx: int,
+def _gen_mm_extra_hash_keys(mm_positions: Optional[list[dict[str, int]]],
+                            mm_hashes: Optional[list[str]],
+                            start_token_idx: int, end_token_idx: int,
                             start_mm_idx: int) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
@@ -286,7 +278,8 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     block and its starting offset in the block tokens.
 
     Args:
-        request: The request object.
+        mm_positions: The multi-modal positions.
+        mm_hashes: The multi-modal hashes.
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
         start_mm_idx: The start multi-modal index of the block.
@@ -296,8 +289,7 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     """
     extra_keys: list[Any] = []
 
-    mm_positions, mm_hashes = request.mm_positions, request.mm_hashes
-    if not mm_positions:
+    if not mm_positions or not mm_hashes:
         return extra_keys, start_mm_idx
 
     if mm_positions and len(mm_positions) != len(mm_hashes):
@@ -346,29 +338,34 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
+def _gen_lora_extra_hash_keys(
+        lora_request: Optional["LoRARequest"]) -> list[int]:
     """Generate extra keys related to LoRA for block hash computation.
 
     Args:
-        request: The request object.
+        lora_request: The LoRA request.
 
     Returns:
         Return LoRA id of the request if it is a LoRA request. Return empty
         list otherwise.
     """
-    if not request.lora_request:
+    if not lora_request:
         return []
-    return [request.lora_request.lora_int_id]
+    return [lora_request.lora_int_id]
 
 
 def generate_block_hash_extra_keys(
-        request: Request, start_token_idx: int, end_token_idx: int,
+        mm_positions: Optional[list[dict[str, int]]],
+        mm_hashes: Optional[list[str]], lora_request: Optional["LoRARequest"],
+        start_token_idx: int, end_token_idx: int,
         start_mm_idx: int) -> tuple[Optional[tuple[Any, ...]], int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
 
     Args:
-        request: The request object.
+        mm_positions: The multi-modal positions.
+        mm_hashes: The multi-modal hashes.
+        lora_request: The LoRA request.
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
         start_mm_idx: The start multi-modal index of the block.
@@ -378,8 +375,8 @@ def generate_block_hash_extra_keys(
     """
     mm_extra_keys: list[Any]
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
-        request, start_token_idx, end_token_idx, start_mm_idx)
-    lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(request)
+        mm_positions, mm_hashes, start_token_idx, end_token_idx, start_mm_idx)
+    lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(lora_request)
 
     extra_keys: list[Any] = lora_extra_keys + mm_extra_keys
 
@@ -420,21 +417,26 @@ def hash_block_tokens(
         curr_block_token_ids_tuple, extra_keys)
 
 
-def hash_request_tokens(hash_function: Any, block_size: int,
-                        request: Request) -> list[BlockHashType]:
+def hash_request_tokens(
+        hash_function: Callable, block_size: int, token_ids: list[int],
+        mm_positions: Optional[list[dict[str, int]]],
+        mm_hashes: Optional[list[str]],
+        lora_request: Optional["LoRARequest"]) -> list[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
     Args:
         block_size: The size of each block.
-        request: The request object.
+        token_ids: The token IDs of the request.
+        mm_positions: The multi-modal positions.
+        mm_hashes: The multi-modal hashes.
+        lora_request: The LoRA request.
 
     Returns:
         The list of computed hash values.
     """
-    token_ids = request.all_token_ids
 
-    req_need_extra_keys = need_extra_keys(request)
+    req_need_extra_keys = need_extra_keys(mm_positions, lora_request)
     req_extra_keys = None
     curr_mm_idx = 0
 
@@ -450,7 +452,7 @@ def hash_request_tokens(hash_function: Any, block_size: int,
         if req_need_extra_keys:
             # MM and LoRA requests need extra keys for block-hash computation.
             req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, start, end, curr_mm_idx)
+                mm_positions, mm_hashes, lora_request, start, end, curr_mm_idx)
 
         block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
                                        block_token_ids, req_extra_keys)
