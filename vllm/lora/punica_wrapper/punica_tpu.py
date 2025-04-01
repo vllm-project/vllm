@@ -4,6 +4,8 @@ import math
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
+import torch_xla.core.xla_model as xm
 
 from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from vllm.lora.punica_wrapper.utils import convert_mapping
@@ -335,6 +337,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         else:
             self._long_lora_indices.zero_()
         self.indices_len[:] = indices_len
+        xm.mark_step()
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
         self.batch_size = 1
@@ -354,3 +357,35 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         padding = [-1] * pad_len
         return tuple(list(prompt_mapping) + padding)
+
+def ref_bgmv(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.Tensor):
+    selected_loras = loras[idxs]
+    if len(selected_loras.shape) == 4:
+        selected_loras = selected_loras.squeeze(axis=1)
+
+    batch_size, output_size, input_size = selected_loras.shape
+    return (selected_loras @ inputs.reshape(
+        (batch_size, input_size, 1))).reshape((batch_size, output_size))
+
+def bgmv_expand1(inputs: torch.Tensor,
+                lora_b_weights: torch.Tensor,
+                output_tensor: torch.Tensor,
+                lora_indices_tensor: torch.Tensor,
+                add_inputs: bool = True,
+                *,
+                enable_laning: bool = False):
+
+    outputs = ref_bgmv(inputs, lora_b_weights, lora_indices_tensor)
+
+    limit = output_tensor.shape[0]
+    if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
+        limit = 1
+
+    if output_tensor.shape[1] > outputs.shape[1]:
+        outputs = F.pad(outputs,
+                        (0, output_tensor.shape[1] - outputs.shape[1], 0, 0))
+
+    if add_inputs:
+        return output_tensor + outputs[:limit, :output_tensor.shape[1]]
+    else:
+        return outputs[:limit, :output_tensor.shape[1]]

@@ -33,12 +33,27 @@ from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
+from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
 
+def maybe_compile_xla_graph(func):
+    if not current_platform.is_tpu():
+        return func
+    
+    import torch_xla.core.xla_model as xm
+
+    def wrapper(*args, **kwargs):
+        logger.warning("compiling with xla")
+        result = func(*args, **kwargs)
+        
+        xm.mark_step()
+        xm.wait_device_ops()
+        return result
+    return wrapper
 
 @dataclass
 class LongContextLoRAContext:
@@ -378,6 +393,7 @@ class LoRAModelManager(AdapterModelManager):
     def adapter_slots(self) -> int:
         return self.lora_slots
 
+    @maybe_compile_xla_graph
     def activate_adapter(
         self,
         lora_id: int,
@@ -628,6 +644,7 @@ class LoRAModelManager(AdapterModelManager):
             prefix + "." + r if prefix else r for r in replacements
         ]
 
+    @maybe_compile_xla_graph
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
             replacement_loras: List[Optional[LoRALayerWeights]] = []
