@@ -33,7 +33,6 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
@@ -44,7 +43,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .blip2 import Blip2QFormerModel
-from .interfaces import SupportsLoRA, SupportsPP, SupportsMultiModal
+from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsPP
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 ###########################################################
@@ -397,7 +396,8 @@ class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
         return {"audio": self.get_max_audio_tokens()}
 
     def get_max_audio_tokens(self):
-        return 10000 # should this be 16000000 because it's the max we get from the encoder? probably not right...
+        # should this be 16000000 because it's the max we get from the encoder?
+        return 10000
 
 
 class GraniteSpeechMultiModalProcessor(
@@ -543,7 +543,6 @@ class GraniteSpeechForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> Optional[GraniteSpeechAudioInputs]:
         input_features = kwargs.pop('input_features', None)
@@ -564,14 +563,12 @@ class GraniteSpeechForConditionalGeneration(
             input_features_mask=input_features_mask,
         )
 
-
         def get_input_embeddings(
             self,
             input_ids: torch.Tensor,
             multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         ) -> torch.Tensor:
             raise NotImplementedError("Get input embeddings not implemented")
-
 
     def forward(
         self,
@@ -600,32 +597,7 @@ class GraniteSpeechForConditionalGeneration(
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def _get_ignore_hacked_ignore_weight_dict(self):
-        ## FIXME - there are issues with loading BN, needs to be resolved;
-        # the problem is that batch norm puts the tensors in the state
-        # dict, but not in the named parameters.
-        #
-        # For example, in keys:
-        # >>> dict(self.encoder.rnn_tr[1].conv.net[5].named_parameters()).keys()
-        # we do not have things like num_batches_tracked, which breaks when
-        # we export the model and try to reload them.
-        print("🚨 Currently we are not loading batch norm stats correctly! 🚨")
-        ignore_suffixes = [
-            "bias",
-            "num_batches_tracked",
-            "running_mean",
-            "running_var",
-        ]
-        ignore_layers = []
-        for idx1 in range(1, 11):
-            for idx2 in range(1, 11):
-                for suffix in ignore_suffixes:
-                    ignore_layers.append(
-                        f"encoder.rnn_tr.{idx1}.conv.net.{idx2}.{suffix}")
-        return {"ignore_unexpected_prefixes": ignore_layers}  # FIXME
-
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        extra_kwargs = self._get_ignore_hacked_ignore_weight_dict()
-        loader = AutoWeightsLoader(self, **extra_kwargs)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
