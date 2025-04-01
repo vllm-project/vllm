@@ -7,8 +7,7 @@ from collections import deque
 from collections.abc import Iterable
 from typing import Optional, Union
 
-from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -36,7 +35,6 @@ class Scheduler(SchedulerInterface):
         model_config: ModelConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
-        speculative_config: Optional[SpeculativeConfig],
         structured_output_manager: StructuredOutputManager,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
@@ -45,7 +43,6 @@ class Scheduler(SchedulerInterface):
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.speculative_config = speculative_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
 
@@ -171,19 +168,23 @@ class Scheduler(SchedulerInterface):
             assert num_new_tokens > 0
 
             # Schedule encoder inputs.
-            encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
-                self._try_schedule_encoder_inputs(request,
-                                                  request.num_computed_tokens,
-                                                  num_new_tokens,
-                                                  encoder_budget))
-            if num_new_tokens == 0:
-                # The request cannot be scheduled because the encoder budget
-                # or the encoder cache is exhausted.
-                # NOTE(woosuk): Here, by doing `continue` instead of `break`,
-                # we do not strictly follow the FCFS scheduling policy and
-                # allow the lower-priority requests to be scheduled.
-                req_index += 1
-                continue
+            if request.has_encoder_inputs:
+                (encoder_inputs_to_schedule, num_new_tokens,
+                 new_encoder_budget) = self._try_schedule_encoder_inputs(
+                     request, request.num_computed_tokens, num_new_tokens,
+                     encoder_budget)
+                if num_new_tokens == 0:
+                    # The request cannot be scheduled because the encoder budget
+                    # or the encoder cache is exhausted.
+                    # NOTE(woosuk): By using `continue` instead of `break` here,
+                    # we intentionally relax the strict FCFS scheduling policy
+                    # to allow lower-priority requests to be scheduled when a
+                    # higher-priority request is blocked by encoder constraints.
+                    req_index += 1
+                    continue
+            else:
+                encoder_inputs_to_schedule = None
+                new_encoder_budget = encoder_budget
 
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
@@ -318,13 +319,17 @@ class Scheduler(SchedulerInterface):
                 assert num_new_tokens > 0
 
                 # Schedule encoder inputs.
-                (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_budget) = self._try_schedule_encoder_inputs(
-                     request, num_computed_tokens, num_new_tokens,
-                     encoder_budget)
-                if num_new_tokens == 0:
-                    # The request cannot be scheduled.
-                    break
+                if request.has_encoder_inputs:
+                    (encoder_inputs_to_schedule, num_new_tokens,
+                     new_encoder_budget) = self._try_schedule_encoder_inputs(
+                         request, num_computed_tokens, num_new_tokens,
+                         encoder_budget)
+                    if num_new_tokens == 0:
+                        # The request cannot be scheduled.
+                        break
+                else:
+                    encoder_inputs_to_schedule = None
+                    new_encoder_budget = encoder_budget
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request, num_new_tokens, computed_blocks)
@@ -506,9 +511,6 @@ class Scheduler(SchedulerInterface):
         limitations, the method adjusts `num_new_tokens` to schedule only the
         decoder tokens up to just before the unschedulable encoder input.
         """
-        if not request.has_encoder_inputs():
-            return [], num_new_tokens, encoder_budget
-
         encoder_inputs_to_schedule: list[int] = []
         mm_positions = request.mm_positions
         assert mm_positions is not None
