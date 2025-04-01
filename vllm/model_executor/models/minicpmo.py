@@ -180,8 +180,7 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         pool_step = self.get_default_audio_pool_step()
         fbank_feat_in_chunk = 100
         cnn_feat_in_chunk = (fbank_feat_in_chunk - 1) // 2 + 1
-        num_audio_tokens = (cnn_feat_in_chunk - pool_step) // pool_step + 1
-        return num_audio_tokens + 2  # <audio>(<unk>*N)</audio>
+        return (cnn_feat_in_chunk - pool_step) // pool_step + 1
 
     def get_max_audio_chunks_with_most_features(self) -> int:
         return 30
@@ -192,8 +191,7 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
 
     def get_audio_len_by_num_chunks(self, num_chunks: int) -> int:
         sampling_rate = self.get_default_audio_sampling_rate()
-        # exclude <audio> </audio>
-        num_tokens_per_chunk = self.get_max_audio_tokens_per_chunk() - 2
+        num_tokens_per_chunk = self.get_max_audio_tokens_per_chunk()
         return int(num_chunks * sampling_rate / num_tokens_per_chunk) + 1
 
     def get_num_frames_with_most_features(

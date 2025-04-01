@@ -379,22 +379,43 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             use_image_id=use_image_id,
         )
 
+    def get_sliced_grid(
+        self,
+        image_size: ImageSize,
+        # For MiniCPM V/O 2.6
+        max_slice_nums: Optional[int] = None,
+    ) -> Optional[tuple[int, int]]:
+        image_processor = self.get_image_processor()
+        version = self.get_model_version()
+
+        if version == (2, 0) or version == (2, 5):
+            return image_processor.get_sliced_grid(image_size)
+
+        if max_slice_nums is None:
+            max_slice_nums = image_processor.max_slice_nums
+
+        return image_processor.get_sliced_grid(
+            image_size,
+            max_slice_nums=max_slice_nums,
+        )
+
     def get_num_image_tokens(
         self,
         image_size: ImageSize,
         max_slice_nums: Optional[int] = None,
-        use_image_id: bool = True,
     ) -> int:
-        tokenizer = self.get_tokenizer()
-        image_placeholders = self.get_slice_image_placeholder(
+        image_processor = self.get_image_processor()
+
+        grid = self.get_sliced_grid(
             image_size,
             max_slice_nums=max_slice_nums,
-            use_image_id=use_image_id,
         )
-        image_token_ids = tokenizer.encode(image_placeholders,
-                                           add_special_tokens=False)
+        if grid is None:
+            ncols = nrows = 0
+        else:
+            ncols, nrows = grid
 
-        return len(image_token_ids)
+        return (ncols * nrows + 1) * image_processor.image_feature_size
 
     def get_max_image_tokens(self) -> int:
         image_size = self.get_image_size_with_most_features()
@@ -414,7 +435,6 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(
             frame_size,
             max_slice_nums=self.get_video_max_slice_num(),
-            use_image_id=False,
         )
 
     def get_max_video_tokens(
