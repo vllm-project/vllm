@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import pytest
-
 from ..utils import compare_two_settings
-
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 def test_cpu_offload():
