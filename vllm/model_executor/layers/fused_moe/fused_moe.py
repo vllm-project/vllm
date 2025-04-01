@@ -691,11 +691,6 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     # Lazy import to avoid CUDA initialization problems.
     import deep_gemm as dg
 
-    # Expert maps not supported yet.
-    if expert_map is not None:
-        logger.debug("DeepGemm disabled: non-null expert_map.")
-        return False
-
     align = dg.get_m_alignment_for_contiguous_layout()
     M = hidden_states.shape[0]
     _, K, N = w2.shape
@@ -758,6 +753,9 @@ def dg_m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
     C: torch.Tensor,
     expert_ids: torch.Tensor,
 ) -> None:
+    # Lazy import to avoid CUDA initialization issues.
+    import deep_gemm as dg
+
     block_m = dg.get_m_alignment_for_contiguous_layout()
     expanded_expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
 
@@ -1510,11 +1508,8 @@ def _moe_permute(
                              expert_map,
                              pad_sorted_ids=True))
 
-    inv_perm: Optional[torch.Tensor] = None
-
     num_tokens = top_k_num * tokens_in_chunk
     sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
-    expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
     inv_perm = torch.argsort(sorted_token_ids)[:num_tokens]
 
     # Permute according to sorted token ids.
@@ -1904,8 +1899,6 @@ def deep_gemm_moe_fp8(
     """
     # Lazy import to avoid CUDA initialization problems.
     import deep_gemm as dg
-
-    assert expert_map is None, "Expert maps not supported yet"
 
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
 
