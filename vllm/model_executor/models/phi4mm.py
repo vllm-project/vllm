@@ -1881,6 +1881,9 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             if isinstance(audio_features, torch.Tensor):
                 assert audio_features.size(0) == len(audio_embed_sizes), (
                     "audio_features and audio_embed_sizes must have the same length")
+            elif is_list_of(audio_features, torch.Tensor):
+                assert len(audio_features) == len(audio_embed_sizes), (
+                    "audio_features and audio_embed_sizes must have the same length")
             elif is_list_of(audio_features, list):
                 assert len(audio_features) == len(audio_embed_sizes), (
                     "audio_features and audio_embed_sizes must have the same length")
@@ -2001,7 +2004,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                              "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
-            if input_key in ("audio_features",
+            if input_key in ("input_audio_embeds",
                              "audio_embeds") and "audios" not in modalities:
                 modalities["audios"] = self._parse_and_validate_audio_input(
                     **kwargs)
@@ -2044,7 +2047,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             if modality == "audios":
                 audio_input = modalities["audios"]
                 audio_embeddings = self._process_audio_input(audio_input, audio_projection_mode=audio_projection_mode)
-                multimodal_embeddings += audio_embeddings
+                multimodal_embeddings += tuple(audio_embeddings)
 
         return multimodal_embeddings
 
