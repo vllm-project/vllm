@@ -12,9 +12,11 @@ AWQ, GPTQ, Rotation and SmoothQuant.
 ## Quark Installation
 
 Before quantizing model, you need to install Quark. Release of Quark can be installed with pip:
+
 ```console
 pip install amd-quark
 ```
+
 You can refer to [Quark installation guide](https://quark.docs.amd.com/latest/install.html)
 for more installation details.
 
@@ -203,6 +205,7 @@ In addition to the example of Python API above, Quark also offers a
 to quantize large language models more conveniently. It supports quantizing models with variety
 of different quantization schemes and optimization algorithms. It can export the quantized model
 and run evaluation tasks on the fly. With the script, the example above can be:
+
 ```console
 python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
                           --output_dir /path/to/output \
