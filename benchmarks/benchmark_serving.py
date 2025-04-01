@@ -514,10 +514,7 @@ def parse_goodput(slo_pairs):
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
                                      results: dict[str, Any],
                                      file_name: str) -> None:
-    metrics = {}
-    for k, v in results.items():
-        if k.endswith('_ms'):
-            metrics[k] = [v]
+    metrics = {k: v for k, v in results.items() if k.endswith('_ms')}
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
     ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
