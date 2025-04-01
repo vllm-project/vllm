@@ -27,6 +27,7 @@ class BlockPool:
     """
 
     def __init__(self, num_gpu_blocks: int, enable_caching: bool):
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         # All kv-cache blocks.
@@ -49,6 +50,11 @@ class BlockPool:
         # block tables are append-only.
         self.cached_block_hash_to_block: dict[BlockHashType, dict[
             int, KVCacheBlock]] = defaultdict(dict)
+
+        # To represent a placeholder block with block_id=0.
+        # The ref_cnt of null_block is not maintained, needs special care to
+        # avoid freeing it.
+        self.null_block = self.free_block_queue.popleft()
 
     def get_cached_block(self,
                          block_hash: BlockHashType) -> Optional[KVCacheBlock]:
@@ -214,7 +220,7 @@ class BlockPool:
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
-            if block.ref_cnt == 0:
+            if block.ref_cnt == 0 and block != self.null_block:
                 self.free_block_queue.remove(block)
             block.incr_ref()
 
@@ -228,7 +234,8 @@ class BlockPool:
         """
         for block in ordered_blocks:
             block.decr_ref()
-            if block.ref_cnt == 0:
+            # null_block should not be added to the free list.
+            if block.ref_cnt == 0 and block != self.null_block:
                 self.free_block_queue.append(block)
 
     def reset_prefix_cache(self) -> bool:
@@ -241,10 +248,10 @@ class BlockPool:
             False otherwise.
         """
         num_used_blocks = (self.num_gpu_blocks - self.get_num_free_blocks())
-        if num_used_blocks > 0:
+        if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(
                 "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet", num_used_blocks)
+                "blocks (%d) are not freed yet", num_used_blocks - 1)
             return False
 
         # Remove all hashes so that no new blocks will hit.
