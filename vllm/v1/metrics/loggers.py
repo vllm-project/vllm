@@ -302,11 +302,6 @@ class PrometheusStatLogger(StatLoggerBase):
                         self.labelname_running_lora_adapters,
                     ])
 
-        #
-        # Cache config info metric
-        #
-        self.log_metrics_info("cache_config", vllm_config.cache_config)
-
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
 
@@ -390,6 +385,14 @@ class PrometheusStatLogger(StatLoggerBase):
             }
             self.gauge_lora_info.labels(**lora_info_labels)\
                                 .set_to_current_time()
+
+    def set_cache_metric(self, vllm_config: VllmConfig):
+        #
+        # Cache config info metric
+        #
+        logger.info("vLLM cache config: %s",
+                    vllm_config.cache_config.num_gpu_blocks)
+        self.log_metrics_info("cache_config", vllm_config.cache_config)
 
     @staticmethod
     def _unregister_vllm_metrics():

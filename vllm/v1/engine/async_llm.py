@@ -70,13 +70,15 @@ class AsyncLLM(EngineClient):
 
         # Set up stat loggers; independent set for each DP rank.
         self.stat_loggers: list[list[StatLoggerBase]] = []
+        self.prometheusLog = None
         if self.log_stats:
             for i in range(vllm_config.parallel_config.data_parallel_size):
                 loggers: list[StatLoggerBase] = []
                 if logger.isEnabledFor(logging.INFO):
                     loggers.append(LoggingStatLogger(engine_index=i))
-                loggers.append(
-                    PrometheusStatLogger(vllm_config, engine_index=i))
+                self.prometheusLog = PrometheusStatLogger(vllm_config,
+                                                          engine_index=i)
+                loggers.append(self.prometheusLog)
                 self.stat_loggers.append(loggers)
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -108,6 +110,7 @@ class AsyncLLM(EngineClient):
         )
 
         self.output_handler: Optional[asyncio.Task] = None
+        self.vllm_config = vllm_config
 
     @classmethod
     def from_vllm_config(
@@ -445,6 +448,15 @@ class AsyncLLM(EngineClient):
     async def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
         return await self.engine_core.pin_lora_async(lora_id)
+
+    async def set_vllmcache_metric(self) -> None:
+        """Set the metric for the engine."""
+        if self.prometheusLog is not None:
+            gpu_blocks = await self.engine_core.get_gpu_blocks()
+            self.vllm_config.cache_config.num_gpu_blocks = gpu_blocks
+            self.vllm_config.cache_config.num_cpu_blocks = 0
+            self.prometheusLog.set_cache_metric(self.vllm_config)
+        return None
 
     @property
     def is_running(self) -> bool:
