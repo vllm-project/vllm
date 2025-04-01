@@ -6,7 +6,7 @@ import math
 import time
 from collections.abc import AsyncGenerator
 from math import ceil
-from typing import Final, Optional, Union, cast
+from typing import Callable, Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -17,7 +17,8 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage, ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
     TranscriptionResponse, TranscriptionResponseStreamChoice,
-    TranscriptionStreamResponse, UsageInfo)
+    TranscriptionStreamResponse, TranslationRequest, TranslationResponse,
+    TranslationResponseStreamChoice, TranslationStreamResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
@@ -33,7 +34,7 @@ except ImportError:
 
 logger = init_logger(__name__)
 
-# From https://platform.openai.com/docs/guides/speech-to-text/supported-languages#supported-languages
+# From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
 # TODO these configs should live somewhere with the model so we can support
 # additional ones
 
@@ -149,16 +150,19 @@ OVERLAP_CHUNK_SECOND = 1
 MIN_ENERGY_WINDOW_SIZE = 1600  # 1600 ~ 100ms for 16000 Hz audio
 
 
-class OpenAIServingTranscription(OpenAIServing):
+class OpenAISpeechToText(OpenAIServing):
+    """Base class for speech-to-text operations like transcription and 
+    translation."""
 
     def __init__(
-        self,
-        engine_client: EngineClient,
-        model_config: ModelConfig,
-        models: OpenAIServingModels,
-        *,
-        request_logger: Optional[RequestLogger],
-        return_tokens_as_token_ids: bool = False,
+            self,
+            engine_client: EngineClient,
+            model_config: ModelConfig,
+            models: OpenAIServingModels,
+            *,
+            request_logger: Optional[RequestLogger],
+            return_tokens_as_token_ids: bool = False,
+            task_type: str = "transcribe",  # or "translate"
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
@@ -172,15 +176,16 @@ class OpenAIServingTranscription(OpenAIServing):
         self.max_audio_clip_s = processor.feature_extractor.chunk_length
         self.model_sr = processor.feature_extractor.sampling_rate
         self.hop_length = processor.feature_extractor.hop_length
+        self.task_type = task_type
 
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
                 self.default_sampling_params)
 
-    async def _preprocess_transcription(
+    async def _preprocess_speech_to_text(
         self,
-        request: TranscriptionRequest,
+        request: Union[TranscriptionRequest, TranslationRequest],
         audio_data: bytes,
     ) -> tuple[list[PromptType], float]:
         # Validate request
@@ -221,23 +226,24 @@ class OpenAIServingTranscription(OpenAIServing):
                     },
                 },
                 "decoder_prompt":
-                f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
+                (f"<|startoftranscript|>{lang_token}"
+                f"<|{self.task_type}|><|notimestamps|>{request.prompt}")
                 if i == 0 else ""
             }
             prompts.append(cast(PromptType, prompt))
         return prompts, duration
 
-    # TODO (varun) : Make verbose response work !
-    async def create_transcription(
-        self, audio_data: bytes, request: TranscriptionRequest,
-        raw_request: Request
-    ) -> Union[TranscriptionResponse, AsyncGenerator[str, None],
-               ErrorResponse]:
-        """Transcription API similar to OpenAI's API.
-
-        See https://platform.openai.com/docs/api-reference/audio/createTranscription
-        for the API specification. This API mimics the OpenAI transcription API.
-        """
+    async def _create_speech_to_text(
+        self,
+        audio_data: bytes,
+        request: Union[TranscriptionRequest, TranslationRequest],
+        raw_request: Request,
+        response_class: Union[TranscriptionResponse, TranslationResponse],
+        stream_generator_method: Callable,
+    ) -> Union[Union[TranscriptionResponse, TranslationResponse],
+               AsyncGenerator[str, None], ErrorResponse]:
+        """Base method for speech-to-text operations like transcription and 
+        translation."""
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -252,7 +258,7 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(
                 "Currently only support response_format `text` or `json`")
 
-        request_id = f"trsc-{self._base_request_id(raw_request)}"
+        request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -266,13 +272,14 @@ class OpenAIServingTranscription(OpenAIServing):
 
             if lora_request:
                 return self.create_error_response(
-                    "Currently do not support LoRA for Transcription.")
+                    "Currently do not support LoRA for "
+                    f"{self.task_type.title()}.")
             if prompt_adapter_request:
                 return self.create_error_response(
-                    "Currently do not support PromptAdapter for Transcription."
-                )
+                    f"Currently do not support PromptAdapter for "
+                    f"{self.task_type.title()}.")
 
-            prompts, duration_s = await self._preprocess_transcription(
+            prompts, duration_s = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
             )
@@ -310,11 +317,11 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
         if request.stream:
-            return self.transcription_stream_generator(request,
-                                                       list_result_generator,
-                                                       request_id,
-                                                       request_metadata,
-                                                       duration_s)
+            return stream_generator_method(request,
+                                            list_result_generator,
+                                            request_id,
+                                            request_metadata,
+                                            duration_s)
         # Non-streaming response.
         try:
             assert list_result_generator is not None
@@ -322,21 +329,28 @@ class OpenAIServingTranscription(OpenAIServing):
             for result_generator in list_result_generator:
                 async for op in result_generator:
                     text += op.outputs[0].text
-            return TranscriptionResponse(text=text)
+            return response_class(text=text)
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-    async def transcription_stream_generator(
-            self, request: TranscriptionRequest,
-            list_result_generator: list[AsyncGenerator[RequestOutput, None]],
-            request_id: str, request_metadata: RequestResponseMetadata,
-            audio_duration_s: float) -> AsyncGenerator[str, None]:
+    async def _speech_to_text_stream_generator(
+        self,
+        request: Union[TranscriptionRequest, TranslationRequest],
+        list_result_generator: list[AsyncGenerator[RequestOutput, None]],
+        request_id: str,
+        request_metadata: RequestResponseMetadata,
+        audio_duration_s: float,
+        chunk_object_type: str,
+        response_stream_choice_class: Union[TranscriptionResponseStreamChoice,
+                                            TranslationResponseStreamChoice],
+        stream_response_class: Union[TranscriptionStreamResponse,
+                                     TranslationStreamResponse],
+    ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
-        chunk_object_type: Final = "transcription.chunk"
 
         completion_tokens = 0
         num_prompt_tokens = 0
@@ -377,16 +391,16 @@ class OpenAIServingTranscription(OpenAIServing):
 
                     if output.finish_reason is None:
                         # Still generating, send delta update.
-                        choice_data = TranscriptionResponseStreamChoice(
+                        choice_data = response_stream_choice_class(
                             delta=delta_message)
                     else:
                         # Model is finished generating.
-                        choice_data = TranscriptionResponseStreamChoice(
+                        choice_data = response_stream_choice_class(
                             delta=delta_message,
                             finish_reason=output.finish_reason,
                             stop_reason=output.stop_reason)
 
-                    chunk = TranscriptionStreamResponse(
+                    chunk = stream_response_class(
                         id=request_id,
                         object=chunk_object_type,
                         created=created_time,
@@ -412,7 +426,7 @@ class OpenAIServingTranscription(OpenAIServing):
                                         total_tokens=num_prompt_tokens +
                                         completion_tokens)
 
-                final_usage_chunk = TranscriptionStreamResponse(
+                final_usage_chunk = stream_response_class(
                     id=request_id,
                     object=chunk_object_type,
                     created=created_time,
@@ -431,7 +445,7 @@ class OpenAIServingTranscription(OpenAIServing):
 
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
-            logger.exception("Error in chat completion stream generator.")
+            logger.exception("Error in %s stream generator.", self.task_type)
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
@@ -485,3 +499,109 @@ class OpenAIServingTranscription(OpenAIServing):
                 quietest_idx = i + start_idx
                 min_energy = energy
         return quietest_idx
+
+class OpenAIServingTranscription(OpenAISpeechToText):
+    """Handles transcription requests."""
+
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        model_config: ModelConfig,
+        models: OpenAIServingModels,
+        *,
+        request_logger: Optional[RequestLogger],
+        return_tokens_as_token_ids: bool = False,
+    ):
+        super().__init__(engine_client=engine_client,
+                         model_config=model_config,
+                         models=models,
+                         request_logger=request_logger,
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         task_type="transcribe")
+
+    async def create_transcription(
+        self, audio_data: bytes, request: TranscriptionRequest,
+        raw_request: Request
+    ) -> Union[TranscriptionResponse, AsyncGenerator[str, None],
+               ErrorResponse]:
+        """Transcription API similar to OpenAI's API.
+
+        See https://platform.openai.com/docs/api-reference/audio/createTranscription
+        for the API specification. This API mimics the OpenAI transcription API.
+        """
+        return await self._create_speech_to_text(
+            audio_data=audio_data,
+            request=request,
+            raw_request=raw_request,
+            response_class=TranscriptionResponse,
+            stream_generator_method=self.transcription_stream_generator,
+        )
+
+    async def transcription_stream_generator(
+            self, request: TranscriptionRequest,
+            result_generator: AsyncGenerator[RequestOutput, None],
+            request_id: str, request_metadata: RequestResponseMetadata,
+            audio_duration_s: float) -> AsyncGenerator[str, None]:
+        return await self._speech_to_text_stream_generator(
+            request=request,
+            result_generator=result_generator,
+            request_id=request_id,
+            request_metadata=request_metadata,
+            audio_duration_s=audio_duration_s,
+            chunk_object_type="transcription.chunk",
+            response_stream_choice_class=TranscriptionResponseStreamChoice,
+            stream_response_class=TranscriptionStreamResponse,
+        )
+
+
+class OpenAIServingTranslation(OpenAISpeechToText):
+    """Handles translation requests."""
+
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        model_config: ModelConfig,
+        models: OpenAIServingModels,
+        *,
+        request_logger: Optional[RequestLogger],
+        return_tokens_as_token_ids: bool = False,
+    ):
+        super().__init__(engine_client=engine_client,
+                         model_config=model_config,
+                         models=models,
+                         request_logger=request_logger,
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         task_type="translate")
+
+    async def create_translation(
+        self, audio_data: bytes, request: TranslationRequest,
+        raw_request: Request
+    ) -> Union[TranslationResponse, AsyncGenerator[str, None], ErrorResponse]:
+        """Translation API similar to OpenAI's API.
+
+        See https://platform.openai.com/docs/api-reference/audio/createTranslation
+        for the API specification. This API mimics the OpenAI translation API.
+        """
+        return await self._create_speech_to_text(
+            audio_data=audio_data,
+            request=request,
+            raw_request=raw_request,
+            response_class=TranslationResponse,
+            stream_generator_method=self.translation_stream_generator,
+        )
+
+    async def translation_stream_generator(
+            self, request: TranslationRequest,
+            result_generator: AsyncGenerator[RequestOutput, None],
+            request_id: str, request_metadata: RequestResponseMetadata,
+            audio_duration_s: float) -> AsyncGenerator[str, None]:
+        return await self._speech_to_text_stream_generator(
+            request=request,
+            result_generator=result_generator,
+            request_id=request_id,
+            request_metadata=request_metadata,
+            audio_duration_s=audio_duration_s,
+            chunk_object_type="translation.chunk",
+            response_stream_choice_class=TranslationResponseStreamChoice,
+            stream_response_class=TranslationStreamResponse,
+        )
