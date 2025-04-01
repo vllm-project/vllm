@@ -161,7 +161,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
                 elif self.speculative_config.method == "eagle":
-                    self.drafter = EagleProposer(self.vllm_config, self.device)
+                    self.drafter = EagleProposer(self.vllm_config,
+                                                 self.device)  # type: ignore
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -1143,9 +1144,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Speculative decoding is not enabled.
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
+            assert isinstance(self.drafter, NgramProposer)
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids, sampling_metadata)
         elif self.speculative_config.method == "eagle":
+            assert isinstance(self.drafter, EagleProposer)
             # TODO(woosuk): Refactor the loop.
             next_token_ids: list[int] = []
             for i, token_ids in enumerate(valid_sampled_token_ids):
@@ -1264,8 +1267,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                   self.scheduler_config,
                                                   self.lora_config,
                                                   self.device)
-            if (hasattr(self, "drafter")
-                    and self.speculative_config.method != "ngram"):
+            if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
             time_after_load = time.perf_counter()
