@@ -9,8 +9,12 @@ import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk, moe_align_block_size)
+from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+    deep_gemm_moe_fp8,
+    modular_deep_gemm_fused_moe_fp8)
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
@@ -430,11 +434,13 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
 
-    # only aligned sizes
-    if (N % 128 != 0 or K % 128 != 0 or topk > E or block_size != [128, 128]):
+    # only aligned sizes TODO: use _valid_deep_gemm here instead?
+    if (N % block_m != 0 or K % block_m != 0 or topk > E):
         pytest.skip(
-            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}, "
-            f"block_size={block_size}")
+            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
+
+    if False and N <= 512:
+        pytest.skip("Skipping N <= 512 until performance issues solved.")
 
     vllm_config = VllmConfig()
 
@@ -474,6 +480,13 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
         w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
         w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
 
+    if True:
+        dgm = modular_deep_gemm_fused_moe_fp8()
+        def deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids):
+            return dgm(a, w1, w2, topk_weights, topk_ids, w1_scale=w1_s, w2_scale=w2_s)
+    else:
+        deep_gemm_moe_fp8_fn = deep_gemm_moe_fp8
+
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         if M >= 128:
@@ -483,17 +496,9 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
             ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
                                                topk, block_size)
 
-        out = fused_moe(a,
-                        w1,
-                        w2,
-                        score,
-                        topk,
-                        renormalize=False,
-                        use_fp8_w8a8=True,
-                        w1_scale=w1_s,
-                        w2_scale=w2_s,
-                        block_shape=block_size,
-                        allow_deep_gemm=True)
+        topk_weights, topk_ids = fused_topk(a, score.float(), topk, False)
+
+        out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids)
 
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")

@@ -126,6 +126,7 @@ class FusedMoEQuantizeDispatchCombine(ABC):
           experts, it will have (M, topk, K) shape.
         - topk_weights: The weights to be applied to the fused_experts_output.
         - topk_ids: The topk_ids.
+        - apply_router_weight_on_input: When False, apply the weights to fused_expert_output.
         """
         raise NotImplementedError
 
