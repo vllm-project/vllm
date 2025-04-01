@@ -14,7 +14,6 @@ from vllm.attention.selector import (get_env_variable_attn_backend,
                                      get_global_forced_attn_backend)
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
-from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -22,7 +21,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
 from vllm.platforms import _Backend
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, PoolerOutput,
+from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (GPUModelRunnerBase,
@@ -81,7 +80,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
         '''
@@ -98,6 +96,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             vllm_config=vllm_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
+            mm_registry=mm_registry,
         )
 
         # Crash for unsupported encoder/scenarios
@@ -283,43 +282,29 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            decoder_dummy_data = self.input_registry \
-                .dummy_data_for_profiling(self.model_config,
-                                          seq_len,
-                                          self.mm_registry,
-                                          is_encoder_data=False)
-            encoder_dummy_data = self.input_registry \
-                .dummy_data_for_profiling(self.model_config,
-                                          seq_len,
-                                          self.mm_registry,
-                                          is_encoder_data=True)
+            decoder_dummy_data = self.mm_registry.get_decoder_dummy_data(
+                self.model_config, seq_len)
+            decoder_dummy_seq_data = SequenceData.from_seqs(
+                decoder_dummy_data.prompt_token_ids)
+            encoder_dummy_data = self.mm_registry.get_encoder_dummy_data(
+                self.model_config, seq_len)
+            encoder_dummy_seq_data = SequenceData.from_seqs(
+                encoder_dummy_data.prompt_token_ids)
 
-            # Having more tokens is over-conservative but otherwise fine
-            assert len(
-                decoder_dummy_data.seq_data.prompt_token_ids
-            ) >= seq_len, (
-                f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(decoder_dummy_data.seq_data.prompt_token_ids)}"
-            )
-
-            assert decoder_dummy_data.multi_modal_data is None or \
-            encoder_dummy_data.multi_modal_data is None, (
-                "Multi-modal data can't be provided in both encoder and decoder"
-            )
+            # Currently encoder_dummy_seq_data doesn't contain multi-modal data
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: decoder_dummy_data.seq_data},
+                seq_data={group_id: decoder_dummy_seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                encoder_seq_data=encoder_dummy_data.seq_data,
+                encoder_seq_data=encoder_dummy_seq_data,
                 cross_block_table=None,
-                multi_modal_data=decoder_dummy_data.multi_modal_data
-                or encoder_dummy_data.multi_modal_data,
+                multi_modal_data=decoder_dummy_data.multi_modal_data,
                 multi_modal_placeholders=decoder_dummy_data.
-                multi_modal_placeholders
-                or encoder_dummy_data.multi_modal_placeholders)
+                multi_modal_placeholders,
+            )
             seqs.append(seq)
 
         finished_requests_ids = [seq.request_id for seq in seqs]
