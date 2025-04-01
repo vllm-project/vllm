@@ -103,7 +103,7 @@ class TPUSupportedSamplingMetadata:
                    DEFAULT_SAMPLING_PARAMS["min_p"])
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
-        input_batch = cls(
+        tpu_sampling_metadata = cls(
             temperature=input_batch.temperature[:padded_num_reqs],
             # Scalar tensor for xla-friendly tracing.
             all_greedy=torch.tensor(input_batch.all_greedy,
@@ -119,4 +119,4 @@ class TPUSupportedSamplingMetadata:
         xm.mark_step()
         xm.wait_device_ops()
 
-        return input_batch
+        return tpu_sampling_metadata

@@ -12,6 +12,9 @@ from torch.library import impl
 from torch_xla.experimental.custom_kernel import (XLA_LIB, jax_import_guard,
                                                   make_kernel_from_pallas)
 
+# Ignore "Function definition does not bind loop variable" errors in Pallas
+#ruff: noqa: B023
+
 XLA_LIB.define(
     "bgmv_shrink(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor")
 
@@ -19,8 +22,8 @@ XLA_LIB.define(
 # be the outputs of a LoRA laned bgmv_shrink. This is not always the case when
 # we use bgmv_expand
 XLA_LIB.define(
-    "bgmv_expand(Tensor inputs, Tensor loras, Tensor idxs, bool enable_laning) -> Tensor"
-)
+    "bgmv_expand(Tensor inputs, Tensor loras, Tensor idxs, bool enable_laning) \
+        -> Tensor")
 """
 LoRA Laning Optimization for TPU Matrix Multiplication
 
