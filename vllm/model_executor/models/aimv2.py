@@ -1,5 +1,5 @@
 # A modified implementation of the AIMv2 Transformer
-# inserted here also the image tokenizer used by Ovis
+# inserted here also the image tokenizer used by Ovis2
 from typing import Optional, Tuple, Union
 
 import torch

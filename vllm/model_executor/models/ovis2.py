@@ -15,7 +15,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch Ovis model."""
+""" PyTorch Ovis2 model."""
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Dict, Union)
 from abc import ABC, abstractmethod
@@ -60,15 +60,15 @@ IMAGE_TOKEN_ID = -200
 IMAGE_TOKEN = "<image>"
 IMAGE_ATOM_ID = -300
 IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
-MAX_SEGMENTS = 30  # default value in the ovis modeling
+MAX_SEGMENTS = 30  # default value in the ovis2 modeling
 
 NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT = 256
 
 # ----------------------------------------------------------------------
-#                           Ovis Configuration
+#                           Ovis2 Configuration
 # ----------------------------------------------------------------------
-class OvisConfig(PretrainedConfig):
-    model_type = "chamaleon" # swithched to this to have compatible image token
+class Ovis2Config(PretrainedConfig):
+    model_type = "ovis2" # swithched to this to have compatible image token
 
     def __init__(
         self,
@@ -111,7 +111,7 @@ class OvisConfig(PretrainedConfig):
 
 
 
-class OvisProcessorKwargs(ProcessingKwargs, total=False):
+class Ovis2ProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = {
         "text_kwargs": {
             "padding": False,
@@ -125,11 +125,11 @@ class OvisProcessorKwargs(ProcessingKwargs, total=False):
 
 
 
-class OvisProcessor(ProcessorMixin):
+class Ovis2Processor(ProcessorMixin):
     r"""
-    Constructs a Ovis processor which wraps a Ovis image processor and a Qwen2 tokenizer into a single processor.
-    [`OvisProcessor`] offers all the functionalities of [`Qwen2VLImageProcessor`] and [`Qwen2TokenizerFast`]. See the
-    [`~OvisProcessor.__call__`] and [`~OvisProcessor.decode`] for more information.
+    Constructs a Ovis2 processor which wraps a Ovis2 image processor and a Qwen2 tokenizer into a single processor.
+    [`Ovis2Processor`] offers all the functionalities of [`Qwen2VLImageProcessor`] and [`Qwen2TokenizerFast`]. See the
+    [`~Ovis2Processor.__call__`] and [`~Ovis2Processor.decode`] for more information.
     Args:
         image_processor ([`Qwen2VLImageProcessor`], *optional*):
             The image processor is a required input.
@@ -154,7 +154,7 @@ class OvisProcessor(ProcessorMixin):
         self,
         images: ImageInput = None,
         text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
-        **kwargs: Unpack[OvisProcessorKwargs],
+        **kwargs: Unpack[Ovis2ProcessorKwargs],
     ) -> BatchFeature:
         """
         Main method to prepare for the model one or several sequences(s) and image(s). This method forwards the `text`
@@ -194,7 +194,7 @@ class OvisProcessor(ProcessorMixin):
                 - **second_per_grid_ts** -- List of video seconds per time grid. Returned when `videos` is not `None`.
         """
         output_kwargs = self._merge_kwargs(
-            OvisProcessorKwargs,
+            Ovis2ProcessorKwargs,
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
             **kwargs,
         )
@@ -451,7 +451,7 @@ class OvisProcessor(ProcessorMixin):
         return names_from_processor + ["second_per_grid_ts"]
 
 
-class OvisImagePatchInputs(TypedDict):
+class Ovis2ImagePatchInputs(TypedDict):
     type: Literal["image_patches"]
     flat_data: torch.Tensor
     """
@@ -488,16 +488,16 @@ class VisualEmbedding(torch.nn.Embedding):
         return self.weight.dtype
 
 
-class OvisProcessingInfo(BaseProcessingInfo):
+class Ovis2ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(OvisConfig)
+        return self.ctx.get_hf_config(Ovis2Config)
 
     def get_hf_processor(self,
                          **kwargs):
-        return self.ctx.get_hf_processor(OvisProcessor)
+        return self.ctx.get_hf_processor(Ovis2Processor)
 
-    def get_image_processor(self) -> OvisProcessor:
+    def get_image_processor(self) -> Ovis2Processor:
         return self.get_hf_processor().image_processor  # type: ignore
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -521,7 +521,7 @@ class OvisProcessingInfo(BaseProcessingInfo):
                          height=image_processor.size['shortest_edge'] * 9 * 2)
 
 
-class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
+class Ovis2DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2ProcessingInfo]):
 
     def get_dummy_processor_inputs(
             self,
@@ -551,7 +551,7 @@ Describe the image.<|im_end|>
         )
 
 
-class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
+class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
 
     def _get_token_value(self, tok):
         return self.info.get_tokenizer()(self.info.get_tokenizer().extra_special_tokens[tok])["input_ids"]
@@ -641,10 +641,10 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
             for grid in out_mm_kwargs["grids"]]
 
 
-@MULTIMODAL_REGISTRY.register_processor(OvisMultiModalProcessor,
-                                        info=OvisProcessingInfo,
-                                        dummy_inputs=OvisDummyInputsBuilder)
-class OvisForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+@MULTIMODAL_REGISTRY.register_processor(Ovis2MultiModalProcessor,
+                                        info=Ovis2ProcessingInfo,
+                                        dummy_inputs=Ovis2DummyInputsBuilder)
+class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
