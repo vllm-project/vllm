@@ -979,7 +979,8 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         return self.vision_config.image_size
 
     def get_patch_size(self) -> int:
-        return self.vision_config.patch_size
+        return (self.vision_config.patch_size *
+                self.vision_config.spatial_merge_size)
 
     def get_patch_grid_length(self) -> int:
         image_size, patch_size = self.get_image_size(), self.get_patch_size()
@@ -1001,8 +1002,8 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         ratio = max(image_width / max_width, image_height / max_height)
 
         if ratio > 1:
-            image_width = int(math.ceil(image_width / ratio))
-            image_height = int(math.ceil(image_height / ratio))
+            image_width = int(math.floor(image_width / ratio))
+            image_height = int(math.floor(image_height / ratio))
 
         nrows, ncols = _get_pixtral_hf_num_image_tokens(
             (image_height, image_width),
