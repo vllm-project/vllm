@@ -79,7 +79,7 @@ def clean_cache():
 def skip_cuda_with_stage_false(request):
     """
     On cuda-like platforms, we use the same kernels for prefill and decode 
-    stage, and 'stagae' is generally ignored, so we only need to test once.
+    stage, and 'stage' is generally ignored, so we only need to test once.
     """
     if current_platform.is_cuda_alike():
         try:
