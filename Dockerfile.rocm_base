@@ -12,7 +12,7 @@ ARG PYTORCH_REPO="https://github.com/pytorch/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
 ARG FA_BRANCH="b7d29fb"
 ARG FA_REPO="https://github.com/ROCm/flash-attention.git"
-ARG AITER_BRANCH="21d47a9"
+ARG AITER_BRANCH="5208527"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
