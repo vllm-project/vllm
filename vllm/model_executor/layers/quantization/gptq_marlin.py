@@ -489,7 +489,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
         device = layer.w13_qweight.device
         sms = torch.cuda.get_device_properties(device).multi_processor_count
-        layer.workspace = torch.zeros((sms, ),
+        layer.workspace = torch.zeros((sms * 4, ),
                                       dtype=torch.int,
                                       device=device,
                                       requires_grad=False)

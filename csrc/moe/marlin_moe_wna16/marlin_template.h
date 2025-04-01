@@ -479,6 +479,7 @@ __global__ void Marlin(
   using FragS = typename ScalarType<scalar_t>::FragS;
   using FragZP = typename ScalarType<scalar_t>::FragZP;
 
+  extern __shared__ int4 sh[];
   static constexpr auto w_type = vllm::ScalarType::from_id(w_type_id);
 
   constexpr int pack_factor = 32 / w_type.size_bits();
@@ -529,11 +530,15 @@ __global__ void Marlin(
   int par_id = 0;
   int block_id = -1;
   int64_t expert_id = 0;  // use int64 to avoid computation result overflow
-  int64_t old_expert_id = 0;
+  int old_expert_id = 0;
   int64_t B_expert_off = 0;
 
-  float block_topk_weights[moe_block_size];
-  int32_t block_sorted_ids[moe_block_size];
+  int4* sh_block_sorted_ids_int4 = sh;
+  int32_t* sh_block_sorted_ids = reinterpret_cast<int*>(sh_block_sorted_ids_int4);
+  int4* sh_block_topk_weights_int4 = sh_block_sorted_ids_int4 + moe_block_size / 4;
+  scalar_t2* sh_block_topk_weights = reinterpret_cast<scalar_t2*>(sh_block_topk_weights_int4);
+  int4* sh_new = sh_block_topk_weights_int4 + moe_block_size / 4;
+
   int32_t block_num_valid_tokens = 0;
   int32_t locks_off = 0;
 
@@ -555,23 +560,36 @@ __global__ void Marlin(
   // block_sorted_ids / block_num_valid_tokens / block_topk_weights
   auto read_moe_block_data = [&](int block_id) {
     block_num_valid_tokens = moe_block_size;
-    int4* tmp_block_sorted_ids = reinterpret_cast<int4*>(block_sorted_ids);
+  #pragma unroll
     for (int i = 0; i < moe_block_size / 4; i++) {
-      tmp_block_sorted_ids[i] =
-          ((int4*)sorted_token_ids_ptr)[block_id * moe_block_size / 4 + i];
-    }
-    for (int i = 0; i < moe_block_size; i++) {
-      if (block_sorted_ids[i] >= prob_m * top_k) {
-        block_num_valid_tokens = i;
-        break;
-      };
+      int4 sorted_token_ids_int4 = reinterpret_cast<const int4*>(sorted_token_ids_ptr)[
+        block_id * moe_block_size / 4 + i];
+      int* sorted_token_ids = reinterpret_cast<int*>(&sorted_token_ids_int4);
+  #pragma unroll
+      for (int j = 0; j < 4; j++) {
+        if (sorted_token_ids[j] >= prob_m * top_k) {
+          block_num_valid_tokens = i * 4 + j;
+          break;
+        }
+      }
+      if (block_num_valid_tokens != moe_block_size) break;
     }
 
-    if (mul_topk_weights) {
-      for (int i = 0; i < block_num_valid_tokens; i++) {
-        block_topk_weights[i] = topk_weights_ptr[block_sorted_ids[i]];
+    __syncthreads();
+    int tid4 = threadIdx.x / 4;
+    if (threadIdx.x % 4 == 0 && threadIdx.x < block_num_valid_tokens) {
+      sh_block_sorted_ids_int4[tid4] = reinterpret_cast<const int4*>(sorted_token_ids_ptr)[
+        block_id * moe_block_size / 4 + tid4];
+
+      if (mul_topk_weights) {
+  #pragma unroll
+        for (int i = 0; i < 4; i++) {
+          sh_block_topk_weights[tid4 * 4 + i] = Dtype::float2num(
+            topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]]);
+        }
       }
     }
+    __syncthreads();
   };
 
   // when move to next moe block, find the next block_id and expert_id
@@ -656,7 +674,7 @@ __global__ void Marlin(
       for (int index = threadIdx.x; index < num_int4s; index += threads) {
         int row = index / stride_n;
         if (row < block_num_valid_tokens) {
-          int64_t sorted_row = block_sorted_ids[row];
+          int64_t sorted_row = sh_block_sorted_ids[row];
           int col = index % stride_n;
           int64_t true_index =
               sorted_row * global_stride_n + off_stride_n + col;
@@ -709,7 +727,7 @@ __global__ void Marlin(
       for (int i = 0; i < m_per_thread; i++) {
         int row = threads / threads_per_m * i + threadIdx.x / threads_per_m;
         if (row < block_num_valid_tokens) {
-          int64_t sorted_row = block_sorted_ids[row];
+          int64_t sorted_row = sh_block_sorted_ids[row];
           int col = slice_col * 16 * thread_n_blocks / 8 +
                     threadIdx.x % threads_per_m;
           C[sorted_row * prob_n / 8 + col] = {0, 0, 0, 0};
@@ -917,14 +935,13 @@ __global__ void Marlin(
   for (int i = 0; i < b_sh_wr_iters; i++)
     B_ptr[i] = B + b_gl_rd_delta_i * i + b_gl_rd;
 
-  extern __shared__ int4 sh[];
   // Shared memory storage for global fetch pipelines.
-  int4* sh_a = sh;
+  int4* sh_a = sh_new;
   int4* sh_b = sh_a + (stages * a_sh_stage);
   int4* sh_g_idx = sh_b + (stages * b_sh_stage);
   int4* sh_zp = sh_g_idx + (stages * g_idx_stage);
   int4* sh_s = sh_zp + (stages * zp_sh_stage);
-  int4* sh_red = sh_s + (stages * s_sh_stage);
+  int4* sh_red = sh_new;
 
   // Register storage for double buffer of shared memory reads.
   FragA frag_a[2][thread_m_blocks];
@@ -991,7 +1008,7 @@ __global__ void Marlin(
         int row = a_idx / a_gl_stride;
         int64_t sorted_row = 0;
         if (!m_block_size_8 || row < 8)
-          sorted_row = block_sorted_ids[row] / top_k;
+          sorted_row = sh_block_sorted_ids[row] / top_k;
         int64_t true_idx = sorted_row * a_gl_stride + a_idx % a_gl_stride;
         cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]], &A[true_idx],
                        row < block_num_valid_tokens);
@@ -1118,8 +1135,6 @@ __global__ void Marlin(
 
   auto init_same_group = [&](int pipe) {
     if constexpr (!has_act_order) {
-      is_same_group[pipe] = false;
-      same_group_id[pipe] = 0;
       return;
     }
 
@@ -1514,7 +1529,7 @@ __global__ void Marlin(
         int c_idx =
             c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
         if (c_idx / c_gl_stride < block_num_valid_tokens) {
-          int64_t sorted_row = block_sorted_ids[c_idx / c_gl_stride];
+          int64_t sorted_row = sh_block_sorted_ids[c_idx / c_gl_stride];
           int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
           sh_red[c_sh_wr + c_sh_wr_delta * i] = C[true_idx];
         }
@@ -1544,7 +1559,7 @@ __global__ void Marlin(
         int c_idx =
             c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
         if (c_idx / c_gl_stride < block_num_valid_tokens) {
-          int64_t sorted_row = block_sorted_ids[c_idx / c_gl_stride];
+          int64_t sorted_row = sh_block_sorted_ids[c_idx / c_gl_stride];
           int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
           C[true_idx] = c;
         }
@@ -1678,12 +1693,11 @@ __global__ void Marlin(
          i++) {
       int row = c_gl_wr / c_gl_stride;
       if (row < block_num_valid_tokens) {
-        int64_t sorted_row = block_sorted_ids[row];
+        int64_t sorted_row = sh_block_sorted_ids[row];
         int64_t true_idx = sorted_row * c_gl_stride + c_gl_wr % c_gl_stride;
         scalar_t2 topk_weight_score;
         if (mul_topk_weights)
-          topk_weight_score =
-              Dtype::num2num2(Dtype::float2num(block_topk_weights[row]));
+          topk_weight_score = sh_block_topk_weights[row];
         if (use_atomic_add && slice_count > 1 || mul_topk_weights) {
           scalar_t2* C_half2 = reinterpret_cast<scalar_t2*>(&C[true_idx]);
           scalar_t2* sh_red_half2 =
@@ -1708,6 +1722,7 @@ __global__ void Marlin(
         c_sh_rd += c_sh_rd_delta;
       }
     }
+    __syncthreads();
   };
 
   // Start global fetch and register load pipelines.

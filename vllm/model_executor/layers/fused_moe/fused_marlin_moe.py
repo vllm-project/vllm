@@ -252,7 +252,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
             (sorted_token_ids.size(0) // block_size_m)
         device = hidden_states.device
         sms = torch.cuda.get_device_properties(device).multi_processor_count
-        max_workspace_size = min(max_workspace_size, sms)
+        max_workspace_size = min(max_workspace_size, sms * 4)
         workspace = torch.zeros(max_workspace_size,
                                 dtype=torch.int,
                                 device=device,
