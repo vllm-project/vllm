@@ -35,6 +35,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
@@ -157,18 +158,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
-            assert self.speculative_config.method == "ngram", \
-                    "Currently, only ngram spec decode is supported in V1."
             if get_pp_group().is_last_rank:
-                self.drafter = NgramProposer()
-                # Trigger Numba JIT compilation for N-gram proposer.
-                # This usually takes less than 1 second.
-                self.drafter.propose(
-                    np.zeros(1024, dtype=np.int32),
-                    self.speculative_config.prompt_lookup_min,
-                    self.speculative_config.prompt_lookup_max,
-                    self.speculative_config.num_speculative_tokens,
-                )
+                if self.speculative_config.method == "ngram":
+                    self.drafter = NgramProposer(self.vllm_config)
+                elif self.speculative_config.method == "eagle":
+                    self.drafter = EagleProposer(self.vllm_config,
+                                                 self.device)  # type: ignore
+                else:
+                    raise ValueError("Unknown speculative decoding method: "
+                                     f"{self.speculative_config.method}")
                 self.rejection_sampler = RejectionSampler()
 
         # Request states.
@@ -1144,10 +1142,75 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             valid_sampled_token_ids[i].clear()
 
         if not self.use_spec_decode:
+            # Speculative decoding is not enabled.
             spec_token_ids = None
-        else:
+        elif self.speculative_config.method == "ngram":
+            assert isinstance(self.drafter, NgramProposer)
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids, sampling_metadata)
+        elif self.speculative_config.method == "eagle":
+            assert isinstance(self.drafter, EagleProposer)
+            # TODO(woosuk): Refactor the loop.
+            next_token_ids: list[int] = []
+            for i, token_ids in enumerate(valid_sampled_token_ids):
+                if token_ids:
+                    # Common case.
+                    next_token_id = token_ids[-1]
+                else:
+                    # Partial prefill (rare case).
+                    # Get the next token id from the request state.
+                    req_id = self.input_batch.req_ids[i]
+                    req_state = self.requests[req_id]
+                    seq_len = (req_state.num_computed_tokens +
+                               scheduler_output.num_scheduled_tokens[req_id])
+                    next_token_id = req_state.get_token_id(seq_len)
+                next_token_ids.append(next_token_id)
+            next_token_ids = torch.tensor(next_token_ids,
+                                          dtype=torch.int32,
+                                          device=self.device)
+
+            if spec_decode_metadata is None:
+                # input_ids can be None for multimodal models.
+                target_token_ids = self.input_ids[:num_scheduled_tokens]
+                target_positions = positions
+                target_hidden_states = hidden_states
+                target_slot_mapping = attn_metadata.slot_mapping
+                cu_num_tokens = attn_metadata.query_start_loc
+            else:
+                # TODO(woosuk): Refactor this.
+                num_draft_tokens = spec_decode_metadata.num_draft_tokens
+                num_rejected_tokens = [
+                    n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+                    for i, n in enumerate(num_draft_tokens)
+                ]
+                num_rejected_tokens = torch.tensor(
+                    num_rejected_tokens,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                cu_num_tokens, token_indices = self.drafter.prepare_inputs(
+                    attn_metadata.query_start_loc,
+                    num_rejected_tokens,
+                )
+                target_token_ids = self.input_ids[token_indices]
+                target_positions = positions[token_indices]
+                target_hidden_states = hidden_states[token_indices]
+                target_slot_mapping = attn_metadata.slot_mapping[token_indices]
+
+            draft_token_ids, draft_probs = self.drafter.propose(
+                target_token_ids=target_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                target_slot_mapping=target_slot_mapping,
+                next_token_ids=next_token_ids,
+                cu_num_tokens=cu_num_tokens,
+                block_table=attn_metadata.block_table,
+                sampling_metadata=sampling_metadata,
+            )
+            spec_token_ids = draft_token_ids.tolist()
+            # TODO(woosuk): Cache draft_probs and use it for rejection sampling
+            # in the next step.
+            del draft_probs
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1205,6 +1268,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                   self.scheduler_config,
                                                   self.lora_config,
                                                   self.device)
+            if hasattr(self, "drafter"):
+                logger.info("Loading drafter model...")
+                self.drafter.load_model(self.model)
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
         logger.info("Model loading took %.4f GiB and %.6f seconds",

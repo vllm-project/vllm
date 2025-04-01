@@ -4,8 +4,13 @@ from typing import Optional
 import numpy as np
 from numba import jit
 
+from vllm.config import VllmConfig
+
 
 class NgramProposer:
+
+    def __init__(self, vllm_config: VllmConfig):
+        self.vllm_config = vllm_config
 
     def propose(
         self,
@@ -49,6 +54,10 @@ class NgramProposer:
             if result is not None:
                 return result
         return None
+
+    def load_model(self, *args, **kwargs):
+        # No model to load.
+        pass
 
 
 @jit(nopython=True)
