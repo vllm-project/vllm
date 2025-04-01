@@ -1104,7 +1104,6 @@ class LLMEngine:
             output: List[SequenceGroupOutput]
             return_hidden_states = False
 
-            
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
                 if self.model_config.task == "generate" and \
@@ -1113,15 +1112,14 @@ class LLMEngine:
                     hidden_states = []
                     for k in range(len(output)):
                         hidden_states.append(
-                                outputs_by_sequence_group[i][k].hidden_states)
+                            outputs_by_sequence_group[i][k].hidden_states)
             else:
                 output = [outputs_by_sequence_group[0][i]]
                 if self.model_config.task == "generate" and \
                         hasattr(outputs_by_sequence_group[0], "hidden_states") \
                         and outputs_by_sequence_group[0].hidden_states is not None:
                     return_hidden_states = True
-                    hidden_states = outputs_by_sequence_group[0].hidden_states 
- 
+                    hidden_states = outputs_by_sequence_group[0].hidden_states
 
             if not is_async:
                 if self.scheduler_config.is_multi_step:
