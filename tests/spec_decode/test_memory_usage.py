@@ -7,10 +7,10 @@ we enable / disable speculation via --speculative-disable-by-batch-size.
 There are a lot of things we try to keep track of between batches of requests
 and if certain tensors are not freed from memory, can result in CUDA ooms. 
 
-This is particularly relevant for production situations where speculation might be 
-enabled during off hours, but disabled once traffic peaks during the workday. Since
-traffic will stay high for a long period of time, verifying we do not increase our 
-memory usage over time is essential to prevent possible CUDA ooms. 
+This is particularly relevant for production situations where speculation might 
+be enabled during off hours, but disabled once traffic peaks during the workday.
+Since traffic will stay high for a long period of time, verifying we do not 
+increase our memory usage over time is essential to prevent possible CUDA ooms. 
 """
 
 import torch
@@ -28,7 +28,6 @@ SPEC_MODEL = "abhigoyal/vllm-medusa-llama-68m-random"
 BATCH_SIZE = 5
 SPEC_DISABLE_BATCH_SIZE = 2
 
-previous_memory_allocated = None
 
 
 def add_seq_group_to_engine(engine: vllm.LLMEngine, seq_group: SequenceGroup):
@@ -43,6 +42,7 @@ we can ensure we go through the _no_spec codepath for most of our engine steps.
 
 
 def test_memory_usage_no_spec():
+    previous_memory_allocated = None
     llm = vllm.LLM(
         model=MAIN_MODEL,
         speculative_model=SPEC_MODEL,
@@ -82,8 +82,8 @@ def test_memory_usage_no_spec():
 
         # At this point, we are always at the case where we have finished processing
         # some number of requests from the batch after running several _no_spec
-        # executions. The memory should not have increased between the previous time this was recorded
-        # and the current time.
+        # executions. The memory should not have increased between the previous time 
+        # this was recorded and the current time.
         if previous_memory_allocated is None:
             previous_memory_allocated = torch.cuda.memory_allocated()
         else:
