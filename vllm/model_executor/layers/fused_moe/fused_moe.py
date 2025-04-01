@@ -739,98 +739,52 @@ def _fp8_quantize(
 
 
 def find_contiguous_segments(t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    non_matching = t[:-1] != t[1:]
-    ends = non_matching.nonzero().flatten() + 1
-    starts = torch.concat((torch.tensor([0], device=t.device), ends))
-    ends = torch.concat((ends, torch.tensor([t.numel()], device=t.device)))
+    last = t.numel()
+    if False:
+        non_matching = t[:-1] != t[1:]
+        ends = non_matching.nonzero().flatten() + 1
+        starts = torch.concat((torch.tensor([0], device=t.device), ends))
+        ends = torch.concat((ends, torch.tensor([last], device=t.device)))
+    else:
+        starts = torch.arange(0, last, device=t.device)
+        ends = torch.arange(1, last + 1, device=t.device)
     return starts, ends
 
 
-# TODO: this doesn't work.  can compute ranges + positive matrices up front
-# since they depend on the expert_map
-def put_a_bird_on_it(
-        A: torch.Tensor,
-        A_scale: Optional[torch.Tensor],
-        B: torch.Tensor,
-        B_scale: Optional[torch.Tensor],
-        C: torch.Tensor,
-        expert_ids: torch.Tensor,
+# TODO: this doesn't work with cudagraphs.
+def dg_m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+    lhs: Tuple[torch.Tensor, torch.Tensor],
+    rhs: Tuple[torch.Tensor, torch.Tensor],
+    C: torch.Tensor,
+    expert_ids: torch.Tensor,
 ) -> None:
-    #expanded_expert_ids = torch.repeat_interleave(expert_ids, 128, dim=0)
+    block_m = dg.get_m_alignment_for_contiguous_layout()
+    expanded_expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
 
-    # chunk by non-negative expert_ids
-    positive = expert_ids >= 0
-    starts, ends = find_contiguous_segments(positive)
-    #starts = torch.arange(0, expert_ids.numel(), device=expert_ids.device)
-    #ends = torch.arange(1, expert_ids.numel()+1, device=expert_ids.device)
+    if torch.any(expert_ids < 0):
+        A, A_scale = lhs
+        B, B_scale = rhs
 
-    # print("\n\nXXXX")
-    # print(f"eids = {expert_ids}")
-    # print(f"starts = {starts}")
-    # print(f"ends = {ends}")
-    # print(f"positive = {positive}")
+        # chunk by non-negative expert_ids
+        positive = expert_ids >= 0
+        starts, ends = find_contiguous_segments(positive)
 
-    assert starts[0] == 0
-    assert ends[-1] * 128 == A.shape[0]
-    valid_chunks = expert_ids[starts] >= 0
-    assert valid_chunks.numel() == starts.numel()
+        #assert starts[0] == 0                   # bad for cudagraph
+        #assert ends[-1] * 128 == A.shape[0]     # bad for cudagraph
+        valid_chunks = expert_ids[starts] >= 0
+        assert valid_chunks.numel() == starts.numel()
 
-    expanded_expert_ids = torch.repeat_interleave(expert_ids, 128, dim=0)
-
-    for start, end in zip(starts, ends):
-        start128 = start * 128
-        end128 = end * 128
-        if positive[start]:
-            chunk_expert_ids = expanded_expert_ids[start128:end128]
-            #print(f"compute {start}:{end}/{start128}:{end128}, A = {A.shape}/{A[start128:end128].shape}, C = {C.shape}/{C[start128:end128].shape} {expert_ids[start:end]}")
-            dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                (A[start128:end128], A_scale[start128:end128]), (B, B_scale),
-                C[start128:end128], chunk_expert_ids)
-        else:
-            #print(f"skip {start}:{end}/{start128}:{end128}, C={C[start128:end128].shape} {expert_ids[start:end]}")
-            C[start128:end128].fill_(0)
-
-
-direct_register_custom_op(
-    op_name="put_a_bird_on_it",
-    op_func=put_a_bird_on_it,
-    mutates_args=["C"],
-)
-
-def cold_harbor(
-        A: torch.Tensor,
-        A_scale: Optional[torch.Tensor],
-        B: torch.Tensor,
-        B_scale: Optional[torch.Tensor],
-        C: torch.Tensor,
-        e_ids: torch.Tensor,
-) -> None:
-    # chunk by non-negative expert_ids
-    expanded_expert_ids = torch.repeat_interleave(e_ids, 128, dim=0)
-    positive = (e_ids >= 0)
-    i = 0
-    start = 0
-    end = 0
-    numel = e_ids.numel()
-    while i < numel:
-        while i < numel and positive[i]:
-            i = i + 1
-        end = i * 128
-        if start != end:
-            #print(f"compute: {start} {end} {A.shape}")
-            dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                (A[start:end, ...], A_scale[start:end, ...]), (B, B_scale), C[start:end],
-                expanded_expert_ids[start:end])
-            start = end
-        while i < numel and not positive[i]:
-            i = i + 1
-        end = i * 128
-        if start != end:
-            #print(f"skip: {start} {end} {A.shape}")
-            # TODO: fill answer with zeros instead?
-            C[start:end, ...].fill_(0)
-            start = end
-        i = i + 1
+        for start, end, valid in zip(starts * block_m, ends * block_m, valid_chunks):
+            if valid:
+                chunk_expert_ids = expanded_expert_ids[start:end]
+                dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                    (A[start:end], A_scale[start:end]), (B, B_scale),
+                    C[start:end], chunk_expert_ids)
+            else:
+                C[start:end].fill_(0)
+    else:
+        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            lhs, rhs, C, expanded_expert_ids)
 
 
 def invoke_fused_moe_kernel(A: torch.Tensor,
@@ -2053,7 +2007,7 @@ def deep_gemm_moe_fp8(
             intermediate_cache3 = _resize_cache(intermediate_cache3,
                                                 (curr_M, K))
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+        dg_m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (qcurr_hidden_states, a1q_scale), (w1, w1_scale),
             intermediate_cache1, expert_ids)
 
@@ -2071,7 +2025,7 @@ def deep_gemm_moe_fp8(
         qintermediate_cache2, a2q_scale = _fp8_quantize(
             intermediate_cache2, a2_scale, block_shape)
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+        dg_m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (qintermediate_cache2, a2q_scale), (w2, w2_scale),
             intermediate_cache3, expert_ids)
 
