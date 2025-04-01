@@ -191,7 +191,7 @@ class SamplingMetadata:
             "SamplingMetadata("
             f"seq_groups={self.seq_groups}, "
             f"selected_token_indices={self.selected_token_indices}, "
-            f"categorized_sample_indices={self.categorized_sample_indices}), ")
+            f"categorized_sample_indices={self.categorized_sample_indices})")
 
 
 def _prepare_seq_groups(
