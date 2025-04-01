@@ -450,8 +450,6 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
 
 @router.get("/v1/models")
 async def show_available_models(raw_request: Request):
-    import os
-    os._exit(8)
     handler = models(raw_request)
 
     models_ = await handler.show_available_models()
