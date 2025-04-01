@@ -893,7 +893,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             self.encoder_cache[req_id][input_id] = scatter_mm_placeholders(
                 output,
-                is_embed=pos_info.get("is_embed"),
+                is_embed=pos_info.is_embed,
             )
 
     def _gather_mm_embeddings(
@@ -932,7 +932,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert i in self.encoder_cache[req_id]
                 encoder_output = self.encoder_cache[req_id][i]
 
-                if (is_embed := pos_info.get("is_embed")) is not None:
+                if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
                 mm_embeds_item = gather_mm_placeholders(
