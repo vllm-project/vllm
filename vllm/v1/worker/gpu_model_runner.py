@@ -15,7 +15,6 @@ from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
-from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -25,12 +24,13 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, LazyLoader, cdiv,
-                        is_pin_memory_available)
+                        GiB_bytes, LayerBlockType, LazyLoader, cdiv,
+                        check_use_alibi, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -41,6 +41,8 @@ from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+
+from .utils import sanity_check_mm_encoder_outputs
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -69,6 +71,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+
+        from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
+        set_cpu_offload_max_bytes(
+            int(self.cache_config.cpu_offload_gb * 1024**3))
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -130,13 +136,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         # Multi-modal data support
-        self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
             scheduler_config=scheduler_config,
+            mm_registry=self.mm_registry,
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
@@ -222,6 +228,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=torch.int64,
                 device="cpu",
                 pin_memory=self.pin_memory)
+
+        # Only relevant for models using ALiBi (e.g, MPT)
+        self.use_alibi = check_use_alibi(model_config)
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -671,7 +680,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # use two kernels for cascade attention. Let's imagine:
         # Request 3's input query: [D]
         # Request 3's kv cache: [A, B, C, D]
-        # Request 3's num_computed_tokens: 4 (i.e., [A, B, C, D])
+        # Request 3's num_computed_tokens: 3 (i.e., [A, B, C])
         # If we use [A, B, C, D] as the common prefix for Request 1-3,
         # then Request 3 will be processed only by the first kernel,
         # and the second kernel will get an empty input. While this is not
@@ -689,7 +698,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_lens=num_scheduled_tokens,
             num_query_heads=self.num_query_heads,
             num_kv_heads=self.num_kv_heads,
-            use_alibi=False,  # FIXME
+            use_alibi=self.use_alibi,
             use_sliding_window=self.window_size is not None,
             num_sms=self.num_sms,
         )
@@ -860,6 +869,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # depending on the input multimodal items.
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
+
+            sanity_check_mm_encoder_outputs(
+                curr_group_outputs,
+                expected_num_items=len(grouped_mm_inputs),
+            )
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
@@ -1085,8 +1099,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
-        for i, generator in self.input_batch.generators.items():
-            req_id = self.input_batch.req_ids[i]
+        discard_sampled_tokens_req_indices = []
+        for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -1094,7 +1108,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Ignore the sampled token for partial prefills.
                 # Rewind the generator state as if the token was not sampled.
                 # This relies on cuda-specific torch-internal impl details
-                generator.set_offset(generator.get_offset() - 4)
+                generator = self.input_batch.generators.get(i)
+                if generator is not None:
+                    generator.set_offset(generator.get_offset() - 4)
+                # Record the index of the request that should not be sampled,
+                # so that we could clear the sampled tokens before returning.
+                discard_sampled_tokens_req_indices.append(i)
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -1117,7 +1136,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # Includes spec decode tokens.
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
-                sampled_token_ids, self.input_batch.vocab_size)
+                sampled_token_ids,
+                self.input_batch.vocab_size,
+            )
+        # Mask out the sampled tokens that should not be sampled.
+        for i in discard_sampled_tokens_req_indices:
+            valid_sampled_token_ids[i].clear()
 
         if not self.use_spec_decode:
             spec_token_ids = None
@@ -1183,8 +1207,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                   self.device)
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
-        logger.info("Model loading took %.4f GB and %.6f seconds",
-                    self.model_memory_usage / float(2**30),
+        logger.info("Model loading took %.4f GiB and %.6f seconds",
+                    self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
 
     def _get_prompt_logprobs_dict(
@@ -1425,9 +1449,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when
             # it supports multiple.
-            max_tokens_by_modality_dict = (
-                MULTIMODAL_REGISTRY.
-                get_max_tokens_per_item_by_nonzero_modality(self.model_config))
+            max_tokens_by_modality_dict = self.mm_registry \
+                .get_max_tokens_per_item_by_nonzero_modality(self.model_config)
             dummy_data_modality, max_tokens_per_mm_item = max(
                 max_tokens_by_modality_dict.items(), key=lambda item: item[1])
 
@@ -1459,24 +1482,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 encoder_budget, max_num_mm_items, dummy_data_modality)
 
             # Create dummy batch of multimodal inputs.
-            dummy_request_data = self.input_registry.dummy_data_for_profiling(
+            dummy_mm_kwargs = self.mm_registry.get_decoder_dummy_data(
                 model_config=self.model_config,
                 seq_len=self.max_num_tokens,
-                mm_registry=self.mm_registry,
-            )
-            dummy_mm_data = dummy_request_data.multi_modal_data
-            if not isinstance(dummy_mm_data, MultiModalKwargs):
-                # TODO: Delete this check once input mapper is fully removed.
-                raise RuntimeError(
-                    "Legacy input mapper is not supported in V1")
-
-            # Dummy data definition may contain multiple multimodal items
-            # (e.g, multiple images) for a single request, therefore here we
-            # always replicate first item by max_num_mm_items times since in V1
-            # they are scheduled to be processed separately.
-            dummy_mm_item = dummy_mm_data.get_item(
-                modality=dummy_data_modality, item_index=0)
-            dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
+                mm_counts={
+                    dummy_data_modality: 1
+                },
+            ).multi_modal_data
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
@@ -1486,12 +1498,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Run multimodal encoder.
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
                 **batched_dummy_mm_inputs)
-            assert len(dummy_encoder_outputs) == max_num_mm_items, (
-                "Expected dimension 0 of encoder outputs to match the number "
-                f"of multimodal data items: {max_num_mm_items}, got "
-                f"{len(dummy_encoder_outputs)=} instead. This is most likely "
-                "due to the 'get_multimodal_embeddings' method of the model "
-                "not implemented correctly.")
+
+            sanity_check_mm_encoder_outputs(
+                dummy_encoder_outputs,
+                expected_num_items=max_num_mm_items,
+            )
 
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
@@ -1562,7 +1573,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # different GPUs, and `kv_cache_config.num_blocks` is set to
                 # the min of all `num_blocks`. Verify it here.
                 assert num_blocks >= kv_cache_config.num_blocks
-                if isinstance(kv_cache_spec, FullAttentionSpec):
+                if isinstance(kv_cache_spec, AttentionSpec):
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
@@ -1601,12 +1612,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention
             assert isinstance(attn_module, Attention)
             if attn_module.attn_type == AttentionType.DECODER:
-                kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=attn_module.num_kv_heads,
-                    head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype,
-                    use_mla=use_mla)
+                if attn_module.sliding_window is not None:
+                    kv_cache_spec[layer_name] = SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        sliding_window=attn_module.sliding_window,
+                        use_mla=use_mla)
+                else:
+                    kv_cache_spec[layer_name] = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.

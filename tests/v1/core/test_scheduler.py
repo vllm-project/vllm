@@ -2,12 +2,15 @@
 from typing import Optional
 
 import pytest
+import torch
 
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
@@ -66,13 +69,21 @@ def create_scheduler(
         model_config=model_config,
         cache_config=cache_config,
     )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10000,  # A large number of blocks to hold all requests
+        tensors={},
+        kv_cache_groups=[
+            KVCacheGroupSpec(['layer'],
+                             FullAttentionSpec(16, 1, 1, torch.float32, False))
+        ],
+    )
     cache_config.num_gpu_blocks = 10000
     return Scheduler(
         scheduler_config,
         model_config,
         cache_config,
-        speculative_config=None,
         lora_config=None,
+        kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
@@ -244,7 +255,9 @@ def test_schedule_partial_requests():
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[0] for _ in range(len(requests))],
+        # Only the first request has a sampled token id because
+        # the rest requests are still being prefilled.
+        sampled_token_ids=[[0], [], []],
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -266,7 +279,7 @@ def test_schedule_partial_requests():
 
 
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
-def test_schedule_concurrent_partial_requestse(enable_prefix_caching: bool):
+def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     """Test scheduling behavior with concurrent partial requests.
 
     This test verifies that: there are multiple long prefill requests in the
@@ -304,7 +317,7 @@ def test_schedule_concurrent_partial_requestse(enable_prefix_caching: bool):
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[0] for _ in range(len(requests))],
+        sampled_token_ids=[[] for _ in range(len(requests))],
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -325,6 +338,14 @@ def test_schedule_concurrent_partial_requestse(enable_prefix_caching: bool):
     # Schedule the third step. All three requests are running.
     # First and second requests are in the decode stage.
     # All the remaining tokens in the third request are processed.
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0], [0]] + [[] for _ in range(len(requests) - 2)],
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
     scheduler.update_from_output(output1, model_runner_output)
     output2 = scheduler.schedule()
     assert len(scheduler.running) == 3
