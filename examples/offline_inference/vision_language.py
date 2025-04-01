@@ -62,7 +62,6 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
 
 # Aya Vision
 def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
-    # Requires transformers>=4.50.0
     assert modality == "image"
     model_name = "CohereForAI/aya-vision-8b"
 
@@ -73,17 +72,10 @@ def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
         mm_processor_kwargs={"crop_to_patches": True},
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
-    messages = [[{
-        'role': 'user',
-        'content': f"<image>\n{question}"
-    }] for question in questions]
-    prompts = tokenizer.apply_chat_template(messages,
-                                            tokenize=False,
-                                            add_generation_prompt=True)
-
+    prompts = [
+        f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><image>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+        for question in questions
+    ]
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
