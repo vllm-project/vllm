@@ -8,7 +8,6 @@ import torch
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
-from vllm.utils import is_pin_memory_available
 
 
 class SpecDecodeWorkerMetrics(
