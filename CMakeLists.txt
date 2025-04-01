@@ -289,7 +289,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
-    "csrc/cutlass_extensions/common.cpp")
+    "csrc/cutlass_extensions/common.cpp"
+    "csrc/attention/mla/cutlass_mla_entry.cu")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
@@ -462,7 +463,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(FP4_ARCHS)
   endif()
 
-  #
+  # CUTLASS MLA Archs and flags
+  cuda_archs_loose_intersection(MLA_ARCHS "10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND MLA_ARCHS)
+    set(SRCS
+      "csrc/attention/mla/cutlass_mla_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${MLA_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MLA=1")
+    # Add MLA-specific include directories only to MLA source files
+    set_source_files_properties(${SRCS}
+      PROPERTIES INCLUDE_DIRECTORIES "${CUTLASS_INCLUDE_DIR}/../examples/77_blackwell_fmha;${CUTLASS_INCLUDE_DIR}/../examples/common")
+    message(STATUS "Building CUTLASS MLA for archs: ${MLA_ARCHS}")
+  else()
+    message(STATUS "Not building CUTLASS MLA as no compatible archs were found.")
+    # clear MLA_ARCHS
+    set(MLA_ARCHS)
+  endif()
+
   # CUTLASS MoE kernels
 
   # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and only works
