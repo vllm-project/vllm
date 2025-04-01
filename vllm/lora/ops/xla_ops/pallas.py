@@ -256,7 +256,7 @@ def bgmv_shrink_xla(inputs: torch.Tensor, loras: torch.Tensor,
 
     TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
     LORA_BLOCK = 256
-    DIM_BLOCK = min(1024, next_multiple_of(D, 256))
+    DIM_BLOCK = largest_divisor(D, [256, 512, 1024])
 
     # See if we can fit multiple LoRAs in a register. This would activate LoRA
     # laning
@@ -419,7 +419,7 @@ def bgmv_expand_xla(inputs: torch.Tensor, loras: torch.Tensor,
     N, D, L = loras.shape
 
     TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
-    LORA_BLOCK = min(1024, next_multiple_of(L, 256))
+    LORA_BLOCK = largest_divisor(L, [256, 512, 1024])
     DIM_BLOCK = 256
 
     # See if we can fit multiple LoRAs in a register. This would activate LoRA
@@ -477,6 +477,14 @@ def bgmv_expand_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
     _, _, L = loras.shape
 
     return torch.empty((T, L), device=inputs.device)
+
+
+def largest_divisor(n: int, divs: List[int]) -> int:
+    for div in sorted(divs, reverse=True):
+        if n % div == 0:
+            return div
+    return max(divs)
+
 
 def next_multiple_of(n: int, mult: int) -> int:
     return math.ceil(n / mult) * mult
