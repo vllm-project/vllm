@@ -27,7 +27,7 @@ def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
 
     # Use clone() to ensure an independent copy
     if kv_history is None:
-        kv_cache = torch.randn((B, H, D, E), dtype=dtype, device=q.device)
+        kv_cache = torch.zeros((B, H, D, E), dtype=dtype, device=q.device)
     else:
         kv_cache = kv_history.clone()
 
@@ -37,8 +37,6 @@ def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
         decay = torch.exp(-ed).view(1, -1, 1, 1)
     else:
         decay = torch.exp(-ed)
-
-    scale_factor = 0.1
 
     for b in range(B):
         for step in range(S):
@@ -50,8 +48,7 @@ def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
             # Calculate KV outer products for all heads
             for h in range(H):
                 # Calculate KV outer product
-                kv_outer = torch.outer(k_bs[h],
-                                       v_bs[h]) * scale_factor  # [D, E]
+                kv_outer = torch.outer(k_bs[h], v_bs[h])
 
                 # Update KV cache with decay
                 # Note: Using the same order as in the Triton kernel
