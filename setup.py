@@ -684,7 +684,7 @@ setup(
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
-        "video": ["decord"]  # Required for video processing
+        "video": []  # Kept for backwards compatibility
     },
     cmdclass=cmdclass,
     package_data=package_data,
