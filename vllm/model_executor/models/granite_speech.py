@@ -33,6 +33,7 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
@@ -43,7 +44,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .blip2 import Blip2QFormerModel
-from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 ###########################################################
@@ -395,9 +397,15 @@ class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
     ) -> Mapping[str, int]:
         return {"audio": self.get_max_audio_tokens()}
 
+    # There is no limit to the maximum number of audio tokens that can be
+    # encoded as features; we pick ~10,000 as a number that is probably higher
+    # than we would expect to encounter. The sequence of length
+    # get_max_audio_len() produces get_max_audio_tokens().
     def get_max_audio_tokens(self):
-        # should this be 16000000 because it's the max we get from the encoder?
-        return 10000
+        return 10002
+
+    def get_max_audio_len(self):
+        return 16000000
 
 
 class GraniteSpeechMultiModalProcessor(
@@ -436,12 +444,10 @@ class GraniteSpeechMultiModalProcessor(
         def get_replacement(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             audio = audios.get(item_idx)
-            # HACK - this is actually calculating the features and passing the
-            # variable length feature shapes; we should add a helper to calc
-            # this instead of computing the potentially expensive features
-            num_features = feature_extractor(
-                torch.from_numpy(audio).view(1, -1)).shape[1]
-            return [audio_token_id] * num_features
+            audio_length = audio.shape[-1]
+            num_projector_features = feature_extractor._get_num_audio_features(
+                [audio_length])[0]
+            return [audio_token_id] * num_projector_features
 
         return [
             PromptReplacement(
@@ -473,12 +479,11 @@ class GraniteSpeechDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        max_audio_len = self.info.get_max_audio_tokens()
         num_audios = mm_counts.get("audio", 0)
         mm_data = {
             "audio":
             self._get_dummy_audios(
-                length=max_audio_len,
+                length=self.info.get_max_audio_len(),
                 num_audios=num_audios,
             )
         }
@@ -492,13 +497,13 @@ class GraniteSpeechDummyInputsBuilder(
         )
 
 
-# @MULTIMODAL_REGISTRY.register_processor(
-#     GraniteSpeechMultiModalProcessor,
-#     info=GraniteSpeechMultiModalProcessingInfo,
-#     dummy_inputs=GraniteSpeechDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    GraniteSpeechMultiModalProcessor,
+    info=GraniteSpeechMultiModalProcessingInfo,
+    dummy_inputs=GraniteSpeechDummyInputsBuilder)
 class GraniteSpeechForConditionalGeneration(
         nn.Module,
-        #SupportsMultiModal,
+        SupportsMultiModal,
         SupportsPP,
         SupportsLoRA,
 ):
