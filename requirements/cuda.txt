@@ -1,10 +1,11 @@
 # Common dependencies
 -r common.txt
 
-numba == 0.60.0 # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
+numba == 0.60.0; python_version == '3.9' # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
+numba == 0.61; python_version > '3.9'
 
 # Dependencies for NVIDIA GPUs
-ray[cgraph]>=2.43.0 # Ray Compiled Graph, required for pipeline parallelism in V1.
+ray[cgraph]>=2.43.0, !=2.44.* # Ray Compiled Graph, required for pipeline parallelism in V1.
 torch==2.6.0
 torchaudio==2.6.0
 # These must be updated alongside torch
