@@ -317,8 +317,8 @@ class ModelConfig:
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
             raise ValueError(
                 "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
-                "module was not found."
-                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile "
+                "module was not found. See "
+                "https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile "  # noqa: E501
                 "for instructions on how to install it.")
 
         # The tokenizer version is consistent with the model version by default.
@@ -1116,8 +1116,7 @@ class CacheConfig:
         is_attention_free: Whether the model is attention-free.
         num_gpu_blocks_override: Number of GPU blocks to use. This overrides the
             profiled num_gpu_blocks if specified. Does nothing if None.
-        sliding_window: Sliding window size for the KV cache. Can not work with
-            prefix caching enabled.
+        sliding_window: Sliding window size for the KV cache.
         enable_prefix_caching: Whether to enable prefix caching.
         cpu_offload_gb: Size of the CPU offload buffer in GiB.
     """
@@ -1606,11 +1605,13 @@ class ParallelConfig:
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
-        if current_platform.is_rocm():
+        device_capability = current_platform.get_device_capability()
+        if (current_platform.is_rocm() and device_capability is not None
+                and device_capability < (9, 4)):
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
-                "supported on AMD GPUs.")
+                "supported on AMD GPUs older than MI300X.")
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
@@ -2047,14 +2048,13 @@ class SpeculativeConfig:
 
     def __post_init__(self):
 
-        # Note: After next release, the method parameter will be used to
-        # specify the speculative method, which helps to extend the
-        # configuration of non-model-based proposers, and the model parameter
-        # will be used when the draft model or head is needed.
-        # If users do not specify the method, the speculative method will
-        # be detected automatically if possible. If the speculative method can
-        # not be detected, it will be considered as the draft-model-based
-        # method by default.
+        # Note: "method" is a new parameter that helps to extend the
+        # configuration of non-model-based proposers, and the "model" parameter
+        # will be used to set the draft model, eagle head, or additional weight
+        # when needed. If users do not specify "method", the speculative method
+        # will be detected automatically if possible. If the speculative method
+        # can not be detected, it will be considered as the "draft_model" by
+        # default.
 
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
@@ -2069,8 +2069,8 @@ class SpeculativeConfig:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
 
-        # Automatically configure the ngram method during configuration
-        # refactoring to ensure a smooth transition.
+        # Automatically configure the method for ngram when "model" is used
+        # instead of "method"
         if self.method is None and (self.model is not None
                                     and self.model in ("ngram", "[ngram]")):
             self.method = "ngram"
@@ -2359,12 +2359,10 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        if self.prompt_lookup_max is not None and self.prompt_lookup_max > 0:
-            draft_model = "ngram"
-        else:
-            draft_model = self.draft_model_config.model
+        method = self.method
+        model = None if method == "ngram" else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
+        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
 
 
 @dataclass
