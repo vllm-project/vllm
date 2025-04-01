@@ -871,9 +871,10 @@ class TPUModelRunner:
             self.kv_caches)
 
     def reset_dynamo_cache(self):
-        # TODO(lsy323): Support multimodal models, the backbone language model
-        # is stored in a different member.
-        compiled_model = self.model.model
+        if self.is_multimodal_model:
+            compiled_model = self.model.language_model.model
+        else:
+            compiled_model = self.model.model
         if isinstance(compiled_model, TorchCompileWrapperWithCustomDispatcher):
             logger.info("Clear dynamo cache and cached dynamo bytecode.")
             torch._dynamo.eval_frame.remove_from_cache(
