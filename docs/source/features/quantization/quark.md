@@ -1,17 +1,16 @@
 (quark)=
 
-# QUARK
+# AMD QUARK
 
 Quantization can effectively reduce memory and bandwidth usage, accelerate computation and improve
 throughput while with minimal accuracy loss. vLLM can leverage [Quark](https://quark.docs.amd.com/latest/),
-the flexible and powerful quantization toolkit, to produce performant quantized models to run on GPUs
-of AMD. Quark has specialized support for quantizing large language models with weight,
-activation and kv-cache quantization and along with the cutting-edge quantization algorithms like
+the flexible and powerful quantization toolkit, to produce performant quantized models to run on AMD GPUs. Quark has specialized support for quantizing large language models with weight,
+activation and kv-cache quantization and cutting-edge quantization algorithms like
 AWQ, GPTQ, Rotation and SmoothQuant.
 
 ## Quark Installation
 
-Before quantizing model, you need to install Quark. Release of Quark can be installed with pip:
+Before quantizing models, you need to install Quark. The latest release of Quark can be installed with pip:
 
 ```console
 pip install amd-quark
@@ -79,13 +78,13 @@ calib_dataloader = DataLoader(tokenized_outputs['input_ids'],
 We need to set the quantization configuration, you can check
 [quark config guide](https://quark.docs.amd.com/latest/pytorch/user_guide_config_description.html)
 for further details. Here we use FP8 per-tensor quantization on weight, activation,
-kv-cache and the quantization algorithm is autosmoothquant.
+kv-cache and the quantization algorithm is AutoSmoothQuant.
 
 :::{note}
-Note the quantization algorithm need json config file and the config file is located in
+Note the quantization algorithm needs a JSON config file and the config file is located in
 [Quark Pytorch examples](https://quark.docs.amd.com/latest/pytorch/pytorch_examples.html),
 under the directory `examples/torch/language_modeling/llm_ptq/models`. For example,
-autosmoothquant config file for llama is
+AutoSmoothQuant config file for Llama is
 `examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json`.
 :::
 
