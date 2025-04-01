@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import torch
@@ -558,7 +558,8 @@ def use_cascade_attention(
     use_alibi: bool,
     use_sliding_window: bool,
     num_sms: int,
-    sliding_window: Optional[Union[int, list[Optional[int]]]],
+    context_lens: np.ndarrary,
+    sliding_window: Optional[int],
 ) -> bool:
     """Decide whether to use cascade attention.
 
@@ -573,23 +574,16 @@ def use_cascade_attention(
     if common_prefix_len < 256:
         return False
     # Cascade attention is currently not supported with these variants.
-    # For sliding window, we could support it if the query length does not
+    # For sliding window, we could support it if the sequence length does not
     # exceed sliding window size.
-    def get_sliding_window(
-            sliding_window: Optional[Union[int, list[Optional[int]]]]) -> int:
-        if sliding_window is None:
-            return 0
-        if isinstance(sliding_window, int):
-            return sliding_window
-        if isinstance(sliding_window, list):
-            # Filter out None values and sum the remaining integers
-            return sum(x for x in sliding_window if x is not None)
-        return 0
+
+    assert isinstance(
+        sliding_window,
+        int), f"Expected sliding_window a int, got {type(sliding_window)}"
 
     if use_alibi:
         return False
-    if use_sliding_window and np.any(
-            query_lens > get_sliding_window(sliding_window)):
+    if use_sliding_window and np.any(context_lens > sliding_window):
         return False
     # Too few queries. Probably not worth using cascade attention.
     # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
@@ -658,7 +652,7 @@ def cascade_attention(
     v_descale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
-    # Support sliding window.
+    # Support sliding window when seqs are within sliding window.
     sliding_window = (-1, -1)
 
     num_tokens = query.shape[0]

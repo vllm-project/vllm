@@ -688,9 +688,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # a fundamental problem, our current implementation does not support
         # this case.
         num_reqs = len(num_scheduled_tokens)
-        common_prefix_len = min(
-            common_prefix_len,
-            self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
+        context_lens = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        common_prefix_len = min(common_prefix_len, context_lens.min())
         # common_prefix_len should be a multiple of the block size.
         common_prefix_len = (common_prefix_len // self.block_size *
                              self.block_size)
@@ -700,9 +699,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_query_heads=self.num_query_heads,
             num_kv_heads=self.num_kv_heads,
             use_alibi=self.use_alibi,
-            use_sliding_window=self.window_size is not None,
+            use_sliding_window=self.sliding_window is not None,
             num_sms=self.num_sms,
-            sliding_window=self.window_size,
+            context_lens=context_lens,
+            sliding_window=self.sliding_window,
         )
         return common_prefix_len if use_cascade else 0
 
