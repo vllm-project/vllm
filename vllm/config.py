@@ -317,8 +317,8 @@ class ModelConfig:
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
             raise ValueError(
                 "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
-                "module was not found."
-                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile "
+                "module was not found. See "
+                "https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile "  # noqa: E501
                 "for instructions on how to install it.")
 
         # The tokenizer version is consistent with the model version by default.
@@ -411,6 +411,7 @@ class ModelConfig:
 
         self.is_attention_free = self._init_attention_free()
         self.is_hybrid = self._init_is_hybrid()
+        self.has_noops = self._init_has_noops()
         self.has_inner_state = self._init_has_inner_state()
 
         if current_platform.is_neuron():
@@ -509,6 +510,10 @@ class ModelConfig:
 
     def _init_is_hybrid(self) -> bool:
         return self.registry.is_hybrid_model(self.architectures)
+
+    def _init_has_noops(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return self.registry.is_noops_model(architectures)
 
     def _init_has_inner_state(self) -> bool:
         return self.registry.model_has_inner_state(self.architectures)
@@ -872,6 +877,14 @@ class ModelConfig:
             return getattr(self.hf_config.attn_config, "kv_n_heads",
                            self.hf_config.num_attention_heads)
 
+        if self.hf_config.model_type == "nemotron-nas":
+            for block in self.hf_config.block_configs:
+                if not block.attention.no_op:
+                    return self.hf_config.num_attention_heads \
+                        // block.attention.n_heads_in_group
+
+            raise RuntimeError("Couldn't determine number of kv heads")
+
         if self.is_attention_free:
             return 0
 
@@ -940,7 +953,9 @@ class ModelConfig:
         # This function relies on 'layers_block_type' in hf_config,
         # for w/o this attribute, we will need to have workarounds like so
         attn_block_type = block_type == LayerBlockType.attention
-        is_transformer = not self.is_hybrid and not self.is_attention_free
+        is_transformer = not self.is_hybrid and \
+                            not self.has_noops and \
+                            not self.is_attention_free
         start, end = self.get_layers_start_end_indices(parallel_config)
 
         if is_transformer:
@@ -951,6 +966,10 @@ class ModelConfig:
             # Note that this code assumes there
             # is only one type of attention-free block type.
             return 0 if attn_block_type else end - start
+        elif self.has_noops:
+            block_configs = self.hf_config.block_configs
+            return sum(not bc.attention.no_op
+                       for bc in block_configs[start:end])
         else:
             # Hybrid model
             layers_block_type_value = getattr(self.hf_config,
@@ -1097,8 +1116,7 @@ class CacheConfig:
         is_attention_free: Whether the model is attention-free.
         num_gpu_blocks_override: Number of GPU blocks to use. This overrides the
             profiled num_gpu_blocks if specified. Does nothing if None.
-        sliding_window: Sliding window size for the KV cache. Can not work with
-            prefix caching enabled.
+        sliding_window: Sliding window size for the KV cache.
         enable_prefix_caching: Whether to enable prefix caching.
         cpu_offload_gb: Size of the CPU offload buffer in GiB.
     """
@@ -1587,11 +1605,13 @@ class ParallelConfig:
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
-        if current_platform.is_rocm():
+        device_capability = current_platform.get_device_capability()
+        if (current_platform.is_rocm() and device_capability is not None
+                and device_capability < (9, 4)):
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
-                "supported on AMD GPUs.")
+                "supported on AMD GPUs older than MI300X.")
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
@@ -2028,14 +2048,13 @@ class SpeculativeConfig:
 
     def __post_init__(self):
 
-        # Note: After next release, the method parameter will be used to
-        # specify the speculative method, which helps to extend the
-        # configuration of non-model-based proposers, and the model parameter
-        # will be used when the draft model or head is needed.
-        # If users do not specify the method, the speculative method will
-        # be detected automatically if possible. If the speculative method can
-        # not be detected, it will be considered as the draft-model-based
-        # method by default.
+        # Note: "method" is a new parameter that helps to extend the
+        # configuration of non-model-based proposers, and the "model" parameter
+        # will be used to set the draft model, eagle head, or additional weight
+        # when needed. If users do not specify "method", the speculative method
+        # will be detected automatically if possible. If the speculative method
+        # can not be detected, it will be considered as the "draft_model" by
+        # default.
 
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
@@ -2050,8 +2069,8 @@ class SpeculativeConfig:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
 
-        # Automatically configure the ngram method during configuration
-        # refactoring to ensure a smooth transition.
+        # Automatically configure the method for ngram when "model" is used
+        # instead of "method"
         if self.method is None and (self.model is not None
                                     and self.model in ("ngram", "[ngram]")):
             self.method = "ngram"
@@ -2340,12 +2359,10 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        if self.prompt_lookup_max is not None and self.prompt_lookup_max > 0:
-            draft_model = "ngram"
-        else:
-            draft_model = self.draft_model_config.model
+        method = self.method
+        model = None if method == "ngram" else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
+        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
 
 
 @dataclass
@@ -3562,9 +3579,10 @@ class VllmConfig:
 
         if self.cache_config is not None and \
             self.cache_config.cpu_offload_gb > 0 and \
-            self.compilation_config.level != CompilationLevel.NO_COMPILATION:
+            self.compilation_config.level != CompilationLevel.NO_COMPILATION \
+                and not envs.VLLM_USE_V1:
             logger.warning(
-                "CPU offload is not supported with `torch.compile` yet."
+                "CPU offload is not supported with `torch.compile` in v0 yet."
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 

@@ -68,7 +68,7 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
-        model="Salesforce/blip2-opt-2.7b",
+        model="Salesforce/blip2-opt-6.7b",
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
@@ -128,7 +128,8 @@ def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="microsoft/Florence-2-large",
         tokenizer="facebook/bart-large",
-        max_num_seqs=8,
+        max_model_len=4096,
+        max_num_seqs=2,
         trust_remote_code=True,
         dtype="bfloat16",
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
@@ -497,6 +498,29 @@ def run_minicpmv(questions: list[str], modality: str) -> ModelRequestData:
     return run_minicpmv_base(questions, modality, "openbmb/MiniCPM-V-2_6")
 
 
+# Mistral-3 HF-format
+def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+    # NOTE: Need L40 (or equivalent) to avoid OOM
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        tensor_parallel_size=2,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
+
+    prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # LLama 3.2
 def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -511,7 +535,7 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=4096,
-        max_num_seqs=16,
+        max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
@@ -700,7 +724,7 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     # NOTE: Need L40 (or equivalent) to avoid OOM
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=8192,
+        max_model_len=6144,
         max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
@@ -894,6 +918,7 @@ model_example_map = {
     "mantis": run_mantis,
     "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
+    "mistral3": run_mistral3,
     "mllama": run_mllama,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,

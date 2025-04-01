@@ -49,14 +49,19 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     frames = []
-    for i in range(total_frames):
-        ret, frame = cap.read()
-        if ret:
-            frames.append(frame)
-    cap.release()
+
+    num_frames = num_frames if num_frames > 0 else total_frames
+    frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+    for idx in range(total_frames):
+        ok = cap.grab()  # next img
+        if not ok:
+            break
+        if idx in frame_indices:  # only decompress needed
+            ret, frame = cap.retrieve()
+            if ret:
+                frames.append(frame)
 
     frames = np.stack(frames)
-    frames = sample_frames_from_video(frames, num_frames)
     if len(frames) < num_frames:
         raise ValueError(f"Could not read enough frames from video file {path}"
                          f" (expected {num_frames} frames, got {len(frames)})")

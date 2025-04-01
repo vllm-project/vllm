@@ -6,7 +6,7 @@ requests >= 2.26.0
 tqdm
 blake3
 py-cpuinfo
-transformers >= 4.48.2  # Required for Bamba model and Transformers backend.
+transformers >= 4.50.3
 tokenizers >= 0.19.1  # Required for Llama 3.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
@@ -30,6 +30,7 @@ msgspec
 gguf == 0.10.0
 importlib_metadata
 mistral_common[opencv] >= 1.5.4
+opencv-python-headless >= 4.11.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
 setuptools>=74.1.1; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12
