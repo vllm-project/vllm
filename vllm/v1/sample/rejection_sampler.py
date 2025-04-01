@@ -81,6 +81,7 @@ class RejectionSampler(nn.Module):
         Returns:
             output_token_ids (torch.Tensor):
                 A tensor containing the final output token IDs.
+            acceptance_rate: min(p, q)
         '''
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         # [num_tokens, vocab_size]
@@ -92,7 +93,7 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
         )
 
-        output_token_ids = rejection_sample(
+        output_token_ids, output_probs = rejection_sample(
             metadata.draft_token_ids,
             metadata.num_draft_tokens,
             metadata.max_spec_len,
@@ -102,7 +103,9 @@ class RejectionSampler(nn.Module):
             bonus_token_ids,
             sampling_metadata,
         )
-        return output_token_ids
+        mask = output_probs != PLACEHOLDER_TOKEN_ID
+        acceptance_rate = output_probs[mask].mean()
+        return output_token_ids, acceptance_rate
 
     @staticmethod
     def parse_output(
@@ -170,6 +173,8 @@ def rejection_sample(
         device=device,
     )
     output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
+    output_probs = torch.empty_like(output_token_ids, dtype=torch.float32)
+    output_probs.fill_(PLACEHOLDER_TOKEN_ID)
 
     if sampling_metadata.all_greedy:
         is_greedy = None
@@ -180,6 +185,7 @@ def rejection_sample(
         target_argmax = target_probs.argmax(dim=-1)
         rejection_greedy_sample_kernel[(batch_size, )](
             output_token_ids,
+            output_probs,
             cu_num_draft_tokens,
             draft_token_ids,
             target_argmax,
@@ -216,6 +222,7 @@ def rejection_sample(
     # Rejection sampling for random sampling requests.
     rejection_random_sample_kernel[(batch_size, )](
         output_token_ids,
+        output_probs,
         cu_num_draft_tokens,
         draft_token_ids,
         draft_probs,
@@ -229,7 +236,7 @@ def rejection_sample(
         IS_NGRAM=draft_probs is None,
         num_warps=1,
     )
-    return output_token_ids
+    return output_token_ids, output_probs
 
 
 def compute_probs(
@@ -432,6 +439,7 @@ def sample_recovered_tokens(
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_greedy_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    output_probs_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     target_argmax_ptr,  # [num_tokens]
@@ -459,14 +467,16 @@ def rejection_greedy_sample_kernel(
 
     rejected = False
     for pos in range(num_draft_tokens):
+        draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+        target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos)
         if not rejected:
-            draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-            target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos)
             tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
                      target_argmax_id)
             if draft_token_id != target_argmax_id:
                 # Reject.
                 rejected = True
+        tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
+                 not rejected)
 
     if not rejected:
         # If all tokens are accepted, append the bonus token.
@@ -480,6 +490,7 @@ def rejection_greedy_sample_kernel(
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    output_probs_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     draft_probs_ptr,  # [num_tokens, vocab_size] or None
@@ -507,17 +518,16 @@ def rejection_random_sample_kernel(
 
     rejected = False
     for pos in range(num_draft_tokens):
+        draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+        if IS_NGRAM:
+            draft_prob = 1
+        else:
+            draft_prob = tl.load(draft_probs_ptr +
+                                 (start_idx + pos) * vocab_size +
+                                 draft_token_id)
+        target_prob = tl.load(target_probs_ptr +
+                              (start_idx + pos) * vocab_size + draft_token_id)
         if not rejected:
-            draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-            if IS_NGRAM:
-                draft_prob = 1
-            else:
-                draft_prob = tl.load(draft_probs_ptr +
-                                     (start_idx + pos) * vocab_size +
-                                     draft_token_id)
-            target_prob = tl.load(target_probs_ptr +
-                                  (start_idx + pos) * vocab_size +
-                                  draft_token_id)
             uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
             # NOTE(woosuk): While the draft probability should never be 0,
             # we check it to avoid NaNs. If it happens to be 0, we reject.
@@ -530,6 +540,8 @@ def rejection_random_sample_kernel(
                 token_id = tl.load(recovered_token_ids_ptr + start_idx + pos)
             tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
                      token_id)
+        tl.store(output_probs_ptr + req_idx * (max_spec_len + 1) + pos,
+                 min(draft_prob, target_prob))
 
     if not rejected:
         # If all tokens are accepted, append the bonus token.

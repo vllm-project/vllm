@@ -226,6 +226,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
+    args.backend = "vllm"
     validate_dataset(args)
     random.seed(0)
     main(args)

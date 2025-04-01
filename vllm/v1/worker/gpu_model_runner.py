@@ -34,6 +34,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.spec_decode.auto_tuner import AutoTuner
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
@@ -156,6 +157,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
+            self.auto_tuner = AutoTuner()
             assert self.speculative_config.method == "ngram", \
                     "Currently, only ngram spec decode is supported in V1."
             if get_pp_group().is_last_rank:
@@ -1087,13 +1089,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # separate storage from the original `logits` tensor. Therefore,
             # it is safe to update `target_logits` in place.
             target_logits = logits[spec_decode_metadata.target_logits_indices]
-            output_token_ids = self.rejection_sampler(
+            output_token_ids, acceptance_rate = self.rejection_sampler(
                 spec_decode_metadata,
                 None,  # draft_probs
                 target_logits,
                 bonus_token_ids,
                 sampling_metadata,
             )
+            self.auto_tuner.update_stats(acceptance_rate)
             sampler_output.sampled_token_ids = output_token_ids
 
         # TODO(woosuk): The following loop can be slow since it iterates over
@@ -1191,6 +1194,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append([])
             else:
                 draft_token_ids.append(drafter_output.tolist())
+
+        draft_token_ids = self.auto_tuner.adjust_draft_len(
+            self.requests, draft_token_ids)
         return draft_token_ids
 
     def load_model(self) -> None:
