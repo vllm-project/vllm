@@ -41,7 +41,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems,
                                         MultiModalFieldConfig,
                                         PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails, encode_tokens)
+                                        PromptUpdateDetails)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -258,19 +258,16 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Optional[Idefics3Processor],
     ) -> int:
-        tokenizer = self.get_tokenizer()
-        image_repl = self.get_image_repl(
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        num_patches = self.get_num_patches(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
         )
 
-        image_repl_tokens = encode_tokens(
-            tokenizer,
-            image_repl,
-            add_special_tokens=False,
-        )
-        return len(image_repl_tokens)
+        return num_patches * processor.image_seq_len
 
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
