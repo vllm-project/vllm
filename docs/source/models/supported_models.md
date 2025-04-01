@@ -135,7 +135,7 @@ To determine whether a given model is natively supported, you can check the `con
 If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
 
 Models do not _need_ to be natively supported to be used in vLLM.
-The <project:#transformers-backend> enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
+The [Transformers backend](#transformers-backend) enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
 
 :::{tip}
 The easiest way to check if your model is really supported at runtime is to run the program below:
