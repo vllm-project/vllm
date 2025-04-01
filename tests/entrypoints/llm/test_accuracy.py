@@ -27,7 +27,6 @@ EXPECTED_VALUES = {
 }
 
 
-
 def run_test(model_name, more_args=None):
     """Run the end to end accuracy test."""
 
@@ -45,8 +44,7 @@ def run_test(model_name, more_args=None):
 
     measured_value = results["results"][TASK][FILTER]
     assert model_name in EXPECTED_VALUES, (
-        f"Cannot find the expected value for the model {model_name=}"
-    )
+        f"Cannot find the expected value for the model {model_name=}")
     expected_value = EXPECTED_VALUES[model_name]
     assert (measured_value - RTOL < expected_value
             and measured_value + RTOL > expected_value
