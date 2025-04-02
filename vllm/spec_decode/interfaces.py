@@ -94,5 +94,5 @@ class SpeculativeScorer(ABC):
         self,
         execute_model_req: ExecuteModelRequest,
         proposals: SpeculativeProposals,
-    ) -> Optional[SpeculativeScores]:
+    ) -> SpeculativeScores:
         raise NotImplementedError

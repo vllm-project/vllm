@@ -337,7 +337,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         # Hidden states from target model to pass to proposer
         # in the subsequent step.
-        self.previous_hidden_states: Optional[HiddenStates] = None
+        self.previous_hidden_states: Dict[int, Optional[HiddenStates]] = {}
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
         self._num_spec_prefill_steps = num_spec_prefill_steps
@@ -374,11 +374,13 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             self.proposer_worker.maybe_load_lm_head_weight(
                 target_lm_head_weight)
 
-        self._metrics.init_tensors(self.rank, device_type=self.device)
         if model_parallel_is_initialized():
+            self._metrics.init_tensors(get_tp_group().rank_in_group,
+                                       device_type=self.device)
             self.spec_decode_sampler.init_tensors(get_tp_group().local_rank,
                                                   device_type=self.device)
         else:
+            self._metrics.init_tensors(self.rank, device_type=self.device)
             self.spec_decode_sampler.init_tensors(self.rank,
                                                   device_type=self.device)
 
@@ -467,7 +469,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     ) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
-        if self.rank % self.tensor_parallel_size != self._driver_rank:
+        rank = get_tp_group().rank_in_group if model_parallel_is_initialized(
+        ) else self.rank
+        if rank != self._driver_rank:
             self._run_non_driver_rank()
             return []
 
@@ -721,14 +725,19 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 hidden_states = hidden_states[
                     torch.where(sampler_output.sampled_token_ids -
                                 VLLM_INVALID_TOKEN_ID)[0]]
-            if self.previous_hidden_states is None and len(
-                    seq_group_meta_with_hidden):
-                self.previous_hidden_states = HiddenStates(
-                    hidden_states, seq_group_meta_with_hidden)
-            elif self.previous_hidden_states and len(
-                    seq_group_meta_with_hidden):
-                self.previous_hidden_states.update(hidden_states,
-                                                   seq_group_meta_with_hidden)
+            if execute_model_req.virtual_engine not in \
+                    self.previous_hidden_states and \
+                    len(seq_group_meta_with_hidden):
+                self.previous_hidden_states[
+                    execute_model_req.virtual_engine] = HiddenStates(
+                        hidden_states, seq_group_meta_with_hidden)
+            elif execute_model_req.virtual_engine in \
+                    self.previous_hidden_states and \
+                    len(seq_group_meta_with_hidden):
+                previous_hidden_states: HiddenStates = \
+                    self.previous_hidden_states[execute_model_req.virtual_engine]
+                previous_hidden_states.update(hidden_states,
+                                              seq_group_meta_with_hidden)
 
         if not skip_proposer:
             # We prepare the prefill hidden states here so that there no
@@ -804,8 +813,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         Returns a list of SamplerOutput, each containing a single token per
         sequence.
         """
-        if self.previous_hidden_states is not None:
-            self.previous_hidden_states.seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         if get_pp_group().is_first_rank:
             # With prefill chunking, expect requests to have prompts first
             # so that backend gets prefill|decode.
@@ -813,8 +820,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
             # Pass last hidden states from target model to proposer
             execute_model_req.previous_hidden_states = \
-                self.previous_hidden_states
-            self.previous_hidden_states = None
+                self.previous_hidden_states[execute_model_req.virtual_engine]
+            self.previous_hidden_states.pop(execute_model_req.virtual_engine)
 
             with Timer() as proposal_timer:
                 # Generate proposals using draft worker.
@@ -883,8 +890,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         with Timer() as verification_timer:
             accepted_token_ids, target_logprobs = self._verify_tokens(
-                execute_model_req.seq_group_metadata_list, proposal_scores,
-                proposals, execute_model_req.num_lookahead_slots)
+                execute_model_req, proposal_scores, proposals,
+                execute_model_req.num_lookahead_slots)
 
         stage_times = (proposal_execute_time, scoring_timer.elapsed_time_ms,
                        verification_timer.elapsed_time_ms)
@@ -901,7 +908,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        execute_model_req: ExecuteModelRequest,
         proposal_scores: SpeculativeScores,
         proposals: SpeculativeProposals,
         max_proposal_len: int,
@@ -912,6 +919,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         Returns a tuple of Tensors, one for the accepted token ids and one for
         the logprobs according to the scoring model.
         """
+        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         proposal_lens_list = proposals.proposal_lens.tolist()
 
         # vLLM currently only supports proposal lens equal to zero or the batch
@@ -991,9 +999,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             second_last_token_hidden_states = hidden_states[:, -2]  # b x d
             hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
             # Store hidden states from target model for subsequent decode step
-            self.previous_hidden_states = HiddenStates(
-                hidden_states, terminal_metadata,
-                second_last_token_hidden_states)
+            self.previous_hidden_states[
+                execute_model_req.virtual_engine] = HiddenStates(
+                    hidden_states, terminal_metadata,
+                    second_last_token_hidden_states)
         return accepted_token_ids, logprobs
 
     def _create_output_sampler_list(

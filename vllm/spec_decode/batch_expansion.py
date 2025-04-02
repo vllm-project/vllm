@@ -43,7 +43,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         self,
         execute_model_req: ExecuteModelRequest,
         proposals: SpeculativeProposals,
-    ) -> Optional[SpeculativeScores]:
+    ) -> SpeculativeScores:
         """Score the proposed tokens via the scorer model.
 
         This converts each input sequence to a set of k+1 target sequences. The

@@ -153,7 +153,7 @@ class Attention(nn.Module):
         # this variable will not be accessed if use_direct_call is True
         self.kv_cache = [
             torch.tensor([]) for _ in range(
-                get_current_vllm_config().parallel_config.virtual_engine_size)
+                get_current_vllm_config().parallel_config.num_virtual_engine)
         ]
 
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)

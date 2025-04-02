@@ -266,7 +266,7 @@ class Metrics:
         # Speculative decoding stats
         self.gauge_spec_decode_draft_acceptance_rate = self._gauge_cls(
             name="vllm:spec_decode_draft_acceptance_rate",
-            documentation="Speulative token acceptance rate.",
+            documentation="Speculative token acceptance rate.",
             labelnames=labelnames,
             multiprocess_mode="sum")
         self.gauge_spec_decode_efficiency = self._gauge_cls(

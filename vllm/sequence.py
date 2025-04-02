@@ -1246,6 +1246,8 @@ class HiddenStates(msgspec.Struct, array_like=True,
         decode steps"""
         assert len(seq_group_metadata_list) == len(hidden_states)
         self._seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
+        if self.seq_group_metadata_list is not None:
+            self.seq_group_metadata_list.extend(seq_group_metadata_list)
         self.hidden_states = torch.cat([self.hidden_states, hidden_states])
 
         if self.second_last_token_hidden_states is not None:
@@ -1270,6 +1272,10 @@ class HiddenStates(msgspec.Struct, array_like=True,
             # Batch contents changed - prune removed sequences.
             index = [self._seq_ids.index(seq_id) for seq_id in seq_ids]
             self.hidden_states = self.hidden_states[index]
+            if self.seq_group_metadata_list is not None:
+                self.seq_group_metadata_list = [
+                    self.seq_group_metadata_list[i] for i in index
+                ]
             if self.second_last_token_hidden_states is not None:
                 self.second_last_token_hidden_states = self\
                     .second_last_token_hidden_states[index]
@@ -1284,12 +1290,23 @@ class HiddenStates(msgspec.Struct, array_like=True,
             return
 
         index = []
-        for seq_id in self._seq_ids:
-            i = self._seq_ids.index(seq_id)
+        expanded_seq_ids = []
+        expanded_seq_group_metadata_list = []
+        for i, seq_id in enumerate(self._seq_ids):
             if seq_id in seq_with_bonus_token_in_last_step:
                 index.append(i + len(self._seq_ids))
+                expanded_seq_ids.append(seq_id)
+                if self.seq_group_metadata_list is not None:
+                    expanded_seq_group_metadata_list.append(
+                        self.seq_group_metadata_list[i])
             index.append(i)
+            expanded_seq_ids.append(seq_id)
+            if self.seq_group_metadata_list is not None:
+                expanded_seq_group_metadata_list.append(
+                    self.seq_group_metadata_list[i])
 
+        self._seq_ids = expanded_seq_ids
+        self.seq_group_metadata_list = expanded_seq_group_metadata_list
         self.hidden_states = torch.cat(
             [self.hidden_states, self.second_last_token_hidden_states])[index]
 
@@ -1370,7 +1387,7 @@ class ExecuteModelRequest(
             virtual_engine=self.virtual_engine,
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
-            previous_hidden_states=self.previous_hidden_states,
+            previous_hidden_states=copy.copy(self.previous_hidden_states),
             num_steps=self.num_steps,
             finished_requests_ids=self.finished_requests_ids,
             last_sampled_token_ids=self.last_sampled_token_ids.clone()

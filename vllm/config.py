@@ -1417,7 +1417,7 @@ class ParallelConfig:
     data_parallel_master_ip: str = "127.0.0.1"
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
     enable_expert_parallel: bool = False  # Use EP instead of TP for MoE layers.
-    virtual_engine_size: int = 1  # Number of virtual engine.
+    num_virtual_engine: int = 1  # Number of virtual engines.
 
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor
@@ -1927,6 +1927,9 @@ class SpeculativeConfig:
         - draft_tensor_parallel_size (Optional[int]): The degree of the tensor
             parallelism for the draft model. Can only be 1 or the same as the
             target model's tensor parallel size.
+        - draft_pipeline_parallel_size (Optional[int]): The degree of the
+            pipeline parallelism for the draft model. Can only be 1 or the
+            same as the target model's pipeline parallel size.
         - disable_logprobs (bool): If set to True, token log probabilities are
             not returned during speculative decoding. If set to False, token
             log probabilities are returned according to the log probability
@@ -2321,7 +2324,7 @@ class SpeculativeConfig:
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=speculative_draft_pipeline_parallel_size,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
-            virtual_engine_size=target_parallel_config.virtual_engine_size,
+            num_virtual_engine=target_parallel_config.num_virtual_engine,
             distributed_executor_backend=target_parallel_config.
             distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
