@@ -181,11 +181,6 @@ def mixtral_lora_files():
 
 
 @pytest.fixture(scope="session")
-def gemma_lora_files():
-    return snapshot_download(repo_id="wskwon/gemma-7b-test-lora")
-
-
-@pytest.fixture(scope="session")
 def chatglm3_lora_files():
     return snapshot_download(repo_id="jeeejeee/chatglm3-text2sql-spider")
 
@@ -234,11 +229,6 @@ def tinyllama_lora_files():
 @pytest.fixture(scope="session")
 def phi2_lora_files():
     return snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora")
-
-
-@pytest.fixture(scope="session")
-def long_context_lora_files_16k_1():
-    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1")
 
 
 @pytest.fixture
