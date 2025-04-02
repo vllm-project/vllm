@@ -44,7 +44,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1
 #
 # Note: the CUDA torch version is derived from pyproject.toml and various
 # requirements.txt files and should be kept consistent.  The ROCm torch
-# versions are derived from Dockerfile.rocm
+# versions are derived from docker/Dockerfile.rocm
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.6.0")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.6.0")
@@ -243,6 +243,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
+  "csrc/custom_all_reduce.cu"
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -284,7 +285,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
@@ -560,11 +560,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 # if CUDA endif
-endif()
-
-if(VLLM_GPU_LANG STREQUAL "HIP")
-  list(APPEND VLLM_EXT_SRC
-    "csrc/custom_all_reduce.cu")
 endif()
 
 message(STATUS "Enabling C extension.")

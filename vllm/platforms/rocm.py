@@ -23,8 +23,9 @@ else:
 logger = init_logger(__name__)
 
 try:
-    from amdsmi import (amdsmi_get_gpu_asic_info, amdsmi_get_processor_handles,
-                        amdsmi_init, amdsmi_shut_down)
+    from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
+                        amdsmi_get_processor_handles, amdsmi_init,
+                        amdsmi_shut_down, amdsmi_topo_get_link_type)
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
 
@@ -138,13 +139,15 @@ class RocmPlatform(Platform):
 
     @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+    def get_device_capability(cls,
+                              device_id: int = 0
+                              ) -> Optional[DeviceCapability]:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
     @staticmethod
     @with_amdsmi_context
-    def is_full_nvlink(physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(physical_device_ids: List[int]) -> bool:
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """

@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.spec_decode.metrics import SpecDecodingMetrics
 
 logger = init_logger(__name__)
 
@@ -38,6 +39,7 @@ class LoggingStatLogger(StatLoggerBase):
         # Prefix cache metrics. This cannot be reset.
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
+        self.spec_decoding_metrics = SpecDecodingMetrics()
 
     def _reset(self, now):
         self.last_log_time = now
@@ -64,6 +66,10 @@ class LoggingStatLogger(StatLoggerBase):
             self._track_iteration_stats(iteration_stats)
 
         self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
+
+        if scheduler_stats.spec_decoding_stats is not None:
+            self.spec_decoding_metrics.observe(
+                scheduler_stats.spec_decoding_stats)
 
         self.last_scheduler_stats = scheduler_stats
 
@@ -93,6 +99,9 @@ class LoggingStatLogger(StatLoggerBase):
             scheduler_stats.gpu_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         )
+
+        if scheduler_stats.spec_decoding_stats is not None:
+            self.spec_decoding_metrics.log()
 
 
 class PrometheusStatLogger(StatLoggerBase):
@@ -303,6 +312,24 @@ class PrometheusStatLogger(StatLoggerBase):
                     ])
 
         #
+        # Speculative Decoding metrics
+        # The acceptance rate can be calculated using a PromQL query:
+        #
+        #   rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
+        #   rate(vllm:spec_decode_num_draft_tokens_total[$interval])
+        #
+        self.counter_spec_decode_num_draft_tokens = \
+            prometheus_client.Counter(
+                name="vllm:spec_decode_num_draft_tokens_total",
+                documentation="Number of draft tokens.",
+                labelnames=labelnames).labels(*labelvalues)
+        self.counter_spec_decode_num_accepted_tokens = \
+            prometheus_client.Counter(
+                name="vllm:spec_decode_num_accepted_tokens_total",
+                documentation="Number of accepted tokens.",
+                labelnames=labelnames).labels(*labelvalues)
+
+        #
         # Cache config info metric
         #
         self.log_metrics_info("cache_config", vllm_config.cache_config)
@@ -337,6 +364,12 @@ class PrometheusStatLogger(StatLoggerBase):
             scheduler_stats.prefix_cache_stats.queries)
         self.counter_gpu_prefix_cache_hits.inc(
             scheduler_stats.prefix_cache_stats.hits)
+
+        if scheduler_stats.spec_decoding_stats is not None:
+            self.counter_spec_decode_num_draft_tokens.inc(
+                scheduler_stats.spec_decoding_stats.num_draft_tokens)
+            self.counter_spec_decode_num_accepted_tokens.inc(
+                scheduler_stats.spec_decoding_stats.num_accepted_tokens)
 
         if iteration_stats is None:
             return
