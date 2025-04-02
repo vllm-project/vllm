@@ -735,7 +735,7 @@ def _fp8_quantize(
 
 def find_contiguous_segments(t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     last = t.numel()
-    if False:
+    if True:
         non_matching = t[:-1] != t[1:]
         ends = non_matching.nonzero().flatten() + 1
         starts = torch.concat((torch.tensor([0], device=t.device), ends))
