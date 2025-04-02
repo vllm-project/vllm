@@ -250,6 +250,7 @@ class CoreEngine:
         index: int = 0,
         local_dp_rank: int = 0,
     ):
+        self.index = index
         self.identity = index.to_bytes(length=2, byteorder="little")
         try:
             # Start EngineCore in background process.
@@ -391,7 +392,7 @@ class MPClient(EngineCoreClient):
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
 
         # Wait for engine core process(es) to send ready messages.
-        identities = set(range(len(self.resources.core_engines)))
+        identities = set(eng.index for eng in self.resources.core_engines)
         while identities:
             while not sync_input_socket.poll(timeout=STARTUP_POLL_PERIOD_MS):
                 logger.info("Waiting for %d core engine proc(s) to start: %s",
