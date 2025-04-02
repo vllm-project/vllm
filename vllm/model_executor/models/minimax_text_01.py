@@ -664,6 +664,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
         self.shared_moe = False
 
         shared_intermediate = getattr(config, 'shared_intermediate_size', 0)
+        if isinstance(shared_intermediate, list):
+            shared_intermediate = shared_intermediate[self._ilayer] if self._ilayer is not None else 0
         if shared_intermediate > 0:
             self.shared_moe = True
             self.shared_mlp = MiniMaxText01MLP(
