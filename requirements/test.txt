@@ -23,10 +23,6 @@ anyio==4.6.2.post1
     # via httpx
 argcomplete==3.5.1
     # via datamodel-code-generator
-async-timeout==5.0.1
-    # via
-    #   aiohttp
-    #   redis
 attrs==24.2.0
     # via
     #   aiohttp
@@ -121,10 +117,6 @@ encodec==0.1.1
     # via vocos
 evaluate==0.4.3
     # via lm-eval
-exceptiongroup==1.2.2
-    # via
-    #   anyio
-    #   pytest
 fastparquet==2024.11.0
     # via genai-perf
 fastrlock==0.8.2
@@ -564,7 +556,9 @@ sentence-transformers==3.2.1
 sentencepiece==0.2.0
     # via mistral-common
 setuptools==75.8.0
-    # via pytablewriter
+    # via
+    #   pytablewriter
+    #   torch
 shellingham==1.5.4
     # via typer
 six==1.16.0
@@ -611,12 +605,6 @@ timm==1.0.11
     # via -r requirements/test.in
 tokenizers==0.21.0
     # via transformers
-toml==0.10.2
-    # via datamodel-code-generator
-tomli==2.2.1
-    # via
-    #   black
-    #   pytest
 torch==2.6.0
     # via
     #   -r requirements/test.in
@@ -682,16 +670,12 @@ typer==0.15.2
     # via fastsafetensors
 typing-extensions==4.12.2
     # via
-    #   anyio
-    #   black
     #   huggingface-hub
     #   librosa
     #   mistral-common
-    #   multidict
     #   pqdm
     #   pydantic
     #   pydantic-core
-    #   rich
     #   torch
     #   typer
 tzdata==2024.2
