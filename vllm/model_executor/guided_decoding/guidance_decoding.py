@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import json
 from re import escape as regex_escape
 
@@ -8,6 +9,18 @@ from transformers import PreTrainedTokenizerBase
 from vllm.model_executor.guided_decoding.guidance_logits_processors import (
     GuidanceLogitsProcessor)
 from vllm.sampling_params import GuidedDecodingParams
+
+
+def _walk_json_for_additional_properties(data: object):
+    if isinstance(data, dict):
+        for value in data.values():
+            _walk_json_for_additional_properties(value)
+        if 'additionalProperties' not in data and \
+            ('properties' in data or 'patternProperties' in data):
+            data['additionalProperties'] = False
+    elif isinstance(data, list):
+        for item in data:
+            _walk_json_for_additional_properties(item)
 
 
 def get_local_guidance_guided_decoding_logits_processor(
@@ -28,8 +41,10 @@ def get_local_guidance_guided_decoding_logits_processor(
         if 'no-additional-properties' in guided_params.backend_options():
             if isinstance(guide_json, str):
                 guide_json = json.loads(guide_json)
-            if 'additionalProperties' not in guide_json:
-                guide_json['additionalProperties'] = False
+            else:
+                # copy for modifications
+                guide_json = copy.deepcopy(guide_json)
+            _walk_json_for_additional_properties(guide_json)
 
         grm = llguidance.LLMatcher.grammar_from_json_schema(
             guide_json,
