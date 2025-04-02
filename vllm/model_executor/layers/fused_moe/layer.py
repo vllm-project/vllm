@@ -24,9 +24,10 @@ from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda_alike():
-    from .fused_moe import fused_experts
+    from .fused_moe import cutlass_moe_fp16, fused_experts
 else:
     fused_experts = None  # type: ignore
+    cutlass_moe_fp16 = None  # type: ignore
 if current_platform.is_tpu():
     # the iterative moe implementation is used until the moe_pallas is fixed
     from .moe_torch_iterative import fused_moe as fused_moe_pallas
@@ -70,8 +71,23 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
-@CustomOp.register("unquantized_fused_moe")
-class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
+class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
+    """MoE method without quantization."""
+
+    @staticmethod
+    def get_moe_method(
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+    ) -> "UnquantizedFusedMoEMethod":
+        if (UnquantizedFusedCutlassMoEMethod.check_supported(
+                activation, expert_map)):
+            return UnquantizedFusedCutlassMoEMethod()
+        else:
+            return UnquantizedFusedTritonMoEMethod()
+
+
+@CustomOp.register("unquantized_fused_triton_moe")
+class UnquantizedFusedTritonMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -96,24 +112,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        device = layer.w13_weight.device
-        self.ab_strides1 = torch.full((num_experts, ),
-                                      hidden_size,
-                                      device=device,
-                                      dtype=torch.int64)
-        self.c_strides1 = torch.full((num_experts, ),
-                                     2 * intermediate_size_per_partition,
-                                     device=device,
-                                     dtype=torch.int64)
-        self.ab_strides2 = torch.full((num_experts, ),
-                                      intermediate_size_per_partition,
-                                      device=device,
-                                      dtype=torch.int64)
-        self.c_strides2 = torch.full((num_experts, ),
-                                     hidden_size,
-                                     device=device,
-                                     dtype=torch.int64)
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
@@ -220,30 +218,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        # TODO will need a similar class split as fp8 because we don't have
-        # expert map and other activations here either
-        from vllm.model_executor.layers.fused_moe import cutlass_moe_fp16
-        return cutlass_moe_fp16(
-            x,
-            layer.w13_weight.transpose(1, 2),
-            layer.w2_weight.transpose(1, 2),
-            topk_weights,
-            topk_ids,
-            self.ab_strides1,
-            self.c_strides1,
-            self.ab_strides2,
-            self.c_strides2,
-        )
-
-        # return fused_experts(hidden_states=x,
-        #                      w1=layer.w13_weight,
-        #                      w2=layer.w2_weight,
-        #                      topk_weights=topk_weights,
-        #                      topk_ids=topk_ids,
-        #                      inplace=True,
-        #                      activation=activation,
-        #                      global_num_experts=global_num_experts,
-        #                      expert_map=expert_map)
+        return fused_experts(hidden_states=x,
+                             w1=layer.w13_weight,
+                             w2=layer.w2_weight,
+                             topk_weights=topk_weights,
+                             topk_ids=topk_ids,
+                             inplace=True,
+                             activation=activation,
+                             global_num_experts=global_num_experts,
+                             expert_map=expert_map)
 
     def forward_cpu(
         self,
@@ -343,6 +326,129 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                 renormalize=renormalize)
 
     forward_native = forward_cuda
+
+
+@CustomOp.register("unquantized_fused_cutlass_moe")
+class UnquantizedFusedCutlassMoEMethod(FusedMoEMethodBase, CustomOp):
+    """CUTLASS MoE method without quantization."""
+
+    @staticmethod
+    def check_supported(activation: str,
+                        expert_map: Optional[torch.Tensor],
+                        error: bool = True) -> bool:
+        required_capability = 90
+        capability_tuple = current_platform.get_device_capability()
+
+        if capability_tuple is not None:
+            capability = capability_tuple.to_int()
+            arch_supported = (capability == required_capability
+                              and not current_platform.is_cpu()
+                              and not current_platform.is_rocm())
+            functions_supported = activation == "silu" and expert_map is None
+            if error and not arch_supported:
+                raise RuntimeError(
+                    "Method is not supported for the current device. Required ",
+                    f"GPU with capability: {required_capability}. Current "
+                    f"capability: {capability}.")
+            elif error and not functions_supported:
+                raise RuntimeError(
+                    "Method is not supported for the required functionality. ",
+                    "Required activation: silu, expert map not supported.",
+                )
+            return arch_supported and functions_supported
+        else:
+            return False
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+        # Fused gate_up_proj (column parallel)
+        w13_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size,
+            dtype=params_dtype),
+                                        requires_grad=False)
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        # down_proj (row parallel)
+        w2_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            dtype=params_dtype),
+                                       requires_grad=False)
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        device = layer.w13_weight.device
+        self.ab_strides1 = torch.full((num_experts, ),
+                                      hidden_size,
+                                      device=device,
+                                      dtype=torch.int64)
+        self.c_strides1 = torch.full((num_experts, ),
+                                     2 * intermediate_size_per_partition,
+                                     device=device,
+                                     dtype=torch.int64)
+        self.ab_strides2 = torch.full((num_experts, ),
+                                      intermediate_size_per_partition,
+                                      device=device,
+                                      dtype=torch.int64)
+        self.c_strides2 = torch.full((num_experts, ),
+                                     hidden_size,
+                                     device=device,
+                                     dtype=torch.int64)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+    # TODO half()
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
+    ) -> torch.Tensor:
+
+        assert activation == "silu"
+        assert global_num_experts == layer.w13_weight.shape[0]
+        assert expert_map is None
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
+
+        return cutlass_moe_fp16(
+            x,
+            layer.w13_weight.transpose(1, 2),
+            layer.w2_weight.transpose(1, 2),
+            topk_weights,
+            topk_ids,
+            self.ab_strides1,
+            self.c_strides1,
+            self.ab_strides2,
+            self.c_strides2,
+        )
 
 
 def determine_expert_map(
@@ -511,7 +617,8 @@ class FusedMoE(torch.nn.Module):
         # for heuristic purposes, so it must be initialized first.
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
-                UnquantizedFusedMoEMethod())
+                UnquantizedFusedMoEMethod.get_moe_method(
+                    self.activation, self.expert_map))
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None

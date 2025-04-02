@@ -147,7 +147,7 @@ def test_cutlass_moe_no_graph(
         print(cutlass_output)
         print("*")
 
-        torch.testing.assert_close(triton_output.view(cutlass_output.shape),
+        torch.testing.assert_close(triton_output,
                                    cutlass_output,
                                    atol=5e-2,
                                    rtol=1e-2)
