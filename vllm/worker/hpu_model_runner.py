@@ -2565,6 +2565,11 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         **execute_model_kwargs,
                         selected_token_indices=sampling_metadata.
                         selected_token_indices)
+                    if warmup_mode == True:
+                        torch.hpu.synchronize()
+                        import torch.distributed as dist
+                        if dist.is_initialized():
+                            dist.barrier()
 
                 if self.lora_config:
                     LoraMask.setLoraMask(
