@@ -155,6 +155,7 @@ steps:
   - popd
 
 - label: Metrics, Tracing Test # 10min
+  mirror_hardwares: [amd]
   num_gpus: 2
   source_file_dependencies:
   - vllm/
@@ -464,6 +465,7 @@ steps:
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
+  mirror_hardwares: [amd]
   optional: true
   commands:
     - echo 'Testing custom models...'
@@ -475,6 +477,7 @@ steps:
 #####  multi gpus test  #####
 
 - label: Distributed Comm Ops Test # 7min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
