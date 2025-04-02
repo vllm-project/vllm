@@ -1,29 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
-import re
 from collections.abc import Iterable, Mapping, Sequence
-from functools import lru_cache
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Tuple,
-                    TypedDict, Union)
+from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict, Union
 
 import numpy as np
 import numpy.typing as npt
 import scipy.signal
 import torch
 import torch.nn as nn
-import torchvision.transforms as T
-from PIL import Image
-from transformers import PretrainedConfig, SiglipVisionConfig, ProcessorMixin, BatchFeature, SequenceFeatureExtractor
-from transformers.utils import logging
+from transformers import (BatchFeature, PretrainedConfig,
+                          SequenceFeatureExtractor, SiglipVisionConfig)
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext)
-from vllm.inputs.data import TokenInputs, token_inputs
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput, get_sampler
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.models.llama import LlamaModel
@@ -31,21 +23,22 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors, MultiModalInputs)
-from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems, MultiModalDataParser,
-                                   ImageSize, MultiModalDataItems, AudioEmbeddingItems, AudioProcessorItems)
+                                    NestedTensors)
+from vllm.multimodal.parse import (AudioProcessorItems, ImageEmbeddingItems,
+                                   ImageProcessorItems, ImageSize,
+                                   MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-from vllm.sequence import IntermediateTensors, SequenceData
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA, SupportsMultiModal, MultiModalEmbeddings
+from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
 from .phi4mm_audio import AudioEmbedding
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix, merge_multimodal_embeddings, flatten_bn
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 # <|endoftext10|> (see vocab.json in hf model)
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
@@ -65,7 +58,8 @@ VISION_ENCODER_TO_PROCESSING_CONFIG = {
 }
 
 
-def _get_padding_size(orig_width: int, orig_height: int, target_height: int, target_width: int):
+def _get_padding_size(orig_width: int, orig_height: int, target_height: int,
+                      target_width: int):
     ratio_width = target_width / orig_width
     ratio_height = target_height / orig_height
 
@@ -485,12 +479,12 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
     @property
     def audio_tokens(self) -> list[str]:
         return [f"<|audio_{i+1}|>" for i in range(100)]
-    
+
     @property
     def dynamic_hd(self) -> int:
         image_processor = self.get_hf_processor().image_processor
         return image_processor.dynamic_hd
-    
+
     def get_feature_extractor(self) -> SequenceFeatureExtractor:
         return self.get_hf_processor().audio_processor
 
@@ -511,13 +505,20 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         sr = self.get_feature_extractor().sampling_rate
         num_frames = self.get_audio_num_frames(_AUDIO_MAX_SOUNDFILE_SIZE, sr)
         return self._compute_audio_embed_size(num_frames)
-    
+
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
-        return self.get_num_image_tokens(
-            image_width=target_width, image_height=target_height)
-    
-    def _find_target_aspect_ratio(self, orig_width: int, orig_height: int, image_size: int, max_num: int, min_num: int,):
+        return self.get_num_image_tokens(image_width=target_width,
+                                         image_height=target_height)
+
+    def _find_target_aspect_ratio(
+        self,
+        orig_width: int,
+        orig_height: int,
+        image_size: int,
+        max_num: int,
+        min_num: int,
+    ):
         w_crop_num = math.ceil(orig_width / float(image_size))
         h_crop_num = math.ceil(orig_height / float(image_size))
         if w_crop_num * h_crop_num > max_num:
@@ -532,7 +533,12 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
             # find the closest aspect ratio to the target
             image_processor = self.get_hf_processor().image_processor
             target_aspect_ratio = image_processor.find_closest_aspect_ratio(
-                aspect_ratio, target_ratios, orig_width, orig_height, image_size,)
+                aspect_ratio,
+                target_ratios,
+                orig_width,
+                orig_height,
+                image_size,
+            )
 
             # calculate the target width and height
             target_width = image_size * target_aspect_ratio[0]
@@ -542,7 +548,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
             target_height = image_size * h_crop_num
             target_aspect_ratio = (w_crop_num, h_crop_num)
         return target_aspect_ratio, target_height, target_width
-    
+
     def _compute_num_image_tokens(
         self,
         orig_width: int,
@@ -553,7 +559,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         token_compression_factor: int = 2,
     ):
         """
-        compute the number of tokens an image is expected to take up considering 
+        compute the number of tokens an image is expected to take up considering
         the image encoder architecture and exclude output features containing 
         only padding pixels
 
@@ -561,29 +567,28 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         32x32 feature map
         NOTE right now, Phi4MM uses hard-coded token_compression_factor=2
         """
-        assert vit_image_size % vit_patch_size == 0, \
-            "vit_image_size must be divisible by vit_patch_size"
-        assert vit_image_size // vit_patch_size % token_compression_factor == 0, \
-            "vit_image_size // vit_patch_size must be divisible by "\
-                "token_compression_factor"
+        assert vit_image_size % vit_patch_size == 0, (
+            "vit_image_size must be divisible by vit_patch_size")
+        assert (vit_image_size // vit_patch_size %
+                token_compression_factor == 0), (
+                    "vit_image_size // vit_patch_size must be divisible by "
+                    "token_compression_factor")
 
         target_aspect_ratio, target_height, target_width = (
             self._find_target_aspect_ratio(orig_width,
-                                    orig_height,
-                                    vit_image_size,
-                                    dynamic_hd_size,
-                                    min_num=1))
-        assert target_aspect_ratio[
-            0] * vit_image_size == target_width, \
-                f"{target_aspect_ratio[0]} * {vit_image_size} != {target_width}"
-        assert target_aspect_ratio[
-            1] * vit_image_size == target_height, \
-                f"{target_aspect_ratio[1]} * {vit_image_size} != {target_height}"
+                                           orig_height,
+                                           vit_image_size,
+                                           dynamic_hd_size,
+                                           min_num=1))
+        assert target_aspect_ratio[0] * vit_image_size == target_width, (
+            f"{target_aspect_ratio[0]} * {vit_image_size} != {target_width}")
+        assert target_aspect_ratio[1] * vit_image_size == target_height, (
+            f"{target_aspect_ratio[1]} * {vit_image_size} != {target_height}")
         assert (target_height % vit_image_size == 0
                 and target_width % vit_image_size == 0)
 
-        padding_height, padding_width = _get_padding_size(orig_width, orig_height, target_height,
-                                                        target_width)
+        padding_height, padding_width = _get_padding_size(
+            orig_width, orig_height, target_height, target_width)
         assert padding_width == 0 or padding_height == 0, \
             "padding_width or padding_height must be 0"
 
@@ -614,13 +619,15 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         num_hd_patch_tokens = feat_width * feat_height
         num_hd_newline_tokens = feat_height
         vit_feature_size = vit_image_size // vit_patch_size
-        num_global_image_tokens = (vit_feature_size // token_compression_factor)**2
+        num_global_image_tokens = (vit_feature_size //
+                                   token_compression_factor)**2
         num_sep_tokens = 1
         num_global_image_newline_tokens = \
             vit_feature_size // token_compression_factor
 
-        return (num_global_image_tokens + num_sep_tokens + num_hd_patch_tokens +
-                num_hd_newline_tokens + num_global_image_newline_tokens)
+        return (num_global_image_tokens + num_sep_tokens +
+                num_hd_patch_tokens + num_hd_newline_tokens +
+                num_global_image_newline_tokens)
 
     def get_num_image_tokens(
         self,
@@ -632,7 +639,8 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         vision_encoder_name = hf_config.img_processor
         if vision_encoder_name is None:
             vision_encoder_name = SIGLIP_NAME
-        prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[vision_encoder_name]
+        prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[
+            vision_encoder_name]
         vit_image_size = prepro_config['vit_image_size']
         vit_patch_size = prepro_config['vit_patch_size']
         token_compression_factor = prepro_config['token_compression_factor']
@@ -640,7 +648,8 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         dynamic_hd_size = self.dynamic_hd
 
         image_num_tokens = self._compute_num_image_tokens(
-            image_width, image_height, 
+            image_width,
+            image_height,
             dynamic_hd_size=dynamic_hd_size,
             vit_image_size=vit_image_size,
             vit_patch_size=vit_patch_size,
@@ -654,12 +663,13 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         vision_encoder_name = hf_config.img_processor
         if vision_encoder_name is None:
             vision_encoder_name = SIGLIP_NAME
-        prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[vision_encoder_name]
+        prepro_config = VISION_ENCODER_TO_PROCESSING_CONFIG[
+            vision_encoder_name]
         vit_image_size = prepro_config['vit_image_size']
 
         max_side = vit_image_size * self.dynamic_hd
         return ImageSize(height=max_side, width=vit_image_size)
-    
+
     def get_audio_num_frames(self, audio_len: int, sr: float) -> int:
         """
         Compute the output size of the `extract_features` method.
@@ -694,7 +704,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
         # Return time frames (T)
         return num_frames
-    
+
     def _compute_audio_embed_size(self, audio_frames: int) -> int:
         """
         Compute the audio embedding size based on the audio frames and
@@ -703,7 +713,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         hf_config = self.get_hf_config()
         compression_rate = hf_config.embd_layer['audio_embd_layer'][
             'compression_rate']
-        # NOTE: this is a hard-coded value but might be configurable 
+        # NOTE: this is a hard-coded value but might be configurable
         # in the future
         qformer_compression_rate = 1
         integer = audio_frames // compression_rate
@@ -713,7 +723,8 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
         integer = result // qformer_compression_rate
         remainder = result % qformer_compression_rate
-        result = integer if remainder == 0 else integer + 1  # qformer compression
+        # qformer compression
+        result = integer if remainder == 0 else integer + 1
 
         return result
 
@@ -736,15 +747,16 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images),
-            "audio": self._get_dummy_audios(length=_AUDIO_MAX_SOUNDFILE_SIZE,
-                                            num_audios=num_audios),
+            "audio":
+            self._get_dummy_audios(length=_AUDIO_MAX_SOUNDFILE_SIZE,
+                                   num_audios=num_audios),
         }
 
         image_tokens: list[str] = self.info.image_tokens[:num_images]
         audio_tokens: list[str] = self.info.audio_tokens[:num_audios]
 
         return ProcessorInputs(
-            prompt_text="".join(image_tokens+audio_tokens),
+            prompt_text="".join(image_tokens + audio_tokens),
             mm_data=mm_data,
         )
 
@@ -760,13 +772,16 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             target_sr: float,
         ):
             if orig_sr > target_sr:
-                return scipy.signal.resample_poly(audio, 1, orig_sr // target_sr)
+                return scipy.signal.resample_poly(audio, 1,
+                                                  orig_sr // target_sr)
             elif orig_sr < target_sr:
-                return scipy.signal.resample_poly(audio, target_sr // orig_sr, 1)
+                return scipy.signal.resample_poly(audio, target_sr // orig_sr,
+                                                  1)
             return audio
 
         feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate, resample_func=scipy_resample_audio)
+        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate,
+                                    resample_func=scipy_resample_audio)
 
     def _call_hf_processor(
         self,
@@ -783,18 +798,26 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         if (audio_data := mm_data.get("audios", [])):
             mm_data['audios'] = [(data, sr) for data in audio_data]
 
-        processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        processed_outputs = super()._call_hf_processor(prompt, mm_data,
+                                                       mm_kwargs)
 
         num_img_tokens = [
-            self.info.get_num_image_tokens(image_width=img_size[0], image_height=img_size[1])
+            self.info.get_num_image_tokens(image_width=img_size[0],
+                                           image_height=img_size[1])
             for img_size in processed_outputs["image_sizes"]
         ]
         processed_outputs["num_img_tokens"] = num_img_tokens
 
         audio_features = processed_outputs['input_audio_embeds']
-        feature_sizes = [self.info.get_audio_num_frames(len(audio), sr) for audio in audio_data]
-        processed_outputs['input_audio_embeds'] = [audio_features[idx, :size] for idx, size in enumerate(feature_sizes)]
-    
+        feature_sizes = [
+            self.info.get_audio_num_frames(len(audio), sr)
+            for audio in audio_data
+        ]
+        processed_outputs['input_audio_embeds'] = [
+            audio_features[idx, :size]
+            for idx, size in enumerate(feature_sizes)
+        ]
+
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -843,8 +866,10 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             # TODO(Isotr0py): support embedding inputs
             audio_len = audios.get_audio_length(item_idx)
-            audio_frames = self.info.get_audio_num_frames(audio_len, feature_extractor.sampling_rate)
-            audio_embed_size = self.info._compute_audio_embed_size(audio_frames)
+            audio_frames = self.info.get_audio_num_frames(
+                audio_len, feature_extractor.sampling_rate)
+            audio_embed_size = self.info._compute_audio_embed_size(
+                audio_frames)
 
             audio_tokens = [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
 
@@ -1026,10 +1051,12 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             assert isinstance(audio_embed_sizes, torch.Tensor)
             if isinstance(audio_features, torch.Tensor):
                 assert audio_features.size(0) == len(audio_embed_sizes), (
-                    "audio_features and audio_embed_sizes must have the same length")
+                    "audio_features and audio_embed_sizes "
+                    "must have the same length")
             elif is_list_of(audio_features, (torch.Tensor, list)):
                 assert len(audio_features) == len(audio_embed_sizes), (
-                    "audio_features and audio_embed_sizes must have the same length")
+                    "audio_features and audio_embed_sizes "
+                    "must have the same length")
             else:
                 raise ValueError("Incorrect type of audio features. "
                                  f"Got type: {type(audio_features)}")
@@ -1047,8 +1074,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_audio_input(self,
-                             audio_input: Phi4MMAudioInputs,
+    def _process_audio_input(self, audio_input: Phi4MMAudioInputs,
                              audio_projection_mode: str) -> NestedTensors:
         """
         Create the audio embeddings from the audio input, where the audio input
@@ -1069,10 +1095,12 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         # (e.g. multiple audios in the same example)
 
         dtype = next(self.embed_tokens_extend.parameters()).dtype
-        audio_embeds = [self.embed_tokens_extend.get_audio_features(
-            features.unsqueeze(0).to(dtype),
-            audio_projection_mode=audio_projection_mode,
-        ).squeeze(0) for features in audio_features]
+        audio_embeds = [
+            self.embed_tokens_extend.get_audio_features(
+                features.unsqueeze(0).to(dtype),
+                audio_projection_mode=audio_projection_mode,
+            ).squeeze(0) for features in audio_features
+        ]
         return audio_embeds
 
     def _parse_and_validate_image_input(self,
@@ -1088,7 +1116,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
               and num_img_tokens is not None, "Missing image inputs"
 
         if is_list_of(input_image_embeds, torch.Tensor):
-            assert all(p.dim() == 5 for p in input_image_embeds), "Incorrect image inputs"
+            assert all(p.dim() == 5
+                       for p in input_image_embeds), "Incorrect image inputs"
             # list len is batch_size.
             # each tensor has dimension: num_img_per_example, num_hd_patches,
             # channels, height, width.
@@ -1153,8 +1182,9 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                     **kwargs)
 
         return modalities
-    
-    def _process_image_input(self, image_input: Phi4MMImagePixelInputs) -> list[torch.Tensor]:
+
+    def _process_image_input(
+            self, image_input: Phi4MMImagePixelInputs) -> list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
@@ -1162,10 +1192,10 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             pixel_values = image_input['data'].to(dtype)
             image_sizes = image_input['image_sizes']
             image_attention_mask = image_input['image_attention_mask']
-            image_embeds = self.vision_encoder(
-                pixel_values, image_sizes, image_attention_mask)
+            image_embeds = self.vision_encoder(pixel_values, image_sizes,
+                                               image_attention_mask)
         return image_embeds
-    
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 
@@ -1189,7 +1219,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                 multimodal_embeddings += tuple(vision_embeddings)
             if modality == "audios":
                 audio_input = modalities["audios"]
-                audio_embeddings = self._process_audio_input(audio_input, audio_projection_mode=audio_projection_mode)
+                audio_embeddings = self._process_audio_input(
+                    audio_input, audio_projection_mode=audio_projection_mode)
                 multimodal_embeddings += tuple(audio_embeddings)
 
         return multimodal_embeddings
@@ -1205,7 +1236,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [_IMAGE_PLACEHOLDER_TOKEN_ID, _AUDIO_PLACEHOLDER_TOKEN_ID])
         return inputs_embeds
-    
+
     def get_input_embeddings_v0(
         self,
         input_ids: torch.Tensor,
@@ -1225,7 +1256,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             audio_projection_mode = 'vision'
 
         if audio_input is not None:
-            audio_embeds = self._process_audio_input(audio_input, audio_projection_mode=audio_projection_mode)
+            audio_embeds = self._process_audio_input(
+                audio_input, audio_projection_mode=audio_projection_mode)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
