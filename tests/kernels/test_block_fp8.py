@@ -455,10 +455,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
     w2_bf16 = ((torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 *
                fp8_max).clamp(min=fp8_min, max=fp8_max)
 
-#    if not _valid_deep_gemm(a, w1_bf16, w2_bf16, None):
-#        pytest.skip(
-#            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
-
     score = torch.randn((M, E), dtype=dtype)
 
     block_n, block_k = block_size[0], block_size[1]
@@ -483,13 +479,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
         w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
 
-    if True:
-        dgm = modular_deep_gemm_fused_moe_fp8()
-        def deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids):
-            return dgm(a, w1, w2, topk_weights, topk_ids, w1_scale=w1_s, w2_scale=w2_s)
-    else:
-        deep_gemm_moe_fp8_fn = deep_gemm_moe_fp8
-
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         if M >= 128:
@@ -501,7 +490,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
 
         topk_weights, topk_ids = fused_topk(a, score.float(), topk, False)
 
-        out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids)
+        out = deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids)
 
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
