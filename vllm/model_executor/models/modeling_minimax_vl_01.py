@@ -210,7 +210,23 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
-        vision_feature_layer = config.vision_feature_layer
+        # Convert MiniMaxVL01Config to LlavaNextConfig
+        from transformers import LlavaNextConfig
+        llava_config = LlavaNextConfig(
+            vision_config=config.vision_config,
+            text_config=config.text_config,
+            ignore_index=config.ignore_index,
+            image_token_index=config.image_token_index,
+            projector_hidden_act=config.projector_hidden_act,
+            vision_feature_select_strategy=config.vision_feature_select_strategy,
+            vision_feature_layer=config.vision_feature_layer,
+            image_grid_pinpoints=config.image_grid_pinpoints,
+            tie_word_embeddings=config.tie_word_embeddings,
+        )
+        self.config = llava_config
+        self.multimodal_config = multimodal_config
+
+        vision_feature_layer = llava_config.vision_feature_layer
         # Determine the layer up to which we will initialize the vision tower
         if isinstance(vision_feature_layer, int):
             vision_hidden_size = config.vision_config.hidden_size
@@ -225,10 +241,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 f"vision_layer_feature type: {type(vision_feature_layer)}"
                 " is not supported")
 
-        self.config = config
-        self.multimodal_config = multimodal_config
-
-        # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = init_vision_tower_for_llava(
             config,
             quant_config,

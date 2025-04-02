@@ -1058,7 +1058,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                         dtype=dtype,
                         device=device),
         })
-
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> None:
         params_dict = dict(self.named_parameters())
@@ -1276,3 +1275,4 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
 
             load_basic_weight(name, loaded_weight, self)
         return
+
