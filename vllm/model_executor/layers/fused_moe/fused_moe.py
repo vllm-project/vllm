@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fused MoE kernel."""
 import functools
-import importlib.util
 import json
 import os
-from math import prod
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -14,12 +12,11 @@ import triton.language as tl
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import moe_align_block_size
-from vllm.model_executor.layers.fused_moe.utils import (
-    _fp8_quantize)
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    _valid_deep_gemm,
-    deep_gemm_moe_fp8)
+    _valid_deep_gemm, deep_gemm_moe_fp8)
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_align_block_size)
+from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
@@ -1299,28 +1296,30 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             qintermediate_cache2 = intermediate_cache2
             a2q_scale = a2_scale
 
-        invoke_fused_moe_kernel(qintermediate_cache2,
-                                w2,
-                                intermediate_cache3,
-                                a2q_scale,
-                                w2_scale,
-                                w2_zp,
-                                curr_topk_weights,
-                                sorted_token_ids,
-                                expert_ids,
-                                num_tokens_post_padded,
-                                False, #True,
-                                1,
-                                config,
-                                compute_type=compute_type,
-                                use_fp8_w8a8=use_fp8_w8a8,
-                                use_int8_w8a16=use_int8_w8a16,
-                                use_int4_w4a16=use_int4_w4a16,
-                                block_shape=block_shape)
+        invoke_fused_moe_kernel(
+            qintermediate_cache2,
+            w2,
+            intermediate_cache3,
+            a2q_scale,
+            w2_scale,
+            w2_zp,
+            curr_topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            False,  #True,
+            1,
+            config,
+            compute_type=compute_type,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16,
+            block_shape=block_shape)
 
         if True:
             intermediate_cache3 = intermediate_cache3.view(-1, top_k_num, K)
-            intermediate_cache3.mul_(curr_topk_weights.view(tokens_in_chunk, -1, 1))
+            intermediate_cache3.mul_(
+                curr_topk_weights.view(tokens_in_chunk, -1, 1))
 
         ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])

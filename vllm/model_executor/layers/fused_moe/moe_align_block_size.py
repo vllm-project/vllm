@@ -1,7 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+from typing import Optional, Tuple
+
 import torch
 import triton
 import triton.language as tl
-from typing import Optional, Tuple
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops

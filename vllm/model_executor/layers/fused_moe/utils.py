@@ -1,6 +1,8 @@
-import torch
+# SPDX-License-Identifier: Apache-2.0
 from math import prod
 from typing import List, Optional, Tuple
+
+import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
