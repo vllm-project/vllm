@@ -97,6 +97,24 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
+        device = layer.w13_weight.device
+        self.ab_strides1 = torch.full((num_experts, ),
+                                      hidden_size,
+                                      device=device,
+                                      dtype=torch.int64)
+        self.c_strides1 = torch.full((num_experts, ),
+                                     2 * intermediate_size_per_partition,
+                                     device=device,
+                                     dtype=torch.int64)
+        self.ab_strides2 = torch.full((num_experts, ),
+                                      intermediate_size_per_partition,
+                                      device=device,
+                                      dtype=torch.int64)
+        self.c_strides2 = torch.full((num_experts, ),
+                                     hidden_size,
+                                     device=device,
+                                     dtype=torch.int64)
+
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
         # can benefit from tensors located far enough from one another in memory
@@ -202,15 +220,30 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        return fused_experts(hidden_states=x,
-                             w1=layer.w13_weight,
-                             w2=layer.w2_weight,
-                             topk_weights=topk_weights,
-                             topk_ids=topk_ids,
-                             inplace=True,
-                             activation=activation,
-                             global_num_experts=global_num_experts,
-                             expert_map=expert_map)
+        # TODO will need a similar class split as fp8 because we don't have
+        # expert map and other activations here either
+        from vllm.model_executor.layers.fused_moe import cutlass_moe_fp16
+        return cutlass_moe_fp16(
+            x,
+            layer.w13_weight.transpose(1, 2),
+            layer.w2_weight.transpose(1, 2),
+            topk_weights,
+            topk_ids,
+            self.ab_strides1,
+            self.c_strides1,
+            self.ab_strides2,
+            self.c_strides2,
+        )
+
+        # return fused_experts(hidden_states=x,
+        #                      w1=layer.w13_weight,
+        #                      w2=layer.w2_weight,
+        #                      topk_weights=topk_weights,
+        #                      topk_ids=topk_ids,
+        #                      inplace=True,
+        #                      activation=activation,
+        #                      global_num_experts=global_num_experts,
+        #                      expert_map=expert_map)
 
     def forward_cpu(
         self,

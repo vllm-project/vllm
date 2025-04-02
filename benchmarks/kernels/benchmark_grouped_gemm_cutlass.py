@@ -18,8 +18,8 @@ DEFAULT_MODELS = [
 DEFAULT_BATCH_SIZES = [1, 4, 8, 16, 32, 64, 128, 256, 512]
 DEFAULT_TP_SIZES = [1]
 
-PER_ACT_TOKEN_OPTS = [False]
-PER_OUT_CH_OPTS = [False]
+PER_ACT_TOKEN_OPTS = [False, True]
+PER_OUT_CH_OPTS = [False, True]
 
 
 def to_fp8(tensor: torch.Tensor):
@@ -48,7 +48,8 @@ def bench_run(results: list[benchmark.Measurement], model: str,
     w1 = torch.randn((num_experts, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((num_experts, k, n), device="cuda", dtype=dtype) / 10
 
-    _, a_scale = ops.scaled_fp8_quant(a)
+    _, a_scale = ops.scaled_fp8_quant(a,
+                                      use_per_token_if_dynamic=per_act_token)
 
     w1_q = torch.empty((num_experts, 2 * n, k),
                        device="cuda",
@@ -56,10 +57,12 @@ def bench_run(results: list[benchmark.Measurement], model: str,
     w2_q = torch.empty((num_experts, k, n),
                        device="cuda",
                        dtype=torch.float8_e4m3fn)
-    w1_scale = torch.empty((num_experts, 1, 1),
+    n_b_scales = 2 * n if per_out_ch else 1
+    k_b_scales = k if per_out_ch else 1
+    w1_scale = torch.empty((num_experts, n_b_scales, 1),
                            device="cuda",
                            dtype=torch.float32)
-    w2_scale = torch.empty((num_experts, 1, 1),
+    w2_scale = torch.empty((num_experts, k_b_scales, 1),
                            device="cuda",
                            dtype=torch.float32)
 
@@ -81,8 +84,10 @@ def bench_run(results: list[benchmark.Measurement], model: str,
                             dtype=torch.int64)
 
     for expert in range(num_experts):
-        w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(w1[expert])
-        w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(w2[expert])
+        w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(
+            w1[expert], use_per_token_if_dynamic=per_out_ch)
+        w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(
+            w2[expert], use_per_token_if_dynamic=per_out_ch)
     w1_q_notransp = w1_q.clone()
     w2_q_notransp = w2_q.clone()
     w1_q = w1_q.transpose(1, 2)
@@ -105,7 +110,8 @@ def bench_run(results: list[benchmark.Measurement], model: str,
                           use_fp8_w8a8=True,
                           w1_scale=w1_scale,
                           w2_scale=w2_scale,
-                          a1_scale=a_scale)
+                          a1_scale=a_scale,
+                          a2_scale=a_scale)
 
     def run_cutlass_moe(a: torch.Tensor, a_scale: torch.Tensor,
                         w1: torch.Tensor, w2: torch.Tensor,
@@ -165,7 +171,8 @@ def bench_run(results: list[benchmark.Measurement], model: str,
                                  use_fp8_w8a8=True,
                                  w1_scale=w1_scale,
                                  w2_scale=w2_scale,
-                                 a1_scale=a_scale)
+                                 a1_scale=a_scale,
+                                 a2_scale=a_scale)
 
     def replay_graph(graph, num_repeats):
         for _ in range(num_repeats):
@@ -180,12 +187,16 @@ def bench_run(results: list[benchmark.Measurement], model: str,
                                ab_strides2, c_strides2)
     torch.cuda.synchronize()
 
-    triton_stream = torch.cuda.Stream()
-    triton_graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(triton_graph, stream=triton_stream):
-        run_triton_from_graph(a, w1_q_notransp, w2_q_notransp, topk_weights,
-                              topk_ids, w1_scale, w2_scale, a_scale)
-    torch.cuda.synchronize()
+    if not per_act_token and not per_out_ch:
+        triton_stream = torch.cuda.Stream()
+        triton_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(triton_graph, stream=triton_stream):
+            run_triton_from_graph(a, w1_q_notransp, w2_q_notransp,
+                                  topk_weights, topk_ids, w1_scale, w2_scale,
+                                  a_scale)
+        torch.cuda.synchronize()
+    else:
+        triton_graph = []
 
     min_run_time = 5
     num_warmup = 5
@@ -223,31 +234,32 @@ def bench_run(results: list[benchmark.Measurement], model: str,
         "replay_graph": replay_graph,
     }
 
-    # Warmup
-    run_triton_moe(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids,
-                   w1_scale, w2_scale, a_scale, num_warmup)
+    if not per_act_token and not per_out_ch:
+        # Warmup
+        run_triton_moe(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids,
+                       w1_scale, w2_scale, a_scale, num_warmup)
 
-    results.append(
-        benchmark.Timer(
-            stmt=
-            "run_triton_moe(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids, w1_scale, w2_scale, a_scale, num_runs)",  # noqa: E501
-            globals=globals,
-            label=label,
-            sub_label=sub_label,
-            description="triton_moe",
-        ).blocked_autorange(min_run_time=min_run_time))
+        results.append(
+            benchmark.Timer(
+                stmt=
+                "run_triton_moe(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids, w1_scale, w2_scale, a_scale, num_runs)",  # noqa: E501
+                globals=globals,
+                label=label,
+                sub_label=sub_label,
+                description="triton_moe",
+            ).blocked_autorange(min_run_time=min_run_time))
 
-    # Warmup
-    replay_graph(triton_graph, num_warmup)
+        # Warmup
+        replay_graph(triton_graph, num_warmup)
 
-    results.append(
-        benchmark.Timer(
-            stmt="replay_graph(triton_graph, num_runs)",
-            globals=globals,
-            label=label,
-            sub_label=sub_label,
-            description="triton_moe_cuda_graphs",
-        ).blocked_autorange(min_run_time=min_run_time))
+        results.append(
+            benchmark.Timer(
+                stmt="replay_graph(triton_graph, num_runs)",
+                globals=globals,
+                label=label,
+                sub_label=sub_label,
+                description="triton_moe_cuda_graphs",
+            ).blocked_autorange(min_run_time=min_run_time))
 
     # Warmup
     run_cutlass_moe(a, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights,

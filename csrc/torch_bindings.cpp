@@ -379,6 +379,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       {stride_tag});
   ops.impl("cutlass_moe_mm", torch::kCUDA, &cutlass_moe_mm);
 
+  // CUTLASS w16a16 grouped GEMM
+  ops.def(
+      "cutlass_moe_mm_fp16(Tensor! out_tensors, Tensor a_tensors, "
+      "                    Tensor b_tensors, Tensor expert_offsets, "
+      "                    Tensor problem_sizes, Tensor a_strides, "
+      "                    Tensor b_strides, Tensor c_strides) -> ()",
+      {stride_tag});
+  ops.impl("cutlass_moe_mm_fp16", torch::kCUDA, &cutlass_moe_mm_fp16);
+
   // A function that computes data required to run fused MoE with w8a8 grouped
   // GEMM. It takes topk_ids as an input, and computes expert_offsets
   // (token start indices of each expert). In addition to this, it computes

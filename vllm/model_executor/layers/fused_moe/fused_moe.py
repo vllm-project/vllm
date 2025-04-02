@@ -1760,3 +1760,60 @@ def cutlass_moe_fp8(
 
     return (c2[c_map].view(m, topk, k) *
             topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)
+
+
+def cutlass_moe_fp16(
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    ab_strides1: torch.Tensor,
+    c_strides1: torch.Tensor,
+    ab_strides2: torch.Tensor,
+    c_strides2: torch.Tensor,
+) -> torch.Tensor:
+    num_experts = w1.shape[0]
+    m = a.shape[0]
+    k = w1.shape[1]
+    n = w2.shape[1]
+
+    topk = topk_ids.shape[1]
+    device = a.device
+
+    out_dtype = a.dtype
+
+    expert_offsets = torch.empty((num_experts + 1),
+                                 dtype=torch.int32,
+                                 device=device)
+    problem_sizes1 = torch.empty((num_experts, 3),
+                                 dtype=torch.int32,
+                                 device=device)
+    problem_sizes2 = torch.empty((num_experts, 3),
+                                 dtype=torch.int32,
+                                 device=device)
+
+    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+
+    ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
+                                problem_sizes2, a_map, c_map, num_experts, n,
+                                k)
+
+    rep_a = a[a_map]
+
+    c1 = torch.zeros((m * topk, n * 2), device=device, dtype=out_dtype)
+    c2 = torch.zeros((m * topk, k), device=device, dtype=out_dtype)
+
+    ops.cutlass_moe_mm_fp16(c1, rep_a, w1, expert_offsets[:-1], problem_sizes1,
+                            ab_strides1, ab_strides1, c_strides1)
+
+    intermediate = torch.empty((m * topk, n), device=device, dtype=out_dtype)
+    torch.ops._C.silu_and_mul(intermediate, c1)
+
+    ops.cutlass_moe_mm_fp16(c2, intermediate, w2, expert_offsets[:-1],
+                            problem_sizes2, ab_strides2, ab_strides2,
+                            c_strides2)
+
+    return (c2[c_map].view(m, topk, k) *
+            topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)

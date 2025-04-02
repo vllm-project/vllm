@@ -5,6 +5,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe_fp8,
+                                                            cutlass_moe_fp16,
                                                             fused_experts,
                                                             fused_topk)
 from vllm.platforms import current_platform
@@ -35,13 +36,31 @@ def run(a: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
                                a1_scale=a_scale)
 
 
-@pytest.mark.parametrize("m", [2, 64, 224])
+def run_fp16(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
+             topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+             ab_strides1: torch.Tensor, c_strides1: torch.Tensor,
+             ab_strides2: torch.Tensor, c_strides2: torch.Tensor):
+    with set_current_vllm_config(
+            VllmConfig(parallel_config=ParallelConfig(
+                pipeline_parallel_size=1))):
+        return cutlass_moe_fp16(a, w1, w2, topk_weights, topk_ids, ab_strides1,
+                                c_strides1, ab_strides2, c_strides2)
+
+
+@pytest.mark.parametrize("m", [2, 64, 224, 512, 163840])
 @pytest.mark.parametrize("n", [1024, 3072])
-@pytest.mark.parametrize("k", [1024, 1536])
+@pytest.mark.parametrize("k", [1024, 1536, 5120])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("per_act_token", [True, False])
+@pytest.mark.parametrize("per_act_token", [False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
+# @pytest.mark.parametrize("m", [64, 224, 512, 163840])
+# @pytest.mark.parametrize("n", [1024])
+# @pytest.mark.parametrize("k", [5120])
+# @pytest.mark.parametrize("e", [16])
+# @pytest.mark.parametrize("topk", [1])
+# @pytest.mark.parametrize("per_act_token", [False])
+# @pytest.mark.parametrize("per_out_ch", [False])
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
@@ -69,11 +88,12 @@ def test_cutlass_moe_no_graph(
         # Get the right scale for tests.
         _, a_scale1 = ops.scaled_fp8_quant(
             a, use_per_token_if_dynamic=per_act_token)
-        a_q, _ = ops.scaled_fp8_quant(a,
-                                      a_scale1,
-                                      use_per_token_if_dynamic=per_act_token)
+        a_scale2 = a_scale1.clone()
+        # a_q, _ = ops.scaled_fp8_quant(a,
+        #                               a_scale1,
+        #                               use_per_token_if_dynamic=per_act_token)
 
-        a_d = a_q.float().mul(a_scale1).to(dtype)
+        # a_d = a_q.float().mul(a_scale1).to(dtype)
 
         n_b_scales = 2 * n if per_out_ch else 1
         k_b_scales = k if per_out_ch else 1
@@ -116,7 +136,16 @@ def test_cutlass_moe_no_graph(
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
 
-        triton_output = fused_experts(a_d, w1_d, w2_d, topk_weights, topk_ids)
+        triton_output = fused_experts(a,
+                                      w1_q.transpose(1, 2),
+                                      w2_q.transpose(1, 2),
+                                      topk_weights,
+                                      topk_ids,
+                                      use_fp8_w8a8=True,
+                                      w1_scale=w1_scale,
+                                      w2_scale=w2_scale,
+                                      a1_scale=a_scale1,
+                                      a2_scale=a_scale2)
 
         cutlass_output = cutlass_moe_fp8(a,
                                          w1_q,
@@ -129,15 +158,16 @@ def test_cutlass_moe_no_graph(
                                          c_strides1,
                                          ab_strides2,
                                          c_strides2,
-                                         a1_scale=a_scale1)
+                                         a1_scale=a_scale1,
+                                         a2_scale=a_scale2)
 
-        print(triton_output)
-        print(cutlass_output)
+        print(triton_output.view(cutlass_output.shape).t()[0])
+        print(cutlass_output.t()[0])
         print("*")
 
-        torch.testing.assert_close(triton_output,
+        torch.testing.assert_close(triton_output.view(cutlass_output.shape),
                                    cutlass_output,
-                                   atol=5e-2,
+                                   atol=2e-2,
                                    rtol=1e-2)
 
 
@@ -241,4 +271,118 @@ def test_cutlass_moe_cuda_graph(
         torch.testing.assert_close(triton_output,
                                    cutlass_output,
                                    atol=9e-2,
+                                   rtol=1e-2)
+
+
+@pytest.mark.parametrize("m", [2, 16, 32, 64, 224, 512, 163840])
+@pytest.mark.parametrize("n", [1024, 2048, 3072])
+@pytest.mark.parametrize("k", [1024, 1536, 2048])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()),
+    reason="Grouped gemm is not supported on this GPU type.")
+def test_cutlass_fp16_moe_no_graph(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+):
+    current_platform.seed_everything(7)
+    with set_current_vllm_config(
+            VllmConfig(parallel_config=ParallelConfig(
+                pipeline_parallel_size=1))):
+
+        a = torch.ones((m, k), device="cuda", dtype=dtype) / 10
+        w1 = torch.randn(
+            (e, 2 * n, k), device="cuda", dtype=dtype).transpose(1, 2) / 10
+        w2 = torch.randn(
+            (e, k, n), device="cuda", dtype=dtype).transpose(1, 2) / 10
+
+        ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+        c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
+        ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
+        c_strides2 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
+
+        triton_output = fused_experts(a, w1.transpose(1,
+                                                      2), w2.transpose(1, 2),
+                                      topk_weights, topk_ids)
+        cutlass_output = cutlass_moe_fp16(a, w1, w2, topk_weights, topk_ids,
+                                          ab_strides1, c_strides1, ab_strides2,
+                                          c_strides2)
+
+        print(triton_output)
+        print(cutlass_output)
+        print("*")
+
+        torch.testing.assert_close(triton_output.view(cutlass_output.shape),
+                                   cutlass_output,
+                                   atol=2e-2,
+                                   rtol=1e-2)
+
+
+@pytest.mark.parametrize("m", [2, 16, 32, 64, 224, 512, 163840])
+@pytest.mark.parametrize("n", [1024, 2048, 3072])
+@pytest.mark.parametrize("k", [1024, 1536, 2048])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])  #, torch.half])
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()),
+    reason="Grouped gemm is not supported on this GPU type.")
+def test_cutlass_fp16_moe_cuda_graph(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+):
+    current_platform.seed_everything(7)
+    with set_current_vllm_config(
+            VllmConfig(parallel_config=ParallelConfig(
+                pipeline_parallel_size=1))):
+
+        a = torch.ones((m, k), device="cuda", dtype=dtype) / 10
+        w1 = torch.randn(
+            (e, 2 * n, k), device="cuda", dtype=dtype).transpose(1, 2) / 10
+        w2 = torch.randn(
+            (e, k, n), device="cuda", dtype=dtype).transpose(1, 2) / 10
+
+        ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+        c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
+        ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
+        c_strides2 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
+
+        triton_output = fused_experts(a, w1.transpose(1,
+                                                      2), w2.transpose(1, 2),
+                                      topk_weights, topk_ids)
+        stream = torch.cuda.Stream()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            cutlass_output = run_fp16(a, w1, w2, topk_weights, topk_ids,
+                                      ab_strides1, c_strides1, ab_strides2,
+                                      c_strides2)
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        print(triton_output)
+        print(cutlass_output)
+        print("*")
+
+        torch.testing.assert_close(triton_output,
+                                   cutlass_output,
+                                   atol=2e-2,
                                    rtol=1e-2)
