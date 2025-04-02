@@ -218,6 +218,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc.
   * ✅︎
   * ✅︎
+- * `BambaForCausalLM`
+  * Bamba
+  * `ibm-ai-platform/Bamba-9B-fp8`, `ibm-ai-platform/Bamba-9B`
+  *
+  *
 - * `BloomForCausalLM`
   * BLOOM, BLOOMZ, BLOOMChat
   * `bigscience/bloom`, `bigscience/bloomz`, etc.
@@ -502,6 +507,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * XVERSE
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
   * ✅︎
+  * ✅︎
+- * `MiniMaxText01ForCausalLM`
+  * MiniMax-Text
+  * `MiniMaxAI/MiniMax-Text-01`, etc.
+  *
   * ✅︎
 - * `Zamba2ForCausalLM`
   * Zamba2
