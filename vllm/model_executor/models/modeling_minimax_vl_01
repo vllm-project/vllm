@@ -197,9 +197,10 @@ class LlavaNextMultiModalProcessor(
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor,
-                                        info=LlavaNextProcessingInfo,
-                                        dummy_inputs=LlavaDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    LlavaNextMultiModalProcessor,
+    info=LlavaNextProcessingInfo,
+    dummy_inputs=LlavaDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
