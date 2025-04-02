@@ -31,7 +31,7 @@ Currently, there are no pre-built ROCm wheels.
     ```console
     # Install PyTorch
     $ pip uninstall torch -y
-    $ pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/rocm6.3
+    $ pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3
     ```
 
 1. Install [Triton flash attention for ROCm](https://github.com/ROCm/triton)
