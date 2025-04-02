@@ -61,9 +61,9 @@ class Hermes2ProToolParser(ToolParser):
                 "tokens in the tokenizer!")
 
     def extract_tool_calls(
-            self,
-            model_output: str,
-            request: ChatCompletionRequest,
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
@@ -100,7 +100,7 @@ class Hermes2ProToolParser(ToolParser):
                 ]
 
                 content = model_output[:model_output.
-                    find(self.tool_call_start_token)]
+                                       find(self.tool_call_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -114,14 +114,14 @@ class Hermes2ProToolParser(ToolParser):
                                                     content=model_output)
 
     def extract_tool_calls_streaming(
-            self,
-            previous_text: str,
-            current_text: str,
-            delta_text: str,
-            previous_token_ids: Sequence[int],
-            current_token_ids: Sequence[int],
-            delta_token_ids: Sequence[int],
-            request: ChatCompletionRequest,
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
         logger.debug("delta_text: %s", delta_text)
@@ -158,7 +158,7 @@ class Hermes2ProToolParser(ToolParser):
                 full_text = current_text + delta_text
                 tool_call_portion = full_text.split(
                     self.tool_call_start_token)[-1].split(
-                    self.tool_call_end_token)[0].rstrip()
+                        self.tool_call_end_token)[0].rstrip()
                 delta_text = delta_text.split(
                     self.tool_call_end_token)[0].rstrip()
                 text_portion = delta_text.split(
@@ -225,7 +225,7 @@ class Hermes2ProToolParser(ToolParser):
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
                                           arguments=diff).model_dump(
-                                          exclude_none=True))
+                                              exclude_none=True))
                     ])
 
             # case -- otherwise we're just generating text
@@ -262,7 +262,7 @@ class Hermes2ProToolParser(ToolParser):
                                       id=f"chatcmpl-tool-{random_uuid()}",
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
-                                          exclude_none=True))
+                                              exclude_none=True))
                     ])
                 else:
                     return None
@@ -333,15 +333,18 @@ class Hermes2ProToolParser(ToolParser):
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
                                       arguments=arguments_delta).model_dump(
-                                      exclude_none=True))
+                                          exclude_none=True))
                 ])
                 self.streamed_args_for_tool[self.current_tool_id] \
                     += arguments_delta
 
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
-                # 'len(delta_text.rstrip()) >= 1' Change to 'len(delta_text.rstrip()) > 1'
-                if isinstance(delta_text, str) and len(delta_text.rstrip()) > 1 and delta_text.rstrip()[-1] == '}':
+                # 'len(delta_text.rstrip()) >= 1'
+                # Change to 'len(delta_text.rstrip()) > 1'
+                if isinstance(delta_text, str) \
+                        and len(delta_text.rstrip()) > 1 \
+                        and delta_text.rstrip()[-1] == '}':
                     if delta_text.replace('\n', '').replace('\r', '') == '}':
                         logger.debug("Exceptional condition: %s", delta_text)
                     delta_text = delta_text.rstrip()[:-1]
@@ -351,7 +354,7 @@ class Hermes2ProToolParser(ToolParser):
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
                                       arguments=delta_text).model_dump(
-                                      exclude_none=True))
+                                          exclude_none=True))
                 ])
                 self.streamed_args_for_tool[self.current_tool_id] \
                     += delta_text
