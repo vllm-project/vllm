@@ -395,7 +395,7 @@ class Phi4MMImageEncoder(nn.Module):
         for _output_img in output_imgs:
             img_feature_proj = self.img_projection(
                 _output_img.to(target_device).to(target_dtype))
-            img_set_tensor.append(img_feature_proj)
+            img_set_tensor.append(img_feature_proj.squeeze(0))
 
         return img_set_tensor
 
