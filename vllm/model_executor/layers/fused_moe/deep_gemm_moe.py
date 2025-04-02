@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 
@@ -18,6 +18,13 @@ from vllm.utils import round_up
 logger = init_logger(__name__)
 
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
+
+
+def deep_gemm_block_shape() -> List[int]:
+    import deep_gemm as dg
+    block = dg.get_m_alignment_for_contiguous_layout()
+    return [block, block]
+
 
 # TODO: check types?
 def _valid_deep_gemm(hidden_states: torch.Tensor,
@@ -109,7 +116,8 @@ def _moe_unpermute_and_reduce(
     """
     M, topk = topk_weight.shape
     K = curr_hidden.shape[1]
-    curr_hidden = curr_hidden[inv_perm, ...]
+    if inv_perm is not None:
+        curr_hidden = curr_hidden[inv_perm, ...]
     curr_hidden = curr_hidden.view(-1, topk, K)
     curr_hidden.mul_(topk_weight.view(M, -1, 1))
     ops.moe_sum(curr_hidden, out)
@@ -295,48 +303,46 @@ def deep_gemm_moe_fp8(
     return out_hidden_states
 
 
-class DeepGemmDispatch(mk.FusedMoEDispatchQuantize):
+class DeepGemmDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
     def __init__(self):
         super().__init__()
-        import deep_gemm as dg
-        block_m = dg.get_m_alignment_for_contiguous_layout()
-        self.block_shape = [block_m, block_m]
+        self.block_shape = deep_gemm_block_shape()
 
-    def apply(
+    def dispatch(
             self,
-            hidden_states: torch.Tensor,
-            hidden_states_scale: Optional[torch.Tensor],
+            a: torch.Tensor,
+            a1_scale: Optional[torch.Tensor],
             a2_scale: Optional[torch.Tensor],
             topk_ids: torch.Tensor,
             num_experts: int,
             expert_map: Optional[torch.Tensor],
-            n: int,  # TODO try to get rid of this?
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor], Optional[Any]]:
-        # TODO: move?
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         q_hidden_states, q_hidden_states_scale = _fp8_quantize(
-            hidden_states,
-            hidden_states_scale,
+            a,
+            a1_scale,
             self.block_shape,
         )
+        return q_hidden_states, q_hidden_states_scale, topk_ids
 
-        q_hidden_states, q_hidden_states_scale, _, expert_ids, inv_perm = _moe_permute(
-            q_hidden_states,
-            q_hidden_states_scale,
-            topk_ids,
-            num_experts,
-            expert_map,
-            self.block_shape[0],
+    def combine(
+            self,
+            out: torch.Tensor,
+            hidden_states: torch.Tensor,
+            topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        _moe_unpermute_and_reduce(
+            out,
+            hidden_states,
+            None,
+            topk_weights
         )
+        return out
 
-        return q_hidden_states, q_hidden_states_scale, expert_ids, inv_perm, None
 
-
-class DeepGemmExperts(mk.FusedMoEExperts):
+class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(self):
         super().__init__()
-        import deep_gemm as dg
-        block_m = dg.get_m_alignment_for_contiguous_layout()
-        self.block_shape = [block_m, block_m]
+        self.block_shape = deep_gemm_block_shape()
 
     def workspace_shapes(
             self,
@@ -352,33 +358,43 @@ class DeepGemmExperts(mk.FusedMoEExperts):
         workspace1 = M_sum * max(N * 2, K)
         workspace2 = M_sum * N
         # return tuples????
-        return (workspace1, workspace2)
+        return (workspace1, workspace2)  # TODO add type
 
     def apply(
             self,
+            out: torch.Tensor, #unused tbd
             q_hidden_states: torch.Tensor,
             w1: torch.Tensor,
             w2: torch.Tensor,
+            topk_ids: torch.Tensor,
             inplace: bool,
             activation: str,
-            expert_ids: torch.Tensor,
+            expert_map: Optional[torch.Tensor],
             w1_scale: Optional[torch.Tensor],
             w2_scale: Optional[torch.Tensor],
             a1_scale: Optional[torch.Tensor],
             a2_scale: Optional[torch.Tensor],
             workspace13: torch.Tensor,
             workspace2: torch.Tensor,
-            context: Optional[Any] = None,
     ) -> torch.Tensor: # or None?  assume inplace?
         import deep_gemm as dg
 
         # chunking in here or in ModularFusedMoEKernel? ignore for now
-        M_sum = q_hidden_states.shape[0]  # double check this
         E, N, _ = w1.shape
         _, K, _ = w2.shape
 
         #print(f"M_sum = {M_sum}")
 
+        q_hidden_states, a1_scale, _, expert_ids, inv_perm = _moe_permute(
+            q_hidden_states,
+            a1_scale,
+            topk_ids,
+            E,
+            expert_map,
+            self.block_shape[0],
+        )
+
+        M_sum = q_hidden_states.shape[0]
         workspace1 = _resize_cache(workspace13, (M_sum, N))
         workspace2 = _resize_cache(workspace2, (M_sum, N // 2))
         workspace3 = _resize_cache(workspace13, (M_sum, K))
@@ -406,32 +422,13 @@ class DeepGemmExperts(mk.FusedMoEExperts):
             (qworkspace2, a2q_scale), (w2, w2_scale),
             workspace3, expert_ids)
 
+        workspace3 = workspace3[inv_perm, ...]
+
         return workspace3
 
 
-class DeepGemmUnpermuteCombine(mk.FusedMoEUnpermuteCombine):
-    def __init__(self):
-        super().__init__()
-
-    def apply(
-            self,
-            out: torch.Tensor,
-            hidden_states: torch.Tensor,
-            topk_weights: torch.Tensor,
-            inv_perm: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        _moe_unpermute_and_reduce(
-            out,
-            hidden_states,
-            inv_perm,
-            topk_weights
-        )
-        return out
-
-
-def modular_deep_gemm_fused_moe_fp8() -> mk.ModularFusedMoEKernel:
-    return mk.ModularFusedMoEKernel(
-        DeepGemmDispatch(),
+def modular_deep_gemm_fused_moe_fp8() -> mk.FusedMoEModularKernel:
+    return mk.FusedMoEModularKernel(
+        DeepGemmDispatchCombine(),
         DeepGemmExperts(),
-        DeepGemmUnpermuteCombine(),
     )
