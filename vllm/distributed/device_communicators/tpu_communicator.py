@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Optional, Sequence
+from typing import List, Optional
 
 import torch
 from torch.distributed import ProcessGroup
@@ -30,14 +30,13 @@ if current_platform.is_tpu():
 
 
 @torch.library.custom_op("tpu::all_reduce", mutates_args=())
-def tpu_all_reduce(input_: torch.Tensor,
-                   groups: Sequence[int]) -> torch.Tensor:
+def tpu_all_reduce(input_: torch.Tensor, groups: List[int]) -> torch.Tensor:
     groups = [groups] if groups else None
     return xm.all_reduce(xm.REDUCE_SUM, input_, groups=groups)
 
 
 @tpu_all_reduce.register_fake
-def _(input_: torch.Tensor, groups: Sequence[int]):
+def _(input_: torch.Tensor, groups: List[int]):
     return torch.empty_like(input_)
 
 
@@ -96,9 +95,9 @@ class TpuCommunicator(DeviceCommunicatorBase):
         self.groups = create_optimized_replica_groups()
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        # Note: PyTorch python custom op doesn't support input parameter with type
-        # of Sequence[Sequence[int]], here we have to use Sequence[int] and convert
-        # back to Sequence[Sequence[int]] in the operation implementation
+        # Note: PyTorch python custom op doesn't support input parameter with
+        # type of List[List[int]], here we have to use List[int] and convert
+        # back to List[List[int]] in the operation implementation
         # TODO: Remove the groups specification after XLA compiler can support
         # auto-reordering the ring order for all-reduce.
         groups = self.groups[0] if self.groups is not None else None
