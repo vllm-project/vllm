@@ -179,6 +179,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             max_token_size=self.max_num_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
 
+        if self.lora_config is not None:
+            # This makes us pad at initialisation time so we can avoid padding
+            # at runtime, which introduces long stalls
+            self.lora_config.max_lora_rank = _get_padded_lora_rank(
+                self.lora_config.max_lora_rank, self.lora_config.max_loras)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -1037,6 +1043,18 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
+
+
+def _get_padded_lora_rank(max_lora_rank: int, max_num_loras: int) -> int:
+    LORA_BLOCK_SIZE = 256  # Same as in the pallas kernel
+
+    max_num_loras += 1
+
+    # If we have enough LoRAs to use laning without padding
+    if max_lora_rank * max_num_loras >= LORA_BLOCK_SIZE:
+        return max_lora_rank
+
+    return 1 << (LORA_BLOCK_SIZE // max_num_loras).bit_length()
 
 
 def _create_dummy_scheduled_tokens(total_tokens: int,

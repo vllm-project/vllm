@@ -38,9 +38,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self._sampler_indices_padded = self._sampler_indices_padded.to(
             dtype=torch.int32)
 
-        # Debug only
-        self.disable_add_lora_logits = True
-
     def mark_compiled(self):
         torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
         torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)
@@ -276,8 +273,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
-        if self.disable_add_lora_logits:
-            return y
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
