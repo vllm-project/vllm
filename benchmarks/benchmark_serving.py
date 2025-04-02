@@ -596,13 +596,15 @@ def main(args: argparse.Namespace):
         elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = ConversationDataset
         else:
-            supported_datasets = {
-                cls.__name__: list(cls.SUPPORTED_DATASET_PATHS)
-                for cls in HuggingFaceDataset.__subclasses__()
-            }
+            supported_datasets = set([
+                dataset_name 
+                for cls in HuggingFaceDataset.__subclasses__() 
+                for dataset_name in cls.SUPPORTED_DATASET_PATHS
+            ])
             raise ValueError(
                 f"get unsupported dataset path: {args.dataset_path}. "
-                f"only supports one of the map: {supported_datasets}. "
+                "Huggingface dataset only supports dataset_path"
+                f" from one of following: {supported_datasets}. "
                 "Please consider contributing if you would "
                 "like to add support for additional dataset formats.")
         input_requests = dataset_class(
