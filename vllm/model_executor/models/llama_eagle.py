@@ -27,7 +27,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         layer_id: int = 0,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, layer_id, prefix)
+        super().__init__(config, prefix=prefix)
 
         # Skip the input_layernorm
         # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427
@@ -83,14 +83,12 @@ class LlamaModel(nn.Module):
 class LlamaForCausalLMEagle(LlamaForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config)
+        nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         self.config = config
+        self.model = LlamaModel(config=config,
+                                prefix=maybe_prefix(prefix, "eagle"))
 
-        self.model = LlamaModel(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
-
-        self.orig_vocab_size = config.vocab_size
         self.truncated_vocab_size = config.truncated_vocab_size
         self.unpadded_vocab_size = self.truncated_vocab_size
 
@@ -112,9 +110,19 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
                                                 logit_scale)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        print("===========")
+        print_module_names(self.model)
+        print("===========")
         loader = AutoWeightsLoader(self)
 
         for name, loaded_weight in weights:
             if "lm_head" not in name:
-                name = "model." + name
-            loader.load_weight(name, loaded_weight)
+                name = "eagle." + name
+            loader.load_weights(name, loaded_weight)
+
+
+def print_module_names(module, prefix=""):
+    for name, child in module.named_children():
+        full_name = f"{prefix}.{name}" if prefix else name
+        print(full_name)
+        print_module_names(child, full_name)
