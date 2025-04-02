@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import List, Optional
+from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
@@ -27,17 +27,6 @@ if current_platform.is_tpu():
 
     if USE_RAY:
         from vllm.executor import ray_utils
-
-
-@torch.library.custom_op("tpu::all_reduce", mutates_args=())
-def tpu_all_reduce(input_: torch.Tensor, groups: List[int]) -> torch.Tensor:
-    groups = [groups] if groups else None
-    return xm.all_reduce(xm.REDUCE_SUM, input_, groups=groups)
-
-
-@tpu_all_reduce.register_fake
-def _(input_: torch.Tensor, groups: List[int]):
-    return torch.empty_like(input_)
 
 
 class TpuCommunicator(DeviceCommunicatorBase):
@@ -95,13 +84,9 @@ class TpuCommunicator(DeviceCommunicatorBase):
         self.groups = create_optimized_replica_groups()
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        # Note: PyTorch python custom op doesn't support input parameter with
-        # type of List[List[int]], here we have to use List[int] and convert
-        # back to List[List[int]] in the operation implementation
         # TODO: Remove the groups specification after XLA compiler can support
         # auto-reordering the ring order for all-reduce.
-        groups = self.groups[0] if self.groups is not None else None
-        return tpu_all_reduce(input_, groups=groups)
+        return xm.all_reduce(xm.REDUCE_SUM, input_, groups=self.groups)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         assert dim == -1, "TPUs only support dim=-1 for all-gather."
