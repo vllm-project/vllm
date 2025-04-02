@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
