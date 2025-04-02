@@ -9,7 +9,6 @@ pytest-shard
 # testing utils
 awscli
 backoff # required for phi4mm test
-decord # required for video tests
 einops # required for MPT, qwen-vl and Mamba
 httpx
 librosa # required for audio tests
@@ -28,9 +27,11 @@ torchvision==0.21.0
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.5.4 # required for pixtral test
+opencv-python-headless >= 4.11.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
-lm-eval[api]==0.4.4 # required for model evaluation test
+lm-eval[api]==0.4.8 # required for model evaluation test
 transformers==4.50.3
+huggingface-hub[hf-xet]>=0.30.0  # Required for Xet downloads.
 # quantization
 bitsandbytes>=0.45.3
 buildkite-test-collector==0.1.9
