@@ -874,14 +874,19 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 token_types.extend(cur_token_types)
             if inter_data.inputs_embeds is not None:
                 inputs_embeds_.append(
-                    inter_data.inputs_embeds.to(self.runner.device))
+                    inter_data.inputs_embeds.to(
+                        dtype=self.runner.model_config.dtype,
+                        device=self.runner.device))
         inputs_embeds: Optional[torch.Tensor]
         if len(inputs_embeds_) == 0:
             inputs_embeds = None
-        elif len(inputs_embeds_) == 1:
-            inputs_embeds = inputs_embeds_[0]
         else:
-            inputs_embeds = torch.cat(inputs_embeds_, dim=0)
+            inputs_embeds = torch.cat([
+                x.squeeze(dim=0) if x.dim() == 3 else x for x in inputs_embeds_
+            ],
+                                      dim=0).to(
+                                          dtype=self.runner.model_config.dtype,
+                                          device=self.runner.device)
 
         if not input_tokens and inputs_embeds is None:
             # This may happen when all prefill requests hit

@@ -309,8 +309,7 @@ class SequenceData(msgspec.Struct,
         self._cumulative_logprob += logprob
 
     def get_len(self) -> int:
-        return len(self._output_token_ids) + len(self._prompt_token_ids) + (
-            len(self._prompt_embeds) if self._prompt_embeds is not None else 0)
+        return len(self._output_token_ids) + len(self._prompt_token_ids)
 
     def get_prompt_len(self) -> int:
         return len(self._prompt_token_ids)
