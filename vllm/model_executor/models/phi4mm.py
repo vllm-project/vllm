@@ -774,26 +774,27 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if mm_data:
-            if "audios" in mm_data:
-                sr = self.info.get_feature_extractor().sampling_rate
-                mm_data['audios'] = [(data, sr) for data in mm_data['audios']]
-            processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
-            num_img_tokens = [
-                self.info.get_num_image_tokens(image_width=img_size[0], image_height=img_size[1])
-                for img_size in processed_outputs["image_sizes"]
-            ]
-            processed_outputs["num_img_tokens"] = num_img_tokens
-            processed_outputs["pixel_values"] = processed_outputs.pop('input_image_embeds')
-            if "audios" in mm_data:
-                audio_features = processed_outputs['input_audio_embeds']
-                feature_sizes = [self.info.get_audio_num_frames(len(audio), sr) for audio, sr in mm_data['audios']]
-                processed_outputs['input_audio_embeds'] = [audio_features[idx, :size] for idx, size in enumerate(feature_sizes)]
-        else:
-            tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(prompt,
-                                          add_special_tokens=True,
-                                          return_tensors="pt")
+        if not mm_data:
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        sr = self.info.get_feature_extractor().sampling_rate
+        if (audio_data := mm_data.get("audios", [])):
+            mm_data['audios'] = [(data, sr) for data in audio_data]
+
+        processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+
+        num_img_tokens = [
+            self.info.get_num_image_tokens(image_width=img_size[0], image_height=img_size[1])
+            for img_size in processed_outputs["image_sizes"]
+        ]
+        processed_outputs["num_img_tokens"] = num_img_tokens
+
+        audio_features = processed_outputs['input_audio_embeds']
+        feature_sizes = [self.info.get_audio_num_frames(len(audio), sr) for audio in audio_data]
+        processed_outputs['input_audio_embeds'] = [audio_features[idx, :size] for idx, size in enumerate(feature_sizes)]
+    
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -802,7 +803,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
+            input_image_embeds=MultiModalFieldConfig.batched("image"),
             image_attention_mask=MultiModalFieldConfig.batched("image"),
             image_sizes=MultiModalFieldConfig.batched("image"),
             num_img_tokens=MultiModalFieldConfig.batched("image"),
@@ -1076,8 +1077,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
     def _parse_and_validate_image_input(self,
                                         **kwargs: object) -> Optional[Dict]:
-        pixel_values: NestedTensors = kwargs.get("pixel_values")
-        if pixel_values is None:
+        input_image_embeds: NestedTensors = kwargs.get("input_image_embeds")
+        if input_image_embeds is None:
             return None
 
         image_sizes = kwargs.get("image_sizes")
@@ -1086,23 +1087,23 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         assert image_sizes is not None and image_attention_mask is not None\
               and num_img_tokens is not None, "Missing image inputs"
 
-        if is_list_of(pixel_values, torch.Tensor):
-            assert all(p.dim() == 5 for p in pixel_values), "Incorrect image inputs"
+        if is_list_of(input_image_embeds, torch.Tensor):
+            assert all(p.dim() == 5 for p in input_image_embeds), "Incorrect image inputs"
             # list len is batch_size.
             # each tensor has dimension: num_img_per_example, num_hd_patches,
             # channels, height, width.
             # need to pad along num_hd_patches.
             # mask size num_img_per_prompt, num_hd_patches, feat_h, heat_w.
-            pixel_values = cat_with_pad(pixel_values, dim=0)
-        elif isinstance(pixel_values, torch.Tensor):
+            input_image_embeds = cat_with_pad(input_image_embeds, dim=0)
+        elif isinstance(input_image_embeds, torch.Tensor):
             # dimension: batch_size, num_img_per_example, num_hd_patches,
             # channels, height, width.
             # we flatten first 2 dims to make it a single large batch for
             # SigLIP Encoder.
-            assert pixel_values.dim() == 6, "Incorrect image inputs"
-            pixel_values = pixel_values.flatten(0, 1)
+            assert input_image_embeds.dim() == 6, "Incorrect image inputs"
+            input_image_embeds = input_image_embeds.flatten(0, 1)
         else:
-            raise ValueError("Incorrect pixel_values inputs")
+            raise ValueError("Incorrect input_image_embeds inputs")
 
         if isinstance(image_attention_mask, list):
             image_attention_mask = cat_with_pad(image_attention_mask, dim=0)
@@ -1129,8 +1130,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             raise ValueError("Incorrect image_attention_mask inputs")
 
         return Phi4MMImagePixelInputs(
-            type="pixel_values_videos",
-            data=pixel_values,
+            type="pixel_values",
+            data=input_image_embeds,
             image_sizes=image_sizes,
             image_attention_mask=image_attention_mask,
             num_img_tokens=num_img_tokens,
@@ -1142,7 +1143,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
         for input_key in kwargs:
-            if input_key in ("pixel_values",
+            if input_key in ("input_image_embeds",
                              "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
