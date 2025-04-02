@@ -4,8 +4,6 @@ from typing import List, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8)
 from vllm.platforms import current_platform
 
 
@@ -37,6 +35,9 @@ def rocm_aiter_fused_experts(
 
     import aiter as rocm_aiter
     import aiter.fused_moe_bf16_asm as rocm_aiter_asm_fmoe
+
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8)
 
     if envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE and use_fp8_w8a8:
         assert w1_scale is not None
