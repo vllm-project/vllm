@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 import torch
 
 
@@ -12,11 +12,13 @@ class FusedMoEDispatchQuantize(ABC):
             self,
             hidden_states: torch.Tensor,
             hidden_states_scale: Optional[torch.Tensor],
+            a2: Optional[torch.Tensor],
             topk_ids: torch.Tensor,
             num_experts: int,
             expert_map: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor]]:
-        # returns (hidden_states, scales, expert_ids, inv_perm) # make more abstract?
+            n: int,  # TODO try to get rid of this?
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor], Optional[Any]]:
+        # returns (hidden_states, scales, expert_ids, inv_perm, context) # make more abstract?
         raise NotImplementedError
 
 
@@ -103,8 +105,7 @@ class ModularFusedMoEKernel(torch.nn.Module): # should this be a module?
             a2_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         M, _ = hidden_states.shape
-        E, N, _ = w1.shape
-        K = w2.shape[1]
+        E, K, N = w2.shape
         if global_num_experts == -1:
             global_num_experts = E
         top_k = topk_ids.shape[1]
@@ -129,12 +130,14 @@ class ModularFusedMoEKernel(torch.nn.Module): # should this be a module?
 
         #print(f"\nbefore M = {hidden_states.shape[0]}")
 
-        hidden_states, a1_scale, expert_ids, inv_perm = self.dispatch.apply(
+        hidden_states, a1_scale, expert_ids, inv_perm, context = self.dispatch.apply(
             hidden_states,
             a1_scale,
+            a2_scale,
             topk_ids,
             global_num_experts,
             expert_map,
+            w2.shape[1],
         )
 
         #print(f"after M = {hidden_states.shape[0]}")
@@ -152,6 +155,7 @@ class ModularFusedMoEKernel(torch.nn.Module): # should this be a module?
             a2_scale=a2_scale,
             workspace13=workspace13,
             workspace2=workspace2,
+            context=context,
         )
 
         return self.combine.apply(out_hidden_states, fused_out, topk_weights, inv_perm)

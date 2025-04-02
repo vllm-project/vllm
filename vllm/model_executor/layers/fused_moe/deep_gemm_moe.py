@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -306,10 +306,13 @@ class DeepGemmDispatch(mk.FusedMoEDispatchQuantize):
             self,
             hidden_states: torch.Tensor,
             hidden_states_scale: Optional[torch.Tensor],
+            a2_scale: Optional[torch.Tensor],
             topk_ids: torch.Tensor,
             num_experts: int,
             expert_map: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor]]:
+            n: int,  # TODO try to get rid of this?
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor], Optional[Any]]:
+        # TODO: move?
         q_hidden_states, q_hidden_states_scale = _fp8_quantize(
             hidden_states,
             hidden_states_scale,
@@ -325,7 +328,7 @@ class DeepGemmDispatch(mk.FusedMoEDispatchQuantize):
             self.block_shape[0],
         )
 
-        return q_hidden_states, q_hidden_states_scale, expert_ids, inv_perm
+        return q_hidden_states, q_hidden_states_scale, expert_ids, inv_perm, None
 
 
 class DeepGemmExperts(mk.FusedMoEExperts):
@@ -346,8 +349,8 @@ class DeepGemmExperts(mk.FusedMoEExperts):
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
-        workspace1 = M_sum * max(N, K)
-        workspace2 = M_sum * (N // 2)
+        workspace1 = M_sum * max(N * 2, K)
+        workspace2 = M_sum * N
         # return tuples????
         return (workspace1, workspace2)
 
@@ -365,6 +368,7 @@ class DeepGemmExperts(mk.FusedMoEExperts):
             a2_scale: Optional[torch.Tensor],
             workspace13: torch.Tensor,
             workspace2: torch.Tensor,
+            context: Optional[Any] = None,
     ) -> torch.Tensor: # or None?  assume inplace?
         import deep_gemm as dg
 
