@@ -34,8 +34,8 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.guided_decoding.reasoner import Reasoner
 from vllm.platforms import current_platform
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
@@ -49,9 +49,9 @@ else:
 
 class BaseLogitsProcessor:
 
-    def __init__(self, guide: Guide, reasoner: Optional[Reasoner]):
+    def __init__(self, guide: Guide, reasoner: Optional[ReasoningParser]):
         self._guide: Guide = guide
-        self._reasoner: Optional[Reasoner] = reasoner
+        self._reasoner: Optional[ReasoningParser] = reasoner
         # CFGState is used for the FSM state for CFGGuide
         self._fsm_state: DefaultDict[int, Union[int,
                                                 CFGState]] = defaultdict(int)
@@ -69,7 +69,7 @@ class BaseLogitsProcessor:
                 # Remove the reasoning tokens from the input_ids
                 # We need this because our implementation relies on the
                 # hash of the input_ids to store the FSM state.
-                input_ids = self._reasoner.extract_content(input_ids)
+                input_ids = self._reasoner.extract_content_ids(input_ids)
 
         seq_id = hash(tuple(input_ids))
 
@@ -142,7 +142,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
         self,
         regex_string: str,
         tokenizer: PreTrainedTokenizerBase,
-        reasoner: Optional[Reasoner],
+        reasoner: Optional[ReasoningParser],
     ):
         """Compile the FSM that drives the regex-structured generation.
 
@@ -163,7 +163,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
     def __init__(self, schema: Union[str, Dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
                  whitespace_pattern: Union[str, None],
-                 reasoner: Optional[Reasoner]):
+                 reasoner: Optional[ReasoningParser]):
         """Compile the FSM that drives the JSON-guided generation.
 
         Parameters
@@ -203,7 +203,7 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         return CFGGuide(cfg, tokenizer)
 
     def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase,
-                 reasoner: Optional[Reasoner]):
+                 reasoner: Optional[ReasoningParser]):
         """Compile the FSM that drives the context free grammar generation.
 
         Parameters

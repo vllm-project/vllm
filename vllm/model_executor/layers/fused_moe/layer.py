@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
-from vllm import envs
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -117,6 +117,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.w2_weight = torch.nn.Parameter(self._maybe_pad_weight(
             layer.w2_weight.data),
                                              requires_grad=False)
+        # Lazy import to avoid importing triton.
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            is_rocm_aiter_moe_enabled, shuffle_weights)
+        if is_rocm_aiter_moe_enabled():
+            # reshaping weights is required for aiter moe kernel.
+            shuffled_w13, shuffled_w2 = shuffle_weights(
+                layer.w13_weight.data, layer.w2_weight.data)
+
+            layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                  requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                 requires_grad=False)
 
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
@@ -297,7 +309,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                 expert_map=expert_map,
                                 renormalize=renormalize)
 
-    forward_native = forward_cuda
+    forward_native = forward_tpu if current_platform.is_tpu() else forward_cuda
 
 
 def determine_expert_map(
@@ -687,8 +699,9 @@ class FusedMoE(torch.nn.Module):
                              tp_rank=self.tp_rank)
             return
 
-        # Case weight scales and zero_points
-        if ("scale" in weight_name or "zero" in weight_name):
+        # Case weight scales, zero_points and offset
+        if ("scale" in weight_name or "zero" in weight_name
+                or "offset" in weight_name):
             # load the weight scales and zp based on the quantization scheme
             # supported weight scales/zp can be found in
             # FusedMoeWeightScaleSupported
@@ -871,32 +884,6 @@ class FusedMoE(torch.nn.Module):
                 ("w3", ckpt_up_proj_name),
             ]
         ]
-
-    def _load_fp8_scale(self, param: torch.nn.Parameter,
-                        loaded_weight: torch.Tensor, weight_name: str,
-                        shard_id: str, expert_id: int) -> None:
-        param_data = param.data
-
-        # Input scales can be loaded directly and should be equal.
-        if "input_scale" in weight_name:
-            if param_data[expert_id] != 1 and (param_data[expert_id] -
-                                               loaded_weight).abs() > 1e-5:
-                raise ValueError(
-                    "input_scales of w1 and w3 of a layer "
-                    f"must be equal. But got {param_data[expert_id]} "
-                    f"vs. {loaded_weight}")
-            param_data[expert_id] = loaded_weight
-        # Weight scales
-        elif "weight_scale" in weight_name:
-            # If we are in merged column case (gate_up_proj)
-            if shard_id in ("w1", "w3"):
-                # We have to keep the weight scales of w1 and w3 because
-                # we need to re-quantize w1/w3 weights after weight loading.
-                idx = 0 if shard_id == "w1" else 1
-                param_data[expert_id][idx] = loaded_weight
-            # If we are in the row parallel case (down_proj)
-            else:
-                param_data[expert_id] = loaded_weight
 
     def extra_repr(self) -> str:
 

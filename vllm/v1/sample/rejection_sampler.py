@@ -109,6 +109,18 @@ class RejectionSampler(nn.Module):
         output_token_ids: torch.Tensor,
         vocab_size: int,
     ) -> list[list[int]]:
+        """Parse the output of the rejection sampler.
+
+        Args:
+            output_token_ids: The sampled token IDs in shape
+                [batch_size, max_spec_len + 1]. The rejected tokens are
+                replaced with `PLACEHOLDER_TOKEN_ID` by the rejection sampler
+                and will be filtered out in this function.
+            vocab_size: The size of the vocabulary.
+
+        Returns:
+            A list of lists of token IDs.
+        """
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
         valid_mask = ((output_token_ids_np != PLACEHOLDER_TOKEN_ID) &
