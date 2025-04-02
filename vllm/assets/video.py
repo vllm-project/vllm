@@ -10,7 +10,6 @@ import numpy.typing as npt
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
-from vllm.multimodal.video import sample_frames_from_video
 from vllm.utils import PlaceholderModule
 
 from .base import get_cache_dir
