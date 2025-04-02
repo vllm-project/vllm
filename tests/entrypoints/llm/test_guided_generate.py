@@ -414,7 +414,7 @@ def test_guidance_no_additional_properties(llm):
         jsonschema.validate(instance=parsed_json, schema=schema)
         return parsed_json
 
-    base_generated = generate_with_backend('guidance')
+    base_generated = generate_with_backend('guidance:disable-any-whitespace')
     assert "a1" in base_generated
     assert "a2" in base_generated
     assert "a3" in base_generated
@@ -423,7 +423,8 @@ def test_guidance_no_additional_properties(llm):
     assert "a5" in base_generated
     assert "a6" in base_generated
 
-    generated = generate_with_backend('guidance:no-additional-properties')
+    generated = generate_with_backend(
+        'guidance:no-additional-properties,disable-any-whitespace')
     assert "a1" in generated
     assert "a2" in generated
     assert "a3" in generated
