@@ -428,8 +428,8 @@ class Phi4MMImageEmbeddingInputs(TypedDict):
 
 class Phi4MMAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
-    data: Tuple[NestedTensors]
-    """Shape: `((batch_size * num_audios, 80, M), )"""
+    data: Union[torch.Tensor, List[torch.Tensor]]
+    """Shape: `(batch_size * num_audios, 80, M)"""
 
 
 class Phi4MMAudioEmbeddingInputs(TypedDict):
@@ -969,47 +969,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                                                 config.vocab_size, logit_scale)
         self.sampler = get_sampler()
 
-    def _audio_features_to_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        input_features: List[torch.Tensor],
-        audio_input_sizes: torch.Tensor,
-        audio_projection_mode: str,
-    ) -> torch.Tensor:
-        """
-        Convert audio features to embeddings, which are used as input to the 
-        model (via `inputs_embeds`).
-
-        Args:
-            input_ids (torch.Tensor): Input IDs (the prompt in this case).
-            input_features (list[torch.Tensor]): Input features (the audio 
-            embeddings).
-            audio_input_sizes (list[torch.Tensor]): Audio input sizes (the 
-            audio embed lengths to use for padding the audio placeholder token 
-            in the input prompt IDs).
-        """
-        # The audio projection can either be a single linear or Sequential,
-        # so handle both cases
-        if isinstance(self.embed_tokens_extend.audio_projection,
-                      nn.Sequential):
-            target_dtype = self.embed_tokens_extend.audio_projection[
-                0].bias.dtype
-        else:
-            target_dtype = self.embed_tokens_extend.audio_projection.bias.dtype
-
-        audio_input = [
-            input.unsqueeze(0).to(target_dtype) for input in input_features
-        ]
-        kwargs = {
-            "wte": self.model.embed_tokens,
-            'audio_projection_mode': audio_projection_mode
-        }
-        audio_embeddings = self.embed_tokens_extend(input_ids, audio_input,
-                                                    audio_input_sizes,
-                                                    **kwargs)
-        audio_embeddings = audio_embeddings.to(target_dtype)
-        return audio_embeddings
-
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> Optional[Phi4MMAudioInputs]:
         """
@@ -1079,10 +1038,10 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
         dtype = next(self.embed_tokens_extend.parameters()).dtype
         audio_embeds = [
-            self.embed_tokens_extend.get_audio_features(
-                features.unsqueeze(0).to(dtype),
+            self.embed_tokens_extend(
+                features.to(dtype),
                 audio_projection_mode=audio_projection_mode,
-            ).squeeze(0) for features in audio_features
+            ) for features in audio_features
         ]
         return audio_embeds
 
