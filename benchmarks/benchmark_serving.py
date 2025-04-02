@@ -50,9 +50,9 @@ except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
 from benchmark_dataset import (BurstGPTDataset, ConversationDataset,
-                               InstructCoderDataset, RandomDataset,
-                               SampleRequest, ShareGPTDataset, SonnetDataset,
-                               VisionArenaDataset)
+                               HuggingFaceDataset, InstructCoderDataset,
+                               RandomDataset, SampleRequest, ShareGPTDataset,
+                               SonnetDataset, VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -595,6 +595,17 @@ def main(args: argparse.Namespace):
             args.hf_split = "train"
         elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = ConversationDataset
+        else:
+            supported_datasets = set([
+                dataset_name for cls in HuggingFaceDataset.__subclasses__()
+                for dataset_name in cls.SUPPORTED_DATASET_PATHS
+            ])
+            raise ValueError(
+                f"Unsupported dataset path: {args.dataset_path}. "
+                "Huggingface dataset only supports dataset_path"
+                f" from one of following: {supported_datasets}. "
+                "Please consider contributing if you would "
+                "like to add support for additional dataset formats.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
