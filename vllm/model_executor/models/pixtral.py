@@ -199,7 +199,7 @@ class PixtralProcessingInfo(BaseProcessingInfo):
         ncols, nrows = processor.image_processor._image_to_num_tokens(
             Image.new("RGB", (image_width, image_height)))
 
-        return (ncols + 1) * nrows
+        return ncols * nrows
 
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_hf_processor().image_processor
@@ -933,9 +933,7 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
             image_width=image_width,
             image_height=image_height,
         )
-
-        # Consider the image_break_token
-        return (ncols + 1) * nrows
+        return ncols * nrows
 
     def get_max_image_tokens(self) -> int:
         image_size = self.get_image_size()

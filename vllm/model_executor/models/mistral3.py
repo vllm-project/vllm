@@ -32,8 +32,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
-                         SupportsV0Only)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -393,14 +392,12 @@ def init_vision_tower_for_llava(
     )
 
 
-# TODO(mgoin): Support V1, there are issues with image batching/chunking
-# that need to be resolved first.
 @MULTIMODAL_REGISTRY.register_processor(
     _build_mistral3_processor,
     info=_build_mistral3_info,
     dummy_inputs=Mistral3DummyInputsBuilder)
 class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                       SupportsPP, SupportsV0Only):
+                                       SupportsPP):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

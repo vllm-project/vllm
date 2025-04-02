@@ -883,7 +883,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
   *
   * ✅︎
-  *
+  * ✅︎
 - * `MllamaForConditionalGeneration`
   * Llama 3.2
   * T + I<sup>+</sup>
@@ -984,9 +984,6 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{important}
-To use Gemma3 series models, you have to install Hugging Face Transformers library from source via
-`pip install git+https://github.com/huggingface/transformers`.
-
 Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
 You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": True}'`.
 :::
