@@ -669,7 +669,7 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.time_decode_requests)
         self._log_gauge(self.metrics.gauge_total_tokens_in_queue,
                         stats.total_tokens_in_queue)
-  
+
         total_evicted = sum(stats.total_evicted_tokens_requests
                             ) if stats.total_evicted_tokens_requests else 0
         self._log_counter(self.metrics.counter_total_evicted_tokens,
