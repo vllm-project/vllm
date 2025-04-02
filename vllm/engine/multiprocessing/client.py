@@ -697,10 +697,10 @@ class MQLLMEngineClient(EngineClient):
         return await self._send_one_way_rpc_request(
             request=RPCSleepRequest(level), socket=self.input_socket)
 
-    async def wake_up(self) -> None:
+    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """Wake up the engine"""
         return await self._send_one_way_rpc_request(
-            request=RPCWakeUpRequest.WAKE_UP, socket=self.input_socket)
+            request=RPCWakeUpRequest(tags), socket=self.input_socket)
 
     async def is_sleeping(self) -> bool:
         """Check whether the engine is sleeping"""

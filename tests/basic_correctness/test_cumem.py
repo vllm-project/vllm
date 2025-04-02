@@ -155,6 +155,24 @@ def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
 
         llm.wake_up()
         output2 = llm.generate(prompt, sampling_params)
-
         # cmp output
         assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+        llm.sleep(level=1)
+        llm.wake_up(tags=["weights"])
+
+        free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
+        used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
+
+        # should just reallocate memory for weights (1B model, ~2GiB weights)
+        if use_v1:
+            assert used_bytes < 10 * GiB_bytes
+        else:
+            assert used_bytes < 6 * GiB_bytes
+
+        # now allocate kv cache memory
+        llm.wake_up(tags=["kv_cache"])
+        output3 = llm.generate(prompt, sampling_params)
+
+        # cmp output
+        assert output[0].outputs[0].text == output3[0].outputs[0].text
