@@ -787,7 +787,12 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, is_v1_server: bool,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", ["unsloth/Llama-3.2-1B-Instruct"])
-async def test_required_tool_use(client: openai.AsyncOpenAI, model_name: str):
+async def test_required_tool_use(client: openai.AsyncOpenAI,
+                                 is_v1_server: bool, model_name: str):
+    if is_v1_server:
+        pytest.skip(
+            "tool_choice='required' requires features unsupported on V1")
+
     tools = [
         {
             "type": "function",
@@ -909,6 +914,7 @@ async def test_required_tool_use(client: openai.AsyncOpenAI, model_name: str):
 
 @pytest.mark.asyncio
 async def test_inconsistent_tool_choice_and_tools(client: openai.AsyncOpenAI,
+                                                  is_v1_server: bool,
                                                   sample_json_schema):
 
     if is_v1_server:
