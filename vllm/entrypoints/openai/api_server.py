@@ -705,7 +705,6 @@ if envs.VLLM_SERVER_DEV_MODE:
     async def sleep(raw_request: Request):
         # get POST params
         level = raw_request.query_params.get("level", "1")
-        logger.info("sleep the engine with level %s", level)
         await engine_client(raw_request).sleep(int(level))
         # FIXME: in v0 with frontend multiprocessing, the sleep command
         # is sent but does not finish yet when we return a response.
@@ -713,8 +712,12 @@ if envs.VLLM_SERVER_DEV_MODE:
 
     @router.post("/wake_up")
     async def wake_up(raw_request: Request):
-        logger.info("wake up the engine")
-        await engine_client(raw_request).wake_up()
+        tags = raw_request.query_params.getlist("tags")
+        if tags == []:
+            # set to None to wake up all tags if no tags are provided
+            tags = None
+        logger.info("wake up the engine with tags: %s", tags)
+        await engine_client(raw_request).wake_up(tags)
         # FIXME: in v0 with frontend multiprocessing, the wake-up command
         # is sent but does not finish yet when we return a response.
         return Response(status_code=200)
