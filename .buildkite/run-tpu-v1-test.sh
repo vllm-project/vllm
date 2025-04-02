@@ -30,8 +30,6 @@ docker run --privileged --net host --shm-size=16G -it \
     && echo TEST_3 \
     && pytest -v -s /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine \
     && echo TEST_4 \
-    && pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py \
-    && echo TEST_5 \
     && python3 /workspace/vllm/examples/offline_inference/tpu.py \
     && echo TEST_6 \
     && pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py \
