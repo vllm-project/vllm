@@ -9,8 +9,8 @@ import torch
 
 class FusedMoEQuantizeDispatchCombine(ABC):
 
-    def __init__(self):
-        pass
+    #    def __init__(self):
+    #        pass
 
     @abstractmethod
     def dispatch(
@@ -23,7 +23,9 @@ class FusedMoEQuantizeDispatchCombine(ABC):
         expert_map: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         # TODO: figure this out
-        # returns (quantized+dispatched a, quantized+dispatched a1_scales, dispatched topk_ids)
+        # returns (quantized+dispatched a,
+        #          quantized+dispatched a1_scales,
+        #          dispatched topk_ids)
         raise NotImplementedError
 
     @abstractmethod
@@ -39,8 +41,8 @@ class FusedMoEQuantizeDispatchCombine(ABC):
 # store weights, etc. here
 class FusedMoEPermuteExpertsUnpermute(ABC):
 
-    def __init__(self):
-        pass
+    #    def __init__(self):
+    #        pass
 
     @abstractmethod
     def workspace_shapes(self, M: int, N: int, K: int, topk: int,
@@ -66,8 +68,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         raise NotImplementedError
 
 
-# Note: only intended for use with a single model layer (due to temp buffers, constants, etc.)
-# TODO: permute/unpermute must be paired
+# Note: only intended for use with a single model layer (due to temp buffers,
+# constants, etc.)
 class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
 
     def __init__(
@@ -103,10 +105,7 @@ class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
             global_num_experts = E
         top_k = topk_ids.shape[1]
 
-        if inplace:
-            output = a1
-        else:
-            output = torch.empty_like(a1)
+        output = a1 if inplace else torch.empty_like(a1)
 
         workspace13_shape, workspace2_shape, workspace_dtype = (
             self.fused_experts.workspace_shapes(M, N, K, top_k,
