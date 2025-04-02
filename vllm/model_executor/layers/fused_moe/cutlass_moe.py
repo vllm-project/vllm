@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import (_resize_cache,
@@ -312,39 +313,42 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
 
 
 class CutlassDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
+
     def __init__(self, out_dtype: torch.dtype):
         super().__init__()
         self.out_dtype = out_dtype
 
     def dispatch(
-            self,
-            a: torch.Tensor,
-            a1_scale: Optional[torch.Tensor],
-            a2_scale: Optional[torch.Tensor],
-            topk_ids: torch.Tensor,
-            num_experts: int,
-            expert_map: Optional[torch.Tensor],
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         # why do we need to check a2_scale here?
         per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
             a2_scale.numel() != 1 if a2_scale is not None else False)
 
-        a_q, a1_scale = ops.scaled_fp8_quant(
-            a, a1_scale, use_per_token_if_dynamic=per_act_token)
+        a1q, a1q_scale = ops.scaled_fp8_quant(
+            a1, a1_scale, use_per_token_if_dynamic=per_act_token)
 
-        return a_q, a1_scale, topk_ids
+        return a1q, a1_scale, topk_ids
 
     def combine(
-            self,
-            out: torch.Tensor,  #TBD
-            hidden_states: torch.Tensor,
-            topk_weights: torch.Tensor,
-    ) -> torch.Tensor:
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> None:
         M, topk = topk_weights.shape
-        K = hidden_states.shape[1]
-        hidden_states = (hidden_states.view(-1, topk, K) * topk_weights.view(M, -1, 1).to(self.out_dtype)).sum(dim=1)
-        # use moe_sum? to write into out?
-        return hidden_states
+        K = fused_expert_output.shape[1]
+        fused_expert_output = fused_expert_output.view(
+            -1, topk, K) * topk_weights.view(
+                M, -1, 1)  #.to(self.out_dtype)).sum(dim=1)
+        assert output.dtype == self.out_dtype
+        ops.moe_sum(fused_expert_output, output)
 
         ops.get_cutlass_moe_mm_data(topk_ids,
                                     expert_offsets,
@@ -363,106 +367,85 @@ class CutlassDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
 
 class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
+
     def __init__(
-            self,
-            ab_strides1: torch.Tensor,
-            c_strides1: torch.Tensor,
-            ab_strides2: torch.Tensor,
-            c_strides2: torch.Tensor,
+        self,
+        ab_strides1: torch.Tensor,
+        c_strides1: torch.Tensor,
+        ab_strides2: torch.Tensor,
+        c_strides2: torch.Tensor,
+        out_dtype: torch.dtype,
     ):
         super().__init__()
         self.ab_strides1 = ab_strides1
         self.c_strides1 = c_strides1
         self.ab_strides2 = ab_strides2
         self.c_strides2 = c_strides2
+        self.out_dtype = out_dtype
 
     def workspace_shapes(
             self,
             M: int,
-            K: int,
+            K: int,  # Note that K, N are transposed
             N: int,
             topk: int,
-            num_experts: int
-    ) -> Tuple[int, int]:
+            num_experts: int) -> Tuple[int, int, torch.dtype]:
         workspace1 = M * topk * max(2 * N, K)
         workspace2 = M * topk * N
-        # return tuples????
-        return (workspace1, workspace2)
+        return (workspace1, workspace2, self.out_dtype)
 
     def apply(
-            self,
-            out: torch.Tensor, # TBD
-            q_hidden_states: torch.Tensor,
-            w1: torch.Tensor,
-            w2: torch.Tensor,
-            topk_ids: torch.Tensor,
-            inplace: bool,
-            activation: str,
-            expert_map: Optional[torch.Tensor],
-            w1_scale: Optional[torch.Tensor],
-            w2_scale: Optional[torch.Tensor],
-            a1_scale: Optional[torch.Tensor],
-            a2_scale: Optional[torch.Tensor],
-            workspace13: torch.Tensor,
-            workspace2: torch.Tensor,
-    ) -> torch.Tensor: # or None?  assume inplace?
-        # chunking in here or in ModularFusedMoEKernel? ignore for now
-        M = q_hidden_states.shape[0]
-        E, N, _ = w2.shape   # because w1 + w2 are transposed
-        K = w1.shape[1]  #?
+        self,
+        a1q: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        w1_scale: Optional[torch.Tensor],
+        w2_scale: Optional[torch.Tensor],
+        a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+    ) -> torch.Tensor:
+        # TODO: chunking in here or in FusedMoEModularKernel? ignore for now
+        M = a1q.shape[0]
+        E, N, K = w2.shape  # because w1 + w2 are transposed
         topk = topk_ids.shape[1]
-        assert K == w2.shape[-1]
-        assert E == w1.shape[0]
-        device = q_hidden_states.device
+        device = a1q.device
 
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+        assert w1.shape[1] == K
+        assert w1.shape[0] == E
+
+        per_act_token = a1q_scale.numel() != 1 if a1q_scale is not None else (
             a2_scale.numel() != 1 if a2_scale is not None else False)
 
-        expert_offsets = torch.empty((E + 1),
-                                     dtype=torch.int32,
-                                     device=device)
-        problem_sizes1 = torch.empty((E, 3),
-                                     dtype=torch.int32,
-                                     device=device)
-        problem_sizes2 = torch.empty((E, 3),
-                                     dtype=torch.int32,
-                                     device=device)
+        expert_offsets = torch.empty((E + 1), dtype=torch.int32, device=device)
+        problem_sizes1 = torch.empty((E, 3), dtype=torch.int32, device=device)
+        problem_sizes2 = torch.empty((E, 3), dtype=torch.int32, device=device)
 
-        a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-        c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+        a_map = torch.empty((topk_ids.numel()),
+                            dtype=torch.int32,
+                            device=device)
+        c_map = torch.empty((topk_ids.numel()),
+                            dtype=torch.int32,
+                            device=device)
 
-        #print(f"prob {k}, {n}")
+        ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
+                                    problem_sizes2, a_map, c_map, E, N, K)
 
-        ops.get_cutlass_moe_mm_data(topk_ids,
-                                    expert_offsets,
-                                    problem_sizes1,
-                                    problem_sizes2,
-                                    a_map,
-                                    c_map,
-                                    E,
-                                    N,
-                                    K)
-
-        q_hidden_states  = _fp8_perm(q_hidden_states, a_map)
-        a1_scale = a1_scale[a_map] if per_act_token else a1_scale
+        a1q = _fp8_perm(a1q, a_map)
+        a1q_scale = a1q_scale[a_map] if per_act_token else a1q_scale
 
         # fix names
         c1 = _resize_cache(workspace13, (M * topk, N * 2))
         c2 = _resize_cache(workspace2, (M * topk, N))
         c3 = _resize_cache(workspace13, (M * topk, K))
 
-        ops.cutlass_moe_mm(
-            c1,
-            q_hidden_states,
-            w1,
-            a1_scale,
-            w1_scale,
-            expert_offsets[:-1],
-            problem_sizes1,
-            self.ab_strides1,
-            self.ab_strides1,
-            self.c_strides1
-        )
+        ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale, w1_scale,
+                           expert_offsets[:-1], problem_sizes1,
+                           self.ab_strides1, self.ab_strides1, self.c_strides1)
 
         if activation == "silu":
             torch.ops._C.silu_and_mul(c2, c1)
@@ -471,21 +454,12 @@ class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
-        intemediate_q, a2_scale = ops.scaled_fp8_quant(
+        a2q, a2q_scale = ops.scaled_fp8_quant(
             c2, a2_scale, use_per_token_if_dynamic=per_act_token)
 
-        ops.cutlass_moe_mm(
-            c3,
-            intemediate_q,
-            w2,
-            a2_scale,
-            w2_scale,
-            expert_offsets[:-1],
-            problem_sizes2,
-            self.ab_strides2,
-            self.ab_strides2,
-            self.c_strides2
-        )
+        ops.cutlass_moe_mm(c3, a2q, w2, a2q_scale, w2_scale,
+                           expert_offsets[:-1], problem_sizes2,
+                           self.ab_strides2, self.ab_strides2, self.c_strides2)
 
         c3 = c3[c_map, ...]
 
@@ -493,11 +467,11 @@ class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 def modular_cutlass_moe_fp8(
-        ab_strides1: torch.Tensor,
-        c_strides1: torch.Tensor,
-        ab_strides2: torch.Tensor,
-        c_strides2: torch.Tensor,
-        out_dtype: torch.dtype = torch.half,
+    ab_strides1: torch.Tensor,
+    c_strides1: torch.Tensor,
+    ab_strides2: torch.Tensor,
+    c_strides2: torch.Tensor,
+    out_dtype: torch.dtype = torch.half,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         CutlassDispatchCombine(out_dtype),
@@ -506,5 +480,6 @@ def modular_cutlass_moe_fp8(
             c_strides1,
             ab_strides2,
             c_strides2,
+            out_dtype,
         ),
     )

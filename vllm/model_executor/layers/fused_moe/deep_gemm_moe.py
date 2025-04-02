@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
@@ -304,123 +304,109 @@ def deep_gemm_moe_fp8(
 
 
 class DeepGemmDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
+
     def __init__(self):
         super().__init__()
         self.block_shape = deep_gemm_block_shape()
 
     def dispatch(
-            self,
-            a: torch.Tensor,
-            a1_scale: Optional[torch.Tensor],
-            a2_scale: Optional[torch.Tensor],
-            topk_ids: torch.Tensor,
-            num_experts: int,
-            expert_map: Optional[torch.Tensor],
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
-        q_hidden_states, q_hidden_states_scale = _fp8_quantize(
-            a,
+        a1q, a1q_scale = _fp8_quantize(
+            a1,
             a1_scale,
             self.block_shape,
         )
-        return q_hidden_states, q_hidden_states_scale, topk_ids
+        return a1q, a1q_scale, topk_ids
 
     def combine(
-            self,
-            out: torch.Tensor,
-            hidden_states: torch.Tensor,
-            topk_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        _moe_unpermute_and_reduce(
-            out,
-            hidden_states,
-            None,
-            topk_weights
-        )
-        return out
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> None:
+        _moe_unpermute_and_reduce(output, fused_expert_output, None,
+                                  topk_weights)
 
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
+
     def __init__(self):
         super().__init__()
         self.block_shape = deep_gemm_block_shape()
+        self.out_dtype = torch.bfloat16
 
-    def workspace_shapes(
-            self,
-            M: int,
-            N: int,
-            K: int,
-            topk: int,
-            num_experts: int
-    ) -> Tuple[int, int]:
+    def workspace_shapes(self, M: int, N: int, K: int, topk: int,
+                         num_experts: int) -> Tuple[int, int, torch.dtype]:
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
         workspace1 = M_sum * max(N * 2, K)
         workspace2 = M_sum * N
-        # return tuples????
-        return (workspace1, workspace2)  # TODO add type
+        return (workspace1, workspace2, self.out_dtype)
 
     def apply(
-            self,
-            out: torch.Tensor, #unused tbd
-            q_hidden_states: torch.Tensor,
-            w1: torch.Tensor,
-            w2: torch.Tensor,
-            topk_ids: torch.Tensor,
-            inplace: bool,
-            activation: str,
-            expert_map: Optional[torch.Tensor],
-            w1_scale: Optional[torch.Tensor],
-            w2_scale: Optional[torch.Tensor],
-            a1_scale: Optional[torch.Tensor],
-            a2_scale: Optional[torch.Tensor],
-            workspace13: torch.Tensor,
-            workspace2: torch.Tensor,
-    ) -> torch.Tensor: # or None?  assume inplace?
+        self,
+        a1q: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        w1_scale: Optional[torch.Tensor],
+        w2_scale: Optional[torch.Tensor],
+        a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+    ) -> torch.Tensor:
         import deep_gemm as dg
 
-        # chunking in here or in ModularFusedMoEKernel? ignore for now
-        E, N, _ = w1.shape
-        _, K, _ = w2.shape
+        # TODO: chunking in here or in FusedMoEModularKernel? ignore for now
+        #E, N, _ = w1.shape
+        #_, K, _ = w2.shape
+        E, N, K = w1.shape
 
-        #print(f"M_sum = {M_sum}")
+        assert w2.shape[1] == K
+        assert w2.shape[0] == E
 
-        q_hidden_states, a1_scale, _, expert_ids, inv_perm = _moe_permute(
-            q_hidden_states,
-            a1_scale,
+        a1q, a1q_scale, _, expert_ids, inv_perm = _moe_permute(
+            a1q,
+            a1q_scale,
             topk_ids,
             E,
             expert_map,
             self.block_shape[0],
         )
 
-        M_sum = q_hidden_states.shape[0]
+        # Note: M_sum is different than the pre-permuted shape of a1q.
+        M_sum = a1q.shape[0]
         workspace1 = _resize_cache(workspace13, (M_sum, N))
         workspace2 = _resize_cache(workspace2, (M_sum, N // 2))
         workspace3 = _resize_cache(workspace13, (M_sum, K))
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (q_hidden_states, a1_scale), (w1, w1_scale),
-            workspace1,
-            expert_ids)
+            (a1q, a1q_scale), (w1, w1_scale), workspace1, expert_ids)
 
         if activation == "silu":
-            torch.ops._C.silu_and_mul(workspace2,
-                                      workspace1.view(-1, N))
+            torch.ops._C.silu_and_mul(workspace2, workspace1.view(-1, N))
         elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(workspace2,
-                                      workspace1.view(-1, N))
+            torch.ops._C.gelu_and_mul(workspace2, workspace1.view(-1, N))
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
         a2q_scale: Optional[torch.Tensor] = None
 
-        qworkspace2, a2q_scale = _fp8_quantize(
-            workspace2, a2_scale, self.block_shape)
+        a2q, a2q_scale = _fp8_quantize(workspace2, a2_scale, self.block_shape)
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (qworkspace2, a2q_scale), (w2, w2_scale),
-            workspace3, expert_ids)
+            (a2q, a2q_scale), (w2, w2_scale), workspace3, expert_ids)
 
         workspace3 = workspace3[inv_perm, ...]
 
