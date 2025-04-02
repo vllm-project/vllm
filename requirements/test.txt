@@ -93,8 +93,6 @@ datasets==3.0.2
     #   lm-eval
 decorator==5.1.1
     # via librosa
-decord==0.6.0
-    # via -r requirements/test.in
 dill==0.3.8
     # via
     #   datasets
@@ -154,14 +152,17 @@ genson==1.3.0
     # via datamodel-code-generator
 h11==0.14.0
     # via httpcore
+hf-xet==0.1.4
+    # via huggingface-hub
 hiredis==3.0.0
     # via tensorizer
 httpcore==1.0.6
     # via httpx
 httpx==0.27.2
     # via -r requirements/test.in
-huggingface-hub==0.26.2
+huggingface-hub==0.30.1
     # via
+    #   -r requirements/test.in
     #   accelerate
     #   datasets
     #   evaluate
@@ -221,7 +222,7 @@ librosa==0.10.2.post1
     # via -r requirements/test.in
 llvmlite==0.44.0
     # via numba
-lm-eval==0.4.4
+lm-eval==0.4.8
     # via -r requirements/test.in
 lxml==5.3.0
     # via sacrebleu
@@ -276,7 +277,6 @@ numpy==1.26.4
     #   contourpy
     #   cupy-cuda12x
     #   datasets
-    #   decord
     #   einx
     #   encodec
     #   evaluate
@@ -337,8 +337,10 @@ nvidia-nvjitlink-cu12==12.4.127
     #   torch
 nvidia-nvtx-cu12==12.4.127
     # via torch
-opencv-python-headless==4.10.0.84
-    # via mistral-common
+opencv-python-headless==4.11.0.86
+    # via
+    #   -r requirements/test.in
+    #   mistral-common
 packaging==24.1
     # via
     #   accelerate
