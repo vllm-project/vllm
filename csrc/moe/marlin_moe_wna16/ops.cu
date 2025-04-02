@@ -33,7 +33,7 @@
 
 namespace MARLIN_NAMESPACE_NAME {
 
-__global__ void MarlinDefault(MARLIN_KERNEL_PARAMS){};
+__global__ void MarlinDefault(MARLIN_KERNEL_PARAMS) {};
 
 using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
 
