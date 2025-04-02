@@ -60,10 +60,6 @@ def test_llm_delete(monkeypatch, model: str, tensor_parallel_size: int,
         llm = LLM(model=model,
                   enforce_eager=True,
                   tensor_parallel_size=tensor_parallel_size)
-        # llm.generate(
-        #     "Hello my name is",
-        #     sampling_params=SamplingParams(
-        #         max_tokens=1))
         del llm
 
         # Confirm all the processes are cleaned up.
