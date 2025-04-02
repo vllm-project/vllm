@@ -24,6 +24,8 @@ from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
 from vllm.transformers_utils.configs.solar import SolarConfig
 from vllm.transformers_utils.configs.telechat2 import Telechat2Config
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.transformers_utils.configs.configuration_minimax_text_01 import MiniMaxText01Config
+from vllm.transformers_utils.configs.configuration_minimax_vl_01 import MiniMaxVL01Config
 
 __all__ = [
     "ChatGLMConfig",
@@ -47,4 +49,6 @@ __all__ = [
     "SolarConfig",
     "Telechat2Config",
     "UltravoxConfig",
+    "MiniMaxText01Config",
+    "MiniMaxVL01Config",
 ]
