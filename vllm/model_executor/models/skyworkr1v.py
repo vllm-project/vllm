@@ -410,6 +410,14 @@ class BaseSkyworkR1VProcessor(ABC):
                 torch.tensor([len(item) for item in pixel_values_lst]),
             }
 
+            for pixel_values in pixel_values_lst:
+                num_patches = pixel_values.shape[0]
+                feature_size = num_patches * self.num_image_token
+
+                image_repl = self.get_image_repl(feature_size, num_patches)
+
+                text = [t.replace('<image>', image_repl.full, 1) for t in text]
+
         text_inputs = self.tokenizer(text)
 
         return {
