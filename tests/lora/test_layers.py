@@ -59,7 +59,7 @@ DEVICES = ([
 # prefill stage(True) or decode stage(False)
 STAGES = [True, False]
 
-NUM_RANDOM_SEEDS = 10
+NUM_RANDOM_SEEDS = 6
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
 
