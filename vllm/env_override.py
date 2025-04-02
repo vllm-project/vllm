@@ -11,8 +11,8 @@ import torch
 # see https://github.com/NVIDIA/nccl/issues/1234
 os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
-# see https://github.com/vllm-project/vllm/pull/15366
-# avoid cuda initialization for unintentional call to torch.cuda.is_available()
+# see https://github.com/vllm-project/vllm/pull/15951
+# it avoids unintentional cuda initialization from torch.cuda.is_available()
 os.environ['PYTORCH_NVML_BASED_CUDA_CHECK'] = '1'
 
 # see https://github.com/vllm-project/vllm/issues/10480
