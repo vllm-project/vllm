@@ -2,7 +2,7 @@
     "mode": "QUANTIZE",
     "observer": "maxabs",
     "scale_method": "maxabs_hw",
-    "scale_format": "const",
+    "scale_format": "scalar",
     "allowlist": {
         "types": [],
         "names": []
@@ -12,9 +12,10 @@
         "names": [
             "lm_head",
             "mlp\\.gate\\b",
+            "latent_cache_k_nodeq",
+            "latent_cache_v_nodeq",
             "matmul_qk",
             "matmul_av",
-            "batch2block_matmul",
             "block2batch_matmul"
         ]
     },
