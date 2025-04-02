@@ -219,7 +219,7 @@ librosa==0.10.2.post1
     # via -r requirements/test.in
 llvmlite==0.44.0
     # via numba
-lm-eval==0.4.4
+lm-eval==0.4.8
     # via -r requirements/test.in
 lxml==5.3.0
     # via sacrebleu
