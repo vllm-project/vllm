@@ -92,7 +92,7 @@ class EngineCoreClient(ABC):
     def sleep(self, level: int = 1) -> None:
         raise NotImplementedError
 
-    def wake_up(self) -> None:
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         raise NotImplementedError
 
     def is_sleeping(self) -> bool:
@@ -141,7 +141,7 @@ class EngineCoreClient(ABC):
     async def sleep_async(self, level: int = 1) -> None:
         raise NotImplementedError
 
-    async def wake_up_async(self) -> None:
+    async def wake_up_async(self, tags: Optional[list[str]] = None) -> None:
         raise NotImplementedError
 
     async def is_sleeping_async(self) -> bool:
@@ -206,8 +206,8 @@ class InprocClient(EngineCoreClient):
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
 
-    def wake_up(self) -> None:
-        self.engine_core.wake_up()
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        self.engine_core.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
@@ -520,8 +520,8 @@ class SyncMPClient(MPClient):
     def sleep(self, level: int = 1) -> None:
         self.call_utility("sleep", level)
 
-    def wake_up(self) -> None:
-        self.call_utility("wake_up")
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        self.call_utility("wake_up", tags)
 
     def is_sleeping(self) -> bool:
         return self.call_utility("is_sleeping")
@@ -647,8 +647,8 @@ class AsyncMPClient(MPClient):
     async def sleep_async(self, level: int = 1) -> None:
         await self.call_utility_async("sleep", level)
 
-    async def wake_up_async(self) -> None:
-        await self.call_utility_async("wake_up")
+    async def wake_up_async(self, tags: Optional[list[str]] = None) -> None:
+        await self.call_utility_async("wake_up", tags)
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")

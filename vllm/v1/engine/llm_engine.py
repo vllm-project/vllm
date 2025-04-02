@@ -245,8 +245,8 @@ class LLMEngine:
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 
-    def wake_up(self):
-        self.engine_core.wake_up()
+    def wake_up(self, tags: Optional[list[str]] = None):
+        self.engine_core.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()

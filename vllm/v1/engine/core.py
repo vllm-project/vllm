@@ -264,8 +264,8 @@ class EngineCore:
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 
-    def wake_up(self):
-        self.model_executor.wake_up()
+    def wake_up(self, tags: Optional[list[str]] = None):
+        self.model_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.model_executor.is_sleeping
