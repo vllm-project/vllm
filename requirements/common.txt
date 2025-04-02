@@ -7,7 +7,7 @@ tqdm
 blake3
 py-cpuinfo
 transformers >= 4.50.3
-huggingface-hub[hf-xet] >= 0.30.0  # Required for Xet downloads.
+huggingface-hub[hf_xet] >= 0.30.0  # Required for Xet downloads.
 tokenizers >= 0.19.1  # Required for Llama 3.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
