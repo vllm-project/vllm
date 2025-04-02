@@ -17,6 +17,7 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.spec_decode.util import register_spec_decode
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
@@ -78,6 +79,7 @@ class ROCmFlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
+@register_spec_decode
 class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     """Metadata for FlashAttentionBackend.
 
