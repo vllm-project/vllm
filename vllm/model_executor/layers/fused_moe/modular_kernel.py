@@ -1,160 +1,150 @@
+# SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
+
 import torch
+
+# TODO: add comments
 
 
 class FusedMoEQuantizeDispatchCombine(ABC):
+
     def __init__(self):
         pass
 
     @abstractmethod
     def dispatch(
-            self,
-            a: torch.Tensor,
-            a1_scale: Optional[torch.Tensor],
-            a2_scale: Optional[torch.Tensor],
-            topk_ids: torch.Tensor,
-            num_experts: int,
-            expert_map: Optional[torch.Tensor],
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         # TODO: figure this out
-        # returns (quantized+dispatched hidden_states, quantized+dispatched scales, dispatched topk_ids)
+        # returns (quantized+dispatched a, quantized+dispatched a1_scales, dispatched topk_ids)
         raise NotImplementedError
 
     @abstractmethod
     def combine(
-            self,
-            out: torch.Tensor,
-            hidden_states: torch.Tensor,
-            topk_weights: torch.Tensor,
-    ) -> torch.Tensor:
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,  # not reduced or weighted
+        topk_weights: torch.Tensor,
+    ) -> None:
         raise NotImplementedError
 
 
 # store weights, etc. here
 class FusedMoEPermuteExpertsUnpermute(ABC):
+
     def __init__(self):
         pass
 
     @abstractmethod
-    def workspace_shapes(
-            self,
-            M: int,
-            N: int,
-            K: int,
-            topk: int,
-            num_experts: int
-    ) -> Tuple[int, int]:
+    def workspace_shapes(self, M: int, N: int, K: int, topk: int,
+                         num_experts: int) -> Tuple[int, int, torch.dtype]:
         raise NotImplementedError
 
     @abstractmethod
     def apply(
-            self,
-            out: torch.Tensor,
-            q_hidden_states: torch.Tensor,
-            w1: torch.Tensor,
-            w2: torch.Tensor,
-            topk_ids: torch.Tensor,
-            inplace: bool,
-            activation: str,
-            expert_map: Optional[torch.Tensor],
-            w1_scale: Optional[torch.Tensor],
-            w2_scale: Optional[torch.Tensor],
-            a1_scale: Optional[torch.Tensor],
-            a2_scale: Optional[torch.Tensor],
-            workspace13: torch.Tensor,
-            workspace2: torch.Tensor,
-    ) -> torch.Tensor: # or None?  assume inplace?
+        self,
+        a1q: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        w1_scale: Optional[torch.Tensor],
+        w2_scale: Optional[torch.Tensor],
+        a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+    ) -> torch.Tensor:
         raise NotImplementedError
 
 
 # Note: only intended for use with a single model layer (due to temp buffers, constants, etc.)
 # TODO: permute/unpermute must be paired
-class FusedMoEModularKernel(torch.nn.Module): # should this be a module?
+class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
+
     def __init__(
-            self,
-            dispatch_combine: FusedMoEQuantizeDispatchCombine,
-            fused_experts: FusedMoEPermuteExpertsUnpermute,
+        self,
+        dispatch_combine: FusedMoEQuantizeDispatchCombine,
+        fused_experts: FusedMoEPermuteExpertsUnpermute,
     ):
         super().__init__()
         self.dispatch_combine = dispatch_combine
         self.fused_experts = fused_experts
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            w1: torch.Tensor,
-            w2: torch.Tensor,
-            topk_weights: torch.Tensor,
-            topk_ids: torch.Tensor,
-            inplace: bool = False,
-            activation: str = "silu",
-            global_num_experts: int = -1,
-            expert_map: Optional[torch.Tensor] = None,
-            w1_scale: Optional[torch.Tensor] = None,
-            w2_scale: Optional[torch.Tensor] = None,
-            w1_zp: Optional[torch.Tensor] = None,
-            w2_zp: Optional[torch.Tensor] = None,
-            a1_scale: Optional[torch.Tensor] = None,
-            a2_scale: Optional[torch.Tensor] = None,
+        self,
+        a1: torch.Tensor,  # aka hidden states
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        inplace: bool = False,
+        activation: str = "silu",
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        w1_zp: Optional[torch.Tensor] = None,
+        w2_zp: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        M, _ = hidden_states.shape
+        M, _ = a1.shape
         E, K, N = w2.shape
         if global_num_experts == -1:
             global_num_experts = E
         top_k = topk_ids.shape[1]
 
-        assert not inplace, "NYI"
-
         if inplace:
-            out_hidden_states = hidden_states
+            output = a1
         else:
-            out_hidden_states = torch.empty_like(hidden_states)
+            output = torch.empty_like(a1)
 
-        #print(f"TKN = {topk_ids.numel()} {M*top_k}")
-
-        workspace13_shape, workspace2_shape = (
-            self.fused_experts.workspace_shapes(
-                M, N, K, top_k, global_num_experts)
-        )
+        workspace13_shape, workspace2_shape, workspace_dtype = (
+            self.fused_experts.workspace_shapes(M, N, K, top_k,
+                                                global_num_experts))
 
         # We can reuse the memory between cache1 and cache3 because by the time
         # we need cache3, we're done with cache1
         workspace13 = torch.empty(workspace13_shape,
-                                  device=hidden_states.device,
-                                  dtype=hidden_states.dtype)
+                                  device=a1.device,
+                                  dtype=workspace_dtype)
         workspace2 = torch.empty(workspace2_shape,
-                                 device=hidden_states.device,
-                                 dtype=hidden_states.dtype)
+                                 device=a1.device,
+                                 dtype=workspace_dtype)
 
-        #print(f"\nbefore M = {hidden_states.shape[0]}")
-
-        hidden_states, a1_scale, new_topk_ids = self.dispatch_combine.dispatch(
-            a=hidden_states,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-            topk_ids=topk_ids,
-            num_experts=global_num_experts,
-            expert_map=expert_map,
+        a1q, a1q_scale, dispatched_topk_ids = self.dispatch_combine.dispatch(
+            a1,
+            a1_scale,
+            a2_scale,
+            topk_ids,
+            global_num_experts,
+            expert_map,
         )
 
-        #print(f"after M = {hidden_states.shape[0]}")
-
         fused_out = self.fused_experts.apply(
-            out=hidden_states,
-            q_hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_ids=new_topk_ids,
-            inplace=inplace,
-            activation=activation,
-            expert_map=expert_map,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
+            a1q,
+            w1,
+            w2,
+            dispatched_topk_ids,
+            activation,
+            expert_map,
+            w1_scale,
+            w2_scale,
+            a1q_scale,
+            a2_scale,
             workspace13=workspace13,
             workspace2=workspace2,
         )
 
-        return self.dispatch_combine.combine(out_hidden_states, fused_out, topk_weights)
+        self.dispatch_combine.combine(output, fused_out, topk_weights)
+
+        return output
