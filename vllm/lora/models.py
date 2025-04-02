@@ -57,6 +57,53 @@ def get_lora_id():
     _GLOBAL_LORA_ID += 1
     return _GLOBAL_LORA_ID
 
+import torch
+from vllm.model_executor.models.adapters import as_classification_model
+
+def _attach_classification_head(base_model, tensors: dict):
+    """Attach a classification head to base_model using weights from tensors (if presenr)."""
+    # Find classification weight and bias in tensors
+    weight_key = None
+    bias_key = None
+    for key in tensors:
+        if key.endswith("score.weight") or key.endswith("classifier.weight"):
+            weight_key = key
+        if key.endswith("score.bias") or key.endswith("classifier.bias"):
+            bias_key = key
+    if weight_key is None:
+        return # No classification head in theis adapter
+
+    # Infer number of labels from weight shape
+    num_labels = tensors[weight_key].shape[0]
+    hidden_size = tensors[weight_key].shape[1]
+
+    # Get device from the base model
+    device = next(base_model.parameters()).device
+    logger.info(f"Base model device : {device}")
+    # If the model dosen't already have a 'score' attribute, convert it to a classification model
+    if not hasattr(base_model, "score"):
+        # Transform the model class to a classification variant (adds self.score linear layer)
+        logger.info(f"Transforming to classification model: {base_model.__class__}")
+        base_model.__class__ = as_classification_model(base_model.__class__)
+        #update the config's num_labels for accuracy
+        if hasattr(base_model, "config"):
+            base_model.config.num_labels = num_labels
+    else:
+        # If the core layer exists, check if shape matches; if not, recreate it
+        current_out_features = base_model.score.weight.shape[0]
+        current_in_feature = base_model.score.weight.shape[1]
+        if current_out_features != num_labels or current_in_feature != hidden_size:
+            #replace with a new linear layer of correct shape
+            logger.info(f"Replacing the existing shape of {current_out_features}, {current_in_feature} with {num_labels, hidden_size}")
+            from vllm.model_executor.layers.linear import RowParallelLinear
+            base_model.score = RowParallelLinear(hidden_size, num_labels, bias=True, prefix="").to(device, dtype=torch.bfloat16)
+
+    # Load weights into the score layer
+    with torch.no_grad():
+        base_model.score.weight.copy_(tensors[weight_key].to(device))
+        if bias_key:
+            base_model.score.score.bias.copy_(tensors[bias_key].to(device))
+    logger.info(f"[vLLM] Attached classification head with {num_labels} labels to the model.")
 
 class LoRAModel(AdapterModel):
     """A LoRA fine-tuned model."""
@@ -129,6 +176,8 @@ class LoRAModel(AdapterModel):
         for tensor_name, tensor in tensors.items():
             module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper)
+            if module_name in {"score", "classifier", "lm_head", "embed_tokens","model.embed_tokens"}:
+                continue
             if module_name not in loras:
                 lora_embeddings_tensor = None
                 if embeddings:
@@ -178,6 +227,9 @@ class LoRAModel(AdapterModel):
         for lora in loras.values():
             lora.optimize()
 
+        classification_keys = {"score", "classifier", "lm_head", "embed_tokens", "models.embed_tokens"}
+        loras = {module_name: weights for module_name, weights in loras.items() if module_name not in classification_keys}
+
         return cls(lora_model_id,
                    peft_helper.r,
                    loras,
@@ -197,6 +249,7 @@ class LoRAModel(AdapterModel):
         embedding_modules: Optional[Dict[str, str]] = None,
         embedding_padding_modules: Optional[List[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
+        model_cls = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
         
@@ -237,6 +290,9 @@ class LoRAModel(AdapterModel):
                         lora_module, weights_mapper)
                     part_name = module_name.split(".")[-1]
                     if part_name not in expected_lora_modules:
+                        if part_name in {'score', 'classifier', 'lm_head', 'embed_tokens', 'model.embed_tokens'}:
+                            # These are modules from the modules_to_save; treat as expected.
+                            continue
                         unexpected_modules.append(module_name)
                 if unexpected_modules:
                     raise ValueError(
@@ -248,6 +304,7 @@ class LoRAModel(AdapterModel):
                 # Load tensors if there are only expected modules.
                 for module in f.keys():  # noqa
                     tensors[module] = f.get_tensor(module)
+                _attach_classification_head(model_cls, tensors)
         elif os.path.isfile(lora_bin_file_path):
             # When a bin file is provided, we rely on config to find unexpected
             # modules.
@@ -397,6 +454,8 @@ class LoRAModelManager(AdapterModelManager):
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
+            if module_name in {"score","classifier","lm_head", "embed_tokens", "model.embed_tokens"}:
+                continue
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
                 module_lora.optimize()

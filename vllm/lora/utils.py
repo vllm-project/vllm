@@ -136,6 +136,13 @@ def parse_fine_tuned_lora_name(
     if parts[-1] == "bias":
         new_name = ".".join(parts[2:-2])
         return new_name, False, True
+    
+    if parts[-1] in {"weight", "bias"}:
+        module = ".".join(parts[2:-1])  # drop 'base_model','model', keep module path
+        is_bias = (parts[-1] == "bias")
+        # These are not LoRA A/B matrices.
+        logger.info(f"Returning modules other than lora: {module}")
+        return module, False, is_bias
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 

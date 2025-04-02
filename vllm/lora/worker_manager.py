@@ -125,7 +125,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 self.lora_config.lora_extra_vocab_size,
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
-                weights_mapper=hf_to_vllm_mapper)
+                weights_mapper=hf_to_vllm_mapper,
+                model_cls=model)
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
