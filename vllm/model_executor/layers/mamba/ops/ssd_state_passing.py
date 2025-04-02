@@ -6,11 +6,17 @@
 # ruff: noqa: E501
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+
+from vllm.triton_utils import triton_autotune_decorator, triton_jit_decorator
 
 
-@triton.autotune(
+@triton_autotune_decorator(
     configs=[
         triton.Config({'BLOCK_SIZE': 64}),
         triton.Config({'BLOCK_SIZE': 128}),
@@ -21,7 +27,7 @@ import triton.language as tl
     ],
     key=['dim'],
 )
-@triton.jit
+@triton_jit_decorator
 def _state_passing_fwd_kernel(
     # Pointers to matrices
     states_ptr,

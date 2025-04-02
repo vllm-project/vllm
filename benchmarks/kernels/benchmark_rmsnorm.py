@@ -4,7 +4,12 @@ import itertools
 from typing import Optional, Union
 
 import torch
-import triton
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+
 from flashinfer.norm import fused_add_rmsnorm, rmsnorm
 from torch import nn
 

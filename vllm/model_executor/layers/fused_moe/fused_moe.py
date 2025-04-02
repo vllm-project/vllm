@@ -8,8 +8,12 @@ from math import prod
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -22,13 +26,14 @@ from vllm.utils import direct_register_custom_op, round_up
 from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
                                    rocm_aiter_fused_experts,
                                    rocm_aiter_topk_softmax)
+from vllm.triton_utils import triton_jit_decorator
 
 logger = init_logger(__name__)
 
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
-@triton.jit
+@triton_jit_decorator
 def write_zeros_to_output(c_ptr, stride_cm, stride_cn, pid_n, N, offs_token,
                           token_mask, BLOCK_SIZE_M, BLOCK_SIZE_N,
                           compute_type):
@@ -40,7 +45,7 @@ def write_zeros_to_output(c_ptr, stride_cm, stride_cn, pid_n, N, offs_token,
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@triton.jit
+@triton_jit_decorator
 def fused_moe_kernel_gptq_awq(
         # Pointers to matrices
         a_ptr,
@@ -250,7 +255,7 @@ def fused_moe_kernel_gptq_awq(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@triton.jit
+@triton_jit_decorator
 def fused_moe_kernel(
         # Pointers to matrices
         a_ptr,
@@ -447,7 +452,7 @@ def ceil_div(a, b):
     return (a + b - 1) // b
 
 
-@triton.jit
+@triton_jit_decorator
 def moe_align_block_size_stage1(
     topk_ids_ptr,
     tokens_cnts_ptr,
@@ -468,7 +473,7 @@ def moe_align_block_size_stage1(
             tl.store(tokens_cnts_ptr + off_c + idx, token_cnt + 1)
 
 
-@triton.jit
+@triton_jit_decorator
 def moe_align_block_size_stage2(
     tokens_cnts_ptr,
     num_experts: tl.constexpr,
@@ -482,7 +487,7 @@ def moe_align_block_size_stage2(
         tl.store(tokens_cnts_ptr + i * num_experts + pid, last_cnt)
 
 
-@triton.jit
+@triton_jit_decorator
 def moe_align_block_size_stage3(
     total_tokens_post_pad_ptr,
     tokens_cnts_ptr,
@@ -499,7 +504,7 @@ def moe_align_block_size_stage3(
     tl.store(total_tokens_post_pad_ptr, last_cumsum)
 
 
-@triton.jit
+@triton_jit_decorator
 def moe_align_block_size_stage4(
     topk_ids_ptr,
     sorted_token_ids_ptr,
