@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
-
+# TODO: check types?
 def _valid_deep_gemm(hidden_states: torch.Tensor,
                      w1: torch.Tensor,
                      w2: torch.Tensor,
