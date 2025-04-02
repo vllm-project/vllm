@@ -116,6 +116,7 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     data_parallel_size: int = 1
+    data_parallel_size_local: Optional[int] = None
     enable_expert_parallel: bool = False
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
@@ -1186,10 +1187,16 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
+        # Local DP size defaults to global DP size if not set.
+        data_parallel_size_local = self.data_parallel_size if (
+            self.data_parallel_size_local
+            is None) else self.data_parallel_size_local
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
+            data_parallel_size_local=data_parallel_size_local,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,

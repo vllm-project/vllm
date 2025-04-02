@@ -98,25 +98,22 @@ class BackgroundProcHandle:
 
     def __init__(
         self,
-        input_path: str,
-        output_path: str,
+        input_address: str,
         process_name: str,
         target_fn: Callable,
         process_kwargs: dict[Any, Any],
     ):
         context = get_mp_context()
 
-        assert ("input_path" not in process_kwargs
-                and "output_path" not in process_kwargs)
-        process_kwargs["input_path"] = input_path
-        process_kwargs["output_path"] = output_path
+        assert "input_address" not in process_kwargs
+        process_kwargs["input_address"] = input_address
 
         # Run busy loop in background process.
         self.proc = context.Process(target=target_fn,
                                     kwargs=process_kwargs,
                                     name=process_name)
         self._finalizer = weakref.finalize(self, shutdown, self.proc,
-                                           input_path, output_path)
+                                           input_address)
         self.proc.start()
 
     def shutdown(self):
@@ -125,7 +122,7 @@ class BackgroundProcHandle:
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
+def shutdown(proc: multiprocessing.Process, input_address: str):
     # Shutdown the process.
     if proc.is_alive():
         proc.terminate()
@@ -135,11 +132,12 @@ def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
             kill_process_tree(proc.pid)
 
     # Remove zmq ipc socket files.
-    ipc_sockets = [output_path, input_path]
+    ipc_sockets = (input_address, )
     for ipc_socket in ipc_sockets:
-        socket_file = ipc_socket.replace("ipc://", "")
-        if os and os.path.exists(socket_file):
-            os.remove(socket_file)
+        if ipc_socket.startswith("ipc://"):
+            socket_file = ipc_socket.replace("ipc://", "")
+            if os and os.path.exists(socket_file):
+                os.remove(socket_file)
 
 
 def bind_kv_cache(

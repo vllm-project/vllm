@@ -1430,6 +1430,7 @@ class ParallelConfig:
     pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
     data_parallel_size: int = 1  # Number of data parallel groups.
+    data_parallel_size_local: int = 1  # Number of data parallel groups.
     data_parallel_rank: int = 0  # Rank of the data parallel group.
     # Local rank of the data parallel group, defaults to global rank.
     data_parallel_rank_local: Optional[int] = None
@@ -1536,6 +1537,10 @@ class ParallelConfig:
     def __post_init__(self) -> None:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
+
+        if not (0 < self.data_parallel_size_local <= self.data_parallel_size):
+            raise ValueError(
+                "data_parallel_size_local must be <= data_parallel_size")
 
         if self.data_parallel_size > 1:
             # Data parallel was specified in the engine args.

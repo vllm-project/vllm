@@ -22,8 +22,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
-                        zmq_socket_ctx)
+from vllm.utils import (get_exception_traceback, make_zmq_socket,
+                        resolve_obj_by_qualname, zmq_socket_ctx)
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -309,9 +309,9 @@ class EngineCoreProc(EngineCore):
 
     def __init__(
         self,
-        input_path: str,
-        output_path: str,
         vllm_config: VllmConfig,
+        on_head_node: bool,
+        input_address: str,
         executor_class: type[Executor],
         log_stats: bool,
         engine_index: int = 0,
@@ -323,6 +323,19 @@ class EngineCoreProc(EngineCore):
 
         self.global_unfinished_reqs = False
 
+        # Create input socket.
+        input_ctx = zmq.Context()  # type: ignore[attr-defined]
+        identity = engine_index.to_bytes(length=2, byteorder="little")
+        input_socket = make_zmq_socket(input_ctx,
+                                       input_address,
+                                       zmq.DEALER,
+                                       identity=identity,
+                                       bind=False)
+
+        # Register engine with front-end.
+        output_address = self.startup_handshake(input_socket, on_head_node,
+                                                vllm_config.parallel_config)
+
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
         # and to overlap some serialization/deserialization with the
@@ -332,11 +345,38 @@ class EngineCoreProc(EngineCore):
                                             Any]] = queue.Queue()
         self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
-                         args=(input_path, engine_index),
+                         args=(input_socket, ),
                          daemon=True).start()
         threading.Thread(target=self.process_output_socket,
-                         args=(output_path, engine_index),
+                         args=(output_address, engine_index),
                          daemon=True).start()
+
+    @staticmethod
+    def startup_handshake(input_socket: zmq.Socket, on_head_node: bool,
+                          parallel_config: ParallelConfig) -> str:
+
+        # Send registration message.
+        input_socket.send(
+            msgspec.msgpack.encode({
+                "local": on_head_node,
+                "status": "READY"
+            }))
+
+        # Receive initialization message.
+        logger.info("Waiting for init message from front-end.")
+        input_socket.poll(timeout=5 * 60 * 1000)
+        init_bytes = input_socket.recv()
+        init_message = msgspec.msgpack.decode(init_bytes)
+        logger.debug("Received init message: %s", init_message)
+
+        output_socket_address = init_message["output_socket_address"]
+        #TBD maybe replace IP with configured head node address
+
+        received_parallel_config = init_message["parallel_config"]
+        for key, value in received_parallel_config.items():
+            setattr(parallel_config, key, value)
+
+        return output_socket_address
 
     @staticmethod
     def run_engine_core(*args,
@@ -472,35 +512,25 @@ class EngineCoreProc(EngineCore):
             and not isinstance(v, p.annotation) else v
             for v, p in zip(args, arg_types))
 
-    def process_input_socket(self, input_path: str, engine_index: int):
+    def process_input_socket(self, input_socket: zmq.Socket):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
         generic_decoder = MsgpackDecoder()
-        identity = engine_index.to_bytes(length=2, byteorder="little")
 
-        with zmq_socket_ctx(input_path,
-                            zmq.DEALER,
-                            identity=identity,
-                            bind=False) as socket:
+        while True:
+            # (RequestType, RequestData)
+            type_frame, data_frame = input_socket.recv_multipart(copy=False)
+            request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
-            # Send ready message to front-end once input socket is connected.
-            socket.send(b'READY')
+            # Deserialize the request data.
+            decoder = add_request_decoder if (
+                request_type == EngineCoreRequestType.ADD) else generic_decoder
+            request = decoder.decode(data_frame.buffer)
 
-            while True:
-                # (RequestType, RequestData)
-                type_frame, data_frame = socket.recv_multipart(copy=False)
-                request_type = EngineCoreRequestType(bytes(type_frame.buffer))
-
-                # Deserialize the request data.
-                decoder = add_request_decoder if (
-                    request_type
-                    == EngineCoreRequestType.ADD) else generic_decoder
-                request = decoder.decode(data_frame.buffer)
-
-                # Push to input queue for core busy loop.
-                self.input_queue.put_nowait((request_type, request))
+            # Push to input queue for core busy loop.
+            self.input_queue.put_nowait((request_type, request))
 
     def process_output_socket(self, output_path: str, engine_index: int):
         """Output socket IO thread."""
@@ -527,9 +557,9 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def __init__(
         self,
-        input_path: str,
-        output_path: str,
         vllm_config: VllmConfig,
+        on_head_node: bool,
+        input_address: str,
         executor_class: type[Executor],
         log_stats: bool,
     ):
@@ -551,17 +581,17 @@ class DPEngineCoreProc(EngineCoreProc):
         from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
             from vllm.platforms.cuda import device_id_to_physical_device_id
-            tp_size = vllm_config.parallel_config.tensor_parallel_size
+            world_size = vllm_config.parallel_config.world_size
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
                 str(device_id_to_physical_device_id(i))
-                for i in range(local_dp_rank * tp_size, (local_dp_rank + 1) *
-                               tp_size))
+                for i in range(local_dp_rank *
+                               world_size, (local_dp_rank + 1) * world_size))
 
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
         # Initialize the engine after setting up environment.
-        super().__init__(input_path, output_path, vllm_config, executor_class,
-                         log_stats, dp_rank)
+        super().__init__(vllm_config, on_head_node, input_address,
+                         executor_class, log_stats, dp_rank)
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
