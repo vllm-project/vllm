@@ -340,12 +340,14 @@ class Hermes2ProToolParser(ToolParser):
 
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
-                # 'len(delta_text.rstrip()) >= 1' Change to 'len(delta_text.rstrip()) > 1'
-                if isinstance(delta_text, str) and len(delta_text.rstrip()) > 1 and delta_text.rstrip()[-1] == '}':
+                # 'len(delta_text.rstrip()) >= 1'
+                # Change to 'len(delta_text.rstrip()) > 1'
+                if isinstance(delta_text, str) \
+                        and len(delta_text.rstrip()) > 1 \
+                        and delta_text.rstrip()[-1] == '}':
                     if delta_text.replace('\n', '').replace('\r', '') == '}':
                         logger.debug("Exceptional condition: %s", delta_text)
                     delta_text = delta_text.rstrip()[:-1]
-
                 logger.debug("got diff %s", delta_text)
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(index=self.current_tool_id,
