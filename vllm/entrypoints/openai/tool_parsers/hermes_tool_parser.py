@@ -348,7 +348,6 @@ class Hermes2ProToolParser(ToolParser):
                     if delta_text.replace('\n', '').replace('\r', '') == '}':
                         logger.debug("Exceptional condition: %s", delta_text)
                     delta_text = delta_text.rstrip()[:-1]
-
                 logger.debug("got diff %s", delta_text)
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(index=self.current_tool_id,
