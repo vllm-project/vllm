@@ -613,6 +613,7 @@ def main(args: argparse.Namespace):
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
             dataset_split=args.hf_split,
+            random_seed=args.seed,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
