@@ -38,7 +38,7 @@ RUN microdnf install -y openssl-devel dnf \
     && ln -sf /usr/lib64/libatomic.so.1 /usr/lib64/libatomic.so \
     && python${PYTHON_VERSION} -m venv ${VIRTUAL_ENV} \
     && python -m pip install -U pip uv \
-    && uv pip install wheel build "setuptools<70" setuptools_scm setuptools_rust meson-python cmake ninja cython scikit_build_core scikit_build \
+    && uv pip install wheel build "setuptools<70" setuptools_scm setuptools_rust meson-python 'cmake<4' ninja cython scikit_build_core scikit_build \
     && curl -sL https://ftp2.osuosl.org/pub/ppc64el/openblas/latest/Openblas_${OPENBLAS_VERSION}_ppc64le.tar.gz | tar xvf - -C /usr/local \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && cd /tmp && touch control
@@ -238,7 +238,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && python -m pip install -U pip uv --no-cache \
     && curl -sL https://ftp2.osuosl.org/pub/ppc64el/openblas/latest/Openblas_${OPENBLAS_VERSION}_ppc64le.tar.gz | tar xvf - -C /usr/local \
     && make -C /numactl install \
-    && uv pip install cmake \
+    && uv pip install 'cmake<4' \
     && cmake --install /lapack/build \
     && uv pip uninstall cmake
 
