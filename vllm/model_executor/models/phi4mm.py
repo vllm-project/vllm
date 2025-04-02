@@ -65,50 +65,6 @@ VISION_ENCODER_TO_PROCESSING_CONFIG = {
 }
 
 
-def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
-                              image_size):
-    best_ratio_diff = float('inf')
-    best_ratio = (1, 1)
-    area = width * height
-    for ratio in target_ratios:
-        target_aspect_ratio = ratio[0] / ratio[1]
-        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
-        if ratio_diff < best_ratio_diff:
-            best_ratio_diff = ratio_diff
-            best_ratio = ratio
-        elif ratio_diff == best_ratio_diff:
-            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
-                best_ratio = ratio
-    return best_ratio
-
-
-def _find_target_aspect_ratio(orig_width: int, orig_height: int, image_size: int, max_num: int, min_num: int,):
-
-    w_crop_num = math.ceil(orig_width / float(image_size))
-    h_crop_num = math.ceil(orig_height / float(image_size))
-    if w_crop_num * h_crop_num > max_num:
-        aspect_ratio = orig_width / orig_height
-
-        # calculate the existing image aspect ratio
-        target_ratios = set((i, j) for i in range(1, max_num + 1)
-                            for j in range(1, max_num + 1)
-                            if i * j <= max_num and i * j >= min_num)
-        target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
-
-        # find the closest aspect ratio to the target
-        target_aspect_ratio = find_closest_aspect_ratio(
-            aspect_ratio, target_ratios, orig_width, orig_height, image_size)
-
-        # calculate the target width and height
-        target_width = image_size * target_aspect_ratio[0]
-        target_height = image_size * target_aspect_ratio[1]
-    else:
-        target_width = image_size * w_crop_num
-        target_height = image_size * h_crop_num
-        target_aspect_ratio = (w_crop_num, h_crop_num)
-    return target_aspect_ratio, target_height, target_width
-
-
 def _get_padding_size(orig_width: int, orig_height: int, target_height: int, target_width: int):
     ratio_width = target_width / orig_width
     ratio_height = target_height / orig_height
@@ -494,110 +450,6 @@ Phi4MMImageInput = Union[Phi4MMImagePixelInputs, Phi4MMImageEmbeddingInputs]
 Phi4MMAudioInputs = Union[Phi4MMAudioFeatureInputs, Phi4MMAudioEmbeddingInputs]
 
 
-def _compute_num_image_tokens(
-    orig_width: int,
-    orig_height: int,
-    dynamic_hd_size: int,
-    vit_image_size: int,
-    vit_patch_size: int,
-    token_compression_factor: int = 2,
-):
-    """
-    compute the number of tokens an image is expected to take up considering 
-    the image encoder architecture and exclude output features containing 
-    only padding pixels
-
-    for siglip, vit_image_size=448, vit_patch_size=14, so output will be 
-    32x32 feature map
-    NOTE right now, Phi4MM uses hard-coded token_compression_factor=2
-    """
-    assert vit_image_size % vit_patch_size == 0, \
-        "vit_image_size must be divisible by vit_patch_size"
-    assert vit_image_size // vit_patch_size % token_compression_factor == 0, \
-        "vit_image_size // vit_patch_size must be divisible by "\
-            "token_compression_factor"
-
-    target_aspect_ratio, target_height, target_width = (
-        _find_target_aspect_ratio(orig_width,
-                                  orig_height,
-                                  vit_image_size,
-                                  dynamic_hd_size,
-                                  min_num=1))
-    assert target_aspect_ratio[
-        0] * vit_image_size == target_width, \
-            f"{target_aspect_ratio[0]} * {vit_image_size} != {target_width}"
-    assert target_aspect_ratio[
-        1] * vit_image_size == target_height, \
-            f"{target_aspect_ratio[1]} * {vit_image_size} != {target_height}"
-    assert (target_height % vit_image_size == 0
-            and target_width % vit_image_size == 0)
-
-    padding_height, padding_width = _get_padding_size(orig_width, orig_height, target_height,
-                                                      target_width)
-    assert padding_width == 0 or padding_height == 0, \
-        "padding_width or padding_height must be 0"
-
-    target_feat_width = target_width // vit_patch_size
-    target_feat_height = target_height // vit_patch_size
-    if padding_width >= vit_patch_size:
-        assert padding_height == 0, "padding_height not 0"
-        non_pad_feat_width = target_feat_width - math.floor(
-            padding_width / vit_patch_size)
-        non_pad_feat_height = target_feat_height
-    elif padding_height >= vit_patch_size:
-        assert padding_width == 0, "padding_width not 0"
-        non_pad_feat_height = target_feat_height - math.floor(
-            padding_height / vit_patch_size)
-        non_pad_feat_width = target_feat_width
-    else:
-        # small padding shorter than a vit patch
-        non_pad_feat_width = target_feat_width
-        non_pad_feat_height = target_feat_height
-
-    feat_width = non_pad_feat_width // token_compression_factor
-    feat_height = non_pad_feat_height // token_compression_factor
-    # NOTE it's possible that the non-padding feature is not divisible
-    if non_pad_feat_width % token_compression_factor != 0:
-        feat_width += 1
-    if non_pad_feat_height % token_compression_factor != 0:
-        feat_height += 1
-    num_hd_patch_tokens = feat_width * feat_height
-    num_hd_newline_tokens = feat_height
-    vit_feature_size = vit_image_size // vit_patch_size
-    num_global_image_tokens = (vit_feature_size // token_compression_factor)**2
-    num_sep_tokens = 1
-    num_global_image_newline_tokens = \
-        vit_feature_size // token_compression_factor
-
-    return (num_global_image_tokens + num_sep_tokens + num_hd_patch_tokens +
-            num_hd_newline_tokens + num_global_image_newline_tokens)
-
-
-def _compute_audio_embed_size(hf_config: PretrainedConfig, audio_frames: int) -> int:
-    """
-    Compute the audio embedding size based on the audio frames and
-    compression rate.
-    """
-    compression_rate = hf_config.embd_layer['audio_embd_layer'][
-        'compression_rate']
-    # NOTE: this is a hard-coded value but might be configurable in the future
-    qformer_compression_rate = 1
-    integer = audio_frames // compression_rate
-    remainder = audio_frames % compression_rate
-
-    result = integer if remainder == 0 else integer + 1
-
-    integer = result // qformer_compression_rate
-    remainder = result % qformer_compression_rate
-    result = integer if remainder == 0 else integer + 1  # qformer compression
-
-    return result
-
-
-def get_max_phi4mm_audio_tokens(ctx: InputContext) -> int:
-    return 10000
-
-
 def cat_with_pad(tensors, dim, padding_value=0):
     """
     cat along dim, while pad to max for all other dims
@@ -656,12 +508,119 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         }
 
     def get_max_audio_tokens(self) -> int:
-        return 188
+        sr = self.get_feature_extractor().sampling_rate
+        num_frames = self.get_audio_num_frames(_AUDIO_MAX_SOUNDFILE_SIZE, sr)
+        return self._compute_audio_embed_size(num_frames)
     
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
         return self.get_num_image_tokens(
             image_width=target_width, image_height=target_height)
+    
+    def _find_target_aspect_ratio(self, orig_width: int, orig_height: int, image_size: int, max_num: int, min_num: int,):
+        w_crop_num = math.ceil(orig_width / float(image_size))
+        h_crop_num = math.ceil(orig_height / float(image_size))
+        if w_crop_num * h_crop_num > max_num:
+            aspect_ratio = orig_width / orig_height
+
+            # calculate the existing image aspect ratio
+            target_ratios = set((i, j) for i in range(1, max_num + 1)
+                                for j in range(1, max_num + 1)
+                                if i * j <= max_num and i * j >= min_num)
+            target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+
+            # find the closest aspect ratio to the target
+            image_processor = self.get_hf_processor().image_processor
+            target_aspect_ratio = image_processor.find_closest_aspect_ratio(
+                aspect_ratio, target_ratios, orig_width, orig_height, image_size,)
+
+            # calculate the target width and height
+            target_width = image_size * target_aspect_ratio[0]
+            target_height = image_size * target_aspect_ratio[1]
+        else:
+            target_width = image_size * w_crop_num
+            target_height = image_size * h_crop_num
+            target_aspect_ratio = (w_crop_num, h_crop_num)
+        return target_aspect_ratio, target_height, target_width
+    
+    def _compute_num_image_tokens(
+        self,
+        orig_width: int,
+        orig_height: int,
+        dynamic_hd_size: int,
+        vit_image_size: int,
+        vit_patch_size: int,
+        token_compression_factor: int = 2,
+    ):
+        """
+        compute the number of tokens an image is expected to take up considering 
+        the image encoder architecture and exclude output features containing 
+        only padding pixels
+
+        for siglip, vit_image_size=448, vit_patch_size=14, so output will be 
+        32x32 feature map
+        NOTE right now, Phi4MM uses hard-coded token_compression_factor=2
+        """
+        assert vit_image_size % vit_patch_size == 0, \
+            "vit_image_size must be divisible by vit_patch_size"
+        assert vit_image_size // vit_patch_size % token_compression_factor == 0, \
+            "vit_image_size // vit_patch_size must be divisible by "\
+                "token_compression_factor"
+
+        target_aspect_ratio, target_height, target_width = (
+            self._find_target_aspect_ratio(orig_width,
+                                    orig_height,
+                                    vit_image_size,
+                                    dynamic_hd_size,
+                                    min_num=1))
+        assert target_aspect_ratio[
+            0] * vit_image_size == target_width, \
+                f"{target_aspect_ratio[0]} * {vit_image_size} != {target_width}"
+        assert target_aspect_ratio[
+            1] * vit_image_size == target_height, \
+                f"{target_aspect_ratio[1]} * {vit_image_size} != {target_height}"
+        assert (target_height % vit_image_size == 0
+                and target_width % vit_image_size == 0)
+
+        padding_height, padding_width = _get_padding_size(orig_width, orig_height, target_height,
+                                                        target_width)
+        assert padding_width == 0 or padding_height == 0, \
+            "padding_width or padding_height must be 0"
+
+        target_feat_width = target_width // vit_patch_size
+        target_feat_height = target_height // vit_patch_size
+        if padding_width >= vit_patch_size:
+            assert padding_height == 0, "padding_height not 0"
+            non_pad_feat_width = target_feat_width - math.floor(
+                padding_width / vit_patch_size)
+            non_pad_feat_height = target_feat_height
+        elif padding_height >= vit_patch_size:
+            assert padding_width == 0, "padding_width not 0"
+            non_pad_feat_height = target_feat_height - math.floor(
+                padding_height / vit_patch_size)
+            non_pad_feat_width = target_feat_width
+        else:
+            # small padding shorter than a vit patch
+            non_pad_feat_width = target_feat_width
+            non_pad_feat_height = target_feat_height
+
+        feat_width = non_pad_feat_width // token_compression_factor
+        feat_height = non_pad_feat_height // token_compression_factor
+        # NOTE it's possible that the non-padding feature is not divisible
+        if non_pad_feat_width % token_compression_factor != 0:
+            feat_width += 1
+        if non_pad_feat_height % token_compression_factor != 0:
+            feat_height += 1
+        num_hd_patch_tokens = feat_width * feat_height
+        num_hd_newline_tokens = feat_height
+        vit_feature_size = vit_image_size // vit_patch_size
+        num_global_image_tokens = (vit_feature_size // token_compression_factor)**2
+        num_sep_tokens = 1
+        num_global_image_newline_tokens = \
+            vit_feature_size // token_compression_factor
+
+        return (num_global_image_tokens + num_sep_tokens + num_hd_patch_tokens +
+                num_hd_newline_tokens + num_global_image_newline_tokens)
 
     def get_num_image_tokens(
         self,
@@ -680,7 +639,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
         dynamic_hd_size = self.dynamic_hd
 
-        image_num_tokens = _compute_num_image_tokens(
+        image_num_tokens = self._compute_num_image_tokens(
             image_width, image_height, 
             dynamic_hd_size=dynamic_hd_size,
             vit_image_size=vit_image_size,
@@ -701,7 +660,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         max_side = vit_image_size * self.dynamic_hd
         return ImageSize(height=max_side, width=vit_image_size)
     
-    def get_audio_feature_nums(self, audio_len: int, sr: float) -> int:
+    def get_audio_num_frames(self, audio_len: int, sr: float) -> int:
         """
         Compute the output size of the `extract_features` method.
 
@@ -729,12 +688,34 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         hop_length = 160  # Frame shift in samples
 
         # Calculate number of frames (T)
-        T = (audio_len - win_length) // hop_length + 1
-        if T < 1:
+        num_frames = (audio_len - win_length) // hop_length + 1
+        if num_frames < 1:
             raise ValueError("Waveform too short for given parameters.")
 
         # Return time frames (T)
-        return T
+        return num_frames
+    
+    def _compute_audio_embed_size(self, audio_frames: int) -> int:
+        """
+        Compute the audio embedding size based on the audio frames and
+        compression rate.
+        """
+        hf_config = self.get_hf_config()
+        compression_rate = hf_config.embd_layer['audio_embd_layer'][
+            'compression_rate']
+        # NOTE: this is a hard-coded value but might be configurable 
+        # in the future
+        qformer_compression_rate = 1
+        integer = audio_frames // compression_rate
+        remainder = audio_frames % compression_rate
+
+        result = integer if remainder == 0 else integer + 1
+
+        integer = result // qformer_compression_rate
+        remainder = result % qformer_compression_rate
+        result = integer if remainder == 0 else integer + 1  # qformer compression
+
+        return result
 
 
 class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
@@ -806,7 +787,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             processed_outputs["pixel_values"] = processed_outputs.pop('input_image_embeds')
             if "audios" in mm_data:
                 audio_features = processed_outputs['input_audio_embeds']
-                feature_sizes = [self.info.get_audio_feature_nums(len(audio), sr) for audio, sr in mm_data['audios']]
+                feature_sizes = [self.info.get_audio_num_frames(len(audio), sr) for audio, sr in mm_data['audios']]
                 processed_outputs['input_audio_embeds'] = [audio_features[idx, :size] for idx, size in enumerate(feature_sizes)]
         else:
             tokenizer = self.info.get_tokenizer()
@@ -861,8 +842,8 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             # TODO(Isotr0py): support embedding inputs
             audio_len = audios.get_audio_length(item_idx)
-            audio_frames = self.info.get_audio_feature_nums(audio_len, feature_extractor.sampling_rate)
-            audio_embed_size = _compute_audio_embed_size(self.info.get_hf_config(), audio_frames)
+            audio_frames = self.info.get_audio_num_frames(audio_len, feature_extractor.sampling_rate)
+            audio_embed_size = self.info._compute_audio_embed_size(audio_frames)
 
             audio_tokens = [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
 
@@ -888,16 +869,6 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         return image_repl + audio_repl
 
 
-# @MULTIMODAL_REGISTRY.register_input_mapper("audio",
-#                                            input_mapper_for_phi4mm_audio)
-# @MULTIMODAL_REGISTRY.register_input_mapper("image",
-#                                            input_mapper_for_phi4mm_image)
-# @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-#     "audio", get_max_phi4mm_audio_tokens)
-# @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-#     "image", get_max_phi4mm_image_tokens)
-# @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4mm)
-# @INPUT_REGISTRY.register_input_processor(input_processor_for_phi4mm)
 @MULTIMODAL_REGISTRY.register_processor(
     Phi4MMMultiModalProcessor,
     info=Phi4MMProcessingInfo,
@@ -1055,10 +1026,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             if isinstance(audio_features, torch.Tensor):
                 assert audio_features.size(0) == len(audio_embed_sizes), (
                     "audio_features and audio_embed_sizes must have the same length")
-            elif is_list_of(audio_features, torch.Tensor):
-                assert len(audio_features) == len(audio_embed_sizes), (
-                    "audio_features and audio_embed_sizes must have the same length")
-            elif is_list_of(audio_features, list):
+            elif is_list_of(audio_features, (torch.Tensor, list)):
                 assert len(audio_features) == len(audio_embed_sizes), (
                     "audio_features and audio_embed_sizes must have the same length")
             else:

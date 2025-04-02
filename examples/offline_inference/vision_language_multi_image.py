@@ -392,7 +392,7 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=12800,
+        max_model_len=25600,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
         enable_lora=True,
