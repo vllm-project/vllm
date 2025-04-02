@@ -340,8 +340,6 @@ class Hermes2ProToolParser(ToolParser):
 
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
-                # isinstance(delta_text, str) determines whether delta_text is of type string
-                # The addition of the equal sign len(delta_text.rstrip()) >= 1 filters out the '}' case.
                 if isinstance(delta_text, str) and len(delta_text.rstrip()) > 1 and delta_text.rstrip()[-1] == '}':
                     if delta_text.replace('\n', '').replace('\r', '') == '}':
                         logger.debug("Exceptional condition: %s", delta_text)
