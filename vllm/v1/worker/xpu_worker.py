@@ -52,6 +52,9 @@ class XPUWorker(Worker):
         else:
             self.profiler = None
 
+    def compile_or_warm_up_model(self) -> None:
+        pass
+
     # we provide this function due to `torch.xpu.mem_get_info()` doesn't
     # return correct free_gpu_memory on intel client GPU. We need to
     # calculate/estiamte it.
