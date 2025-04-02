@@ -342,6 +342,8 @@ class Hermes2ProToolParser(ToolParser):
             elif cur_arguments and prev_arguments:
                 if isinstance(delta_text, str) and len(delta_text.rstrip(
                 )) > 1 and delta_text.rstrip()[-1] == '}':
+                    if delta_text.replace('\n', '').replace('\r', '') == '}':
+                        logger.debug("Exceptional condition: %s", delta_text)
                     delta_text = delta_text.rstrip()[:-1]
 
                 logger.debug("got diff %s", delta_text)
