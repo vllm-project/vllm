@@ -501,7 +501,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
-            if model_type in ("qwen2_vl", "qwen2_5_vl", "qwen2_5_omni_thinker"):
+            if model_type in ("qwen2_vl", "qwen2_5_vl", "qwen2_5_omni"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "molmo":
                 return ""
@@ -518,14 +518,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|audio|>"
             if model_type == "phi4mm":
                 return "<|endoftext11|>"  # 200011 (see vocab.json in hf model)
-            if model_type == "qwen2_audio, qwen2_5_omni_thinker":
+            if model_type == "qwen2_audio, qwen2_5_omni":
                 return (f"Audio {current_count}: "
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
             if model_type == "minicpmo":
                 return "(<audio>./</audio>)"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
-            if model_type in ("qwen2_vl", "qwen2_5_vl", "qwen2_5_omni_thinker"):
+            if model_type in ("qwen2_vl", "qwen2_5_vl", "qwen2_5_omni"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<video>./</video>)"
