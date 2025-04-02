@@ -655,7 +655,7 @@ class BaseMultiModalContentParser(ABC):
         if placeholder:
             self._placeholder_storage[mod_placeholder].append(placeholder)
 
-    def mm_placeholder_storage(self) -> dict[str, int]:
+    def mm_placeholder_storage(self) -> dict[str, list]:
         return dict(self._placeholder_storage)
 
     @abstractmethod
@@ -1084,29 +1084,29 @@ def _parse_chat_message_content_part(
             return str_content
 
     modality = None
-    match part_type:
-        case "image_url":
-            str_content = cast(str, content)
-            mm_parser.parse_image(str_content)
-            modality = Modality.IMAGE.value
-        case "image_embeds":
-            content = cast(Union[str, dict[str, str]], content)
-            mm_parser.parse_image_embeds(content)
-            modality = Modality.IMAGE.value
-        case "audio_url":
-            str_content = cast(str, content)
-            mm_parser.parse_audio(str_content)
-            modality = Modality.AUDIO.value
-        case "input_audio":
-            dict_content = cast(InputAudio, content)
-            mm_parser.parse_input_audio(dict_content)
-            modality = Modality.AUDIO.value
-        case "video_url":
-            str_content = cast(str, content)
-            mm_parser.parse_video(str_content)
-            modality = Modality.VIDEO.value
-        case _:
-            raise NotImplementedError(f"Unknown part type: {part_type}")
+
+    if part_type == "image_url":
+        str_content = cast(str, content)
+        mm_parser.parse_image(str_content)
+        modality = Modality.IMAGE.value
+    elif part_type == "image_embeds":
+        content = cast(Union[str, dict[str, str]], content)
+        mm_parser.parse_image_embeds(content)
+        modality = Modality.IMAGE.value
+    elif part_type == "audio_url":
+        str_content = cast(str, content)
+        mm_parser.parse_audio(str_content)
+        modality = Modality.AUDIO.value
+    elif part_type == "input_audio":
+        dict_content = cast(InputAudio, content)
+        mm_parser.parse_input_audio(dict_content)
+        modality = Modality.AUDIO.value
+    elif part_type == "video_url":
+        str_content = cast(str, content)
+        mm_parser.parse_video(str_content)
+        modality = Modality.VIDEO.value
+    else:
+        raise NotImplementedError(f"Unknown part type: {part_type}")
 
     return {'type': modality} if wrap_dicts else (
         MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
