@@ -46,7 +46,7 @@ __global__ void permute_cols_kernel(
     const int32_t* __restrict__ sorted_token_ids_ptr,
     const int32_t* __restrict__ expert_ids_ptr,
     const int32_t* __restrict__ num_tokens_past_padded_ptr, int size_m,
-    int size_k, int top_k) {};
+    int size_k, int top_k){};
 
 }  // namespace marlin
 
@@ -582,9 +582,12 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
     else
       TORCH_CHECK(false, "unsupported moe_block_size ", moe_block_size);
 
+    // avoid ">>>" being formated to "> > >"
+    // clang-format off
     kernel<<<sms, default_threads, 0, stream>>>(
         A_ptr, perm_ptr, a_tmp_ptr, sorted_token_ids_ptr, expert_ids_ptr,
         num_tokens_past_padded_ptr, prob_m, prob_k, top_k);
+    // clang-format on
     A_ptr = a_tmp_ptr;
     prob_m = prob_m * top_k;
     top_k = 1;
@@ -658,11 +661,14 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        max_shared_mem);
+  // avoid ">>>" being formated to "> > >"
+  // clang-format off
   kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
       A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
       sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
       topk_weights_ptr, top_k, mul_topk_weights, is_ep, num_groups, prob_m,
       prob_n, prob_k, locks, use_atomic_add, use_fp32_reduce);
+  // clang-format on
 }
 
 }  // namespace MARLIN_NAMESPACE_NAME

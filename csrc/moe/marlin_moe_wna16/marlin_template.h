@@ -587,8 +587,9 @@ __global__ void Marlin(
       if (mul_topk_weights) {
   #pragma unroll
         for (int i = 0; i < 4; i++) {
-          sh_block_topk_weights[tid4 * 4 + i] = Dtype::num2num2(Dtype::float2num(
-              topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]]));
+          sh_block_topk_weights[tid4 * 4 + i] =
+              Dtype::num2num2(Dtype::float2num(
+                  topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]]));
         }
       }
     }
@@ -1520,13 +1521,13 @@ __global__ void Marlin(
     int c_gl_wr_delta_o = 8 * c_gl_stride;
     int c_gl_wr_delta_i = 4 * (active_threads / 32);
     int c_gl_wr;
-    if constexpr(m_block_size_8) {
-      c_gl_wr = c_gl_stride * ((threadIdx.x % 4) * 2) +
-                    4 * (threadIdx.x / 32) + (threadIdx.x % 32) / 8;
+    if constexpr (m_block_size_8) {
+      c_gl_wr = c_gl_stride * ((threadIdx.x % 4) * 2) + 4 * (threadIdx.x / 32) +
+                (threadIdx.x % 32) / 8;
       c_gl_wr += (2 * thread_n_blocks) * slice_col;
     } else {
       c_gl_wr = c_gl_stride * ((threadIdx.x % 32) / 4) +
-                    4 * (threadIdx.x / 32) + threadIdx.x % 4;
+                4 * (threadIdx.x / 32) + threadIdx.x % 4;
       c_gl_wr += (2 * thread_n_blocks) * slice_col;
     }
     constexpr int c_sh_wr_delta = active_threads;
@@ -1537,10 +1538,12 @@ __global__ void Marlin(
   #pragma unroll
       for (int i = 0; i < (m_block_size_8 ? 2 : thread_m_blocks * 4); i++) {
         int c_idx;
-        if constexpr(m_block_size_8)
-          c_idx = c_gl_wr + i * c_gl_stride + (threadIdx.x % 8) / 4 * c_gl_wr_delta_i;
+        if constexpr (m_block_size_8)
+          c_idx = c_gl_wr + i * c_gl_stride +
+                  (threadIdx.x % 8) / 4 * c_gl_wr_delta_i;
         else
-          c_idx = c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
+          c_idx =
+              c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
         if (c_idx / c_gl_stride < block_num_valid_tokens) {
           int64_t sorted_row = sh_block_sorted_ids[c_idx / c_gl_stride];
           int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
@@ -1556,7 +1559,7 @@ __global__ void Marlin(
   #pragma unroll
         for (int j = 0; j < 2 * 4; j++) {
           int delta = 0;
-          if constexpr(m_block_size_8) {
+          if constexpr (m_block_size_8) {
             delta = j % 2 == 1 ? -2 : 0;
           }
           reinterpret_cast<float*>(
@@ -1569,7 +1572,7 @@ __global__ void Marlin(
   #pragma unroll
         for (int j = 0; j < 2 * 4; j++) {
           int delta = 0;
-          if constexpr(m_block_size_8) {
+          if constexpr (m_block_size_8) {
             delta = j % 2 == 1 ? -2 : 0;
           }
           reinterpret_cast<scalar_t*>(&c)[j] =
@@ -1578,10 +1581,12 @@ __global__ void Marlin(
         }
 
         int c_idx;
-        if constexpr(m_block_size_8)
-          c_idx = c_gl_wr + i * c_gl_stride + (threadIdx.x % 8) / 4 * c_gl_wr_delta_i;
+        if constexpr (m_block_size_8)
+          c_idx = c_gl_wr + i * c_gl_stride +
+                  (threadIdx.x % 8) / 4 * c_gl_wr_delta_i;
         else
-          c_idx = c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
+          c_idx =
+              c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
         if (c_idx / c_gl_stride < block_num_valid_tokens) {
           int64_t sorted_row = sh_block_sorted_ids[c_idx / c_gl_stride];
           int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
@@ -1615,10 +1620,10 @@ __global__ void Marlin(
       float* frag_c_ptr = reinterpret_cast<float*>(&frag_c);
   #pragma unroll
       for (int k = 0; k < th_size; k++) {
-        if constexpr(m_block_size_8) {
+        if constexpr (m_block_size_8) {
           if (k % 2) continue;
         } else {
-          if (k / 8* 16 + (threadIdx.x % 32) / 4 >= block_num_valid_tokens)
+          if (k / 8 * 16 + (threadIdx.x % 32) / 4 >= block_num_valid_tokens)
             continue;
         }
 
@@ -1637,10 +1642,10 @@ __global__ void Marlin(
       int4* frag_c_ptr = reinterpret_cast<int4*>(&frag_c);
   #pragma unroll
       for (int k = 0; k < th_size; k++) {
-        if constexpr(m_block_size_8) {
+        if constexpr (m_block_size_8) {
           if (k % 2) continue;
         } else {
-          if (k / 8* 16 + (threadIdx.x % 32) / 4 >= block_num_valid_tokens)
+          if (k / 8 * 16 + (threadIdx.x % 32) / 4 >= block_num_valid_tokens)
             continue;
         }
 
