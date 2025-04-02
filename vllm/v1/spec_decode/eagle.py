@@ -6,6 +6,7 @@ import triton.language as tl
 
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -176,26 +177,13 @@ class EagleProposer:
         return cu_num_tokens, token_indices
 
     def load_model(self, target_model: nn.Module) -> None:
-        self.model = DummyEagleModel()
-        self.model.get_input_embeddings = target_model.get_input_embeddings
-        self.model.compute_logits = target_model.compute_logits
-
-
-# FIXME(woosuk): This is a dummy model for testing.
-# Remove this once we have a real model.
-class DummyEagleModel(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> torch.Tensor:
-        input_embeddings = self.get_input_embeddings(input_ids)
-        return hidden_states + input_embeddings  # Dummy return.
+        import copy
+        eagle_vllm_config = copy.deepcopy(self.vllm_config)
+        eagle_vllm_config.model_config = \
+            self.vllm_config.speculative_config.draft_model_config
+        print(eagle_vllm_config)
+        self.model = get_model(vllm_config=eagle_vllm_config)
+        print(f"Loaded draft model: {self.model}")
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
