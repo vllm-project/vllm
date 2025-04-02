@@ -34,12 +34,14 @@ def test_topp_result_sums_past_p():
                                               k=no_op_k,
                                               p=p)
 
-        xm.mark_step()
-    with torch.device("cpu"):
         # Verify that the masked logit's probability sums to at least p.
         probs.masked_fill_(logits_masked.isinf(), 0)
         masked_prob_sum = probs.sum(dim=-1)
-        assert torch.all(torch.ge(masked_prob_sum + TOLERANCE, p))
+
+        xm.mark_step()
+
+    # Perform assertion on CPU.
+    assert torch.all(torch.ge(masked_prob_sum.cpu() + TOLERANCE, p.cpu()))
 
 
 def test_topp_basic():
@@ -56,12 +58,12 @@ def test_topp_basic():
                                        p=torch.tensor([0.79, 0.79]))
 
         xm.mark_step()
-    with torch.device("cpu"):
-        # Expect the smallest elements to be dropped.
-        expected_result = logits.clone()
-        expected_result[0, 0] = float("-inf")
-        expected_result[1, 1] = float("-inf")
-        assert torch.allclose(expected_result, result)
+
+    # Expect the smallest elements to be dropped.
+    expected_result = logits.clone().cpu()
+    expected_result[0, 0] = float("-inf")
+    expected_result[1, 1] = float("-inf")
+    assert torch.allclose(expected_result, result.cpu())
 
 
 def test_topp_select_all():
@@ -78,8 +80,8 @@ def test_topp_select_all():
                                        p=torch.tensor([1.0, 1.0]))
 
         xm.mark_step()
-    with torch.device("cpu"):
-        assert torch.allclose(logits, result)
+
+    assert torch.allclose(logits.cpu(), result.cpu())
 
 
 def test_topp_with_ties():
@@ -96,13 +98,13 @@ def test_topp_with_ties():
                                        p=torch.tensor([0.2]))
 
         xm.mark_step()
-    with torch.device("cpu"):
-        # All tie values are included in the top-p set. Tie breaking is left
-        # to be done during final sampling (all tie tokens have equal
-        # probability of being chosen).
-        expected_result = logits.clone()
-        expected_result[0, 3] = float("-inf")
-        assert torch.allclose(expected_result, result)
+
+    # All tie values are included in the top-p set. Tie breaking is left
+    # to be done during final sampling (all tie tokens have equal
+    # probability of being chosen).
+    expected_result = logits.clone().cpu()
+    expected_result[0, 3] = float("-inf")
+    assert torch.allclose(expected_result, result.cpu())
 
 
 def test_both_topk_topp():
@@ -120,11 +122,11 @@ def test_both_topk_topp():
                                        p=torch.tensor([0.79, 0.79]))
 
         xm.mark_step()
-    with torch.device("cpu"):
-        # Since for the first batch k=1, expect only the largest element gets
-        # selected.
-        expected_result = logits.clone()
-        expected_result[0, 0] = float("-inf")
-        expected_result[0, 1] = float("-inf")
-        expected_result[1, 1] = float("-inf")
-        assert torch.allclose(expected_result, result)
+
+    # Since for the first batch k=1, expect only the largest element gets
+    # selected.
+    expected_result = logits.clone().cpu()
+    expected_result[0, 0] = float("-inf")
+    expected_result[0, 1] = float("-inf")
+    expected_result[1, 1] = float("-inf")
+    assert torch.allclose(expected_result, result.cpu())
