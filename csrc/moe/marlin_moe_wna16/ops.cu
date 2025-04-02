@@ -33,7 +33,7 @@
 
 namespace MARLIN_NAMESPACE_NAME {
 
-__global__ void MarlinDefault(MARLIN_KERNEL_PARAMS) {};
+__global__ void MarlinDefault(MARLIN_KERNEL_PARAMS){};
 
 using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
 
@@ -46,7 +46,7 @@ __global__ void permute_cols_kernel(
     const int32_t* __restrict__ sorted_token_ids_ptr,
     const int32_t* __restrict__ expert_ids_ptr,
     const int32_t* __restrict__ num_tokens_past_padded_ptr, int size_m,
-    int size_k, int top_k){};
+    int size_k, int top_k) {};
 
 }  // namespace marlin
 
