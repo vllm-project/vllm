@@ -106,7 +106,7 @@ class CPUCacheEngine:
         num_layers = model_config.get_num_layers(parallel_config)
 
         key_cache_block = block_size * num_heads * head_size
-        value_cache_block = key_cache_block
+        value_cache_block = key_cache_block if not model_config.use_mla else 0
         total = num_layers * (key_cache_block + value_cache_block)
         if cache_dtype == "auto":
             dtype = model_config.dtype
