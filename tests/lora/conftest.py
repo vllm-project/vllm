@@ -2,7 +2,6 @@
 
 import tempfile
 from collections import OrderedDict
-from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,28 +23,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
-
-
-class ContextIDInfo(TypedDict):
-    lora_id: int
-    context_length: str
-
-
-class ContextInfo(TypedDict):
-    lora: str
-    context_length: str
-
-
-LONG_LORA_INFOS: list[ContextIDInfo] = [{
-    "lora_id": 1,
-    "context_length": "16k",
-}, {
-    "lora_id": 2,
-    "context_length": "16k",
-}, {
-    "lora_id": 3,
-    "context_length": "32k",
-}]
 
 
 @pytest.fixture()
@@ -181,6 +158,11 @@ def mixtral_lora_files():
 
 
 @pytest.fixture(scope="session")
+def gemma_lora_files():
+    return snapshot_download(repo_id="wskwon/gemma-7b-test-lora")
+
+
+@pytest.fixture(scope="session")
 def chatglm3_lora_files():
     return snapshot_download(repo_id="jeeejeee/chatglm3-text2sql-spider")
 
@@ -229,6 +211,11 @@ def tinyllama_lora_files():
 @pytest.fixture(scope="session")
 def phi2_lora_files():
     return snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora")
+
+
+@pytest.fixture(scope="session")
+def long_context_lora_files_16k_1():
+    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1")
 
 
 @pytest.fixture
