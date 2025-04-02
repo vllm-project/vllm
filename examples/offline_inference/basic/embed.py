@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import os
 from argparse import Namespace
 
 from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
+
+# Because current vllm v1 version having default start,
+# but embedding model is not supported in v1.
+os.environ['VLLM_USE_V1'] = "0"
 
 
 def main(args: Namespace):
