@@ -487,7 +487,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|endoftext10|>"  # 200010 (see vocab.json in hf model)
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
-            if model_type in ("blip-2", "fuyu", "paligemma", "pixtral"):
+            if model_type in ("blip-2", "fuyu", "paligemma", "pixtral",
+                              "mistral3"):
                 # These models do not use image tokens in the prompt
                 return None
             if model_type == "qwen":
@@ -495,8 +496,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "deepseek_vl_v2", "internvl_chat",
-                              "skywork_chat", "NVLM_D", "h2ovl_chat"):
+            if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
+                              "internvl_chat", "skywork_chat", "NVLM_D",
+                              "h2ovl_chat"):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
