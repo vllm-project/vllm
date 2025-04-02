@@ -304,6 +304,11 @@ class EngineCoreProc(EngineCore):
     ):
         super().__init__(vllm_config, executor_class, log_stats)
 
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
+
+        self.global_unfinished_reqs = False
+
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
         # and to overlap some serialization/deserialization with the
@@ -319,16 +324,10 @@ class EngineCoreProc(EngineCore):
                          args=(output_path, engine_index),
                          daemon=True).start()
 
-        self.global_unfinished_reqs = False
-
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
-
     @staticmethod
     def run_engine_core(*args,
                         dp_rank: int = 0,
                         local_dp_rank: int = 0,
-                        ready_pipe,
                         **kwargs):
         """Launch EngineCore busy loop in background process."""
 
@@ -362,9 +361,6 @@ class EngineCoreProc(EngineCore):
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
                 engine_core = EngineCoreProc(*args, **kwargs)
-
-            # Send Readiness signal to EngineClient.
-            ready_pipe.send({"status": "READY"})
 
             engine_core.run_busy_loop()
 
@@ -474,6 +470,10 @@ class EngineCoreProc(EngineCore):
                             zmq.DEALER,
                             identity=identity,
                             bind=False) as socket:
+
+            # Send ready message to front-end once input socket is connected.
+            socket.send(b'READY')
+
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)

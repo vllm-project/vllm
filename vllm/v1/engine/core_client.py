@@ -380,10 +380,31 @@ class MPClient(EngineCoreClient):
                                 self.resources.core_engines)
 
         # Wait for engine core process(es) to start.
-        for engine in self.resources.core_engines:
-            engine.proc_handle.wait_for_startup()
+        self._wait_for_engine_startup()
 
         self.utility_results: dict[int, AnyFuture] = {}
+
+    def _wait_for_engine_startup(self):
+        # Wait for engine core process(es) to send ready messages.
+        identities = set(range(len(self.resources.core_engines)))
+        while identities:
+            while not self.input_socket.poll(timeout=10000):
+                logger.info("Waiting for %d core engine proc(s) to start: %s",
+                            len(identities), identities)
+            eng_id_bytes, msg = self.input_socket.recv_multipart()
+            eng_id = int.from_bytes(eng_id_bytes, byteorder="little")
+            if eng_id not in identities:
+                raise RuntimeError(f"Unexpected or duplicate engine: {eng_id}")
+            if msg != b'READY':
+                raise RuntimeError(f"Engine {eng_id} failed: {msg.decode()}")
+            logger.info("Core engine process %d ready.", eng_id)
+            identities.discard(eng_id)
+
+        # Double check that the process are running.
+        for engine in self.resources.core_engines:
+            proc = engine.proc_handle.proc
+            if proc.exitcode is not None:
+                raise RuntimeError(f"Engine proc {proc.name} not running")
 
     def _init_core_engines(
         self,
