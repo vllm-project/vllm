@@ -47,13 +47,13 @@ class Phi4MiniJsonToolParser(ToolParser):
         """
         Extract the tool calls from a complete model response.
         """
-        print(f"Model output: {model_output}")
+        logger.debug("Model output: %s", model_output)
 
         pattern = r'functools\[(.*?)\]'
         matches = re.search(pattern, model_output, re.DOTALL)
 
         if not matches:
-            print("No function calls found")
+            logger.debug("No function calls found")
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
@@ -64,10 +64,12 @@ class Phi4MiniJsonToolParser(ToolParser):
                 json_content = '[' + matches.group(1) + ']'
 
                 function_call_arr = json.loads(json_content)
-                print(f"Successfully extracted {len(function_call_arr)} "
-                      "function calls")
+                logger.debug("Successfully extracted %d function calls",
+                             len(function_call_arr))
             except json.JSONDecodeError as e:
-                print(f"Error parsing JSON: {e}")
+                logger.error(
+                    "Failed to parse function calls from model output: %s. "
+                    "Error: %s", model_output, str(e))
 
             tool_calls: list[ToolCall] = [
                 ToolCall(
