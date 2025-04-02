@@ -47,7 +47,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-@create_new_process_for_each_test()
 def test_ilama_lora(ilama_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
