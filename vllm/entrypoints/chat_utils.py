@@ -6,6 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Iterable
+from enum import Enum
 from functools import cache, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
@@ -49,10 +50,18 @@ from vllm.utils import deprecate_kwargs, random_uuid
 
 logger = init_logger(__name__)
 
+
+class Modality(str, Enum):
+    IMAGE = "image"
+    IMAGE_EMBEDS = "image_embeds"
+    AUDIO = "audio"
+    VIDEO = "video"
+
+
 MODALITY_PLACEHOLDERS_MAP = {
-    "image": "<##IMAGE##>",
-    "audio": "<##AUDIO##>",
-    "video": "<##VIDEO##>",
+    Modality.IMAGE: "<##IMAGE##>",
+    Modality.AUDIO: "<##AUDIO##>",
+    Modality.VIDEO: "<##VIDEO##>",
 }
 
 
@@ -474,7 +483,9 @@ def resolve_chat_template_content_format(
 
 
 
-ModalityStr = Literal["image", "audio", "video", "image_embeds"]
+ModalityStr = Literal[
+    Modality.IMAGE, Modality.AUDIO, Modality.VIDEO, Modality.IMAGE_EMBEDS
+]
 _T = TypeVar("_T")
 
 
@@ -517,7 +528,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         hf_config = self._model_config.hf_config
         model_type = hf_config.model_type
 
-        if modality in ("image", "image_embeds"):
+        if modality in (Modality.IMAGE, Modality.IMAGE_EMBEDS):
             if model_type == "chatglm":
                 return "<|begin_of_image|><|endoftext|><|end_of_image|>"
             if model_type in ("phi3_v", "phi4mm"):
@@ -554,7 +565,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|media_start|>image<|media_content|><|media_pad|><|media_end|>" # noqa: E501
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
-        elif modality == "audio":
+        elif modality == Modality.AUDIO:
             if model_type in ("ultravox", "granite_speech"):
                 return "<|audio|>"
             if model_type == "phi4mm":
@@ -564,8 +575,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
             if model_type == "minicpmo":
                 return "(<audio>./</audio>)"
-            raise TypeError(f"Unknown model type: {model_type}")
-        elif modality == "video":
+            raise TypeError(f"Unknown {modality} model type: {model_type}")
+        elif modality == Modality.VIDEO:
             if model_type == "internvl_chat":
                 return "<video>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
@@ -578,14 +589,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.video_token_index)
             raise TypeError(f"Unknown {modality} model type: {model_type}")
-        else:
-            raise TypeError(f"Unknown modality: {modality}")
 
     def add(self, modality: ModalityStr, item: _T) -> Optional[str]:
         """
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
+        modality = Modality(modality).value
+
         mm_registry = self.mm_registry
         model_config = self.model_config
 
@@ -738,8 +749,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def parse_image(self, image_url: str) -> None:
         image = self._connector.fetch_image(image_url)
 
-        placeholder = self._tracker.add("image", image)
-        self._add_placeholder("image", placeholder)
+        placeholder = self._tracker.add(Modality.IMAGE, image)
+        self._add_placeholder(Modality.IMAGE, placeholder)
 
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
@@ -748,19 +759,19 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                 k: self._connector.fetch_image_embedding(v)
                 for k, v in image_embeds.items()
             }
-            placeholder = self._tracker.add("image_embeds", embeds)
+            placeholder = self._tracker.add(Modality.IMAGE_EMBEDS, embeds)
 
         if isinstance(image_embeds, str):
             embedding = self._connector.fetch_image_embedding(image_embeds)
-            placeholder = self._tracker.add("image_embeds", embedding)
+            placeholder = self._tracker.add(Modality.IMAGE_EMBEDS, embedding)
 
-        self._add_placeholder("image", placeholder)
+        self._add_placeholder(Modality.IMAGE, placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
         audio = self._connector.fetch_audio(audio_url)
 
-        placeholder = self._tracker.add("audio", audio)
-        self._add_placeholder("audio", placeholder)
+        placeholder = self._tracker.add(Modality.AUDIO, audio)
+        self._add_placeholder(Modality.AUDIO, placeholder)
 
     def parse_input_audio(self, input_audio: InputAudio) -> None:
         audio_data = input_audio.get("data", "")
@@ -772,8 +783,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def parse_video(self, video_url: str) -> None:
         video = self._connector.fetch_video(video_url)
 
-        placeholder = self._tracker.add("video", video)
-        self._add_placeholder("video", placeholder)
+        placeholder = self._tracker.add(Modality.VIDEO, video)
+        self._add_placeholder(Modality.VIDEO, placeholder)
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
@@ -789,8 +800,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def parse_image(self, image_url: str) -> None:
         image_coro = self._connector.fetch_image_async(image_url)
 
-        placeholder = self._tracker.add("image", image_coro)
-        self._add_placeholder("image", placeholder)
+        placeholder = self._tracker.add(Modality.IMAGE, image_coro)
+        self._add_placeholder(Modality.IMAGE, placeholder)
 
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
@@ -808,14 +819,14 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
                 fetch_image_embedding(image_embeds)
             future.set_result(embedding)
 
-        placeholder = self._tracker.add("image_embeds", future)
-        self._add_placeholder("image", placeholder)
+        placeholder = self._tracker.add(Modality.IMAGE_EMBEDS, future)
+        self._add_placeholder(Modality.IMAGE, placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
         audio_coro = self._connector.fetch_audio_async(audio_url)
 
-        placeholder = self._tracker.add("audio", audio_coro)
-        self._add_placeholder("audio", placeholder)
+        placeholder = self._tracker.add(Modality.AUDIO, audio_coro)
+        self._add_placeholder(Modality.AUDIO, placeholder)
 
     def parse_input_audio(self, input_audio: InputAudio) -> None:
         audio_data = input_audio.get("data", "")
@@ -827,8 +838,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def parse_video(self, video_url: str) -> None:
         video = self._connector.fetch_video_async(video_url)
 
-        placeholder = self._tracker.add("video", video)
-        self._add_placeholder("video", placeholder)
+        placeholder = self._tracker.add(Modality.VIDEO, video)
+        self._add_placeholder(Modality.VIDEO, placeholder)
 
 
 def validate_chat_template(chat_template: Optional[Union[Path, str]]):
@@ -1133,23 +1144,23 @@ def _parse_chat_message_content_part(
         case "image_url":
             str_content = cast(str, content)
             mm_parser.parse_image(str_content)
-            modality = "image"
+            modality = Modality.IMAGE.value
         case "image_embeds":
             content = cast(Union[str, dict[str, str]], content)
             mm_parser.parse_image_embeds(content)
-            modality = "image"
+            modality = Modality.IMAGE.value
         case "audio_url":
             str_content = cast(str, content)
             mm_parser.parse_audio(str_content)
-            modality = "audio"
+            modality = Modality.AUDIO.value
         case "input_audio":
             dict_content = cast(InputAudio, content)
             mm_parser.parse_input_audio(dict_content)
-            modality = "audio"
+            modality = Modality.AUDIO.value
         case "video_url":
             str_content = cast(str, content)
             mm_parser.parse_video(str_content)
-            modality = "video"
+            modality = Modality.VIDEO.value
         case _:
             raise NotImplementedError(f"Unknown part type: {part_type}")
 
