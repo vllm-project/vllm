@@ -145,7 +145,8 @@ torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 #endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
-                              int64_t n);
+                              int64_t n,
+                              std::optional<at::ScalarType> const& dtype);
 
 torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
                                   int64_t type, int64_t row);
