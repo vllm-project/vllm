@@ -46,7 +46,8 @@ from vllm.sequence import IntermediateTensors
 from .blip2 import Blip2QFormerModel
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (AutoWeightsLoader, embed_multimodal,
+                    init_vllm_registered_model, maybe_prefix)
 
 ###########################################################
 # Below is a direct copy of the non-lang model components from transformers
@@ -81,12 +82,17 @@ class GraniteSpeechEncoderProjectorQFormer(nn.Module):
         query_output = self.qformer(
             query_embeds=self.query.data,
             encoder_hidden_states=x,
-            encoder_attention_mask=atts,
-            return_dict=True,
+            # encoder_attention_mask=atts,
+            # return_dict=True,
         )
+        # NOTE - rewrite this, just making it explicit so that
+        # we remember we change this for now
+        last_hidden_state = query_output
+
         query_proj = self.linear(
-            query_output.last_hidden_state.view(
-                batch_size, nblocks * self.window_size // self.ds_rate, -1))
+            last_hidden_state.view(batch_size,
+                                   nblocks * self.window_size // self.ds_rate,
+                                   -1))
         return query_proj
 
 
@@ -123,6 +129,11 @@ class GraniteSpeechCTCModel(nn.Module):
         self.output_dim = config.output_dim
 
     def forward(self, x: torch.Tensor):
+        # TODO - currently we unsqueeze a singleton dim when we have one audio
+        # output, but vLLM stacks along a new axis....
+        if len(x.shape) == 4:
+            x = x.squeeze(1)
+
         x = self.rnn_tr[0](x)
         for idx, layer in enumerate(self.rnn_tr[1:], start=1):
             x = layer(x, self.context_size)
@@ -398,23 +409,20 @@ class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
         return {"audio": self.get_max_audio_tokens()}
 
     # There is no limit to the maximum number of audio tokens that can be
-    # encoded as features; we pick ~10,000 as a number that is probably higher
+    # encoded as features; we pick ~5000 as a number that is probably higher
     # than we would expect to encounter. The sequence of length
     # get_max_audio_len() produces get_max_audio_tokens().
     def get_max_audio_tokens(self):
-        return 10002
+        return 5001
 
     def get_max_audio_len(self):
-        return 16000000
+        return 8000000
 
 
 class GraniteSpeechMultiModalProcessor(
         BaseMultiModalProcessor[GraniteSpeechMultiModalProcessingInfo]):
 
     def _get_data_parser(self) -> MultiModalDataParser:
-        # TODO - may need to clean this up / need to make sure override is
-        # handled correctly. This can also probably be handled more cleanly
-        # on the HF side of things...
         feature_extractor = self.info.get_hf_processor().feature_extractor
         sampling_rate = feature_extractor.melspec_kwargs["sample_rate"]
         return MultiModalDataParser(target_sr=sampling_rate)
@@ -559,21 +567,54 @@ class GraniteSpeechForConditionalGeneration(
             raise ValueError("Incorrect type of audio input features. "
                              f"Got type: {type(input_features)}")
 
-        if not isinstance(input_features_mask, (torch.Tensor, list)):
+        if input_features_mask and not isinstance(input_features_mask,
+                                                  (torch.Tensor, list)):
             raise ValueError("Incorrect type of audio input features mask. "
-                             f"Got type: {type(input_features)}")
+                             f"Got type: {type(input_features_mask)}")
 
         return GraniteSpeechAudioInputs(
             input_features=input_features,
             input_features_mask=input_features_mask,
         )
 
-        def get_input_embeddings(
-            self,
-            input_ids: torch.Tensor,
-            multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-        ) -> torch.Tensor:
-            raise NotImplementedError("Get input embeddings not implemented")
+    def _process_audio_input(self, audio_input: GraniteSpeechAudioInputs):
+        # TODO - probably should handle audio embeddings
+        # in addition to raw audio data, but for now we don't
+        # TODO - handle the features mask
+        # TODO - fix dtype hacking here
+        # TODO - fix squeezed dim here - seems like something somewhere
+        # may not be stackin properly / is creating an extra dimension
+        # unnecessarily (probably the view() in the processor)
+        #           should be 1, 50000, 160
+        input_features = audio_input["input_features"].to(
+            torch.bfloat16).squeeze(0)
+        encoder_embeds = self.encoder(input_features)
+        projected_embeds = self.projector(encoder_embeds, None)
+        return projected_embeds
+
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+        audio_input = self._parse_and_validate_audio_input(**kwargs)
+        if audio_input is None:
+            return None
+        audio_features = self._process_audio_input(audio_input)
+        return audio_features
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        if multimodal_embeddings is None:
+            return self.language_model.get_input_embeddings(input_ids)
+
+        inputs_embeds = embed_multimodal(
+            input_ids,
+            self.config.audio_token_index,
+            self.language_model.model.get_input_embeddings,
+            multimodal_embeddings,
+        )
+        return inputs_embeds
 
     def forward(
         self,
@@ -581,8 +622,18 @@ class GraniteSpeechForConditionalGeneration(
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        input_features=None,
+        **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            audio_embeds = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids, audio_embeds)
+            input_ids = None
+
         model_output = self.language_model(input_ids, positions,
                                            intermediate_tensors, inputs_embeds)
         return model_output
