@@ -3,6 +3,7 @@
 pipeline parallelism.
 """
 
+import json
 from typing import Optional
 
 import pytest
@@ -29,23 +30,24 @@ from .conftest import run_equality_correctness_test_tp
     ]])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [[]])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])
-@pytest.mark.parametrize("model, test_llm_kwargs",
-                         [("JackFram/llama-68m", [
-                             "--speculative-model",
-                             "JackFram/llama-68m",
-                             "--num-speculative-tokens",
-                             "5",
-                             "--speculative-draft-pipeline-parallel-size",
-                             "1",
-                         ]),
-                          ("ibm-granite/granite-3b-code-instruct", [
-                              "--speculative-model",
-                              "ibm-granite/granite-3b-code-instruct",
-                              "--num-speculative-tokens",
-                              "5",
-                              "--speculative-draft-pipeline-parallel-size",
-                              "1",
-                          ])])
+@pytest.mark.parametrize(
+    "model, test_llm_kwargs",
+    [("JackFram/llama-68m", [
+        "--speculative_config",
+        json.dumps({
+            "model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
+            "draft_pipeline_parallel_size": 1,
+        }),
+    ]),
+     ("ibm-granite/granite-3b-code-instruct", [
+         "--speculative_config",
+         json.dumps({
+             "model": "ibm-granite/granite-3b-code-instruct",
+             "num_speculative_tokens": 5,
+             "draft_pipeline_parallel_size": 1,
+         }),
+     ])])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seed", [1])
 def test_draft_model_pp_lt_target_model_pp2(model, common_llm_kwargs,
@@ -91,12 +93,12 @@ def test_draft_model_pp_lt_target_model_pp2(model, common_llm_kwargs,
      ]])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])
 @pytest.mark.parametrize("model, test_llm_kwargs", [("JackFram/llama-68m", [
-    "--speculative-model",
-    "JackFram/llama-68m",
-    "--num-speculative-tokens",
-    "3",
-    "--speculative-draft-pipeline-parallel-size",
-    "1",
+    "--speculative_config",
+    json.dumps({
+        "model": "JackFram/llama-68m",
+        "num_speculative_tokens": 3,
+        "draft_pipeline_parallel_size": 1,
+    }),
 ])])
 @pytest.mark.parametrize("logprobs", [None, 2])
 @pytest.mark.parametrize("batch_size", [2])
