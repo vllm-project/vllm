@@ -4,8 +4,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict, Union
 
 import numpy as np
-import numpy.typing as npt
-import scipy.signal
 import torch
 import torch.nn as nn
 from transformers import (BatchFeature, PretrainedConfig,
@@ -764,24 +762,9 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
 class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
 
     def _get_data_parser(self) -> MultiModalDataParser:
-
-        def scipy_resample_audio(
-            audio: npt.NDArray[np.floating],
-            *,
-            orig_sr: float,
-            target_sr: float,
-        ):
-            if orig_sr > target_sr:
-                return scipy.signal.resample_poly(audio, 1,
-                                                  orig_sr // target_sr)
-            elif orig_sr < target_sr:
-                return scipy.signal.resample_poly(audio, target_sr // orig_sr,
-                                                  1)
-            return audio
-
         feature_extractor = self.info.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate,
-                                    resample_func=scipy_resample_audio)
+                                    audio_resample_method="scipy")
 
     def _call_hf_processor(
         self,

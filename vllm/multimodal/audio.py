@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import base64
 from io import BytesIO
 from pathlib import Path
+from typing import Literal, Optional
 
 import numpy as np
 import numpy.typing as npt
+import scipy.signal
 
 from vllm.inputs.registry import InputContext
 from vllm.utils import PlaceholderModule
@@ -43,13 +44,59 @@ class AudioPlugin(MultiModalPlugin):
             "There is no default maximum multimodal tokens")
 
 
-def resample_audio(
+def resample_audio_librosa(
     audio: npt.NDArray[np.floating],
     *,
     orig_sr: float,
     target_sr: float,
 ) -> npt.NDArray[np.floating]:
     return librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr)
+
+
+def resample_audio_scipy(
+    audio: npt.NDArray[np.floating],
+    *,
+    orig_sr: float,
+    target_sr: float,
+):
+    if orig_sr > target_sr:
+        return scipy.signal.resample_poly(audio, 1, orig_sr // target_sr)
+    elif orig_sr < target_sr:
+        return scipy.signal.resample_poly(audio, target_sr // orig_sr, 1)
+    return audio
+
+
+class AudioResampler:
+    """Resample audio data to a target sample rate."""
+
+    def __init__(
+        self,
+        target_sr: Optional[float] = None,
+        method: Literal["librosa", "scipy"] = "librosa",
+    ):
+        self.target_sr = target_sr
+        self.method = method
+
+    def resample(
+        self,
+        audio: npt.NDArray[np.floating],
+        *,
+        orig_sr: float,
+    ) -> npt.NDArray[np.floating]:
+        if self.target_sr is None:
+            raise RuntimeError("Audio resampling is not supported when "
+                               "`target_sr` is not provided")
+        if self.method == "librosa":
+            return resample_audio_librosa(audio,
+                                          orig_sr=orig_sr,
+                                          target_sr=self.target_sr)
+        elif self.method == "scipy":
+            return resample_audio_scipy(audio,
+                                        orig_sr=orig_sr,
+                                        target_sr=self.target_sr)
+        else:
+            raise ValueError(f"Invalid resampling method: {self.method}. "
+                             "Supported methods are 'librosa' and 'scipy'.")
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
