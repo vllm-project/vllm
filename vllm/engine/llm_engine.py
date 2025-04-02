@@ -1102,7 +1102,7 @@ class LLMEngine:
                 continue
 
             output: List[SequenceGroupOutput]
-            
+
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
                 if self.model_config.task == "generate" and \
