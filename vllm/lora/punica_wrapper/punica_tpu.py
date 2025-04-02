@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 from .punica_base import PunicaWrapperBase
 
+
 class PunicaWrapperTPU(PunicaWrapperBase):
     """
     PunicaWrapperTPU is designed to manage and provide metadata for the punica
