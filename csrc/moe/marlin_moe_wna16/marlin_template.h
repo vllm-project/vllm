@@ -1519,18 +1519,28 @@ __global__ void Marlin(
     int c_gl_stride = prob_n / 8;
     int c_gl_wr_delta_o = 8 * c_gl_stride;
     int c_gl_wr_delta_i = 4 * (active_threads / 32);
-    int c_gl_wr = c_gl_stride * ((threadIdx.x % 32) / 4) +
-                  4 * (threadIdx.x / 32) + threadIdx.x % 4;
-    c_gl_wr += (2 * thread_n_blocks) * slice_col;
+    int c_gl_wr;
+    if constexpr(m_block_size_8) {
+      c_gl_wr = c_gl_stride * ((threadIdx.x % 4) * 2) +
+                    4 * (threadIdx.x / 32) + (threadIdx.x % 32) / 8;
+      c_gl_wr += (2 * thread_n_blocks) * slice_col;
+    } else {
+      c_gl_wr = c_gl_stride * ((threadIdx.x % 32) / 4) +
+                    4 * (threadIdx.x / 32) + threadIdx.x % 4;
+      c_gl_wr += (2 * thread_n_blocks) * slice_col;
+    }
     constexpr int c_sh_wr_delta = active_threads;
     int c_sh_wr = threadIdx.x;
 
     if (!first) {
 
   #pragma unroll
-      for (int i = 0; i < thread_m_blocks * 4; i++) {
-        int c_idx =
-            c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
+      for (int i = 0; i < (m_block_size_8 ? 2 : thread_m_blocks * 4); i++) {
+        int c_idx;
+        if constexpr(m_block_size_8)
+          c_idx = c_gl_wr + i * c_gl_stride + (threadIdx.x % 8) / 4 * c_gl_wr_delta_i;
+        else
+          c_idx = c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
         if (c_idx / c_gl_stride < block_num_valid_tokens) {
           int64_t sorted_row = sh_block_sorted_ids[c_idx / c_gl_stride];
           int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
@@ -1540,13 +1550,17 @@ __global__ void Marlin(
     }
 
   #pragma unroll
-    for (int i = 0; i < thread_m_blocks * 4; i++) {
+    for (int i = 0; i < (m_block_size_8 ? 2 : thread_m_blocks * 4); i++) {
       if (!first) {
         int4 c_red = sh_red[c_sh_wr + i * c_sh_wr_delta];
   #pragma unroll
         for (int j = 0; j < 2 * 4; j++) {
+          int delta = 0;
+          if constexpr(m_block_size_8) {
+            delta = j % 2 == 1 ? -2 : 0;
+          }
           reinterpret_cast<float*>(
-              &frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)] +=
+              &frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4) + delta] +=
               Dtype::num2float(reinterpret_cast<scalar_t*>(&c_red)[j]);
         }
       }
@@ -1554,13 +1568,20 @@ __global__ void Marlin(
         int4 c;
   #pragma unroll
         for (int j = 0; j < 2 * 4; j++) {
+          int delta = 0;
+          if constexpr(m_block_size_8) {
+            delta = j % 2 == 1 ? -2 : 0;
+          }
           reinterpret_cast<scalar_t*>(&c)[j] =
               Dtype::float2num(reinterpret_cast<float*>(
-                  &frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)]);
+                  &frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4) + delta]);
         }
 
-        int c_idx =
-            c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
+        int c_idx;
+        if constexpr(m_block_size_8)
+          c_idx = c_gl_wr + i * c_gl_stride + (threadIdx.x % 8) / 4 * c_gl_wr_delta_i;
+        else
+          c_idx = c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
         if (c_idx / c_gl_stride < block_num_valid_tokens) {
           int64_t sorted_row = sh_block_sorted_ids[c_idx / c_gl_stride];
           int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
@@ -1594,6 +1615,13 @@ __global__ void Marlin(
       float* frag_c_ptr = reinterpret_cast<float*>(&frag_c);
   #pragma unroll
       for (int k = 0; k < th_size; k++) {
+        if constexpr(m_block_size_8) {
+          if (k % 2) continue;
+        } else {
+          if (k / 8* 16 + (threadIdx.x % 32) / 4 >= block_num_valid_tokens)
+            continue;
+        }
+
         sh_red[threadIdx.x] =
             C_tmp[c_cur_offset + active_threads * k + threadIdx.x];
 
@@ -1609,6 +1637,13 @@ __global__ void Marlin(
       int4* frag_c_ptr = reinterpret_cast<int4*>(&frag_c);
   #pragma unroll
       for (int k = 0; k < th_size; k++) {
+        if constexpr(m_block_size_8) {
+          if (k % 2) continue;
+        } else {
+          if (k / 8* 16 + (threadIdx.x % 32) / 4 >= block_num_valid_tokens)
+            continue;
+        }
+
         C_tmp[c_cur_offset + active_threads * k + threadIdx.x] = frag_c_ptr[k];
       }
     }
