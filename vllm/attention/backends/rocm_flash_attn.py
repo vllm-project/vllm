@@ -14,10 +14,10 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata,
-                                           use_rocm_custom_paged_attention)
+                                           PagedAttentionMetadata)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import use_rocm_custom_paged_attention
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
@@ -789,7 +789,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             gqa_ratio = num_heads // self.num_kv_heads
             use_custom = use_rocm_custom_paged_attention(
                 decode_query.dtype, head_size, block_size, gqa_ratio,
-                decode_meta.max_decode_seq_len)
+                decode_meta.max_decode_seq_len, self.sliding_window)
             if use_custom:
                 max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
                                != AttentionType.ENCODER_DECODER else
@@ -814,6 +814,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     out = output[num_prefill_tokens:]
                 else:
                     out = output
+
+                query_start_loc = None
                 ops.paged_attention_rocm(
                     out,
                     exp_sums,
@@ -830,7 +832,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     decode_meta.seq_lens_tensor
                     if self.attn_type != AttentionType.ENCODER_DECODER else
                     decode_meta.encoder_seq_lens_tensor,
-                    None,
+                    query_start_loc,
                     block_size,
                     max_seq_len,
                     self.alibi_slopes,

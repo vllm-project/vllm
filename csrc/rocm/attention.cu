@@ -385,8 +385,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // fetch Q in shared across warps and then write to registers
   const int local_qhead_idx = 4 * warpid + rowid;
   const int global_qhead_idx = wg_start_head_idx + local_qhead_idx;
-  const int64_t query_start_off =
-      query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx;
+  const int64_t query_start_off = static_cast<int64_t>(
+      query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
   const scalar_t* q_ptr =
       q + query_start_off * q_stride + global_qhead_idx * HEAD_SIZE;
 
@@ -899,8 +899,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
 
     // fetch q elements
     // every 4 lanes fetch 8 elems, so warp fetches 8*16 = 128 elemsc
-    const int64_t query_start_off =
-        query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx;
+    const int64_t query_start_off = static_cast<int64_t>(
+        query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
     const scalar_t* q_ptr =
         q + query_start_off * q_stride + wg_start_head_idx * HEAD_SIZE;
     const _B16x8* q_ptrh8 = reinterpret_cast<const _B16x8*>(q_ptr);
@@ -1466,8 +1466,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       __fdividef(1.0f, shared_global_exp_sum + 1e-6f);
   acc *= inv_global_exp_sum;
 
-  const int64_t query_start_off =
-      query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx;
+  const int64_t query_start_off = static_cast<int64_t>(
+      query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
   OUTT* out_ptr = out + query_start_off * num_heads * HEAD_SIZE +
                   static_cast<int64_t>(head_idx) * HEAD_SIZE;
   if constexpr (std::is_same<OUTT, bit8_t>::value) {

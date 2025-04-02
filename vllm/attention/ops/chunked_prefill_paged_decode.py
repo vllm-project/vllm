@@ -11,7 +11,7 @@ import triton
 import triton.language as tl
 
 from vllm import _custom_ops as ops
-from vllm.attention.ops.paged_attn import use_rocm_custom_paged_attention
+from vllm.platforms.rocm import use_rocm_custom_paged_attention
 
 from .prefix_prefill import context_attention_fwd
 
@@ -244,6 +244,7 @@ def chunked_prefill_paged_decode(
             b_loc=block_table,
             b_start_loc=query_start_loc,
             b_seq_len=seq_lens,
+            max_seq_len=max_seq_len,
             max_input_len=max_query_len,
             k_scale=k_scale,
             v_scale=v_scale,
@@ -282,7 +283,7 @@ def chunked_prefill_paged_decode(
     use_custom = use_rocm_custom_paged_attention(query.dtype, head_size,
                                                  block_size,
                                                  num_queries_per_kv,
-                                                 max_seq_len)
+                                                 max_seq_len, sliding_window)
     if use_custom:
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
