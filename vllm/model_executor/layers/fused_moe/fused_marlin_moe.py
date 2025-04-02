@@ -276,6 +276,9 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     intermediate_cache3 = intermediate_cache13[:M * topk_ids.shape[1] * K]
     intermediate_cache3 = intermediate_cache3.view(-1, K)
 
+    use_atomic_add = hidden_states.dtype == torch.half or \
+        torch.cuda.get_device_capability(hidden_states.device)[0] >= 9
+
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         hidden_states,
         intermediate_cache1,
@@ -298,7 +301,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         size_n=2 * N,
         size_k=K,
         is_k_full=is_k_full,
-        use_atomic_add=True,
+        use_atomic_add=use_atomic_add,
         use_fp32_reduce=True,
         is_zp_float=False)
 
@@ -327,7 +330,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         size_n=K,
         size_k=N,
         is_k_full=is_k_full,
-        use_atomic_add=True,
+        use_atomic_add=use_atomic_add,
         use_fp32_reduce=True,
         is_zp_float=False).view(-1, topk, K)
 
