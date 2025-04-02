@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A CPU worker class."""
+import os
 from typing import Dict, List, Optional, Set, Tuple, Type
 
 import torch
@@ -139,6 +140,8 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
         self.local_rank = local_rank
         self.rank = rank
+        vllm_config.parallel_config.rank = rank
+
         self.distributed_init_method = distributed_init_method
 
         self.is_driver_worker = is_driver_worker
@@ -217,6 +220,10 @@ class CPUWorker(LocalOrDistributedWorkerBase):
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
+
+        # Note: unique identifier for creating allreduce shared memory
+        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(
+            ":")[-1]
         self.device = torch.device("cpu")
         self.init_distributed_environment()
         # Set random seed.

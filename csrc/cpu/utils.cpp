@@ -18,7 +18,7 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
 
 #ifndef VLLM_NUMA_DISABLED
 std::string init_cpu_threads_env(const std::string& cpu_ids) {
-  bitmask* omp_cpu_mask = numa_parse_cpustring(cpu_ids.c_str());
+  bitmask* omp_cpu_mask = numa_parse_cpustring_all(cpu_ids.c_str());
   TORCH_CHECK(omp_cpu_mask->size > 0);
   std::vector<int> omp_cpu_ids;
   omp_cpu_ids.reserve(omp_cpu_mask->size);
