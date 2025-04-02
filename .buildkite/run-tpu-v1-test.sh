@@ -3,7 +3,7 @@
 set -e
 
 # Build the docker image.
-docker build -f Dockerfile.tpu -t vllm-tpu .
+docker build -f docker/Dockerfile.tpu -t vllm-tpu .
 
 # Set up cleanup.
 remove_docker_container() { docker rm -f tpu-test || true; }
@@ -21,6 +21,8 @@ docker run --privileged --net host --shm-size=16G -it \
     && python3 -m pip install lm_eval[api]==0.4.4 \
     && export VLLM_USE_V1=1 \
     && export VLLM_XLA_CHECK_RECOMPILATION=1 \
+    && echo TEST_0 \
+    && pytest -v -s /workspace/vllm/tests/v1/tpu/test_perf.py \
     && echo TEST_1 \
     && pytest -v -s /workspace/vllm/tests/tpu/test_compilation.py \
     && echo TEST_2 \
