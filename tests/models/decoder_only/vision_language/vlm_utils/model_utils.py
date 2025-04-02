@@ -104,6 +104,13 @@ def _llava_vllm_to_hf_output(vllm_output: RunnerOutput, model: str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
+def llava_onevision_hf_model_kwargs(model: str) -> dict:
+    """Workaround to fix the sliding window issue in llava_onevision."""
+    config = AutoConfig.from_pretrained(model)
+    config.text_config.sliding_window = None
+    return config.to_dict()
+
+
 def llava_onevision_vllm_to_hf_output(vllm_output: RunnerOutput,
                                       model: str) -> RunnerOutput:
     """Sanitize vllm output [llava-onevision] to compare with hf output."""
