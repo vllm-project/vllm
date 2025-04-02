@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+    VLLM_ROCM_USE_AITER_FA: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -555,6 +556,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
+             ("true", "1")),
+
+    # Whether to use aiter fa ops in aiter mla.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_FA":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_FA", "True").lower() in
              ("true", "1")),
 
     # Whether to use aiter mla ops.

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Type
 
@@ -18,7 +18,6 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
                                                get_aiter_mla_metadata)
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -28,6 +27,11 @@ if TYPE_CHECKING:
 def is_aiter_mla_enabled() -> bool:
     return envs.VLLM_ROCM_USE_AITER \
         and envs.VLLM_ROCM_USE_AITER_MLA
+
+
+def is_aiter_fa_enabled() -> bool:
+    return envs.VLLM_ROCM_USE_AITER \
+        and envs.VLLM_ROCM_USE_AITER_FA
 
 
 class AiterMLABackend(MLACommonBackend):
@@ -384,158 +388,80 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 "alibi_slopes, sliding_window, blocksparse_params, "
                 "logits_soft_cap")
 
-        from aiter import flash_attn_varlen_func
+        flash_attn_varlen_func = None
+
+        if is_aiter_fa_enabled():
+            from aiter import flash_attn_varlen_func
+        else:
+            with suppress(ImportError):
+                from flash_attn import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
-    def _compute_prefill_context(
-        self,
-        q: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: AiterMLAMetadata,
-    ):
-        prefill_metadata = attn_metadata.prefill_metadata
-        assert prefill_metadata is not None
-        assert prefill_metadata.context_chunk_seq_tot is not None
-        assert prefill_metadata.context_chunk_cu_seq_lens is not None
-        assert prefill_metadata.context_chunk_starts is not None
-        assert prefill_metadata.context_chunk_max_seq_lens is not None
-        assert prefill_metadata.context_lens_tensor is not None
-
-        output = None
-        iters = len(prefill_metadata.context_chunk_seq_tot)
-
-        # Fetch from attn_metadata directly, since it late bound by
-        # MLAAttentionState, grabbing it directly `attn_metadata` can avoid
-        # any weirdness around prefill_metadata caching
-        assert attn_metadata.context_chunk_workspace is not None
-        workspace = attn_metadata.context_chunk_workspace
-
-        for i in range(iters):
-            toks = prefill_metadata.context_chunk_seq_tot[i]
-
-            ops.gather_cache(
-                src_cache=kv_c_and_k_pe_cache,
-                dst=workspace,
-                block_table=prefill_metadata.block_tables,
-                cu_seq_lens=prefill_metadata.context_chunk_cu_seq_lens[i],
-                batch_size=prefill_metadata.num_prefills,
-                seq_starts=prefill_metadata.context_chunk_starts[i],
-            )
-
-            kv_c_normed = workspace[:toks]\
-                [..., :self.kv_lora_rank]
-            k_pe = workspace[:toks]\
-                [..., self.kv_lora_rank:].unsqueeze(1)
-
-            kv_nope = self.kv_b_proj(kv_c_normed)[0].view( \
-                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = kv_nope\
-                .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
-            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
-                          dim=-1)
-
-            # For MLA the v head dim is smaller than qk head dim so we pad
-            # out v with 0s to match the qk head dim
-            v_padded = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
+    def _get_fwd_prefill_attn_output(
+            self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+            metadata: AiterMLAMetadata,
+            has_context: bool) -> tuple[torch.Tensor, ...]:
+        if is_aiter_fa_enabled():
+            output = self.flash_attn_varlen_func(
                 q=q,
                 k=k,
-                v=v_padded,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
-                max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
+                v=v,
+                cu_seqlens_q=metadata.query_start_loc,
+                cu_seqlens_k=metadata.query_start_loc,
+                max_seqlen_q=metadata.max_prefill_seq_len,
+                max_seqlen_k=metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_lse=has_context,
+            )
+            if not has_context:
+                return output[0]
+        else:
+            return self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=metadata.query_start_loc,
+                cu_seqlens_k=metadata.query_start_loc,
+                max_seqlen_q=metadata.max_prefill_seq_len,
+                max_seqlen_k=metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_attn_probs=has_context,
+            )
+
+    def _get_prefill_ctx_attn_output(
+            self, index: int, q: torch.Tensor, k: torch.Tensor,
+            v: torch.Tensor,
+            metadata: AiterMLAMetadata) -> tuple[torch.Tensor, ...]:
+        if is_aiter_fa_enabled():
+            return self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=metadata.query_start_loc,
+                cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
+                max_seqlen_q=metadata.max_query_len,
+                max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
                 softmax_scale=self.scale,
                 causal=False,  # Context is unmasked
                 return_lse=True,
             )
-
-            if output is None:
-                output = attn_output
-                output_lse = attn_softmax_lse
-            else:
-                output_tmp = torch.empty_like(output)
-                output_lse_tmp = torch.empty_like(output_lse)
-                merge_attn_states(
-                    output=output_tmp,
-                    output_lse=output_lse_tmp,
-                    prefix_output=output,
-                    prefix_lse=output_lse,
-                    suffix_output=attn_output,
-                    suffix_lse=attn_softmax_lse,
-                )
-                output = output_tmp
-                output_lse = output_lse_tmp
-
-        return output, output_lse
-
-    def _forward_prefill(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
-    ) -> torch.Tensor:
-
-        prefill_metadata = attn_metadata.prefill_metadata
-        assert prefill_metadata is not None
-
-        has_context = prefill_metadata.context_lens_tensor is not None \
-            and prefill_metadata.context_lens_tensor.max() > 0
-
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
-            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv_nope\
-            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
-        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
-
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
-
-        output = self.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v_padded,
-            cu_seqlens_q=prefill_metadata.query_start_loc,
-            cu_seqlens_k=prefill_metadata.query_start_loc,
-            max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-            max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_lse=has_context,
-        )
-
-        if not has_context:
-            output = output[0]
-
-        if has_context:
-            suffix_output, suffix_lse = output
-            context_output, context_lse = self._compute_prefill_context( \
-                q, kv_c_and_k_pe_cache, attn_metadata)
-
-            output = torch.empty_like(suffix_output)
-            merge_attn_states(
-                output=output,
-                prefix_output=context_output,
-                prefix_lse=context_lse,
-                suffix_output=suffix_output,
-                suffix_lse=suffix_lse,
+        else:
+            attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=metadata.query_start_loc,
+                cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
+                max_seqlen_q=metadata.max_query_len,
+                max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
+                softmax_scale=self.scale,
+                causal=False,  # Context is unmasked
+                return_attn_probs=True,
             )
-
-        # slice by `:v.shape[-1]` in order to remove v headdim padding
-        output = output\
-            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                .reshape(-1, self.num_heads * v.shape[-1])
-
-        return self.o_proj(output)[0]
+            return attn_output, attn_softmax_lse
 
     def _forward_decode(
         self,
