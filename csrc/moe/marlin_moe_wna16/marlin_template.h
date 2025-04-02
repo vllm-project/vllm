@@ -588,7 +588,7 @@ __global__ void Marlin(
   #pragma unroll
         for (int i = 0; i < 4; i++) {
           sh_block_topk_weights[tid4 * 4 + i] = Dtype::num2num2(Dtype::float2num(
-              topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]]);
+              topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]]));
         }
       }
     }
