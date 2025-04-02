@@ -49,6 +49,20 @@ __global__ void get_group_gemm_starts(
             a_tensors.size(1), per_act_token, per_out_ch);                 \
   }
 
+#define __CALL_GET_STARTS_KERNEL_FP16(ABC_TENSOR_TYPE, ABC_TYPE)              \
+  else if (out_tensors.dtype() == ABC_TENSOR_TYPE) {                          \
+    get_group_gemm_starts<ABC_TYPE, ABC_TYPE, float>                          \
+        <<<1, num_experts, 0, stream>>>(                                      \
+            static_cast<int32_t*>(expert_offsets.data_ptr()),                 \
+            static_cast<ABC_TYPE**>(a_ptrs.data_ptr()),                       \
+            static_cast<ABC_TYPE**>(b_ptrs.data_ptr()),                       \
+            static_cast<ABC_TYPE**>(out_ptrs.data_ptr()), nullptr, nullptr,   \
+            static_cast<ABC_TYPE*>(a_tensors.data_ptr()),                     \
+            static_cast<ABC_TYPE*>(b_tensors.data_ptr()),                     \
+            static_cast<ABC_TYPE*>(out_tensors.data_ptr()), nullptr, nullptr, \
+            out_tensors.size(1), a_tensors.size(1), false, false);            \
+  }
+
 namespace {
 
 void run_get_group_gemm_starts(
@@ -85,23 +99,22 @@ void run_get_group_gemm_starts_fp16(torch::Tensor const& expert_offsets,
                                     torch::Tensor const& a_tensors,
                                     torch::Tensor const& b_tensors,
                                     torch::Tensor& out_tensors) {
-  TORCH_CHECK(a_tensors.dtype() == torch::kBFloat16);
-  TORCH_CHECK(b_tensors.dtype() == torch::kBFloat16);
+  TORCH_CHECK(a_tensors.dtype() == torch::kBFloat16 ||
+              a_tensors.dtype() == torch::kFloat16);
+  TORCH_CHECK(a_tensors.dtype() == b_tensors.dtype());
+  TORCH_CHECK(a_tensors.dtype() == out_tensors.dtype());
 
   int num_experts = (int)expert_offsets.size(0);
 
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 
-  get_group_gemm_starts<cutlass::bfloat16_t, cutlass::bfloat16_t, float>
-      <<<1, num_experts, 0, stream>>>(
-          static_cast<int32_t*>(expert_offsets.data_ptr()),
-          static_cast<cutlass::bfloat16_t**>(a_ptrs.data_ptr()),
-          static_cast<cutlass::bfloat16_t**>(b_ptrs.data_ptr()),
-          static_cast<cutlass::bfloat16_t**>(out_ptrs.data_ptr()), nullptr,
-          nullptr, static_cast<cutlass::bfloat16_t*>(a_tensors.data_ptr()),
-          static_cast<cutlass::bfloat16_t*>(b_tensors.data_ptr()),
-          static_cast<cutlass::bfloat16_t*>(out_tensors.data_ptr()), nullptr,
-          nullptr, out_tensors.size(1), a_tensors.size(1), false, false);
+  if (false) {
+  }
+  __CALL_GET_STARTS_KERNEL_FP16(torch::kBFloat16, cutlass::bfloat16_t)
+  __CALL_GET_STARTS_KERNEL_FP16(torch::kFloat16, half)
+  else {
+    TORCH_CHECK(false, "Invalid i/o type (must be float16 or bfloat16)");
+  }
 }
 
 }  // namespace

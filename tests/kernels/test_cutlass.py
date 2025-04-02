@@ -644,7 +644,7 @@ def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
 
 
 @pytest.mark.parametrize("num_experts", [8, 64])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),

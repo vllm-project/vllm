@@ -263,11 +263,15 @@ void dispatch_moe_mm_fp16_sm90(
     torch::Tensor const& b_tensors, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
-  TORCH_CHECK(out_tensors.dtype() == torch::kBFloat16,
-              "output must be bfloat16");
-  run_cutlass_moe_mm_fp16_sm90<cutlass::bfloat16_t, cutlass::bfloat16_t>(
-      out_tensors, a_tensors, b_tensors, expert_offsets, problem_sizes,
-      a_strides, b_strides, c_strides);
+  if (out_tensors.dtype() == torch::kBFloat16) {
+    run_cutlass_moe_mm_fp16_sm90<cutlass::bfloat16_t, cutlass::bfloat16_t>(
+        out_tensors, a_tensors, b_tensors, expert_offsets, problem_sizes,
+        a_strides, b_strides, c_strides);
+  } else {
+    run_cutlass_moe_mm_fp16_sm90<cutlass::half_t, cutlass::half_t>(
+        out_tensors, a_tensors, b_tensors, expert_offsets, problem_sizes,
+        a_strides, b_strides, c_strides);
+  }
 }
 
 }  // namespace
