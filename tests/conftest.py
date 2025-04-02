@@ -765,12 +765,11 @@ class VllmRunner:
                 multi_modal_data["audio"] = audio
 
             text_prompt_kwargs = {
-                ("prompt" if isinstance(prompt, str) else "prompt_embeds"): prompt,
+                ("prompt" if isinstance(prompt, str) else "prompt_embeds"):
+                prompt,
                 "multi_modal_data": multi_modal_data or None
             }
-            inputs.append(
-                TextPrompt(**text_prompt_kwargs)
-            )
+            inputs.append(TextPrompt(**text_prompt_kwargs))
 
         return inputs
 
