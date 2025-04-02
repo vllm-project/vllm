@@ -1172,8 +1172,8 @@ class LLMEngine:
                 seq_group,
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs,
-                hidden_states=hidden_states
-                if return_hidden_states is not None else None,
+                hidden_states=hidden_states \
+                        if return_hidden_states is not None else None,
             )
             if request_output:
                 ctx.request_outputs.append(request_output)
