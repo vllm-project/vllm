@@ -148,7 +148,11 @@ class Ovis2Processor(ProcessorMixin):
     def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):
         self.image_token = "<|image_pad|>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
         self.video_token = "<|video_pad|>" if not hasattr(tokenizer, "video_token") else tokenizer.video_token
-        super().__init__(image_processor, tokenizer, chat_template=chat_template)
+        self.max_partition = kwargs.get('max_partition', 9)
+        self.covering_threshold = kwargs.get('covering_threshold', 0.9)
+        self.convert_to_rgb = kwargs.get('convert_to_rgb', True)
+        self.return_tensors = kwargs.get('return_tensors', 'pt')
+        super().__init__(image_processor, tokenizer, chat_template=chat_template, **kwargs)
 
     def __call__(
         self,
@@ -316,7 +320,12 @@ class Ovis2Processor(ProcessorMixin):
         image_placeholders.append(self.get_token_value('image_end'))
         return image_placeholders
 
-    def preprocess_image(self, image: PIL.Image.Image, max_partition, covering_threshold, convert_to_rgb, return_tensors):
+    def preprocess_image(self, image: PIL.Image.Image, max_partition=None, covering_threshold=None,
+                         convert_to_rgb=None, return_tensors=None):
+        max_partition = max_partition if max_partition is not None else self.max_partition
+        covering_threshold = covering_threshold if covering_threshold is not None else self.covering_threshold
+        convert_to_rgb = convert_to_rgb if convert_to_rgb is not None else self.convert_to_rgb
+        return_tensors = return_tensors if return_tensors is not None else self.return_tensors
         def _preprocess(img: PIL.Image.Image, side):
             # first resize and preprocess
             w, h = img.size
