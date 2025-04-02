@@ -7,7 +7,8 @@ from collections import deque
 from collections.abc import Iterable
 from typing import Optional, Union
 
-from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
+from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
+                         VllmConfig)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -33,6 +34,7 @@ class Scheduler(SchedulerInterface):
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         scheduler_config: SchedulerConfig,
         model_config: ModelConfig,
         cache_config: CacheConfig,
@@ -43,6 +45,7 @@ class Scheduler(SchedulerInterface):
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
+        self.vllm_config = vllm_config
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -62,13 +65,28 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
 
+        # create connector
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory)
+        from vllm.distributed.kv_transfer.kv_connector.v1 import (
+            KVConnectorRole as KVConnectorRole_V1)
+        self.connector = KVConnectorFactory.create_connector(
+            rank=None,
+            local_rank=None,
+            config=self.vllm_config,
+            role=KVConnectorRole_V1.SCHEDULER)
+
+        num_gpu_blocks = cache_config.num_gpu_blocks
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             enable_caching=cache_config.enable_prefix_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
-            log_stats=self.log_stats)
+            log_stats=self.log_stats,
+            connector=self.connector)
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
@@ -416,6 +434,7 @@ class Scheduler(SchedulerInterface):
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
         ]
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,
@@ -433,6 +452,12 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
+
+        # NOTE(Kuntai): this function is designed for multiple purposes:
+        # 1. Plan the KV cache store
+        # 2. Wrap up all the KV cache load / save ops into an opaque object
+        # 3. Clear the internal states of the connector
+        self.connector.attach_connector_meta(scheduler_output)
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.

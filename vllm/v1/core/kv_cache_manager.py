@@ -27,6 +27,7 @@ class KVCacheManager:
         caching_hash_algo: str = "builtin",
         num_preallocate_tokens: int = 64,
         log_stats: bool = False,
+        connector=None,
     ) -> None:
         assert len(kv_cache_config.kv_cache_groups) == 1, (
             "KVCacheManager does not support hybrid models with more than 1 "
@@ -80,6 +81,7 @@ class KVCacheManager:
         # data for reempted ones.
         self.num_cached_block: dict[str, int] = {}
         self.prefix_cache_stats = PrefixCacheStats()
+        self.connector = connector
 
     @property
     def usage(self) -> float:
@@ -147,6 +149,10 @@ class KVCacheManager:
                 # Add back the last block hash if it was removed.
                 block_hashes.append(last_block_hash)
 
+            computed_blocks = self.connector.get_external_prefix_cache_blocks(
+                request, computed_blocks,
+                len(computed_blocks) * self.block_size, self)
+
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)
 
@@ -163,7 +169,8 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[list[KVCacheBlock]] = None
+        new_computed_blocks: Optional[list[KVCacheBlock]] = None,
+        preallocate=True,
     ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -173,6 +180,7 @@ class KVCacheManager:
                 not include the tokens that have already been computed.
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
+            preallocate: Whether to preallocate blocks for the request.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -245,8 +253,10 @@ class KVCacheManager:
         else:
             # Get new blocks from the free block pool considering
             # preallocated blocks.
+            num_preallocate_blocks =\
+                    self.num_preallocate_blocks if preallocate else 0
             num_new_blocks = min(
-                num_new_blocks + self.num_preallocate_blocks,
+                num_new_blocks + num_preallocate_blocks,
                 self.block_pool.get_num_free_blocks(),
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape

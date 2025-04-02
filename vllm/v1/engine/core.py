@@ -93,6 +93,7 @@ class EngineCore:
                 vllm_config.scheduler_config.scheduler_cls)
 
         self.scheduler: SchedulerInterface = Scheduler(
+            vllm_config=vllm_config,
             scheduler_config=vllm_config.scheduler_config,
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
