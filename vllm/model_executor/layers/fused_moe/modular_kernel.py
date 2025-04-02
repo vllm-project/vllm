@@ -104,7 +104,9 @@ class FusedMoEModularKernel(torch.nn.Module): # should this be a module?
             global_num_experts = E
         top_k = topk_ids.shape[1]
 
-        if False and inplace:
+        assert not inplace, "NYI"
+
+        if inplace:
             out_hidden_states = hidden_states
         else:
             out_hidden_states = torch.empty_like(hidden_states)
