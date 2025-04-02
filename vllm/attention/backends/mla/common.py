@@ -191,7 +191,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import accumulate
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Tuple,
-                    Type, TypeVar)
+                    Type, TypeVar, Union)
 
 import torch
 
@@ -739,6 +739,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     NOTE: Please read the comment at the top of the file before trying to 
     understand this class
     """
+    BLOCK_TABLE_EXTENDER: Union[List[List[int]], List[int]] = []
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -850,15 +851,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         return torch.from_numpy(graph_block_tables).to(
             device=self.runner.device, non_blocking=True)
 
-    def get_block_tables_with_captured_graph(self, cuda_graph_pad_size: int,
-                                             num_seqs: int) -> torch.Tensor:
-        self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-        self.block_tables.extend([] * cuda_graph_pad_size)
-        block_tables = self._get_graph_runner_block_tables(
-            num_seqs, self.block_tables)
-
-        return block_tables
-
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
@@ -898,8 +890,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         num_seqs = len(seq_lens)
         if use_captured_graph:
             num_decode_tokens = batch_size - self.num_prefill_tokens
-            block_tables = self.get_block_tables_with_captured_graph(
-                cuda_graph_pad_size, num_seqs)
+            self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
+            self.block_tables.extend(self.BLOCK_TABLE_EXTENDER *
+                                     cuda_graph_pad_size)
+            block_tables = self._get_graph_runner_block_tables(
+                num_seqs, self.block_tables)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
@@ -1150,7 +1145,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def _get_prefill_ctx_attn_output(
             self, index: int, q: torch.Tensor, k: torch.Tensor,
             v: torch.Tensor,
-            metadata: MLACommonMetadata) -> tuple[torch.Tensor, ...]:
+            metadata: MLACommonMetadata) -> Tuple[torch.Tensor, ...]:
         if is_vllm_fa:
             attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
                 q=q,
@@ -1258,7 +1253,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def _get_fwd_prefill_attn_output(
             self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
             metadata: MLACommonMetadata,
-            has_context: bool) -> tuple[torch.Tensor, ...]:
+            has_context: bool) -> Tuple[torch.Tensor, ...]:
         if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN and not has_context:
             output = self.triton_fa_func(
                 q,

@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Type
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Type, Union
 
 import torch
 
@@ -13,7 +13,7 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
                                                 MLACommonMetadata,
                                                 MLACommonMetadataBuilder,
                                                 MLACommonState)
-from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
+from vllm.attention.backends.utils import (compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
@@ -138,6 +138,7 @@ class AiterMLAMetadata(MLACommonMetadata):
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
+    BLOCK_TABLE_EXTENDER: Union[List[List[int]], List[int]] = [[]]
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         super().__init__(input_builder)
@@ -230,15 +231,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         if last_page_len == 0:
             last_page_len = self.block_size
         self.paged_kv_last_page_lens.append(last_page_len)
-
-    def get_block_tables_with_captured_graph(self, cuda_graph_pad_size: int,
-                                             num_seqs: int) -> torch.Tensor:
-        self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-        self.block_tables.extend([[]] * cuda_graph_pad_size)
-        block_tables = self._get_graph_runner_block_tables(
-            num_seqs, self.block_tables)
-
-        return block_tables
 
     def build(self, seq_lens: list[int], query_lens: list[int],
               cuda_graph_pad_size: int, batch_size: int) -> AiterMLAMetadata:
@@ -401,7 +393,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     def _get_fwd_prefill_attn_output(
             self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
             metadata: AiterMLAMetadata,
-            has_context: bool) -> tuple[torch.Tensor, ...]:
+            has_context: bool) -> Tuple[torch.Tensor, ...]:
         if is_aiter_fa_enabled():
             output = self.flash_attn_varlen_func(
                 q=q,
@@ -434,7 +426,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     def _get_prefill_ctx_attn_output(
             self, index: int, q: torch.Tensor, k: torch.Tensor,
             v: torch.Tensor,
-            metadata: AiterMLAMetadata) -> tuple[torch.Tensor, ...]:
+            metadata: AiterMLAMetadata) -> Tuple[torch.Tensor, ...]:
         if is_aiter_fa_enabled():
             return self.flash_attn_varlen_func(
                 q=q,
