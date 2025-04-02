@@ -21,12 +21,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton_jit_decorator
 from vllm.utils import direct_register_custom_op, round_up
 
 from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
                                    rocm_aiter_fused_experts,
                                    rocm_aiter_topk_softmax)
-from vllm.triton_utils import triton_jit_decorator
 
 logger = init_logger(__name__)
 
