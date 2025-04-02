@@ -13,9 +13,12 @@ import requests
 from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoTokenizer
 
+from vllm import version
+
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+PREV_MINOR_VERSION = version._prev_minor_version()
 
 
 @pytest.fixture(scope="module", params=[True, False])
@@ -55,6 +58,7 @@ def default_server_args():
                     "",
                     "--enable-chunked-prefill",
                     "--disable-frontend-multiprocessing",
+                    f"--show-hidden-metrics-for-version={PREV_MINOR_VERSION}",
                 ])
 def server(use_v1, default_server_args, request):
     if request.param:
@@ -129,7 +133,9 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
 
     # Loop over all expected metric_families
     for metric_family, suffix_values_list in EXPECTED_VALUES.items():
-        if use_v1 and metric_family not in EXPECTED_METRICS_V1:
+        if ((use_v1 and metric_family not in EXPECTED_METRICS_V1)
+                or (not server.show_hidden_metrics
+                    and metric_family in HIDDEN_DEPRECATED_METRICS)):
             continue
 
         found_metric = False
@@ -165,10 +171,10 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
 
 EXPECTED_METRICS = [
     "vllm:num_requests_running",
-    "vllm:num_requests_swapped",
+    "vllm:num_requests_swapped",  # deprecated
     "vllm:num_requests_waiting",
     "vllm:gpu_cache_usage_perc",
-    "vllm:cpu_cache_usage_perc",
+    "vllm:cpu_cache_usage_perc",  # deprecated
     "vllm:time_to_first_token_seconds_sum",
     "vllm:time_to_first_token_seconds_bucket",
     "vllm:time_to_first_token_seconds_count",
@@ -268,6 +274,11 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_decode_time_seconds_count",
 ]
 
+HIDDEN_DEPRECATED_METRICS = [
+    "vllm:num_requests_swapped",
+    "vllm:cpu_cache_usage_perc",
+]
+
 
 @pytest.mark.asyncio
 async def test_metrics_exist(server: RemoteOpenAIServer,
@@ -282,7 +293,9 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
     assert response.status_code == HTTPStatus.OK
 
     for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
-        assert metric in response.text
+        if (not server.show_hidden_metrics
+                and metric not in HIDDEN_DEPRECATED_METRICS):
+            assert metric in response.text
 
 
 def test_metrics_exist_run_batch(use_v1: bool):
