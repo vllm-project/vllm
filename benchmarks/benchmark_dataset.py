@@ -582,15 +582,6 @@ class HuggingFaceDataset(BenchmarkDataset):
     ) -> None:
         super().__init__(dataset_path=dataset_path, **kwargs)
 
-        # Validate dataset path
-        if self.SUPPORTED_DATASET_PATHS and \
-            self.dataset_path not in self.SUPPORTED_DATASET_PATHS:
-            raise ValueError(
-                f"{self.__class__.__name__} "
-                f"only supports: {', '.join(self.SUPPORTED_DATASET_PATHS)}. "
-                "Please consider contributing if you would "
-                "like to add support for additional dataset formats.")
-
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
         self.load_data()
