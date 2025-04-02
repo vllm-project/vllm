@@ -16,8 +16,9 @@ parser.add_argument("--task", type=str, default="gsm8k", help="The model path.")
 parser.add_argument("--tokenizer", type=str, default=None, help="The model path.")
 parser.add_argument("--tp_size", type=int, default=8, help="Tensor Parallelism size.")
 parser.add_argument("--ep_size", type=int, default=8, help="Expert Parallelism size.")
-parser.add_argument("-l", "--limit", type=int, default=64, help="test request counts.")
+parser.add_argument("-l", "--limit", type=int, default=None, help="test request counts.")
 parser.add_argument("--batch_size", type=int, default=1, help="The batch size.")
+parser.add_argument("--fp8_kv_cache", action="store_true", help="Use fp8 for kv cache.")
 args = parser.parse_args()
 
 os.environ["VLLM_SKIP_WARMUP"] = "true"
@@ -44,6 +45,9 @@ if __name__ == "__main__":
     model = args.model
     if args.tokenizer is None:
         args.tokenizer = model
+    param = {}
+    if args.fp8_kv_cache:
+        param["kv_cache_dtype"] = "fp8_inc"
     if args.tp_size == 1:
         llm = VLLM(
             pretrained=model, 
@@ -65,17 +69,25 @@ if __name__ == "__main__":
             dtype="bfloat16",
             gpu_memory_utilization=0.8,
             batch_size=args.batch_size,
+            **param,
         )
 
     
     # Run the evaluation; you can adjust num_fewshot and batch_size as needed.
     start = time.perf_counter()
     if args.task == "gsm8k":
-        results = simple_evaluate(model=llm, tasks=["gsm8k"], num_fewshot=5, batch_size=8, limit=args.limit)
+        from lm_eval.utils import make_table
+
+        results = simple_evaluate(
+            model=llm,
+            tasks=["gsm8k"],
+            limit=args.limit,
+        )
         end = time.perf_counter()
         e2e = end - start
+        print(make_table(results))
         # save as json
-        with open(f"gsm8k_ep{args.ep_size}_result_samples_limit{args.limit}.jsonl", "w") as f:
+        with open(f"gsm8k_ep{args.ep_size}_result_samples_limit{str(args.limit)}.jsonl", "w") as f:
             json.dump(results['results'], f)
             json.dump({"e2e time(secs)": e2e}, f)
             f.write("\n")
@@ -86,7 +98,7 @@ if __name__ == "__main__":
         results = simple_evaluate(model=llm, tasks=["hellaswag"], num_fewshot=0, batch_size=8, limit=args.limit)
         end = time.perf_counter()
         e2e = end - start
-        with open(f"hallaswag_ep{args.ep_size}_result_samples_limit{args.limit}.jsonl", "w") as f:
+        with open(f"hallaswag_ep{args.ep_size}_result_samples_limit{str(args.limit)}.jsonl", "w") as f:
             json.dump(results['results'], f)
             json.dump({"e2e time(secs)": e2e}, f)
             f.write("\n")

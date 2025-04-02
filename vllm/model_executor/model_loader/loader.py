@@ -416,6 +416,18 @@ class DefaultModelLoader(BaseModelLoader):
                               fall_back_to_pt=True,
                               allow_patterns_overrides=None)
 
+    def _need_patch_inc_fp8_kvcache(self, vllm_config: VllmConfig) -> bool:
+        user_pass_inc_as_quantization = (
+            vllm_config.quant_config is not None
+            and "inc" in vllm_config.quant_config.get_name().lower()
+        )
+        force_use_inc = os.environ.get("VLLM_REQUANT_FP8_INC", "0") == "1"
+        user_pass_inc_as_quantization = user_pass_inc_as_quantization or force_use_inc
+        return (
+            vllm_config.cache_config.cache_dtype == "fp8_inc"
+            and not user_pass_inc_as_quantization
+        )
+
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
         device_config = vllm_config.device_config
         load_config = vllm_config.load_config
@@ -443,7 +455,13 @@ class DefaultModelLoader(BaseModelLoader):
                     logger.warning(warning_msg)
 
             _process_weights_after_loading(model, model_config, target_device)
-        if vllm_config.cache_config.cache_dtype == "fp8_inc":
+        if self._need_patch_inc_fp8_kvcache(vllm_config):
+            try:
+                from neural_compressor.torch.algorithms.fp8_quant._core.quantized_func_wrappers import init_quantized_func_wrapper_factory
+                init_quantized_func_wrapper_factory()
+            except ImportError:
+                logger.warning("Skip init quantized_func wrapper factory")
+                pass
             from neural_compressor.torch.algorithms.fp8_quant._quant_common.helper_modules import PatchedVLLMKVCache
             from neural_compressor.torch.algorithms.fp8_quant._quant_common.quant_config import Fp8cfg
             from neural_compressor.torch.algorithms.fp8_quant.model_configs import ModuleExtraConfig, ModuleConfig

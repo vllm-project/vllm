@@ -25,6 +25,7 @@ parser.add_argument("--dataset", type=str, default=None, help="The dataset.")
 parser.add_argument("--isl", type=int, default=1024, help="input sequence length.")
 parser.add_argument("--osl", type=int, default=1024, help="output sequence length.")
 parser.add_argument("--nprompts", type=int, default=4, help="The number of prompts.")
+parser.add_argument("--max_num_seqs", type=int, default=None, help="The max number of sequences.")
 parser.add_argument("--random", action="store_true", help="Randomly sample prompts.")
 parser.add_argument("--fp8_kv_cache", action="store_true", help="Use fp8 for kv cache.")
 args = parser.parse_args()
@@ -160,6 +161,70 @@ if __name__ == "__main__":
             tokenizer=tokenizer,
             do_random=args.random,
         )
+    elif args.dataset == "pile":
+
+        def reset_seed(seed=42):
+            import torch
+            import random
+            import numpy as np
+
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            random.seed(seed)
+
+        def get_prompt_token_ids(model_path, prompts, max_length=1024):
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+            prompt_token_ids = []
+            for prompt in prompts:
+                tokens = tokenizer(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=max_length,
+                )
+                if len(tokens.input_ids[0]) < max_length:
+                    continue
+                prompt_token_ids.append([x.item() for x in tokens.input_ids[0]])
+            return prompt_token_ids
+
+        def get_pile_prompts(model_name, num_samples=512):
+            from datasets import load_dataset
+            from tqdm import tqdm
+            import transformers
+
+            least_tokens = 1024
+            seed = 42
+
+            reset_seed(seed)
+
+            dataset = load_dataset("NeelNanda/pile-10k", split="train")
+            dataset = dataset.shuffle(seed=seed)
+
+            tokenizer = transformers.AutoTokenizer.from_pretrained(
+                model_name, trust_remote_code=True
+            )
+            num_sample = 0
+            samples_lst = []
+            for data in tqdm(dataset):
+                prompt = data["text"]
+                tokens = tokenizer(prompt, return_tensors="pt")
+                if len(tokens.input_ids[0]) < least_tokens:
+                    continue
+                num_sample += 1
+                samples_lst.append(prompt)
+                if num_sample >= num_samples:
+                    break
+            return samples_lst
+        least_tokens = args.isl
+        num_samples = args.nprompts
+        prompts = get_pile_prompts(args.model, num_samples)
+        prompt_token_ids = get_prompt_token_ids(
+            args.model, prompts, least_tokens
+        )
+        print(f"Got {len(prompts)} prompts, length of first prompt: {len(prompt_token_ids[0])}.")
+        gt = None
     else:
         prompts = [
             "Hello, my name is",
@@ -178,6 +243,8 @@ if __name__ == "__main__":
     param = {}
     if args.fp8_kv_cache:
         param["kv_cache_dtype"] = "fp8_inc"
+    if args.max_num_seqs is not None:
+        param["max_num_seqs"] = args.max_num_seqs
     if args.tp_size == 1:
         llm = LLM(
             model=model, 
@@ -204,7 +271,12 @@ if __name__ == "__main__":
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     start = time.perf_counter()
-    outputs = llm.generate(prompts, sampling_params)
+    if args.dataset == "pile":
+        outputs = llm.generate(
+            prompts=None, sampling_params=sampling_params, prompt_token_ids=prompt_token_ids
+        )
+    else:
+        outputs = llm.generate(prompts, sampling_params)
     end = time.perf_counter()
     # Print the outputs.
     print(f"e2e took {end - start} seconds")
@@ -218,4 +290,6 @@ if __name__ == "__main__":
         print(f"Generated text: {generated_text!r}")
         print(f"Ground truth: {gt_i!r}")
         print("====================================")
+    if os.getenv("VLLM_REQUANT_FP8_INC", None) is not None:
+        llm.llm_engine.model_executor.shutdown()
     del llm

@@ -1,0 +1,22 @@
+{
+    "mode": "QUANTIZE",
+    "observer": "maxabs",
+    "scale_method": "ACT_MAXABS_HW_WEIGHTS_PCS_MAXABS_POW2",
+    "scale_format": "const",
+    "allowlist": {
+        "types": [],
+        "names": []
+    },
+    "blocklist": {
+        "types": [],
+        "names": [
+            "lm_head",
+            "mlp\\.gate\\b",
+            "matmul_qk",
+            "matmul_av",
+            "batch2block_matmul",
+            "block2batch_matmul"
+        ]
+    },
+    "dump_stats_path": "./nc_workspace_measure_kvache/inc_measure_output"
+}

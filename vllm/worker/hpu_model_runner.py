@@ -761,6 +761,29 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
                                           'false').lower() == 'true'
 
+    def _remove_duplicate_submodules_(self, model, inc_config):
+        # FIXME: (Yi)  for deepseek v3 only
+        self_attn = model.model.layers[0].self_attn
+        for layer in model.model.layers:
+            self_attn = layer.self_attn
+            # delete attrs: q_b_proj, kv_b_proj, o_proj in self_attn,
+            # as they have been transferred to the MLAImpl.
+            if hasattr(self_attn, "q_b_proj"):
+                delattr(self_attn, "q_b_proj")
+            if hasattr(self_attn, "kv_b_proj"):
+                delattr(self_attn, "kv_b_proj")
+            if hasattr(self_attn, "o_proj"):
+                delattr(self_attn, "o_proj")
+
+    def _inc_preprocess_(self, model: torch.nn.Module, inc_config):
+        self._remove_duplicate_submodules_(model, inc_config)
+
+    def _is_quant_with_inc(self):
+        return (
+            self.model_config.quantization == "inc"
+            or os.getenv("VLLM_REQUANT_FP8_INC", "0") in ["1", "true"]
+        )
+    
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
         if self.model_config.quantization == 'inc' or \
@@ -812,19 +835,28 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 )
                 self.model = self.lora_manager.create_lora_manager(self.model)
 
-            if self.model_config.quantization == 'inc':
+            if self._is_quant_with_inc():
                 logger.info("Preparing model with INC..")
+                if torch.distributed.get_rank() == 0:
+                    logger.debug(f"Original model \n {self.model}")
                 with HabanaMemoryProfiler() as m_inc:
                     from neural_compressor.torch.quantization import (
                         FP8Config, convert, prepare)
                     config = FP8Config.from_json_file(
                         os.getenv("QUANT_CONFIG", ""))
+
+                    self._inc_preprocess_(self.model, config)
                     if config.measure:
                         self.model = prepare(self.model, config)
+                        
                     elif config.quantize:
                         self.model = convert(self.model, config)
                     htcore.hpu_initialize(self.model,
                                           mark_only_scales_as_const=True)
+                    torch.distributed.barrier()
+                    if torch.distributed.get_rank() == 0:
+                        logger.debug(f"INC model \n {self.model}")
+                                    
                 self.inc_initialized_successfully = True
                 logger.info("Preparing model with INC took %s",
                             m_inc.get_summary_string())
@@ -2122,7 +2154,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         finalize_calibration(self.model.model)
 
     def shutdown_inc(self):
-        can_finalize_inc = (self.model_config.quantization == 'inc') and \
+        can_finalize_inc = self._is_quant_with_inc() and \
             (self.model.model is not None) and \
             self.inc_initialized_successfully and \
             not getattr(self, "_is_inc_finalized", False)

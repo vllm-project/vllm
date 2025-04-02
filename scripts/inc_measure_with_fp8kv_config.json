@@ -1,0 +1,15 @@
+{
+    "method": "HOOKS",
+    "mode": "MEASURE",
+    "observer": "maxabs",
+    "whitelist": {
+        "types": [],
+        "names": []
+    },
+    "blocklist": {
+        "types": [],
+        "names": ["lm_head", "mlp\\.gate\\b"]
+    },
+    "quantize_weight": false,
+    "dump_stats_path": "./nc_workspace_measure_kvache/inc_measure_output"
+}
