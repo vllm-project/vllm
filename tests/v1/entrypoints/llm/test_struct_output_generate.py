@@ -125,17 +125,9 @@ def test_structured_output(
             print(generated_text)
             assert generated_text is not None
 
-            # Parse to verify it is valid JSON
+            # Parse to verify it is a valid JSON object
             parsed_json = json.loads(generated_text)
-            allowed_types: tuple[type, ...] = (dict, )
-            if guided_decoding_backend.startswith("xgrammar"):
-                # TODO - we are currently too permissive with xgrammar and
-                # allow # any valid json (typically comes back as a list or
-                # object).  We can fix this by specifying a jsonschema of
-                # {"type": "object"}, # but we need this fix in a release
-                # first: https://github.com/mlc-ai/xgrammar/pull/264
-                allowed_types = (dict, list)
-            assert isinstance(parsed_json, allowed_types)
+            assert isinstance(parsed_json, dict)
 
     #
     # Test 3: test a jsonschema incompatible with xgrammar

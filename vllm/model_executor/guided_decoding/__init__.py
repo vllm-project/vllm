@@ -79,12 +79,6 @@ def maybe_backend_fallback(
                     "xgrammar does not support Lark grammars and the "
                     "grammar failed to convert to GBNF.", "outlines")
 
-        elif guided_params.json_object:
-            # https://github.com/mlc-ai/xgrammar/issues/256
-            fallback_or_error(guided_params,
-                              "xgrammar does not support json_object.",
-                              "guidance")
-
         # If the xgrammar module cannot be imported successfully,
         # we should still allow users to use guided decoding with a fallback.
         elif not xgr_installed:
