@@ -170,8 +170,7 @@ class ModelConfig:
         limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
         interleave_mm_strings: Enable fully interleaved support for multimodal 
-            (image + text) prompts, while using 
-            chat-template-content-format=string.
+            prompts, while using chat-template-content-format=string.
             Defaults to False.
         use_async_output_proc: Whether to use async output processor.
             Defaults to True.
