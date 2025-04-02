@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 import requests
 import torch
-from openai import BadRequestError
+from openai import BadRequestError, OpenAI
 
 from ...utils import RemoteOpenAIServer
 from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
@@ -1054,7 +1054,7 @@ async def test_long_seed(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_http_chat_wo_model_name(server: RemoteOpenAIServer):
+async def test_http_chat_no_model_name_with_curl(server: RemoteOpenAIServer):
     url = f"http://localhost:{server.port}/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
@@ -1075,10 +1075,35 @@ async def test_http_chat_wo_model_name(server: RemoteOpenAIServer):
     response = requests.post(url, headers=headers, json=data)
     response_data = response.json()
     print(response_data)
-
+    assert response_data.get("model") == MODEL_NAME
     choice = response_data.get("choices")[0]
     message = choice.get("message")
     assert message is not None
     content = message.get("content")
     assert content is not None
     assert len(content) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME, ""])
+async def test_http_chat_no_model_name_with_openai(server: RemoteOpenAIServer,
+                                                   model_name: str):
+
+    openai_api_key = "EMPTY"
+    openai_api_base = f"http://localhost:{server.port}/v1"
+
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": "Hello, vLLM!"
+        },
+    ]
+    response = client.chat.completions.create(
+        model="",  # empty string
+        messages=messages,
+    )
+    assert response.model == MODEL_NAME

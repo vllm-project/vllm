@@ -537,7 +537,7 @@ class OpenAIServing:
                         lora_request: Optional[LoRARequest] = None) -> str:
         if lora_request:
             return lora_request.lora_name
-        if model_name is None:
+        if not model_name:
             return self.models.base_model_paths[0].name
         return model_name
 
