@@ -786,7 +786,7 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, is_v1_server: bool,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", ["unsloth/Llama-3.2-1B-Instruct"])
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_required_tool_use(client: openai.AsyncOpenAI,
                                  is_v1_server: bool, model_name: str):
     if is_v1_server:
@@ -883,7 +883,7 @@ async def test_required_tool_use(client: openai.AsyncOpenAI,
     ]
 
     # Non-streaming test
-    chat_completion = client.chat.completions.create(
+    chat_completion = await client.chat.completions.create(
         messages=messages,
         model=model_name,
         tools=tools,
@@ -895,7 +895,7 @@ async def test_required_tool_use(client: openai.AsyncOpenAI,
     assert len(chat_completion.choices[0].message.tool_calls) > 0
 
     # Streaming test
-    stream = client.chat.completions.create(
+    stream = await client.chat.completions.create(
         messages=messages,
         model=model_name,
         tools=tools,
@@ -905,7 +905,7 @@ async def test_required_tool_use(client: openai.AsyncOpenAI,
     )
 
     output = []
-    for chunk in stream:
+    async for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.tool_calls:
             output.extend(chunk.choices[0].delta.tool_calls)
 
