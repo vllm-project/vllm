@@ -551,6 +551,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.video_token_index)
             raise TypeError(f"Unknown {modality} model type: {model_type}")
+        else:
+            raise TypeError(f"Unknown {modality}")
 
     def add(self, modality: ModalityStr, item: _T) -> Optional[str]:
         """
@@ -650,7 +652,7 @@ class BaseMultiModalContentParser(ABC):
         # }
         self._placeholder_storage: dict[str, list] = defaultdict(list)
 
-    def _add_placeholder(self, modality: str, placeholder: Optional[str]):
+    def _add_placeholder(self, modality: Modality, placeholder: Optional[str]):
         mod_placeholder = MODALITY_PLACEHOLDERS_MAP[modality]
         if placeholder:
             self._placeholder_storage[mod_placeholder].append(placeholder)
@@ -1088,27 +1090,27 @@ def _parse_chat_message_content_part(
     if part_type == "image_url":
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
-        modality = Modality.IMAGE.value
+        modality = Modality.IMAGE
     elif part_type == "image_embeds":
         content = cast(Union[str, dict[str, str]], content)
         mm_parser.parse_image_embeds(content)
-        modality = Modality.IMAGE.value
+        modality = Modality.IMAGE
     elif part_type == "audio_url":
         str_content = cast(str, content)
         mm_parser.parse_audio(str_content)
-        modality = Modality.AUDIO.value
+        modality = Modality.AUDIO
     elif part_type == "input_audio":
         dict_content = cast(InputAudio, content)
         mm_parser.parse_input_audio(dict_content)
-        modality = Modality.AUDIO.value
+        modality = Modality.AUDIO
     elif part_type == "video_url":
         str_content = cast(str, content)
         mm_parser.parse_video(str_content)
-        modality = Modality.VIDEO.value
+        modality = Modality.VIDEO
     else:
         raise NotImplementedError(f"Unknown part type: {part_type}")
 
-    return {'type': modality} if wrap_dicts else (
+    return {'type': modality.value} if wrap_dicts else (
         MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
     )
 
