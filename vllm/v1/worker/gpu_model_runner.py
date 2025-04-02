@@ -1276,8 +1276,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_memory_usage = m.consumed_memory
         self.model_load_time = time_after_load - time_before_load
         logger.info("Model loading took %.4f GiB and %.6f seconds",
-                    self.model_memory_usage / GiB_bytes,
-                    self.model_load_time)
+                    self.model_memory_usage / GiB_bytes, self.model_load_time)
 
     def _get_prompt_logprobs_dict(
         self,

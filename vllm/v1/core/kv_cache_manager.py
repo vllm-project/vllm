@@ -153,7 +153,7 @@ class KVCacheManager:
 
             computed_blocks = (
                 self.specialized_manager.find_longest_cache_hit(block_hashes))
-            
+
             # Track evicted tokens from computed blocks
             for block in computed_blocks:
                 if block and block.hash and block.hash.token_ids:
