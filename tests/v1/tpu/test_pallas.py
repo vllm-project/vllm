@@ -11,6 +11,10 @@ from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
 
 
 def test_ragged_paged_attention():
+    # We verify that the kernel inputs such as sliding_window, etc. are passed
+    # in from the model correctly.
+    # The correctness of the paged attention kernel is tested in the kernel
+    # library.
     num_heads = 4
     head_size = 128
     scale = 1.0
