@@ -84,7 +84,9 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_json_schema(
                 grammar_spec, any_whitespace=not self.disable_any_whitespace)
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
-            ctx = self.compiler.compile_builtin_json_grammar()
+            ctx = self.compiler.compile_json_schema(
+                '{"type": "object"}',
+                any_whitespace=not self.disable_any_whitespace)
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:

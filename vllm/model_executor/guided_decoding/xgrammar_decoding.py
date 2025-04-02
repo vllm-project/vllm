@@ -320,7 +320,10 @@ class XGrammarLogitsProcessor:
             elif self.config.grammar_str is not None:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
             elif self.config.json_object:
-                self.ctx = compiler.compile_builtin_json_grammar()
+                any_whitespace = self.config.any_whitespace
+                self.ctx = compiler\
+                    .compile_json_schema('{"type": "object"}',
+                                         any_whitespace=any_whitespace)
             else:
                 raise ValueError(
                     "Invalid configuration for xgrammar logits processor")
