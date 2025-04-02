@@ -786,56 +786,135 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, is_v1_server: bool,
 
 
 @pytest.mark.asyncio
-async def test_required_tool_use_not_yet_supported(client: openai.AsyncOpenAI,
-                                                   sample_json_schema):
-
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_required_tool_use(client: openai.AsyncOpenAI,
+                                 is_v1_server: bool, model_name: str):
     if is_v1_server:
-        pytest.skip("sample_json_schema has features unsupported on V1")
+        pytest.skip(
+            "tool_choice='required' requires features unsupported on V1")
 
-    messages = [{
-        "role": "system",
-        "content": "you are a helpful assistant"
-    }, {
-        "role":
-        "user",
-        "content":
-        f"Give an example JSON for an employee profile that "
-        f"fits this schema: {sample_json_schema}"
-    }]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description":
+                            "The city to find the weather for, e.g. 'Vienna'",
+                            "default": "Vienna",
+                        },
+                        "country": {
+                            "type":
+                            "string",
+                            "description":
+                            "The country that the city is in, e.g. 'Austria'",
+                        },
+                        "unit": {
+                            "type": "string",
+                            "description":
+                            "The unit to fetch the temperature in",
+                            "enum": ["celsius", "fahrenheit"],
+                        },
+                    },
+                    "required": ["country", "unit"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_forecast",
+                "description": "Get the weather forecast for a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description":
+                            "The city to get the forecast for, e.g. 'Vienna'",
+                            "default": "Vienna",
+                        },
+                        "country": {
+                            "type":
+                            "string",
+                            "description":
+                            "The country that the city is in, e.g. 'Austria'",
+                        },
+                        "days": {
+                            "type":
+                            "integer",
+                            "description":
+                            "Number of days to get the forecast for (1-7)",
+                        },
+                        "unit": {
+                            "type": "string",
+                            "description":
+                            "The unit to fetch the temperature in",
+                            "enum": ["celsius", "fahrenheit"],
+                        },
+                    },
+                    "required": ["country", "days", "unit"],
+                },
+            },
+        },
+    ]
 
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=1000,
-            tools=[{
-                "type": "function",
-                "function": {
-                    "name": "dummy_function_name",
-                    "description": "This is a dummy function",
-                    "parameters": sample_json_schema
-                }
-            }],
-            tool_choice="required")
+    messages = [
+        {
+            "role": "user",
+            "content": "Hi! How are you doing today?"
+        },
+        {
+            "role": "assistant",
+            "content": "I'm doing well! How can I help you?"
+        },
+        {
+            "role":
+            "user",
+            "content":
+            "Can you tell me what the current weather is in Berlin and the "\
+            "forecast for the next 5 days, in fahrenheit?",
+        },
+    ]
 
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=1000,
-            tools=[{
-                "type": "function",
-                "function": {
-                    "name": "dummy_function_name",
-                    "description": "This is a dummy function",
-                    "parameters": sample_json_schema
-                }
-            }],
-            tool_choice="auto")
+    # Non-streaming test
+    chat_completion = await client.chat.completions.create(
+        messages=messages,
+        model=model_name,
+        tools=tools,
+        tool_choice="required",
+        extra_body=dict(guided_decoding_backend="outlines"),
+    )
+
+    assert chat_completion.choices[0].message.tool_calls is not None
+    assert len(chat_completion.choices[0].message.tool_calls) > 0
+
+    # Streaming test
+    stream = await client.chat.completions.create(
+        messages=messages,
+        model=model_name,
+        tools=tools,
+        tool_choice="required",
+        extra_body=dict(guided_decoding_backend="outlines"),
+        stream=True,
+    )
+
+    output = []
+    async for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.tool_calls:
+            output.extend(chunk.choices[0].delta.tool_calls)
+
+    assert len(output) > 0
 
 
 @pytest.mark.asyncio
 async def test_inconsistent_tool_choice_and_tools(client: openai.AsyncOpenAI,
+                                                  is_v1_server: bool,
                                                   sample_json_schema):
 
     if is_v1_server:
