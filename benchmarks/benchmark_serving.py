@@ -597,12 +597,11 @@ def main(args: argparse.Namespace):
             dataset_class = ConversationDataset
         else:
             supported_datasets = set([
-                dataset_name 
-                for cls in HuggingFaceDataset.__subclasses__() 
+                dataset_name for cls in HuggingFaceDataset.__subclasses__() 
                 for dataset_name in cls.SUPPORTED_DATASET_PATHS
             ])
             raise ValueError(
-                f"get unsupported dataset path: {args.dataset_path}. "
+                f"Unsupported dataset path: {args.dataset_path}. "
                 "Huggingface dataset only supports dataset_path"
                 f" from one of following: {supported_datasets}. "
                 "Please consider contributing if you would "
