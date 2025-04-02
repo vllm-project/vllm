@@ -1113,6 +1113,8 @@ class LLMEngine:
                     for k in range(len(output)):
                         hidden_states.append(
                             outputs_by_sequence_group[i][k].hidden_states)
+                else:
+                    hidden_states = None
             else:
                 output = [outputs_by_sequence_group[0][i]]
                 if self.model_config.task == "generate" and \
@@ -1121,6 +1123,8 @@ class LLMEngine:
                         is not None:
                     return_hidden_states = True
                     hidden_states = outputs_by_sequence_group[0].hidden_states
+                else:
+                    hidden_states = None
 
             if not is_async:
                 if self.scheduler_config.is_multi_step:
@@ -1172,9 +1176,7 @@ class LLMEngine:
                 seq_group,
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs,
-                hidden_states=hidden_states \
-                        if return_hidden_states is not None else None,
-            )
+                hidden_states=hidden_states )
             if request_output:
                 ctx.request_outputs.append(request_output)
 
