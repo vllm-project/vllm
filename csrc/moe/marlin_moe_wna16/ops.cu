@@ -582,7 +582,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
     else
       TORCH_CHECK(false, "unsupported moe_block_size ", moe_block_size);
 
-    // avoid ">>>" being formated to "> > >"
+    // avoid ">>>" being formatted to "> > >"
     // clang-format off
     kernel<<<sms, default_threads, 0, stream>>>(
         A_ptr, perm_ptr, a_tmp_ptr, sorted_token_ids_ptr, expert_ids_ptr,
@@ -661,7 +661,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        max_shared_mem);
-  // avoid ">>>" being formated to "> > >"
+  // avoid ">>>" being formatted to "> > >"
   // clang-format off
   kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
       A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
