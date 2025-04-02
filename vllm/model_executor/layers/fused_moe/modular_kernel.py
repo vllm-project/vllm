@@ -70,6 +70,8 @@ class FusedMoEUnpermuteCombine(ABC):
         raise NotImplementedError
 
 
+# Note: only intended for use with a single model layer (due to temp buffers, constants, etc.)
+# TODO: permute/unpermute must be paired
 class ModularFusedMoEKernel(torch.nn.Module): # should this be a module?
     def __init__(
             self,

@@ -10,7 +10,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import moe_align_block_size
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import deep_gemm_moe_fp8, modular_deep_gemm_fused_moe_fp8
+from vllm.model_executor.layers.fused_moe.deep_gemm_moe import deep_gemm_moe_fp8, modular_deep_gemm_fused_moe_fp8, _valid_deep_gemm
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
@@ -454,6 +454,10 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
 
     w2_bf16 = ((torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 *
                fp8_max).clamp(min=fp8_min, max=fp8_max)
+
+#    if not _valid_deep_gemm(a, w1_bf16, w2_bf16, None):
+#        pytest.skip(
+#            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
 
     score = torch.randn((M, E), dtype=dtype)
 

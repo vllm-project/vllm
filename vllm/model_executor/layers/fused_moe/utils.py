@@ -1,10 +1,20 @@
 import torch
+from math import prod
 from typing import List, Optional, Tuple
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.utils import cdiv
+
+
+def _resize_cache(x: torch.Tensor, v: Tuple[int, ...]) -> torch.Tensor:
+    """
+    Shrink the given tensor and apply the given view to it.  This is
+    used to resize the intermediate fused_moe caches.
+    """
+    assert prod(v) <= x.numel()
+    return x.flatten()[:prod(v)].view(*v)
 
 
 def _fp8_quantize(

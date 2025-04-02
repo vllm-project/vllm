@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
-from math import prod
 from typing import Optional, Tuple
 
 import torch
@@ -10,7 +9,8 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import moe_align_block_size
-from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
+from vllm.model_executor.layers.fused_moe.utils import (_resize_cache,
+                                                        _fp8_perm,
                                                         _fp8_quantize)
 from vllm.utils import round_up
 
@@ -18,10 +18,10 @@ logger = init_logger(__name__)
 
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
-
+# TODO: check types?
 def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
                      w2: torch.Tensor,
-                     expert_map: Optional[torch.Tensor]) -> bool:
+                     expert_map: Optional[torch.Tensor] = None) -> bool:
     """
     Check if the given problem size is supported by the DeepGemm grouped
     gemm kernel.  All of M, N, K and the quantization block_shape must be
@@ -111,15 +111,6 @@ def _moe_unpermute_and_reduce(
     curr_hidden = curr_hidden.view(-1, topk, K)
     curr_hidden.mul_(topk_weight.view(M, -1, 1))
     ops.moe_sum(curr_hidden, out)
-
-
-def _resize_cache(x: torch.Tensor, v: Tuple[int, ...]) -> torch.Tensor:
-    """
-    Shrink the given tensor and apply the given view to it.  This is
-    used to resize the intermediate fused_moe caches.
-    """
-    assert prod(v) <= x.numel()
-    return x.flatten()[:prod(v)].view(*v)
 
 
 def deep_gemm_moe_fp8(
