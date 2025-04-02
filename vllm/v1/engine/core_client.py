@@ -35,6 +35,8 @@ AnyFuture = Union[asyncio.Future[Any], Future[Any]]
 
 _R = TypeVar('_R')  # Return type for collective_rpc
 
+STARTUP_POLL_PERIOD_MS = 10000
+
 
 class EngineCoreClient(ABC):
     """
@@ -385,13 +387,16 @@ class MPClient(EngineCoreClient):
         self.utility_results: dict[int, AnyFuture] = {}
 
     def _wait_for_engine_startup(self):
+        # Get a sync handle to the socket which can be sync or async.
+        sync_input_socket = zmq.Socket.shadow(self.input_socket)
+
         # Wait for engine core process(es) to send ready messages.
         identities = set(range(len(self.resources.core_engines)))
         while identities:
-            while not self.input_socket.poll(timeout=10000):
+            while not sync_input_socket.poll(timeout=STARTUP_POLL_PERIOD_MS):
                 logger.info("Waiting for %d core engine proc(s) to start: %s",
                             len(identities), identities)
-            eng_id_bytes, msg = self.input_socket.recv_multipart()
+            eng_id_bytes, msg = sync_input_socket.recv_multipart()
             eng_id = int.from_bytes(eng_id_bytes, byteorder="little")
             if eng_id not in identities:
                 raise RuntimeError(f"Unexpected or duplicate engine: {eng_id}")
