@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
 from .punica_base import PunicaWrapperBase
 
-
 class PunicaWrapperTPU(PunicaWrapperBase):
     """
     PunicaWrapperTPU is designed to manage and provide metadata for the punica
@@ -102,19 +101,12 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
         """
-
         x = x.view(-1, x.shape[-1])
 
         new_y = []
         for slice_idx in range(len(lora_a_stacked)):
-            y_s = y[slice_idx]
             lora_s = lora_a_stacked[slice_idx]
-
-            y_org = y_s
-            y_s = y_s.view(-1, y_s.shape[-1])
-
             y_s = self.shrink(x, lora_s, scale)
-            y_s = y_s.view_as(y_org)
             new_y.append(y_s)
         return tuple(new_y)
 
