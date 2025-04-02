@@ -752,3 +752,78 @@ class InstructCoderDataset(HuggingFaceDataset):
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# AIMO Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class AIMODataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a AIMO dataset with reasoning questions.
+    """
+    SUPPORTED_DATASET_PATHS = {
+            "AI-MO/aimo-validation-aime",
+            "AI-MO/NuminaMath-1.5", 
+            "AI-MO/NuminaMath-CoT"
+    }
+
+    def load_data(self) -> None:
+        import os.path as osp
+        supported_aimo_datasets = []
+        if not self.dataset_path:
+            raise ValueError("dataset_path must be provided for loading data.")
+        if not osp.exists(self.dataset_path) and \
+            self.dataset_path not in supported_aimo_datasets:
+            raise ValueError(
+                f"Only support AIMO datasets. This data path {self.dataset_path} "
+                f"is not valid. Supported datasets are {supported_aimo_datasets}")
+
+        self.data = load_dataset(
+            self.dataset_path,
+            name=self.dataset_subset,
+            split=self.dataset_split,
+            streaming=True,
+        )
+        if "problem" not in self.data.column_names \
+            or "solution" not in self.data.column_names:
+            raise ValueError(
+                "AIMODataset currently only supports datasets with "
+                "both 'problem' and 'solution' column like "
+                "AI-MO/aimo-validation-aime. "
+                "Please consider contributing if you would like to add "
+                "support for additional dataset formats.")
+        self.data = self.data.shuffle(seed=self.random_seed)
+
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
+               output_len: Optional[int] = None,
+               **kwargs) -> list:
+        sampled_requests = []
+        dynamic_output = output_len is None
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt, completion = item['problem'], item["solution"]
+
+            prompt_ids = tokenizer(prompt).input_ids
+            completion_ids = tokenizer(completion).input_ids
+            prompt_len = len(prompt_ids)
+            completion_len = len(completion_ids)
+            output_len = completion_len if dynamic_output else output_len
+            assert isinstance(output_len, int) and output_len > 0
+            if dynamic_output and not is_valid_sequence(
+                    prompt_len, completion_len):
+                continue
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=None,
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
