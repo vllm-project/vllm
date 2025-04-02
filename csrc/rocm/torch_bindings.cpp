@@ -1,5 +1,6 @@
 #include "core/registration.h"
 #include "rocm/ops.h"
+#include "rocm/FHT.h"
 
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
@@ -49,6 +50,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                str kv_cache_dtype,"
       "                Tensor k_scale, Tensor v_scale) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
+
+  
+  // Register fast Hadamard transforms
+  rocm_ops.def("fast_hadamard_transform_1024(Tensor x, float scale) -> Tensor");
+  rocm_ops.impl("fast_hadamard_transform_1024", torch::kCUDA, &fast_hadamard_transform_1024);
+  rocm_ops.def("fast_hadamard_transform_512(Tensor x, float scale) -> Tensor");
+  rocm_ops.impl("fast_hadamard_transform_512", torch::kCUDA, &fast_hadamard_transform_512);
+
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
