@@ -149,9 +149,12 @@ class KVCacheManager:
                 # Add back the last block hash if it was removed.
                 block_hashes.append(last_block_hash)
 
-            computed_blocks = self.connector.get_external_prefix_cache_blocks(
-                request, computed_blocks,
-                len(computed_blocks) * self.block_size, self)
+            # Check the remote cache for the external prefix cache blocks.
+            if self.connector is not None:
+                computed_blocks =\
+                        self.connector.get_external_prefix_cache_blocks(
+                                request, computed_blocks,
+                                len(computed_blocks) * self.block_size, self)
 
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)

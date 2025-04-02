@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.attention import AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import CacheConfig, get_current_vllm_config
-from vllm.distributed import get_kv_transfer_group
+from vllm.distributed import get_kv_transfer_group, has_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
@@ -180,7 +180,8 @@ class Attention(nn.Module):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
-        get_kv_transfer_group().wait_for_layer_load(self.layer_name)
+        if has_kv_transfer_group():
+            get_kv_transfer_group().wait_for_layer_load(self.layer_name)
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
@@ -216,11 +217,13 @@ class Attention(nn.Module):
                                   self_kv_cache,
                                   attn_metadata,
                                   output=output)
-                save_kv_layer_to_connector(self.layer_name, self.kv_cache)
+                maybe_save_kv_layer_to_connector(self.layer_name,
+                                                 self.kv_cache)
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
-                save_kv_layer_to_connector(self.layer_name, self.kv_cache)
+                maybe_save_kv_layer_to_connector(self.layer_name,
+                                                 self.kv_cache)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -229,12 +232,14 @@ class Attention(nn.Module):
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 output = self.impl.forward(self, query, key, value,
                                            self_kv_cache, attn_metadata)
-                save_kv_layer_to_connector(self.layer_name, self.kv_cache)
+                maybe_save_kv_layer_to_connector(self.layer_name,
+                                                 self.kv_cache)
                 return output
             else:
                 output = torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
-                save_kv_layer_to_connector(self.layer_name, self.kv_cache)
+                maybe_save_kv_layer_to_connector(self.layer_name,
+                                                 self.kv_cache)
                 return output
 
     def calc_kv_scales(self, query, key, value):
@@ -337,17 +342,18 @@ class MultiHeadAttention(nn.Module):
         return out.reshape(bsz, q_len, -1)
 
 
-def save_kv_layer_to_connector(
+def maybe_save_kv_layer_to_connector(
     layer_name: str,
     kv_cache: List[torch.Tensor],
 ):
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if not has_kv_transfer_group():
         return
 
     connector = get_kv_transfer_group()
-    if connector is None:
+
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if attn_metadata is None:
         return
 
     kv_cache_layer = kv_cache[forward_context.virtual_engine]

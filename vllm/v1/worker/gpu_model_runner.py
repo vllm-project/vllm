@@ -13,7 +13,7 @@ import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
-from vllm.distributed import get_kv_transfer_group
+from vllm.distributed import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -1044,8 +1044,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             })
 
         # Update the connector's state with the metadata in scheduler output.
-        get_kv_transfer_group().bind_connector_metadata(
-            scheduler_output.connector_metadata)
+        if has_kv_transfer_group():
+            get_kv_transfer_group().bind_connector_metadata(
+                scheduler_output.connector_metadata)
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
@@ -1065,7 +1066,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Clear connector's state
-        get_kv_transfer_group().clear_connector_metadata()
+        if has_kv_transfer_group():
+            get_kv_transfer_group().clear_connector_metadata()
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:

@@ -66,15 +66,18 @@ class Scheduler(SchedulerInterface):
         self.max_model_len = self.scheduler_config.max_model_len
 
         # create connector
-        from vllm.distributed.kv_transfer.kv_connector.factory import (
-            KVConnectorFactory)
-        from vllm.distributed.kv_transfer.kv_connector.v1 import (
-            KVConnectorRole as KVConnectorRole_V1)
-        self.connector = KVConnectorFactory.create_connector(
-            rank=None,
-            local_rank=None,
-            config=self.vllm_config,
-            role=KVConnectorRole_V1.SCHEDULER)
+        if self.vllm_config.kv_transfer_config is not None:
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory)
+            from vllm.distributed.kv_transfer.kv_connector.v1 import (
+                KVConnectorRole as KVConnectorRole_V1)
+            self.connector = KVConnectorFactory.create_connector(
+                rank=None,
+                local_rank=None,
+                config=self.vllm_config,
+                role=KVConnectorRole_V1.SCHEDULER)
+        else:
+            self.connector = None
 
         num_gpu_blocks = cache_config.num_gpu_blocks
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
@@ -457,7 +460,8 @@ class Scheduler(SchedulerInterface):
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
-        self.connector.attach_connector_meta(scheduler_output)
+        if self.connector is not None:
+            self.connector.attach_connector_meta(scheduler_output)
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
