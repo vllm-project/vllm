@@ -3051,6 +3051,7 @@ class CompilationLevel:
     DYNAMO_AS_IS = 1
     DYNAMO_ONCE = 2
     PIECEWISE = 3
+    FULL_GRAPH = 4
 
 
 class CompilationConfig(BaseModel):
@@ -3063,6 +3064,7 @@ class CompilationConfig(BaseModel):
             - 1: dynamo as is.
             - 2: dynamo once.
             - 3: piecewise compilation.
+            - 4: full compilation.
         - debug_dump_path: the path to dump the debug information.
         - cache_dir: the directory to store the compiled graph, to
             accelerate Inductor compilation. By default, it will use
@@ -3074,6 +3076,7 @@ class CompilationConfig(BaseModel):
             We use string to avoid serialization issues when using compilation in a distributed setting.
             When the compilation level is 1 or 2, the backend is used for the compilation directly (it sees the whole graph).
             When the compilation level is 3, the backend is used for the piecewise compilation (it sees a part of the graph).
+            When the compilation level is 4, the backend is used for the full graph.
         - custom_ops: fine-grained control over which custom ops to enable/disable.
             Use 'all' to enable all, 'none' to disable all.
             Also specify a list of custom op names to enable (prefixed with a '+'),
@@ -3246,7 +3249,7 @@ class CompilationConfig(BaseModel):
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
         """Parse the CLI value for the compilation config."""
-        if cli_value in ["0", "1", "2", "3"]:
+        if cli_value in ["0", "1", "2", "3", "4"]:
             return cls(level=int(cli_value))
         # do not use `eval`, it is dangerous and can execute arbitrary code
         dict_value = ast.literal_eval(cli_value)
@@ -3313,7 +3316,7 @@ class CompilationConfig(BaseModel):
 
         # TODO: pass user-specified backend to piecewise compilation
         # merge with the config use_inductor
-        assert self.level == CompilationLevel.PIECEWISE
+        assert self.level >= CompilationLevel.PIECEWISE
 
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
@@ -3368,13 +3371,16 @@ class CompilationConfig(BaseModel):
             self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
-        # If default, override splitting ops for piecewise cudagraph on V1.
         # NOTE: this function needs to be called
-        if not self.splitting_ops:
-            self.splitting_ops = [
-                "vllm.unified_attention",
-                "vllm.unified_attention_with_output",
-            ]
+        if not self.splitting_ops: 
+            if self.level == CompilationLevel.PIECEWISE: 
+                self.splitting_ops = [
+                    "vllm.unified_attention",
+                    "vllm.unified_attention_with_output",
+                ]
+            elif self.level == CompilationLevel.FULL_GRAPH:
+                self.splitting_ops = []
+        
 
 
 @dataclass
@@ -3600,7 +3606,8 @@ class VllmConfig:
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
-            self.compilation_config.level = CompilationLevel.PIECEWISE
+            if self.compilation_config.level < CompilationLevel.PIECEWISE:
+                self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
         self._set_cudagraph_sizes()
@@ -3773,7 +3780,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
         logger.debug("disabled custom ops: %s",
                      vllm_config.compilation_config.disabled_custom_ops)
         if check_compile and \
-            vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
+            vllm_config.compilation_config.level >= CompilationLevel.PIECEWISE \
             and compilation_counter.num_models_seen == num_models_seen:
             # If the model supports compilation,
             # compilation_counter.num_models_seen should be increased

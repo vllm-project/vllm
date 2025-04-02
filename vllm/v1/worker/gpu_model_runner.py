@@ -182,7 +182,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
-                               == CompilationLevel.PIECEWISE
+                               >= CompilationLevel.PIECEWISE
                                and not self.model_config.enforce_eager)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
@@ -203,6 +203,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
+        self.query_start_loc = torch.zeros(self.max_num_reqs + 1,
+                                           dtype=torch.int32,
+                                           device=self.device)
+        self.seq_lens = torch.zeros(self.max_num_reqs,
+                                    dtype=torch.int32,
+                                    device=self.device)
+        self.slot_mapping = torch.zeros(
+            self.max_num_tokens,
+            # CPU slot_mapping is int32, but
+            # this one must be int64
+            dtype=torch.int64,
+            device=self.device)
+
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -580,6 +593,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_scheduled_tokens,
                 scheduler_output.num_common_prefix_blocks,
             )
+
+        self.query_start_loc[:num_reqs + 1].copy_(
+            self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
+        self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
+                                       non_blocking=True)
+        self.slot_mapping[:total_num_scheduled_tokens].copy_(
+            self.slot_mapping_cpu[:total_num_scheduled_tokens],
+            non_blocking=True)
+
+        # Fill unused with -1. Needed for reshape_and_cache
+        self.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
+        self.seq_lens[num_reqs:].fill_(0)
+        self.query_start_loc[num_reqs + 1:].fill_(-1)
 
         attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,
@@ -1376,6 +1402,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
+        initialize_attention_metadata: bool = False,
     ) -> torch.Tensor:
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
@@ -1391,6 +1418,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
+
+        if initialize_attention_metadata:
+            attn_metadata = self.attn_metadata_builder.build(
+                num_reqs=num_tokens,
+                num_actual_tokens=num_tokens,
+                max_query_len=num_tokens,
+                common_prefix_len=0,
+            )
+        else:
+            attn_metadata = None
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
@@ -1420,7 +1457,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            with set_forward_context(None,
+            with set_forward_context(attn_metadata,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
                 hidden_states = model(
@@ -1587,7 +1624,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. Please add "
-                "-O %s to use CUDA graphs.", CompilationLevel.PIECEWISE)
+                "-O %s or -O %s to use CUDA graphs.", CompilationLevel.PIECEWISE, CompilationLevel.FULL_GRAPH)
             return
 
         start_time = time.perf_counter()
@@ -1600,8 +1637,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens)
-                self._dummy_run(num_tokens)
+                    self._dummy_run(num_tokens, initialize_attention_metadata=True)
+                self._dummy_run(num_tokens, initialize_attention_metadata=True)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]

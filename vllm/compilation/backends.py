@@ -279,8 +279,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
-    It is used for compilation level of `CompilationLevel.PIECEWISE`,
-    where we customize the compilation.
+    It is used for compilation level of `CompilationLevel.PIECEWISE` or
+    `CompilationLevel.FULL_GRAPH`, where we customize the compilation.
 
     The major work of this backend is to split the graph into
     piecewise graphs, and pass them to the piecewise backend.
