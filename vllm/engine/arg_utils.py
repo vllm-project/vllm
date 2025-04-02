@@ -1468,15 +1468,21 @@ class EngineArgs:
 
         # Only Ngram speculative decoding so far.
         is_ngram_enabled = False
+        is_eagle_enabled = False
         if self.speculative_config is not None:
             # This is supported but experimental (handled below).
-            if (("method" in self.speculative_config
-                 and self.speculative_config["method"] in ("ngram", "[ngram]"))
-                    or
-                ("model" in self.speculative_config and
-                 self.speculative_config["model"] in ("ngram", "[ngram]"))):
-                is_ngram_enabled = True
+            speculative_method = self.speculative_config.get("method")
+            if speculative_method:
+                if speculative_method in ("ngram", "[ngram]"):
+                    is_ngram_enabled = True
+                elif speculative_method == "eagle":
+                    is_eagle_enabled = True
             else:
+                speculative_model = self.speculative_config.get("model")
+                if speculative_model in ("ngram", "[ngram]"):
+                    is_ngram_enabled = True
+            if not (is_ngram_enabled or is_eagle_enabled):
+                # Other speculative decoding methods are not supported yet.
                 _raise_or_fallback(feature_name="Speculative Decoding",
                                    recommend_to_remove=False)
                 return False
@@ -1521,6 +1527,10 @@ class EngineArgs:
 
         # ngram is supported on V1, but off by default for now.
         if is_ngram_enabled and _warn_or_fallback("ngram"):
+            return False
+
+        # Eagle is under development, so we don't support it yet.
+        if is_eagle_enabled and _warn_or_fallback("Eagle"):
             return False
 
         # Non-CUDA is supported on V1, but off by default for now.
