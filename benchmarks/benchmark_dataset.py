@@ -769,33 +769,6 @@ class AIMODataset(HuggingFaceDataset):
             "AI-MO/NuminaMath-CoT"
     }
 
-    def load_data(self) -> None:
-        import os.path as osp
-        supported_aimo_datasets = []
-        if not self.dataset_path:
-            raise ValueError("dataset_path must be provided for loading data.")
-        if not osp.exists(self.dataset_path) and \
-            self.dataset_path not in supported_aimo_datasets:
-            raise ValueError(
-                f"Only support AIMO datasets. This data path {self.dataset_path} "
-                f"is not valid. Supported datasets are {supported_aimo_datasets}")
-
-        self.data = load_dataset(
-            self.dataset_path,
-            name=self.dataset_subset,
-            split=self.dataset_split,
-            streaming=True,
-        )
-        if "problem" not in self.data.column_names \
-            or "solution" not in self.data.column_names:
-            raise ValueError(
-                "AIMODataset currently only supports datasets with "
-                "both 'problem' and 'solution' column like "
-                "AI-MO/aimo-validation-aime. "
-                "Please consider contributing if you would like to add "
-                "support for additional dataset formats.")
-        self.data = self.data.shuffle(seed=self.random_seed)
-
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
                num_requests: int,
