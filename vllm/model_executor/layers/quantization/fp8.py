@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -13,9 +14,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    expand_weights, is_rocm_aiter_block_scaled_moe_enabled,
-    is_rocm_aiter_moe_enabled, shuffle_weights)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -39,6 +37,14 @@ from vllm.platforms import current_platform
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
+
+has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
+
+
+def _is_col_major(x: torch.Tensor) -> bool:
+    assert x.dim() == 3
+    b, m, n = x.shape
+    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
 
 
 class Fp8Config(QuantizationConfig):
@@ -119,6 +125,21 @@ class Fp8Config(QuantizationConfig):
             return Fp8KVCacheMethod(self)
         return None
 
+    def get_cache_scale(self, name: str) -> Optional[str]:
+        """
+        Check whether the param name matches the format for k/v cache scales
+        in compressed-tensors. If this is the case, return its equivalent
+        param name expected by vLLM
+
+        :param name: param name
+        :return: matching param name for KV cache scale in vLLM
+        """
+        if name.endswith(".output_scale") and ".k_proj" in name:
+            return name.replace(".k_proj.output_scale", ".attn.k_scale")
+        if name.endswith(".output_scale") and ".v_proj" in name:
+            return name.replace(".v_proj.output_scale", ".attn.v_scale")
+        return None
+
 
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
@@ -141,6 +162,7 @@ class Fp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
+        self.out_dtype = torch.get_default_dtype()
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -389,6 +411,7 @@ class Fp8LinearMethod(LinearMethodBase):
         return self.fp8_linear.apply(input=x,
                                      weight=layer.weight,
                                      weight_scale=layer.weight_scale,
+                                     out_dtype=self.out_dtype,
                                      input_scale=layer.input_scale,
                                      bias=bias)
 
@@ -409,6 +432,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
+
+        # Check for DeepGemm support.
+        self.allow_deep_gemm = False
+        if envs.VLLM_USE_DEEP_GEMM:
+            if not has_deep_gemm:
+                logger.warning_once("Failed to import DeepGemm kernels.")
+            elif (current_platform.is_cuda()
+                  and current_platform.has_device_capability(90)):
+                logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
+                self.allow_deep_gemm = True
+            else:
+                logger.warning_once(
+                    "DeepGemm not supported on the current platform.")
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -532,6 +568,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        # Lazy import to avoid importing triton too early.
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            expand_weights, is_rocm_aiter_block_scaled_moe_enabled,
+            is_rocm_aiter_moe_enabled, shuffle_weights)
+
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
@@ -566,6 +607,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                       requires_grad=False)
                 layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                      requires_grad=False)
+
+            # DeepGemm scales need to be transposed and aligned.  We try to do
+            # it ahead of time for performance reasons.
+            if self.allow_deep_gemm:
+                # Lazy import to avoid CUDA initialization problems.
+                import deep_gemm as dg
+                if _is_col_major(layer.w13_weight_scale_inv):
+                    layer.w13_weight_scale_inv = \
+                        dg.get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
+                if _is_col_major(layer.w2_weight_scale_inv):
+                    layer.w2_weight_scale_inv = \
+                        dg.get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
+
             return
 
         # If checkpoint is fp16, quantize in place.
@@ -754,6 +808,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             block_shape=self.quant_config.weight_block_size,
+            allow_deep_gemm=self.allow_deep_gemm,
         )
 
 

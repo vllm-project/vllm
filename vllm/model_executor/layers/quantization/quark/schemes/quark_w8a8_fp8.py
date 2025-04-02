@@ -22,6 +22,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
         self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=True)
+        self.out_dtype = torch.get_default_dtype()
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -134,5 +135,6 @@ class QuarkW8A8Fp8(QuarkScheme):
         return self.fp8_linear.apply(input=x,
                                      weight=layer.weight,
                                      weight_scale=layer.weight_scale,
+                                     out_dtype=self.out_dtype,
                                      input_scale=layer.input_scale,
                                      bias=bias)

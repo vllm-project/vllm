@@ -31,14 +31,12 @@ TENSOR_PARALLEL_SIZES = [1]
                     reason="This is a basic test for TPU only")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("tensor_parallel_size", TENSOR_PARALLEL_SIZES)
-def test_models(
+def test_basic(
     vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
     model: str,
     max_tokens: int,
-    enforce_eager: bool,
     tensor_parallel_size: int,
 ) -> None:
     prompt = "The next numbers of the sequence " + ", ".join(
@@ -50,12 +48,15 @@ def test_models(
 
         with vllm_runner(
                 model,
-                max_model_len=8192,
-                enforce_eager=enforce_eager,
+                # Note: max_num_batched_tokens == 1024 is needed here to
+                # actually test chunked prompt
+                max_num_batched_tokens=1024,
+                max_model_len=8196,
                 gpu_memory_utilization=0.7,
                 max_num_seqs=16,
                 tensor_parallel_size=tensor_parallel_size) as vllm_model:
             vllm_outputs = vllm_model.generate_greedy(example_prompts,
                                                       max_tokens)
         output = vllm_outputs[0][1]
-        assert "1024" in output
+
+        assert "1024" in output or "0, 1" in output

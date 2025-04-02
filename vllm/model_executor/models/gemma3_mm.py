@@ -30,7 +30,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import flatten_2d_lists
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -60,7 +59,7 @@ class Gemma3ImagePixelInputs(TypedDict):
     A boolean mask indicating which image embeddings correspond
     to patch tokens.
 
-    Shape: `(batch_size, num_images, num_embeds)`
+    Shape: `(batch_size * num_images, num_embeds)`
     """
 
 
@@ -593,6 +592,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         pixel_values = flatten_bn(pixel_values, concat=True)
         num_crops = flatten_bn(num_crops, concat=True)
+        embed_is_patch = flatten_bn(embed_is_patch)
 
         return Gemma3ImagePixelInputs(
             type="pixel_values",
@@ -613,7 +613,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     def _process_image_input(
         self,
         image_input: Gemma3ImageInputs,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> list[torch.Tensor]:
         assert self.vision_tower is not None
 
         pixel_values = image_input["pixel_values"]
@@ -625,7 +625,9 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         )
         image_embeds = self.multi_modal_projector(image_features)
 
-        return image_embeds.split(num_patches.tolist())
+        return [
+            e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())
+        ]
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
@@ -635,14 +637,10 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         image_features = self._process_image_input(image_input)
 
-        if kwargs.get("v0_path", False):
-            return image_features
-
-        return flatten_2d_lists(
-            scatter_patch_features(*args) for args in zip(
-                image_features,
-                image_input["embed_is_patch"],
-            ))
+        return scatter_patch_features(
+            image_features,
+            image_input["embed_is_patch"],
+        )
 
     def get_input_embeddings(
         self,
@@ -671,7 +669,6 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
-            kwargs.update({"v0_path": True})
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
 
             inputs_embeds = self.get_input_embeddings(input_ids,
