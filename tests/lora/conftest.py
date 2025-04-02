@@ -2,7 +2,6 @@
 
 import tempfile
 from collections import OrderedDict
-from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,28 +23,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
-
-
-class ContextIDInfo(TypedDict):
-    lora_id: int
-    context_length: str
-
-
-class ContextInfo(TypedDict):
-    lora: str
-    context_length: str
-
-
-LONG_LORA_INFOS: list[ContextIDInfo] = [{
-    "lora_id": 1,
-    "context_length": "16k",
-}, {
-    "lora_id": 2,
-    "context_length": "16k",
-}, {
-    "lora_id": 3,
-    "context_length": "32k",
-}]
 
 
 @pytest.fixture()
