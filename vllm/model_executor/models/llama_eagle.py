@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -36,26 +37,29 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             self.input_layernorm = lambda x: x
 
 
+@support_torch_compile
 class LlamaModel(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        *,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
         self.config = config
         self.vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            prefix=maybe_prefix("embed_tokens", prefix),
+            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
                 config,
                 i,
-                prefix=maybe_prefix(f"layers.{i}", prefix),
+                prefix=maybe_prefix(prefix, f"layers.{i}"),
             ) for i in range(config.num_hidden_layers)
         ])
         self.fc = torch.nn.Linear(config.hidden_size * 2, config.hidden_size)
@@ -86,8 +90,7 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         self.config = config
-        self.model = LlamaModel(config=config,
-                                prefix=maybe_prefix(prefix, "eagle"))
+        self.model = LlamaModel(vllm_config=vllm_config, prefix="")
 
         self.truncated_vocab_size = config.truncated_vocab_size
         self.unpadded_vocab_size = self.truncated_vocab_size
@@ -109,20 +112,24 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
                                                 self.truncated_vocab_size,
                                                 logit_scale)
 
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.model(input_ids, positions, hidden_states)
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        print("===========")
-        print_module_names(self.model)
-        print("===========")
         loader = AutoWeightsLoader(self)
 
+        model_weights = {}
         for name, loaded_weight in weights:
             if "lm_head" not in name:
-                name = "eagle." + name
-            loader.load_weights(name, loaded_weight)
+                name = "model." + name
+                print(name)
+                model_weights[name] = loaded_weight
 
-
-def print_module_names(module, prefix=""):
-    for name, child in module.named_children():
-        full_name = f"{prefix}.{name}" if prefix else name
-        print(full_name)
-        print_module_names(child, full_name)
+        loader.load_weights(
+            self.maybe_remap_mistral(name, loaded_weight)
+            for name, loaded_weight in weights)
