@@ -69,7 +69,8 @@ class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
 class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
 
     def get_hf_config(self) -> LlavaNextLikeConfig:
-        return self.ctx.get_hf_config(LlavaNextConfig)
+        from vllm.transformers_utils.configs.configuration_minimax_vl_01 import MiniMaxVL01Config
+        return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
         hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
