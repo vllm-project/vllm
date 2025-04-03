@@ -1,21 +1,22 @@
 #pragma once
 
 #include <cuda.h>
-#ifdef USE_ROCM
-  #include <hip/hip_bf16.h>
-typedef __hip_bfloat16 nv_bfloat16;
-#else
-  #include <cuda_bf16.h>
-#endif
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#if defined(USE_ROCM)
+typedef __hip_bfloat16 nv_bfloat16;
+#endif
+
 #include <iostream>
+#include <array>
 #include <limits>
 #include <map>
 #include <unordered_map>
 #include <vector>
 
+namespace vllm {
 #define CUDACHECK(cmd)                                              \
   do {                                                              \
     cudaError_t e = cmd;                                            \
@@ -26,32 +27,41 @@ typedef __hip_bfloat16 nv_bfloat16;
     }                                                               \
   } while (0)
 
-namespace vllm {
+// Maximal number of blocks in allreduce kernel.
+constexpr int kMaxBlocks = 36;
 
-constexpr int kMaxBlocks = 64;
-// note: we don't want to use atomics for signals because peer atomics are no
-// supported on PCIe links
+// Default number of blocks in allreduce kernel.
+#ifndef USE_ROCM
+const int defaultBlockLimit = 36;
+CUpointer_attribute rangeStartAddrAttr = CU_POINTER_ATTRIBUTE_RANGE_START_ADDR;
+#else
+const int defaultBlockLimit = 16;
+hipPointer_attribute rangeStartAddrAttr =
+    HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR;
+#endif
+
+// Counter may overflow, but it's fine since unsigned int overflow is
+// well-defined behavior.
+using FlagType = uint32_t;
+
+// Two sets of peer counters are needed for two syncs: starting and ending an
+// operation. The reason is that it's possible for peer GPU block to arrive at
+// the second sync point while the current GPU block haven't passed the first
+// sync point. Thus, peer GPU may write counter+1 while current GPU is busy
+// waiting for counter. We use alternating counter array to avoid this
+// possibility.
 struct Signal {
-  alignas(128) uint32_t start[kMaxBlocks][8];
-  alignas(128) uint32_t end[kMaxBlocks][8];
-  alignas(128) uint32_t _flag[kMaxBlocks];  // incremental flags for each rank
+  alignas(128) FlagType start[kMaxBlocks][8];
+  alignas(128) FlagType end[kMaxBlocks][8];
+  alignas(128) FlagType _flag[kMaxBlocks];  // incremental flags for each rank
 };
 
-#ifdef USE_ROCM
 struct __align__(16) RankData {
   const void* ptrs[8];
 };
-#else
-struct __align__(16) RankData {
-  const void* __restrict__ ptrs[8];
-};
-#endif
 
 struct __align__(16) RankSignals {
-#ifndef USE_ROCM
-  volatile
-#endif
-      Signal* signals[8];
+  Signal* signals[8];
 };
 
 // like std::array, but aligned
@@ -142,18 +152,97 @@ DINLINE O downcast(array_t<float, O::size> val) {
   }
 }
 
+#if !defined(USE_ROCM)
+
+static DINLINE void st_flag_release(FlagType* flag_addr, FlagType flag) {
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  asm volatile("st.release.sys.global.u32 [%1], %0;" ::"r"(flag),
+               "l"(flag_addr));
+  #else
+  asm volatile("membar.sys; st.volatile.global.u32 [%1], %0;" ::"r"(flag),
+               "l"(flag_addr));
+  #endif
+}
+
+static DINLINE FlagType ld_flag_acquire(FlagType* flag_addr) {
+  FlagType flag;
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  asm volatile("ld.acquire.sys.global.u32 %0, [%1];"
+               : "=r"(flag)
+               : "l"(flag_addr));
+  #else
+  asm volatile("ld.volatile.global.u32 %0, [%1]; membar.gl;"
+               : "=r"(flag)
+               : "l"(flag_addr));
+  #endif
+  return flag;
+}
+
+static DINLINE void st_flag_volatile(FlagType* flag_addr, FlagType flag) {
+  asm volatile("st.volatile.global.u32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
+}
+
+static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
+  FlagType flag;
+  asm volatile("ld.volatile.global.u32 %0, [%1];"
+               : "=r"(flag)
+               : "l"(flag_addr));
+  return flag;
+}
+
 // This function is meant to be used as the first synchronization in the all
 // reduce kernel. Thus, it doesn't need to make any visibility guarantees for
 // prior memory accesses. Note: volatile writes will not be reordered against
 // other volatile writes.
 template <int ngpus>
-DINLINE void start_sync(const RankSignals& sg,
-#ifndef USE_ROCM
-                        volatile
-#endif
-                        Signal* self_sg,
-                        int rank) {
-#ifdef USE_ROCM
+DINLINE void barrier_at_start(const RankSignals& sg, Signal* self_sg,
+                              int rank) {
+  uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
+  if (threadIdx.x < ngpus) {
+    auto peer_counter_ptr = &sg.signals[threadIdx.x]->start[blockIdx.x][rank];
+    auto self_counter_ptr = &self_sg->start[blockIdx.x][threadIdx.x];
+    // Write the expected counter value to peer and wait for correct value
+    // from peer.
+    st_flag_volatile(peer_counter_ptr, flag);
+    while (ld_flag_volatile(self_counter_ptr) != flag);
+  }
+  __syncthreads();
+  // use one thread to update flag
+  if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
+}
+
+// This function is meant to be used as the second or the final
+// synchronization barrier in the all reduce kernel. If it's the final
+// synchronization barrier, we don't need to make any visibility guarantees
+// for prior memory accesses.
+template <int ngpus, bool final_sync = false>
+DINLINE void barrier_at_end(const RankSignals& sg, Signal* self_sg, int rank) {
+  __syncthreads();
+  uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
+  if (threadIdx.x < ngpus) {
+    auto peer_counter_ptr = &sg.signals[threadIdx.x]->end[blockIdx.x][rank];
+    auto self_counter_ptr = &self_sg->end[blockIdx.x][threadIdx.x];
+    // Write the expected counter value to peer and wait for correct value from
+    // peer.
+    if constexpr (!final_sync) {
+      st_flag_release(peer_counter_ptr, flag);
+      while (ld_flag_acquire(self_counter_ptr) != flag);
+    } else {
+      st_flag_volatile(peer_counter_ptr, flag);
+      while (ld_flag_volatile(self_counter_ptr) != flag);
+    }
+  }
+  if constexpr (!final_sync) __syncthreads();
+
+  // use one thread to update flag
+  if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
+}
+
+#else
+
+template <int ngpus>
+DINLINE void barrier_at_start(const RankSignals& sg, Signal* self_sg,
+                              int rank) {
   uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
   if (threadIdx.x < ngpus) {
     // simultaneously write to the corresponding flag of all ranks.
@@ -168,36 +257,11 @@ DINLINE void start_sync(const RankSignals& sg,
   __syncthreads();
   // use one thread to update flag
   if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
-#else
-  if (threadIdx.x < ngpus) {
-    // reset flag for next time
-    self_sg->end[blockIdx.x][threadIdx.x] = 0;
-    // simultaneously write to the corresponding flag of all ranks.
-    // Latency = 1 p2p write
-    sg.signals[threadIdx.x]->start[blockIdx.x][rank] = 1;
-    // wait until we got true from all ranks
-    while (!self_sg->start[blockIdx.x][threadIdx.x]);
-  }
-  __syncthreads();
-#endif
 }
 
-// This function is meant to be used as the second or the final synchronization
-// barrier in the all reduce kernel. If it's the final synchronization barrier,
-// we don't need to make any visibility guarantees for prior memory accesses.
 template <int ngpus, bool final_sync = false>
-DINLINE void end_sync(const RankSignals& sg,
-#ifndef USE_ROCM
-                      volatile
-#endif
-                      Signal* self_sg,
-                      int rank) {
-#ifdef USE_ROCM
+DINLINE void barrier_at_end(const RankSignals& sg, Signal* self_sg, int rank) {
   __syncthreads();
-  // eliminate the case that prior writes are not visible after signals become
-  // visible. Note that I did not managed to make this happen through a lot of
-  // testing. Might be the case that hardware provides stronger guarantee than
-  // the memory model.
   uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
   if (threadIdx.x < ngpus) {
     // simultaneously write to the corresponding flag of all ranks.
@@ -212,28 +276,12 @@ DINLINE void end_sync(const RankSignals& sg,
                                final_sync ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE,
                                __MEMORY_SCOPE_DEVICE) < flag);
   }
-  __syncthreads();
+  if constexpr (!final_sync) __syncthreads();
   // use one thread to update flag
   if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
-#else
-  __syncthreads();
-  // eliminate the case that prior writes are not visible after signals become
-  // visible. Note that I did not managed to make this happen through a lot of
-  // testing. Might be the case that hardware provides stronger guarantee than
-  // the memory model.
-  if constexpr (!final_sync) __threadfence_system();
-  if (threadIdx.x < ngpus) {
-    // reset flag for next time
-    self_sg->start[blockIdx.x][threadIdx.x] = 0;
-    // simultaneously write to the corresponding flag of all ranks.
-    // Latency = 1 p2p write
-    sg.signals[threadIdx.x]->end[blockIdx.x][rank] = 1;
-    // wait until we got true from all ranks
-    while (!self_sg->end[blockIdx.x][threadIdx.x]);
-  }
-  if constexpr (!final_sync) __syncthreads();
-#endif
 }
+
+#endif
 
 template <typename P, int ngpus, typename A>
 DINLINE P packed_reduce(const P* ptrs[], int idx) {
@@ -247,42 +295,30 @@ DINLINE P packed_reduce(const P* ptrs[], int idx) {
 
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
-    cross_device_reduce_1stage(RankData* _dp, RankSignals sg,
-#ifndef USE_ROCM
-                               volatile
-#endif
-                               Signal* self_sg,
+    cross_device_reduce_1stage(RankData* _dp, RankSignals sg, Signal* self_sg,
                                T* __restrict__ result, int rank, int size) {
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
   // note: we don't reorder the address so the accumulation order is the same
   // for all ranks, ensuring bitwise identical results
   auto dp = *_dp;
-  start_sync<ngpus>(sg, self_sg, rank);
+  barrier_at_start<ngpus>(sg, self_sg, rank);
   // do the actual reduction
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
     ((P*)result)[idx] = packed_reduce<P, ngpus, A>((const P**)&dp.ptrs[0], idx);
   }
-  end_sync<ngpus, true>(sg, self_sg, rank);
+  barrier_at_end<ngpus, true>(sg, self_sg, rank);
 }
 
 template <typename P>
-#ifdef USE_ROCM
 DINLINE P* get_tmp_buf(Signal* sg) {
-#else
-DINLINE P* get_tmp_buf(volatile Signal* sg) {
-#endif
   return (P*)(((Signal*)sg) + 1);
 }
 
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
-    cross_device_reduce_2stage(RankData* _dp, RankSignals sg,
-#ifndef USE_ROCM
-                               volatile
-#endif
-                               Signal* self_sg,
+    cross_device_reduce_2stage(RankData* _dp, RankSignals sg, Signal* self_sg,
                                T* __restrict__ result, int rank, int size) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
@@ -301,18 +337,20 @@ __global__ void __launch_bounds__(512, 1)
     tmps[i] = get_tmp_buf<P>(sg.signals[target]);
   }
   auto tmp_out = tmps[0];
-  start_sync<ngpus>(sg, self_sg, rank);
+  barrier_at_start<ngpus>(sg, self_sg, rank);
+
   // stage 1: reduce scatter
   for (int idx = start + tid; idx < end; idx += stride) {
     tmp_out[idx - start] = packed_reduce<P, ngpus, A>(ptrs, idx);
   }
-  end_sync<ngpus>(sg, self_sg, rank);
+  barrier_at_end<ngpus>(sg, self_sg, rank);
 
   // stage 2: allgather. Note: it's important to match the tid between
   // the two stages, because visibility across devices is only guaranteed
   // between threads that have the same tid. If thread i computes the sum of
-  // start + i in the first stage, then thread i also gathers start + i from all
-  // ranks.
+  // start + i in the first stage, then thread i also gathers start + i from
+  // all ranks.
+
   for (int idx = tid; idx < largest_part; idx += stride) {
 #pragma unroll
     for (int i = 0; i < ngpus; i++) {
@@ -333,48 +371,56 @@ class CustomAllreduce {
  public:
   int rank_;
   int world_size_;
-  bool full_nvlink_;
+  // Full NVLink or xGMI connection between GPUs.
+  bool fully_connected_;
 
-  // below are device pointers
   RankSignals sg_;
+  // Stores an map from a pointer to its peer pointers from all ranks.
   std::unordered_map<void*, RankData*> buffers_;
   Signal* self_sg_;
 
-  // stores the registered device pointers from all ranks
+  // Stores rank data from all ranks. This is mainly for cuda graph purposes.
+  // For cuda graph to work, all kernel arguments must be fixed during graph
+  // capture time. However, the peer pointers are not known during graph
+  // capture time. Therefore, during capture, we increment the rank data
+  // pointer and use that as the argument to the kernel. The kernel arguments
+  // are stored in graph_unreg_buffers_. The actual peer pointers will be
+  // filled in at the memory pointed to by the pointers in
+  // graph_unreg_buffers_ when the IPC handles are exchanged between ranks.
+  //
+  // The overall process looks like this:
+  // 1. Graph capture.
+  // 2. Each rank obtains the IPC handles for each addresses used during cuda
+  // graph capture using get_graph_buffer_ipc_meta.
+  // 3. (In Python) all gather the IPC handles.
+  // 4. Obtain the peer pointers by opening the IPC handles, and store them in
+  // the rank data array at corresponding positions.
   RankData *d_rank_data_base_, *d_rank_data_end_;
   std::vector<void*> graph_unreg_buffers_;
   // a map from IPC handles to opened IPC pointers
   std::map<IPC_KEY, char*> ipc_handles_;
 
   /**
-   * meta is a pointer to device metadata and temporary buffer for allreduce.
+   * Signals are an array of ipc-enabled buffers from all ranks.
+   * For each of the buffer, the layout is as follows:
+   * | -- sizeof(Signal) -- | ------ a few MB ----- |
+   * The first section is for allreduce synchronization, and the second
+   * section is for storing the intermediate results required by some
+   * allreduce algos.
    *
-   * There's a total of sizeof(Signal) of prefix before the actual data,
-   * so meta + 1 points to actual temporary buffer.
-   *
-   * note: this class does not own any device memory. Any required buffers
-   * are passed in from the constructor
+   * Note: this class does not own any device memory. Any required buffers
+   * are passed in from the constructor.
    */
-  CustomAllreduce(Signal* meta, void* rank_data, size_t rank_data_sz,
-                  const cudaIpcMemHandle_t* handles,
-                  const std::vector<int64_t>& offsets, int rank,
-                  bool full_nvlink = true)
+  CustomAllreduce(Signal** signals, void* rank_data, size_t rank_data_sz,
+                  int rank, int world_size, bool fully_connected = true)
       : rank_(rank),
-        world_size_(offsets.size()),
-        full_nvlink_(full_nvlink),
-        self_sg_(meta),
+        world_size_(world_size),
+        fully_connected_(fully_connected),
+        self_sg_(signals[rank]),
         d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
         d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
     for (int i = 0; i < world_size_; i++) {
-      Signal* rank_sg;
-      if (i != rank_) {
-        char* handle = open_ipc_handle(&handles[i]);
-        handle += offsets[i];
-        rank_sg = (Signal*)handle;
-      } else {
-        rank_sg = self_sg_;
-      }
-      sg_.signals[i] = rank_sg;
+      sg_.signals[i] = signals[i];
     }
   }
 
@@ -391,23 +437,17 @@ class CustomAllreduce {
     return it->second;
   }
 
-  std::pair<std::vector<uint8_t>, std::vector<int64_t>>
-  get_graph_buffer_ipc_meta() {
+  std::pair<std::string, std::vector<int64_t>> get_graph_buffer_ipc_meta() {
     auto num_buffers = graph_unreg_buffers_.size();
     auto handle_sz = sizeof(cudaIpcMemHandle_t);
-    std::vector<uint8_t> handles(handle_sz * num_buffers, 0);
+    std::string handles(handle_sz * num_buffers, static_cast<char>(0));
     std::vector<int64_t> offsets(num_buffers);
     for (int i = 0; i < num_buffers; i++) {
       auto ptr = graph_unreg_buffers_[i];
       void* base_ptr;
       // note: must share the base address of each allocation, or we get wrong
       // address
-      if (cuPointerGetAttribute(&base_ptr,
-#ifdef USE_ROCM
-                                HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-#else
-                                CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-#endif
+      if (cuPointerGetAttribute(&base_ptr, rangeStartAddrAttr,
                                 (CUdeviceptr)ptr) != CUDA_SUCCESS)
         throw std::runtime_error("failed to get pointer attr");
       CUDACHECK(cudaIpcGetMemHandle(
@@ -424,32 +464,28 @@ class CustomAllreduce {
           std::to_string(d_rank_data_base_ + num - d_rank_data_end_));
   }
 
-  void register_buffer(const std::vector<std::string>& handles,
-                       const std::vector<int64_t>& offsets, void* self) {
+  /**
+   * Register already-shared IPC pointers.
+   */
+  void register_buffer(void** ptrs) {
     check_rank_data_capacity();
     RankData data;
     for (int i = 0; i < world_size_; i++) {
-      if (i != rank_) {
-        char* handle = open_ipc_handle(handles[i].data());
-        handle += offsets[i];
-        data.ptrs[i] = handle;
-      } else {
-        data.ptrs[i] = self;
-      }
+      data.ptrs[i] = ptrs[i];
     }
     auto d_data = d_rank_data_base_++;
     CUDACHECK(
         cudaMemcpy(d_data, &data, sizeof(RankData), cudaMemcpyHostToDevice));
-    buffers_[self] = d_data;
+    buffers_[ptrs[rank_]] = d_data;
   }
 
-  // note: when registering graph buffers, we intentionally choose to not
+  // Note: when registering graph buffers, we intentionally choose to not
   // deduplicate the addresses. That means if the allocator reuses some
-  // addresses, they will be registered again. This is to account for the remote
-  // possibility of different allocation patterns between ranks. For example,
-  // rank 1 may get the same input address for the second allreduce, but rank 2
-  // got a different address. IPC handles have internal reference counting
-  // mechanism so overhead should be small.
+  // addresses, they will be registered again. This is to account for the
+  // remote possibility of different allocation patterns between ranks. For
+  // example, rank 1 may get the same input address for the second allreduce,
+  // but rank 2 got a different address. IPC handles have internal reference
+  // counting mechanism so overhead should be small.
   void register_graph_buffers(
       const std::vector<std::string>& handles,
       const std::vector<std::vector<int64_t>>& offsets) {
@@ -478,49 +514,47 @@ class CustomAllreduce {
   }
 
   /**
-   * This is the result after careful grid search. Using 36 blocks give the best
-   * or close to the best runtime on the devices I tried: A100, A10, A30, T4,
-   * V100. You'll notice that NCCL kernels also only take a small amount of SMs.
-   * Not quite sure the underlying reason, but my guess is that too many SMs
-   * will cause contention on NVLink bus.
+   * Performs allreduce, assuming input has already been registered.
+   *
+   * Block and grid default configs are results after careful grid search.
+   * Using 36 blocks give the best or close to the best runtime on the devices
+   * I tried: A100, A10, A30, T4, V100. You'll notice that NCCL kernels also
+   * only take a small amount of SMs. Not quite sure the underlying reason,
+   * but my guess is that too many SMs will cause contention on NVLink bus.
    */
   template <typename T>
   void allreduce(cudaStream_t stream, T* input, T* output, int size,
-#ifndef USE_ROCM
-                 int threads = 512, int block_limit = 36){
-#else
-                 int threads = 512, int block_limit = 16) {
-#endif
-      auto d = packed_t<T>::P::size;
-  if (size % d != 0)
-    throw std::runtime_error(
-        "custom allreduce currently requires input length to be multiple "
-        "of " +
-        std::to_string(d));
-  if (block_limit > kMaxBlocks)
-    throw std::runtime_error("max supported block limit is " +
-                             std::to_string(kMaxBlocks) + ". Got " +
-                             std::to_string(block_limit));
-
-  RankData* ptrs;
-  cudaStreamCaptureStatus status;
-  CUDACHECK(cudaStreamIsCapturing(stream, &status));
-  if (status == cudaStreamCaptureStatusActive) {
-    ptrs = d_rank_data_base_ + graph_unreg_buffers_.size();
-    graph_unreg_buffers_.push_back(input);
-  } else {
-    auto it = buffers_.find(input);
-    if (it == buffers_.end())
+                 int threads = 512, int block_limit = defaultBlockLimit) {
+    auto d = packed_t<T>::P::size;
+    if (size % d != 0)
       throw std::runtime_error(
-          "buffer address " +
-          std::to_string(reinterpret_cast<uint64_t>(input)) +
-          " is not registered!");
-    ptrs = it->second;
-  }
+          "custom allreduce currently requires input length to be multiple "
+          "of " +
+          std::to_string(d));
+    if (block_limit > kMaxBlocks)
+      throw std::runtime_error("max supported block limit is " +
+                               std::to_string(kMaxBlocks) + ". Got " +
+                               std::to_string(block_limit));
 
-  size /= d;
-  auto bytes = size * sizeof(typename packed_t<T>::P);
-  int blocks = std::min(block_limit, (size + threads - 1) / threads);
+    RankData* ptrs;
+    cudaStreamCaptureStatus status;
+    CUDACHECK(cudaStreamIsCapturing(stream, &status));
+    if (status == cudaStreamCaptureStatusActive) {
+      ptrs = d_rank_data_base_ + graph_unreg_buffers_.size();
+      graph_unreg_buffers_.push_back(input);
+    } else {
+      auto it = buffers_.find(input);
+      if (it == buffers_.end())
+        throw std::runtime_error(
+            "buffer address " +
+            std::to_string(reinterpret_cast<uint64_t>(input)) +
+            " is not registered!");
+      ptrs = it->second;
+    }
+
+    size /= d;
+    auto bytes = size * sizeof(typename packed_t<T>::P);
+    int blocks = std::min(block_limit, (size + threads - 1) / threads);
 #define KL(ngpus, name)                                                       \
   name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
                                                  rank_, size);
@@ -528,7 +562,7 @@ class CustomAllreduce {
   case ngpus: {                                       \
     if (world_size_ == 2) {                           \
       KL(ngpus, cross_device_reduce_1stage);          \
-    } else if (full_nvlink_) {                        \
+    } else if (fully_connected_) {                    \
       if ((world_size_ <= 4 && bytes < 512 * 1024) || \
           (world_size_ <= 8 && bytes < 256 * 1024)) { \
         KL(ngpus, cross_device_reduce_1stage);        \
@@ -539,30 +573,32 @@ class CustomAllreduce {
     break;                                            \
   }
 
-  switch (world_size_) {
-    REDUCE_CASE(2)
-    REDUCE_CASE(4)
-    REDUCE_CASE(6)
-    REDUCE_CASE(8)
-    default:
-      throw std::runtime_error(
-          "custom allreduce only supports num gpus in (2,4,6,8). Actual num "
-          "gpus = " +
-          std::to_string(world_size_));
-  }
+    switch (world_size_) {
+      REDUCE_CASE(2)
+      REDUCE_CASE(4)
+      REDUCE_CASE(6)
+      REDUCE_CASE(8)
+      default:
+        throw std::runtime_error(
+            "custom allreduce only supports num gpus in (2,4,6,8). Actual "
+            "num "
+            "gpus = " +
+            std::to_string(world_size_));
+    }
 #undef REDUCE_CASE
 #undef KL
-}
-
-~CustomAllreduce() {
-  for (auto [_, ptr] : ipc_handles_) {
-    CUDACHECK(cudaIpcCloseMemHandle(ptr));
   }
-}
-};  // namespace vllm
+
+  ~CustomAllreduce() {
+    for (auto [_, ptr] : ipc_handles_) {
+      CUDACHECK(cudaIpcCloseMemHandle(ptr));
+    }
+  }
+};
+
 /**
- * To inspect PTX/SASS, copy paste this header file to compiler explorer and add
- a template instantiation:
+ * To inspect PTX/SASS, copy paste this header file to compiler explorer and
+ add a template instantiation:
  * template void vllm::CustomAllreduce::allreduce<half>(cudaStream_t, half *,
  half *, int, int, int);
 */

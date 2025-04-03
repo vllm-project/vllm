@@ -650,16 +650,11 @@ class MLACommonMetadata(AttentionMetadata):
             is_profile_run=self.is_profile_run)
         return self._cached_decode_metadata
 
-    def advance_step(self,
-                     model_input: "ModelInputForGPUWithSamplingMetadata",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int,
-                     num_seqs: int,
-                     num_queries: int,
-                     turn_prefills_into_decodes: bool = False):
-        """
-        Update metadata in-place to advance one decode step.
-        """
+    def advance_step_assertions(
+            self,
+            num_seqs: int,
+            num_queries: int,
+            turn_prefills_into_decodes: bool = False) -> None:
         # When using cudagraph, the num_seqs is padded to the next captured
         # batch sized, but num_queries tracks the actual number of requests in
         # the batch. For --enforce-eager mode, num_seqs == num_queries
@@ -712,6 +707,22 @@ class MLACommonMetadata(AttentionMetadata):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
 
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
+        """
+        Update metadata in-place to advance one decode step.
+        """
+        self.advance_step_assertions(
+            num_seqs=num_seqs,
+            num_queries=num_queries,
+            turn_prefills_into_decodes=turn_prefills_into_decodes)
+
+        # here we use advance_step_flashinfo to update the paged_kv_* tensors
         ops.advance_step_flashattn(num_seqs=num_seqs,
                                    num_queries=num_queries,
                                    block_size=block_size,
@@ -728,6 +739,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     NOTE: Please read the comment at the top of the file before trying to 
     understand this class
     """
+    BLOCK_TABLE_EXTENDER: list[list[int]] = []
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -877,9 +889,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
 
         num_seqs = len(seq_lens)
         if use_captured_graph:
-            self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
+            self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
+            self.block_tables.extend(self.__class__.BLOCK_TABLE_EXTENDER *
+                                     cuda_graph_pad_size)
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
         else:
@@ -1129,6 +1142,41 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0)
 
+    def _get_prefill_ctx_attn_output(
+            self, index: int, q: torch.Tensor, k: torch.Tensor,
+            v: torch.Tensor,
+            metadata: MLACommonMetadata) -> Tuple[torch.Tensor, ...]:
+        assert metadata.context_chunk_cu_seq_lens is not None
+        assert metadata.context_chunk_max_seq_lens is not None
+
+        if is_vllm_fa:
+            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=metadata.query_start_loc,
+                cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
+                max_seqlen_q=metadata.max_query_len,
+                max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
+                softmax_scale=self.scale,
+                causal=False,  # Context is unmasked
+                return_softmax_lse=True,
+            )
+        else:
+            attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=metadata.query_start_loc,
+                cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
+                max_seqlen_q=metadata.max_query_len,
+                max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
+                softmax_scale=self.scale,
+                causal=False,  # Context is unmasked
+                return_attn_probs=True,
+            )
+        return attn_output, attn_softmax_lse
+
     def _compute_prefill_context(
         self,
         q: torch.Tensor,
@@ -1183,34 +1231,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                                                [0, q.shape[-1] - v.shape[-1]],
                                                value=0)
 
-            if is_vllm_fa:
-                attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                    q=q,
-                    k=k,
-                    v=v_padded,
-                    cu_seqlens_q=prefill_metadata.query_start_loc,
-                    cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
-                    max_seqlen_q=prefill_metadata.max_query_len,
-                    max_seqlen_k=prefill_metadata.
-                    context_chunk_max_seq_lens[i],
-                    softmax_scale=self.scale,
-                    causal=False,  # Context is unmasked
-                    return_softmax_lse=True,
-                )
-            else:
-                attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
-                    q=q,
-                    k=k,
-                    v=v_padded,
-                    cu_seqlens_q=prefill_metadata.query_start_loc,
-                    cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
-                    max_seqlen_q=prefill_metadata.max_query_len,
-                    max_seqlen_k=prefill_metadata.
-                    context_chunk_max_seq_lens[i],
-                    softmax_scale=self.scale,
-                    causal=False,  # Context is unmasked
-                    return_attn_probs=True,
-                )
+            attn_output, attn_softmax_lse = self._get_prefill_ctx_attn_output(
+                i, q, k, v_padded, prefill_metadata)
 
             if output is None:
                 output = attn_output
@@ -1230,6 +1252,73 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 output_lse = output_lse_tmp
 
         return output, output_lse
+
+    def _get_fwd_prefill_attn_output(self, q: torch.Tensor, k: torch.Tensor,
+                                     v: torch.Tensor,
+                                     prefill_metadata: MLACommonMetadata,
+                                     kv_c_and_k_pe_cache: torch.Tensor,
+                                     attn_metadata: MLACommonMetadata,
+                                     has_context: bool) -> torch.Tensor:
+        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN and not has_context:
+            output = self.triton_fa_func(
+                q,
+                k,
+                v,
+                None,
+                prefill_metadata.query_start_loc,
+                prefill_metadata.query_start_loc,
+                prefill_metadata.max_prefill_seq_len,
+                prefill_metadata.max_prefill_seq_len,
+                True,  # causal
+                self.scale,
+                None,  # attn_mask is None unless applying ALiBi mask
+            )
+            ## triton flash attention always return 2 objects
+            if not has_context:
+                output = output[0]
+        elif is_vllm_fa:
+            output = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=has_context,
+            )
+        else:
+            output = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_attn_probs=has_context,
+            )
+
+        if has_context:
+            # ROCm flash_attn_varlen_func will return 3 objects instead of 2
+            suffix_output, suffix_lse, *rest = output
+            context_output, context_lse = self._compute_prefill_context( \
+                q, kv_c_and_k_pe_cache, attn_metadata)
+
+            output = torch.empty_like(suffix_output)
+            merge_attn_states(
+                output=output,
+                prefix_output=context_output,
+                prefix_lse=context_lse,
+                suffix_output=suffix_output,
+                suffix_lse=suffix_lse,
+            )
+
+        return output
 
     def _forward_prefill(
         self,
@@ -1258,64 +1347,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                            value=0)
 
-        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN and not has_context:
-            output = self.triton_fa_func(
-                q,
-                k,
-                v_padded,
-                None,
-                prefill_metadata.query_start_loc,
-                prefill_metadata.query_start_loc,
-                prefill_metadata.max_prefill_seq_len,
-                prefill_metadata.max_prefill_seq_len,
-                True,  # causal
-                self.scale,
-                None,  # attn_mask is None unless applying ALiBi mask
-            )
-            ## triton flash attention always return 2 objects
-            if not has_context:
-                output = output[0]
-        elif is_vllm_fa:
-            output = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.query_start_loc,
-                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=has_context,
-            )
-        else:
-            output = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.query_start_loc,
-                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_attn_probs=has_context,
-            )
-
-        if has_context:
-            # ROCm flash_attn_varlen_func will return 3 objects instead of 2
-            suffix_output, suffix_lse, *rest = output
-            context_output, context_lse = self._compute_prefill_context( \
-                q, kv_c_and_k_pe_cache, attn_metadata)
-
-            output = torch.empty_like(suffix_output)
-            merge_attn_states(
-                output=output,
-                prefix_output=context_output,
-                prefix_lse=context_lse,
-                suffix_output=suffix_output,
-                suffix_lse=suffix_lse,
-            )
+        output = self._get_fwd_prefill_attn_output(q, k, v_padded,
+                                                   prefill_metadata,
+                                                   kv_c_and_k_pe_cache,
+                                                   attn_metadata, has_context)
 
         # slice by `:v.shape[-1]` in order to remove v headdim padding
         output = output\
