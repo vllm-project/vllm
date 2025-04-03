@@ -26,8 +26,6 @@ def check_gguf_file(model: Union[str, PathLike]) -> bool:
     try:
         with model.open("rb") as f:
             header = f.read(4)
-            if len(header) < 4:
-                return False
 
         return header == b"GGUF"
     except Exception as e:
