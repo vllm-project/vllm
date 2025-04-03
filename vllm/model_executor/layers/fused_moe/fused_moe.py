@@ -685,14 +685,11 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     aligned by `dg.get_m_alignment_for_contiguous_layout()`.
     """
     if not has_deep_gemm:
+        logger.debug("DeepGemm disabled: deep_gemm not available.")
         return False
 
     # Lazy import to avoid CUDA initialization problems.
     import deep_gemm as dg
-
-    # Expert maps not supported yet.
-    if expert_map is not None:
-        return False
 
     align = dg.get_m_alignment_for_contiguous_layout()
     M = hidden_states.shape[0]
@@ -700,14 +697,21 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
 
     # For now, disable DeepGemm for small N until better permute/unpermute
     # ops are available.
-    if N <= 512:
+    if False and N <= 512:
+        logger.debug("DeepGemm disabled: N <= 512.")
         return False
 
     if align > M or N % align != 0 or K % align != 0:
+        logger.debug("DeepGemm disabled: unalinged problem size.")
         return False
 
-    return (hidden_states.is_contiguous() and w1.is_contiguous()
-            and w2.is_contiguous())
+    if (not hidden_states.is_contiguous() or
+        not w1.is_contiguous() or
+        not w2.is_contiguous()):
+        logger.debug("DeepGemm disabled: weights or activations not contiguous.")
+        return False
+
+    return True
 
 
 def _fp8_quantize(
@@ -727,6 +731,58 @@ def _fp8_quantize(
         A, A_scale = per_token_group_quant_fp8(A, block_k)
         assert triton.cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
     return A, A_scale
+
+
+def find_contiguous_segments(t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    last = t.numel()
+    if True:
+        non_matching = t[:-1] != t[1:]
+        ends = non_matching.nonzero().flatten() + 1
+        starts = torch.concat((torch.tensor([0], device=t.device), ends))
+        ends = torch.concat((ends, torch.tensor([last], device=t.device)))
+    else:
+        starts = torch.arange(0, last, device=t.device)
+        ends = torch.arange(1, last + 1, device=t.device)
+    return starts, ends
+
+
+# TODO: this doesn't work with cudagraphs.
+def dg_m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+    lhs: Tuple[torch.Tensor, torch.Tensor],
+    rhs: Tuple[torch.Tensor, torch.Tensor],
+    C: torch.Tensor,
+    expert_ids: torch.Tensor,
+) -> None:
+    # Lazy import to avoid CUDA initialization issues.
+    import deep_gemm as dg
+
+    block_m = dg.get_m_alignment_for_contiguous_layout()
+    expanded_expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
+
+    if torch.any(expert_ids < 0):
+        A, A_scale = lhs
+        B, B_scale = rhs
+
+        # chunk by non-negative expert_ids
+        positive = expert_ids >= 0
+        starts, ends = find_contiguous_segments(positive)
+
+        #assert starts[0] == 0                   # bad for cudagraph
+        #assert ends[-1] * 128 == A.shape[0]     # bad for cudagraph
+        valid_chunks = expert_ids[starts] >= 0
+        assert valid_chunks.numel() == starts.numel()
+
+        for start, end, valid in zip(starts * block_m, ends * block_m, valid_chunks):
+            if valid:
+                chunk_expert_ids = expanded_expert_ids[start:end]
+                dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                    (A[start:end], A_scale[start:end]), (B, B_scale),
+                    C[start:end], chunk_expert_ids)
+            else:
+                C[start:end].fill_(0)
+    else:
+        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            lhs, rhs, C, expanded_expert_ids)
 
 
 def invoke_fused_moe_kernel(A: torch.Tensor,
@@ -1452,11 +1508,8 @@ def _moe_permute(
                              expert_map,
                              pad_sorted_ids=True))
 
-    inv_perm: Optional[torch.Tensor] = None
-
     num_tokens = top_k_num * tokens_in_chunk
     sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
-    expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
     inv_perm = torch.argsort(sorted_token_ids)[:num_tokens]
 
     # Permute according to sorted token ids.
@@ -1847,8 +1900,6 @@ def deep_gemm_moe_fp8(
     # Lazy import to avoid CUDA initialization problems.
     import deep_gemm as dg
 
-    assert expert_map is None, "Expert maps not supported yet"
-
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
@@ -1949,7 +2000,7 @@ def deep_gemm_moe_fp8(
             intermediate_cache3 = _resize_cache(intermediate_cache3,
                                                 (curr_M, K))
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+        dg_m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (qcurr_hidden_states, a1q_scale), (w1, w1_scale),
             intermediate_cache1, expert_ids)
 
@@ -1967,7 +2018,7 @@ def deep_gemm_moe_fp8(
         qintermediate_cache2, a2q_scale = _fp8_quantize(
             intermediate_cache2, a2_scale, block_shape)
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+        dg_m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (qintermediate_cache2, a2q_scale), (w2, w2_scale),
             intermediate_cache3, expert_ids)
 
