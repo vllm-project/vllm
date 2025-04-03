@@ -29,7 +29,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -295,7 +295,11 @@ class GLMTransformer(nn.Module):
 
 
 @support_torch_compile
-class ChatGLMModel(nn.Module):
+class ChatGLMModel(nn.Module, SupportsQuant):
+    packed_modules_mapping = {
+        "linear_proj.merged_proj":
+        ["linear_proj.gate_proj", "linear_proj.dense_h_to_4h"]
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -395,7 +399,6 @@ class ChatGLMModel(nn.Module):
 
 
 class ChatGLMBaseModel(nn.Module):
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".word_embeddings": ""}, )
 
@@ -452,7 +455,8 @@ class ChatGLMBaseModel(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP):
+class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
+                         SupportsQuant):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"]
