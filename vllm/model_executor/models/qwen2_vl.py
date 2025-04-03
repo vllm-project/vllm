@@ -1276,6 +1276,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return modalities
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 

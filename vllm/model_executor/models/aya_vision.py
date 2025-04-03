@@ -450,6 +450,9 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             embed_is_patch=embed_is_patch,
         )
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
