@@ -710,10 +710,11 @@ def get_cutlass_moe_mm_data(
 
 
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
-                   b_tensors: torch.Tensor, a_scales: torch.Tensor,
-                   b_scales: torch.Tensor, expert_offsets: torch.Tensor,
-                   problem_sizes: torch.Tensor, a_strides: torch.Tensor,
-                   b_strides: torch.Tensor, c_strides: torch.Tensor):
+                   b_tensors: torch.Tensor, a_scales: Optional[torch.Tensor],
+                   b_scales: Optional[torch.Tensor],
+                   expert_offsets: torch.Tensor, problem_sizes: torch.Tensor,
+                   a_strides: torch.Tensor, b_strides: torch.Tensor,
+                   c_strides: torch.Tensor):
     """
     A single grouped matrix multiplication used in CUTLASS-based fused MoE.
     The function executes fp8-quantized OUT = AB matrix multiplication.
@@ -730,24 +731,24 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                                 a_strides, b_strides, c_strides)
 
 
-def cutlass_moe_mm_fp16(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
-                        b_tensors: torch.Tensor, expert_offsets: torch.Tensor,
-                        problem_sizes: torch.Tensor, a_strides: torch.Tensor,
-                        b_strides: torch.Tensor, c_strides: torch.Tensor):
-    """
-    A single grouped matrix multiplication used in CUTLASS-based fused MoE.
-    The function executes fp8-quantized OUT = AB matrix multiplication.
+# def cutlass_moe_mm_fp16(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
+#                         b_tensors: torch.Tensor, expert_offsets: torch.Tensor,
+#                         problem_sizes: torch.Tensor, a_strides: torch.Tensor,
+#                         b_strides: torch.Tensor, c_strides: torch.Tensor):
+#     """
+#     A single grouped matrix multiplication used in CUTLASS-based fused MoE.
+#     The function executes fp8-quantized OUT = AB matrix multiplication.
 
-    - expert_offsets: Indices that mark at which token index each expert begins
-                      its computation. The number of tokens computed with
-                      expert E is expert_offsets[E + 1] - expert_offsets[E]
-    - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
-                     MMs used in the fused MoE operation.
-    - a/b/c_strides: The data strides passed to grouped matrix multiplication.
-    """
-    torch.ops._C.cutlass_moe_mm_fp16(out_tensors, a_tensors, b_tensors,
-                                     expert_offsets, problem_sizes, a_strides,
-                                     b_strides, c_strides)
+#     - expert_offsets: Indices that mark at which token index each expert begins
+#                       its computation. The number of tokens computed with
+#                       expert E is expert_offsets[E + 1] - expert_offsets[E]
+#     - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
+#                      MMs used in the fused MoE operation.
+#     - a/b/c_strides: The data strides passed to grouped matrix multiplication.
+#     """
+#     torch.ops._C.cutlass_moe_mm_fp16(out_tensors, a_tensors, b_tensors,
+#                                      expert_offsets, problem_sizes, a_strides,
+#                                      b_strides, c_strides)
 
 
 # aqlm

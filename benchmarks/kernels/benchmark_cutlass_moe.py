@@ -6,7 +6,7 @@ from benchmark_shapes import WEIGHT_SHAPES_MOE
 
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe_fp8,
+from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe,
                                                             fused_experts,
                                                             fused_topk)
 from vllm.utils import FlexibleArgumentParser
@@ -121,18 +121,18 @@ def bench_run(results: list[benchmark.Measurement], model: str,
                         ab_strides2: torch.Tensor, c_strides2: torch.Tensor,
                         num_repeats: int):
         for _ in range(num_repeats):
-            cutlass_moe_fp8(a,
-                            w1,
-                            w2,
-                            w1_scale,
-                            w2_scale,
-                            topk_weights,
-                            topk_ids,
-                            ab_strides1,
-                            c_strides1,
-                            ab_strides2,
-                            c_strides2,
-                            a1_scale=a_scale)
+            cutlass_moe(a,
+                        w1,
+                        w2,
+                        topk_weights,
+                        topk_ids,
+                        ab_strides1,
+                        c_strides1,
+                        ab_strides2,
+                        c_strides2,
+                        w1_scale=w1_scale,
+                        w2_scale=w2_scale,
+                        a1_scale=a_scale)
 
     def run_cutlass_from_graph(
             a: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
@@ -143,18 +143,18 @@ def bench_run(results: list[benchmark.Measurement], model: str,
         with set_current_vllm_config(
                 VllmConfig(parallel_config=ParallelConfig(
                     pipeline_parallel_size=1))):
-            return cutlass_moe_fp8(a,
-                                   w1_q,
-                                   w2_q,
-                                   w1_scale,
-                                   w2_scale,
-                                   topk_weights,
-                                   topk_ids,
-                                   ab_strides1,
-                                   c_strides1,
-                                   ab_strides2,
-                                   c_strides2,
-                                   a1_scale=a_scale)
+            return cutlass_moe(a,
+                               w1_q,
+                               w2_q,
+                               topk_weights,
+                               topk_ids,
+                               ab_strides1,
+                               c_strides1,
+                               ab_strides2,
+                               c_strides2,
+                               w1_scale=w1_scale,
+                               w2_scale=w2_scale,
+                               a1_scale=a_scale)
 
     def run_triton_from_graph(a: torch.Tensor, w1: torch.Tensor,
                               w2: torch.Tensor, topk_weights: torch.Tensor,

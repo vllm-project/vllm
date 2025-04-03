@@ -24,10 +24,10 @@ from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda_alike():
-    from .fused_moe import cutlass_moe_fp16, fused_experts
+    from .fused_moe import cutlass_moe, fused_experts
 else:
     fused_experts = None  # type: ignore
-    cutlass_moe_fp16 = None  # type: ignore
+    cutlass_moe = None  # type: ignore
 if current_platform.is_tpu():
     # the iterative moe implementation is used until the moe_pallas is fixed
     from .moe_torch_iterative import fused_moe as fused_moe_pallas
@@ -438,7 +438,7 @@ class UnquantizedFusedCutlassMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        return cutlass_moe_fp16(
+        return cutlass_moe(
             x,
             layer.w13_weight.transpose(1, 2),
             layer.w2_weight.transpose(1, 2),

@@ -518,8 +518,8 @@ def test_cutlass_support_opcheck():
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
     reason="Grouped gemm is not supported on this GPU type.")
-def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
-                                per_out_ch: bool, use_bias: bool):
+def test_cutlass_fp8_moe_gemm(num_experts: int, per_act_token: bool,
+                              per_out_ch: bool, use_bias: bool):
 
     # Device and dtype setup
     device = "cuda"
@@ -649,7 +649,7 @@ def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
     reason="Grouped gemm is not supported on this GPU type.")
-def test_cutlass_fp16_group_gemm(num_experts: int, dtype: torch.dtype):
+def test_cutlass_fp16_moe_gemm(num_experts: int, dtype: torch.dtype):
 
     # Device and dtype setup
     device = "cuda"
@@ -715,9 +715,9 @@ def test_cutlass_fp16_group_gemm(num_experts: int, dtype: torch.dtype):
                            device=device,
                            dtype=torch.int64)
 
-    ops.cutlass_moe_mm_fp16(out_tensors_stacked, a_tensors_stacked,
-                            b_tensors_stacked, expert_offsets[:-1],
-                            problem_sizes, ab_strides, ab_strides, c_strides)
+    ops.cutlass_moe_mm(out_tensors_stacked, a_tensors_stacked,
+                       b_tensors_stacked, None, None, expert_offsets[:-1],
+                       problem_sizes, ab_strides, ab_strides, c_strides)
 
     # Validate each group's result against the baseline
     for g in range(num_experts):

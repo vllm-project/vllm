@@ -8,8 +8,10 @@
 #include "cutlass/bfloat16.h"
 #include "cutlass/float8.h"
 
+// get tensors with pointers pointing to the start index of each group's data
+
 template <typename ElementAB, typename ElementC, typename ElementAccumulator>
-__global__ void get_group_gemm_starts(
+__global__ void get_moe_gemm_starts(
     int32_t* expert_offsets, ElementAB** a_offsets, ElementAB** b_offsets,
     ElementC** out_offsets, ElementAccumulator** a_scales_offsets,
     ElementAccumulator** b_scales_offsets, ElementAB* a_base, ElementAB* b_base,
@@ -31,9 +33,9 @@ __global__ void get_group_gemm_starts(
         b_scales_base + (per_out_ch ? n * expert_id : expert_id);
 }
 
-#define __CALL_GET_STARTS_KERNEL(TENSOR_C_TYPE, C_TYPE)                    \
+#define __CALL_GET_STARTS_KERNEL_8_BIT(TENSOR_C_TYPE, C_TYPE)              \
   else if (out_tensors.dtype() == TENSOR_C_TYPE) {                         \
-    get_group_gemm_starts<cutlass::float_e4m3_t, C_TYPE, float>            \
+    get_moe_gemm_starts<cutlass::float_e4m3_t, C_TYPE, float>              \
         <<<1, num_experts, 0, stream>>>(                                   \
             static_cast<int32_t*>(expert_offsets.data_ptr()),              \
             static_cast<cutlass::float_e4m3_t**>(a_ptrs.data_ptr()),       \
@@ -49,9 +51,9 @@ __global__ void get_group_gemm_starts(
             a_tensors.size(1), per_act_token, per_out_ch);                 \
   }
 
-#define __CALL_GET_STARTS_KERNEL_FP16(ABC_TENSOR_TYPE, ABC_TYPE)              \
-  else if (out_tensors.dtype() == ABC_TENSOR_TYPE) {                          \
-    get_group_gemm_starts<ABC_TYPE, ABC_TYPE, float>                          \
+#define __CALL_GET_STARTS_KERNEL_16_BIT(TENSOR_ABC_TYPE, ABC_TYPE)            \
+  else if (out_tensors.dtype() == TENSOR_ABC_TYPE) {                          \
+    get_moe_gemm_starts<ABC_TYPE, ABC_TYPE, float>                            \
         <<<1, num_experts, 0, stream>>>(                                      \
             static_cast<int32_t*>(expert_offsets.data_ptr()),                 \
             static_cast<ABC_TYPE**>(a_ptrs.data_ptr()),                       \
@@ -65,7 +67,7 @@ __global__ void get_group_gemm_starts(
 
 namespace {
 
-void run_get_group_gemm_starts(
+void run_get_moe_gemm_starts_8_bit(
     torch::Tensor const& expert_offsets, torch::Tensor& a_ptrs,
     torch::Tensor& b_ptrs, torch::Tensor& out_ptrs,
     torch::Tensor& a_scales_ptrs, torch::Tensor& b_scales_ptrs,
@@ -85,14 +87,14 @@ void run_get_group_gemm_starts(
 
   if (false) {
   }
-  __CALL_GET_STARTS_KERNEL(torch::kBFloat16, cutlass::bfloat16_t)
-  __CALL_GET_STARTS_KERNEL(torch::kFloat16, half)
+  __CALL_GET_STARTS_KERNEL_8_BIT(torch::kBFloat16, cutlass::bfloat16_t)
+  __CALL_GET_STARTS_KERNEL_8_BIT(torch::kFloat16, half)
   else {
     TORCH_CHECK(false, "Invalid output type (must be float16 or bfloat16)");
   }
 }
 
-void run_get_group_gemm_starts_fp16(torch::Tensor const& expert_offsets,
+void run_get_moe_gemm_starts_16_bit(torch::Tensor const& expert_offsets,
                                     torch::Tensor& a_ptrs,
                                     torch::Tensor& b_ptrs,
                                     torch::Tensor& out_ptrs,
@@ -110,11 +112,69 @@ void run_get_group_gemm_starts_fp16(torch::Tensor const& expert_offsets,
 
   if (false) {
   }
-  __CALL_GET_STARTS_KERNEL_FP16(torch::kBFloat16, cutlass::bfloat16_t)
-  __CALL_GET_STARTS_KERNEL_FP16(torch::kFloat16, half)
+  __CALL_GET_STARTS_KERNEL_16_BIT(torch::kBFloat16, cutlass::bfloat16_t)
+  __CALL_GET_STARTS_KERNEL_16_BIT(torch::kFloat16, half)
   else {
     TORCH_CHECK(false, "Invalid i/o type (must be float16 or bfloat16)");
   }
 }
+
+// common structs and types used by moe gemm
+
+using ProblemShape =
+    cutlass::gemm::GroupProblemShape<cute::Shape<int, int, int>>;
+
+using ElementAccumulator = float;
+using ArchTag = cutlass::arch::Sm90;
+using OperatorClass = cutlass::arch::OpClassTensorOp;
+
+using LayoutA = cutlass::layout::RowMajor;
+using LayoutB = cutlass::layout::ColumnMajor;
+using LayoutC = cutlass::layout::RowMajor;
+
+template <typename ElementAB_, typename ElementC_,
+          template <typename, typename, typename> typename Epilogue_,
+          typename TileShape, typename ClusterShape, typename KernelSchedule,
+          typename EpilogueSchedule>
+struct cutlass_3x_moe_gemm {
+  using ElementAB = ElementAB_;
+  using ElementC = void;
+  using ElementD = ElementC_;
+  using ElementAccumulator = float;
+
+  using Epilogue = Epilogue_<ElementAccumulator, ElementD, TileShape>;
+
+  using StrideC =
+      cute::remove_pointer_t<cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>>;
+
+  static constexpr int AlignmentAB =
+      128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementD>::value;
+
+  using EVTCompute = typename Epilogue::EVTCompute;
+
+  using CollectiveEpilogue =
+      typename cutlass::epilogue::collective::CollectiveBuilder<
+          ArchTag, OperatorClass, TileShape, ClusterShape,
+          cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
+          ElementAccumulator, ElementC, LayoutC*, AlignmentC, ElementD,
+          LayoutC*, AlignmentC, EpilogueSchedule, EVTCompute>::CollectiveOp;
+
+  static constexpr size_t CEStorageSize =
+      sizeof(typename CollectiveEpilogue::SharedStorage);
+  using Stages = typename cutlass::gemm::collective::StageCountAutoCarveout<
+      static_cast<int>(CEStorageSize)>;
+
+  using CollectiveMainloop =
+      typename cutlass::gemm::collective::CollectiveBuilder<
+          ArchTag, OperatorClass, ElementAB, LayoutA*, AlignmentAB, ElementAB,
+          LayoutB*, AlignmentAB, ElementAccumulator, TileShape, ClusterShape,
+          Stages, KernelSchedule>::CollectiveOp;
+
+  using KernelType = enable_sm90_only<cutlass::gemm::kernel::GemmUniversal<
+      ProblemShape, CollectiveMainloop, CollectiveEpilogue>>;
+
+  struct GemmKernel : public KernelType {};
+};
 
 }  // namespace

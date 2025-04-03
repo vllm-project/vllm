@@ -4,8 +4,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe_fp8,
-                                                            cutlass_moe_fp16,
+from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe,
                                                             fused_experts,
                                                             fused_topk)
 from vllm.platforms import current_platform
@@ -14,37 +13,38 @@ NUM_EXPERTS = [40, 64]
 TOP_KS = [6, 8]
 
 
-def run(a: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
-        w2_q: torch.Tensor, w1_scale: torch.Tensor, w2_scale: torch.Tensor,
-        topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-        ab_strides1: torch.Tensor, c_strides1: torch.Tensor,
-        ab_strides2: torch.Tensor, c_strides2: torch.Tensor):
+def run_8_bit(a: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
+              w2_q: torch.Tensor, w1_scale: torch.Tensor,
+              w2_scale: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, ab_strides1: torch.Tensor,
+              c_strides1: torch.Tensor, ab_strides2: torch.Tensor,
+              c_strides2: torch.Tensor):
     with set_current_vllm_config(
             VllmConfig(parallel_config=ParallelConfig(
                 pipeline_parallel_size=1))):
-        return cutlass_moe_fp8(a,
-                               w1_q,
-                               w2_q,
-                               w1_scale,
-                               w2_scale,
-                               topk_weights,
-                               topk_ids,
-                               ab_strides1,
-                               c_strides1,
-                               ab_strides2,
-                               c_strides2,
-                               a1_scale=a_scale)
+        return cutlass_moe(a,
+                           w1_q,
+                           w2_q,
+                           topk_weights,
+                           topk_ids,
+                           ab_strides1,
+                           c_strides1,
+                           ab_strides2,
+                           c_strides2,
+                           w1_scale=w1_scale,
+                           w2_scale=w2_scale,
+                           a1_scale=a_scale)
 
 
-def run_fp16(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
-             topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-             ab_strides1: torch.Tensor, c_strides1: torch.Tensor,
-             ab_strides2: torch.Tensor, c_strides2: torch.Tensor):
+def run_16_bit(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
+               topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+               ab_strides1: torch.Tensor, c_strides1: torch.Tensor,
+               ab_strides2: torch.Tensor, c_strides2: torch.Tensor):
     with set_current_vllm_config(
             VllmConfig(parallel_config=ParallelConfig(
                 pipeline_parallel_size=1))):
-        return cutlass_moe_fp16(a, w1, w2, topk_weights, topk_ids, ab_strides1,
-                                c_strides1, ab_strides2, c_strides2)
+        return cutlass_moe(a, w1, w2, topk_weights, topk_ids, ab_strides1,
+                           c_strides1, ab_strides2, c_strides2)
 
 
 @pytest.mark.parametrize("m", [2, 64, 224])
@@ -58,7 +58,7 @@ def run_fp16(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
     reason="Grouped gemm is not supported on this GPU type.")
-def test_cutlass_moe_no_graph(
+def test_cutlass_moe_8_bit_no_graph(
     m: int,
     n: int,
     k: int,
@@ -130,18 +130,18 @@ def test_cutlass_moe_no_graph(
 
         triton_output = fused_experts(a_d, w1_d, w2_d, topk_weights, topk_ids)
 
-        cutlass_output = cutlass_moe_fp8(a,
-                                         w1_q,
-                                         w2_q,
-                                         w1_scale,
-                                         w2_scale,
-                                         topk_weights,
-                                         topk_ids,
-                                         ab_strides1,
-                                         c_strides1,
-                                         ab_strides2,
-                                         c_strides2,
-                                         a1_scale=a_scale1)
+        cutlass_output = cutlass_moe(a,
+                                     w1_q,
+                                     w2_q,
+                                     topk_weights,
+                                     topk_ids,
+                                     ab_strides1,
+                                     c_strides1,
+                                     ab_strides2,
+                                     c_strides2,
+                                     w1_scale=w1_scale,
+                                     w2_scale=w2_scale,
+                                     a1_scale=a_scale1)
 
         print(triton_output)
         print(cutlass_output)
@@ -164,7 +164,7 @@ def test_cutlass_moe_no_graph(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
     reason="Grouped gemm is not supported on this GPU type.")
-def test_cutlass_moe_cuda_graph(
+def test_cutlass_moe_8_bit_cuda_graph(
     m: int,
     n: int,
     k: int,
@@ -239,9 +239,10 @@ def test_cutlass_moe_cuda_graph(
         stream = torch.cuda.Stream()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
-            cutlass_output = run(a, a_scale1, w1_q, w2_q, w1_scale, w2_scale,
-                                 topk_weights, topk_ids, ab_strides1,
-                                 c_strides1, ab_strides2, c_strides2)
+            cutlass_output = run_8_bit(a, a_scale1, w1_q, w2_q, w1_scale,
+                                       w2_scale, topk_weights, topk_ids,
+                                       ab_strides1, c_strides1, ab_strides2,
+                                       c_strides2)
         torch.cuda.synchronize()
         graph.replay()
         torch.cuda.synchronize()
@@ -266,7 +267,7 @@ def test_cutlass_moe_cuda_graph(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
     reason="Grouped gemm is not supported on this GPU type.")
-def test_cutlass_fp16_moe_no_graph(
+def test_cutlass_moe_16_bit_no_graph(
     m: int,
     n: int,
     k: int,
@@ -296,9 +297,9 @@ def test_cutlass_fp16_moe_no_graph(
         triton_output = fused_experts(a, w1.transpose(1,
                                                       2), w2.transpose(1, 2),
                                       topk_weights, topk_ids)
-        cutlass_output = cutlass_moe_fp16(a, w1, w2, topk_weights, topk_ids,
-                                          ab_strides1, c_strides1, ab_strides2,
-                                          c_strides2)
+        cutlass_output = cutlass_moe(a, w1, w2, topk_weights, topk_ids,
+                                     ab_strides1, c_strides1, ab_strides2,
+                                     c_strides2)
 
         print(triton_output)
         print(cutlass_output)
@@ -320,7 +321,7 @@ def test_cutlass_fp16_moe_no_graph(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
     reason="Grouped gemm is not supported on this GPU type.")
-def test_cutlass_fp16_moe_cuda_graph(
+def test_cutlass_moe_16_bit_cuda_graph(
     m: int,
     n: int,
     k: int,
@@ -353,9 +354,9 @@ def test_cutlass_fp16_moe_cuda_graph(
         stream = torch.cuda.Stream()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
-            cutlass_output = run_fp16(a, w1, w2, topk_weights, topk_ids,
-                                      ab_strides1, c_strides1, ab_strides2,
-                                      c_strides2)
+            cutlass_output = run_16_bit(a, w1, w2, topk_weights, topk_ids,
+                                        ab_strides1, c_strides1, ab_strides2,
+                                        c_strides2)
         torch.cuda.synchronize()
         graph.replay()
         torch.cuda.synchronize()
