@@ -1204,30 +1204,6 @@ def fused_experts(hidden_states: torch.Tensor,
             a2_scale=a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
-    elif hidden_states.shape[0] <= envs.VLLM_FUSED_MOE_CHUNK_SIZE:
-        fe = modular_triton_fused_moe(
-            use_fp8_w8a8,
-            use_int8_w8a16,
-            use_int4_w4a16,
-            block_shape,
-        )
-        return fe(
-            hidden_states,
-            w1,
-            w2,
-            topk_weights,
-            topk_ids,
-            inplace,
-            activation,
-            global_num_experts,
-            expert_map,
-            w1_scale,
-            w2_scale,
-            w1_zp,
-            w2_zp,
-            a1_scale,
-            a2_scale,
-        )
     else:
         return dispatch_fused_experts_func(inplace)(
             hidden_states=hidden_states,
