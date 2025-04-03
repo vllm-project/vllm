@@ -13,15 +13,16 @@ from transformers import (
     CONFIG_MAPPING,
     AutoProcessor,
     ProcessorMixin,
+    BaseImageProcessor
 )
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
+from transformers.models.auto.processing_auto import _BaseAutoProcessor
 from typing_extensions import NotRequired
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
-from transformers.processing_utils import ProcessingKwargs, ProcessorMixin
+from transformers.processing_utils import ProcessingKwargs
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging, TensorType
-from transformers.image_processing_utils import BaseImageProcessor
 from transformers.image_transforms import to_channel_dimension_format
 from transformers.image_utils import ChannelDimension
 from torchvision.transforms import Compose, ToTensor, Normalize
@@ -198,7 +199,7 @@ class ImageProcessor(BaseImageProcessor):
         self.patch_size = patch_size
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs):
         return cls(**kwargs)
 
     def preprocess(
@@ -496,27 +497,9 @@ class LlavaNextMultiModalProcessor(
         return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
 
 class MiniMaxVL01Processor(ProcessorMixin):
-    r"""
-    Constructs a MiniMaxVL01 processor which wraps a MiniMaxVL01 image processor and a MiniMaxVL01 tokenizer into a single processor.
-    Args:
-        image_processor ([`ImageProcessor`], *optional*):
-            The image processor is a required input.
-        tokenizer ([`PreTrainedTokenizer`], *optional*):
-            The tokenizer is a required input.
-        patch_size (`int`, *optional*):
-            Patch size from the vision tower.
-        vision_feature_select_strategy (`str`, *optional*):
-            The feature selection strategy used to select the vision feature from the vision backbone.
-            Should be same as in model's config
-        chat_template (`str`, *optional*): A Jinja template which will be used to convert lists of messages
-            in a chat into a tokenizable string.
-        image_token (`str`, *optional*, defaults to `"<image>"`):
-            Special token used to denote image location.
-    """
-
     attributes = ["image_processor", "tokenizer"]
     valid_kwargs = ["chat_template", "patch_size", "vision_feature_select_strategy", "image_token"]
-    image_processor_class = "ImageProcessor"
+    image_processor_class = ImageProcessor
     tokenizer_class = "AutoTokenizer"
 
     def __init__(
