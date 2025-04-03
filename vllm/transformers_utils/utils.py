@@ -20,12 +20,21 @@ def check_gguf_file(model: Union[str, PathLike]) -> bool:
     model = Path(model)
     if not model.is_file():
         return False
-    elif model.suffix == ".gguf":
-        return True
 
-    with open(model, "rb") as f:
-        header = f.read(4)
-    return header == b"GGUF"
+    import struct
+
+    from gguf.constants import GGUF_MAGIC
+
+    try:
+        with model.open("rb") as f:
+            first_4_bytes = f.read(4)
+            if len(first_4_bytes) < 4:
+                return False
+
+        return struct.unpack("<I", first_4_bytes)[0] == GGUF_MAGIC
+    except Exception as e:
+        logger.debug("Error reading file %s: %s", model, e)
+        return False
 
 
 def modelscope_list_repo_files(
