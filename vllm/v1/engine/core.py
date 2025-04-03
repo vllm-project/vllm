@@ -316,13 +316,6 @@ class EngineCoreProc(EngineCore):
         log_stats: bool,
         engine_index: int = 0,
     ):
-        super().__init__(vllm_config, executor_class, log_stats)
-
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
-
-        self.global_unfinished_reqs = False
-
         # Create input socket.
         input_ctx = zmq.Context()  # type: ignore[attr-defined]
         identity = engine_index.to_bytes(length=2, byteorder="little")
@@ -335,6 +328,24 @@ class EngineCoreProc(EngineCore):
         # Register engine with front-end.
         output_address = self.startup_handshake(input_socket, on_head_node,
                                                 vllm_config.parallel_config)
+
+        # Set up data parallel environment.
+        self._init_data_parallel(vllm_config)
+
+        # Initialize engine core and model.
+        super().__init__(vllm_config, executor_class, log_stats)
+
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
+
+        self.global_unfinished_reqs = False
+
+        # Send ready message.
+        input_socket.send(
+            msgspec.msgpack.encode({
+                "status": "READY",
+                "local": on_head_node
+            }))
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -358,8 +369,8 @@ class EngineCoreProc(EngineCore):
         # Send registration message.
         input_socket.send(
             msgspec.msgpack.encode({
+                "status": "HELLO",
                 "local": on_head_node,
-                "status": "READY"
             }))
 
         # Receive initialization message.
@@ -429,6 +440,9 @@ class EngineCoreProc(EngineCore):
         finally:
             if engine_core is not None:
                 engine_core.shutdown()
+
+    def _init_data_parallel(self, vllm_config: VllmConfig):
+        pass
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
@@ -571,8 +585,20 @@ class DPEngineCoreProc(EngineCoreProc):
         _add_prefix(sys.stdout, process_name, pid)
         _add_prefix(sys.stderr, process_name, pid)
 
-        dp_size = vllm_config.parallel_config.data_parallel_size
+        # Counts forward-passes of the model so that we can synchronize
+        # finished with DP peers every N steps.
+        self.counter = 0
+
+        # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
+        super().__init__(vllm_config, on_head_node, input_address,
+                         executor_class, log_stats, dp_rank)
+
+    def _init_data_parallel(self, vllm_config: VllmConfig):
+
+        # Configure GPUs and stateless process group for data parallel.
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        dp_size = vllm_config.parallel_config.data_parallel_size
         local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
 
         assert dp_size > 1
@@ -588,14 +614,6 @@ class DPEngineCoreProc(EngineCoreProc):
                                world_size, (local_dp_rank + 1) * world_size))
 
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
-
-        # Initialize the engine after setting up environment.
-        super().__init__(vllm_config, on_head_node, input_address,
-                         executor_class, log_stats, dp_rank)
-
-        # Counts forward-passes of the model so that we can synchronize
-        # finished with DP peers every N steps.
-        self.counter = 0
 
     def shutdown(self):
         super().shutdown()

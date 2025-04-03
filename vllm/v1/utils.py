@@ -2,17 +2,21 @@
 
 import multiprocessing
 import os
+import time
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
-                    Union, overload)
+from multiprocessing import connection
+from typing import (TYPE_CHECKING, Callable, Generic, Optional, TypeVar, Union,
+                    overload)
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils import get_mp_context, kill_process_tree
+from vllm.v1.executor.abstract import Executor
 
 if TYPE_CHECKING:
     from vllm.attention.layer import Attention
@@ -90,7 +94,7 @@ class ConstantList(Generic[T], Sequence):
         return f"ConstantList({self._x})"
 
 
-class BackgroundProcHandle:
+class CoreEngineProcManager:
     """
     Utility class to handle creation, readiness, and shutdown
     of background processes used by the AsyncLLM and LLMEngine.
@@ -98,46 +102,87 @@ class BackgroundProcHandle:
 
     def __init__(
         self,
-        input_address: str,
-        process_name: str,
         target_fn: Callable,
-        process_kwargs: dict[Any, Any],
+        local_engine_count: int,
+        start_index: int,
+        vllm_config: VllmConfig,
+        on_head_node: bool,
+        input_address: str,
+        executor_class: type[Executor],
+        log_stats: bool,
     ):
         context = get_mp_context()
+        common_kwargs = {
+            "vllm_config": vllm_config,
+            "on_head_node": on_head_node,
+            "input_address": input_address,
+            "executor_class": executor_class,
+            "log_stats": log_stats,
+        }
 
-        assert "input_address" not in process_kwargs
-        process_kwargs["input_address"] = input_address
+        self.processes = []
+        for local_index in range(local_engine_count):
+            index = local_index + start_index
+            # Start EngineCore in background process.
+            self.processes.append(
+                context.Process(target=target_fn,
+                                name=f"EngineCore_{index}",
+                                kwargs=common_kwargs | {
+                                    "dp_rank": index,
+                                    "local_dp_rank": local_index,
+                                }))
 
-        # Run busy loop in background process.
-        self.proc = context.Process(target=target_fn,
-                                    kwargs=process_kwargs,
-                                    name=process_name)
-        self._finalizer = weakref.finalize(self, shutdown, self.proc,
+        self._finalizer = weakref.finalize(self, shutdown, self.processes,
                                            input_address)
-        self.proc.start()
+        try:
+            for proc in self.processes:
+                proc.start()
+        finally:
+            # Kill other procs if not all are running.
+            if self.finished_procs():
+                self.close()
 
-    def shutdown(self):
+    def close(self):
+        """Shutdown all procs."""
         self._finalizer()
+
+    def join_first(self):
+        """Wait for any process to exit."""
+        connection.wait(proc.sentinel for proc in self.processes)
+
+    def finished_procs(self) -> dict[int, int]:
+        """Returns dict of proc name -> exit code for any finished procs."""
+        return {
+            proc.name: proc.exitcode
+            for proc in self.processes if proc.exitcode is not None
+        }
 
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(proc: multiprocessing.Process, input_address: str):
+def shutdown(procs: list[multiprocessing.Process], input_address: str):
     # Shutdown the process.
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(5)
+    for proc in procs:
+        if proc.is_alive():
+            proc.terminate()
 
+    # Allow 5 seconds for remaining procs to terminate.
+    deadline = time.monotonic() + 5
+    for proc in procs:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        proc.join(remaining)
+
+    for proc in procs:
         if proc.is_alive():
             kill_process_tree(proc.pid)
 
     # Remove zmq ipc socket files.
-    ipc_sockets = (input_address, )
-    for ipc_socket in ipc_sockets:
-        if ipc_socket.startswith("ipc://"):
-            socket_file = ipc_socket.replace("ipc://", "")
-            if os and os.path.exists(socket_file):
-                os.remove(socket_file)
+    if input_address.startswith("ipc://"):
+        socket_file = input_address[len("ipc://"):]
+        if os and os.path.exists(socket_file):
+            os.remove(socket_file)
 
 
 def bind_kv_cache(

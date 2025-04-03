@@ -1436,6 +1436,7 @@ class ParallelConfig:
     data_parallel_rank_local: Optional[int] = None
     # IP of the data parallel master.
     data_parallel_master_ip: str = "127.0.0.1"
+    data_parallel_rpc_port: int = 29550  # Port for data parallel messaging.
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
     enable_expert_parallel: bool = False  # Use EP instead of TP for MoE layers.
 
@@ -1538,7 +1539,7 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        if not (0 < self.data_parallel_size_local <= self.data_parallel_size):
+        if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
                 "data_parallel_size_local must be <= data_parallel_size")
 
