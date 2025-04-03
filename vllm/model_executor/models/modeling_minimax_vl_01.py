@@ -9,8 +9,6 @@ import torch
 import torch.nn as nn
 from transformers import (
     BatchFeature, 
-    LlavaNextConfig, 
-    LlavaNextProcessor,
     PretrainedConfig,
     CONFIG_MAPPING,
 )
@@ -442,6 +440,39 @@ class LlavaNextMultiModalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
+    def _process_image_input(self, images: List[Image.Image], **kwargs) -> Dict[str, Any]:
+        """Process image inputs without relying on LlavaNextProcessor."""
+        all_images = []
+        image_sizes = []
+        
+        for image in images:
+            # Get original size
+            ori_w, ori_h = image.size
+            image_sizes.append([ori_h, ori_w])
+            
+            # Resize image
+            if self.process_image_mode == 'resize':
+                resized_image = image.resize(self.size, Image.BICUBIC)
+            else:
+                resized_image = resize_multiple_of(image, self.patch_size, max_size=self.size)
+            
+            # Convert to tensor and normalize
+            transform_img = self._transform(resized_image)
+            img_array = to_numpy_array(transform_img)
+            img_array = to_channel_dimension_format(img_array, ChannelDimension.FIRST)
+            all_images.append(img_array)
+
+        return {
+            "pixel_values": all_images,
+            "image_sizes": image_sizes
+        }
+
+    def _transform(self, image):
+        """Convert PIL image to tensor and normalize."""
+        image = _convert_image_to_rgb(image)
+        image = ToTensor()(image)
+        image = Normalize(mean=self.image_mean, std=self.image_std)(image)
+        return image
 
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaNextMultiModalProcessor,
@@ -456,23 +487,10 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
-        # Convert MiniMaxVL01Config to LlavaNextConfig
-        from transformers import LlavaNextConfig
-        llava_config = LlavaNextConfig(
-            vision_config=config.vision_config,
-            text_config=config.text_config,
-            ignore_index=config.ignore_index,
-            image_token_index=config.image_token_index,
-            projector_hidden_act=config.projector_hidden_act,
-            vision_feature_select_strategy=config.vision_feature_select_strategy,
-            vision_feature_layer=config.vision_feature_layer,
-            image_grid_pinpoints=config.image_grid_pinpoints,
-            tie_word_embeddings=config.tie_word_embeddings,
-        )
-        self.config = llava_config
+        self.config = config
         self.multimodal_config = multimodal_config
 
-        vision_feature_layer = llava_config.vision_feature_layer
+        vision_feature_layer = config.vision_feature_layer
         # Determine the layer up to which we will initialize the vision tower
         if isinstance(vision_feature_layer, int):
             vision_hidden_size = config.vision_config.hidden_size
@@ -1004,12 +1022,10 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
 class MiniMaxVL01Processor(ProcessorMixin):
     r"""
     Constructs a MiniMaxVL01 processor which wraps a MiniMaxVL01 image processor and a MiniMaxVL01 tokenizer into a single processor.
-    [`MiniMaxVL01Processor`] offers all the functionalities of [`CLIPImageProcessor`] and [`LlamaTokenizerFast`]. See the
-    [`~MiniMaxVL01Processor.__call__`] and [`~MiniMaxVL01Processor.decode`] for more information.
     Args:
-        image_processor ([`CLIPImageProcessor`], *optional*):
+        image_processor ([`ImageProcessor`], *optional*):
             The image processor is a required input.
-        tokenizer ([`LlamaTokenizerFast`], *optional*):
+        tokenizer ([`PreTrainedTokenizer`], *optional*):
             The tokenizer is a required input.
         patch_size (`int`, *optional*):
             Patch size from the vision tower.
@@ -1024,7 +1040,7 @@ class MiniMaxVL01Processor(ProcessorMixin):
 
     attributes = ["image_processor", "tokenizer"]
     valid_kwargs = ["chat_template", "patch_size", "vision_feature_select_strategy", "image_token"]
-    image_processor_class = "AutoImageProcessor"
+    image_processor_class = "ImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
     def __init__(
@@ -1055,11 +1071,7 @@ class MiniMaxVL01Processor(ProcessorMixin):
         **kwargs,
     ) -> BatchFeature:
         """
-        Main method to prepare for the model one or several sequences(s) and image(s). This method forwards the `text`
-        and `kwargs` arguments to LlamaTokenizerFast's [`~LlamaTokenizerFast.__call__`] if `text` is not `None` to encode
-        the text. To prepare the image(s), this method forwards the `images` and `kwrags` arguments to
-        CLIPImageProcessor's [`~CLIPImageProcessor.__call__`] if `images` is not `None`. Please refer to the doctsring
-        of the above two methods for more information.
+        Main method to prepare for the model one or several sequences(s) and image(s).
         Args:
             images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `List[PIL.Image.Image]`, `List[np.ndarray]`, `List[torch.Tensor]`):
                 The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch
@@ -1077,9 +1089,7 @@ class MiniMaxVL01Processor(ProcessorMixin):
         Returns:
             [`BatchFeature`]: A [`BatchFeature`] with the following fields:
             - **input_ids** -- List of token ids to be fed to a model. Returned when `text` is not `None`.
-            - **attention_mask** -- List of indices specifying which tokens should be attended to by the model (when
-              `return_attention_mask=True` or if *"attention_mask"* is in `self.model_input_names` and if `text` is not
-              `None`).
+            - **attention_mask** -- List of indices specifying which tokens should be attended to by the model.
             - **pixel_values** -- Pixel values to be fed to a model. Returned when `images` is not `None`.
         """
         if images is None and text is None:
@@ -1090,8 +1100,14 @@ class MiniMaxVL01Processor(ProcessorMixin):
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
             **kwargs,
         )
+
         if images is not None:
-            image_inputs = self.image_processor(images, **output_kwargs["images_kwargs"])
+            # Convert images to list if needed
+            if not isinstance(images, (list, tuple)):
+                images = [images]
+            
+            # Process images
+            image_inputs = self._process_image_input(images)
         else:
             image_inputs = {}
 
@@ -1179,17 +1195,49 @@ class MiniMaxVL01Processor(ProcessorMixin):
         text_inputs = self.tokenizer(prompt_strings, **output_kwargs["text_kwargs"])
         return CustomBatchFeature(data={**text_inputs, **image_inputs})
 
+    def _process_image_input(self, images: List[Image.Image]) -> Dict[str, Any]:
+        """Process image inputs."""
+        all_images = []
+        image_sizes = []
+        
+        for image in images:
+            # Get original size
+            ori_w, ori_h = image.size
+            image_sizes.append([ori_h, ori_w])
+            
+            # Resize image
+            if self.process_image_mode == 'resize':
+                resized_image = image.resize(self.size, Image.BICUBIC)
+            else:
+                resized_image = resize_multiple_of(image, self.patch_size, max_size=self.size)
+            
+            # Convert to tensor and normalize
+            transform_img = self._transform(resized_image)
+            img_array = to_numpy_array(transform_img)
+            img_array = to_channel_dimension_format(img_array, ChannelDimension.FIRST)
+            all_images.append(img_array)
+
+        return {
+            "pixel_values": all_images,
+            "image_sizes": image_sizes
+        }
+
+    def _transform(self, image):
+        """Convert PIL image to tensor and normalize."""
+        image = _convert_image_to_rgb(image)
+        image = ToTensor()(image)
+        image = Normalize(mean=self.image_mean, std=self.image_std)(image)
+        return image
+
     def batch_decode(self, *args, **kwargs):
         """
-        This method forwards all its arguments to LlamaTokenizerFast's [`~PreTrainedTokenizer.batch_decode`]. Please
-        refer to the docstring of this method for more information.
+        This method forwards all its arguments to tokenizer's [`~PreTrainedTokenizer.batch_decode`].
         """
         return self.tokenizer.batch_decode(*args, **kwargs)
 
     def decode(self, *args, **kwargs):
         """
-        This method forwards all its arguments to LlamaTokenizerFast's [`~PreTrainedTokenizer.decode`]. Please refer to
-        the docstring of this method for more information.
+        This method forwards all its arguments to tokenizer's [`~PreTrainedTokenizer.decode`].
         """
         return self.tokenizer.decode(*args, **kwargs)
 
