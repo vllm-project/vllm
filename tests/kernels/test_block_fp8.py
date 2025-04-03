@@ -10,9 +10,9 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    _valid_deep_gemm,
     deep_gemm_moe_fp8,
-    modular_deep_gemm_fused_moe_fp8)
+    modular_deep_gemm_fused_moe_fp8,
+    _valid_deep_gemm_shape)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
@@ -435,13 +435,11 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
 
-    # only aligned sizes TODO: use _valid_deep_gemm here instead?
-    if (N % block_m != 0 or K % block_m != 0 or topk > E):
-        pytest.skip(
-            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
+    if topk > E:
+        pytest.skip(f"Skipping test: topk={topk} > E={E}")
 
-    if False and N <= 512:
-        pytest.skip("Skipping N <= 512 until performance issues solved.")
+    if not _valid_deep_gemm_shape(M, N, K):
+        pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
 
     vllm_config = VllmConfig()
 
@@ -456,10 +454,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
 
     w2_bf16 = ((torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 *
                fp8_max).clamp(min=fp8_min, max=fp8_max)
-
-    #    if not _valid_deep_gemm(a, w1_bf16, w2_bf16, None):
-    #        pytest.skip(
-    #            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
 
     score = torch.randn((M, E), dtype=dtype)
 
