@@ -291,30 +291,23 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _validate_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
-
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
 
         def _validate_shape(d: torch.Tensor):
-            # 确保张量是3维的
-            if len(d.shape) == 2:
-                d = d.unsqueeze(0)
-            elif len(d.shape) == 3 and d.shape[0] != 3:
-                d = d.permute(2, 0, 1)
-            
             actual_dims = tuple(d.shape)
             if actual_dims != expected_dims:
-                expected_expr = ("num_patches", *map(str, expected_dims))
                 raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-            
-            return d
+                    f"The expected shape of pixel values is {expected_dims}. "
+                    f"You supplied {actual_dims}.")
 
         if isinstance(data, torch.Tensor):
-            return _validate_shape(data)
+            _validate_shape(data)
         else:
-            return [_validate_shape(d) for d in data]
+            for d in data:
+                _validate_shape(d)
+
+        return data
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaNextImageInputs]:
@@ -329,10 +322,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
-
-            if not isinstance(image_sizes, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image sizes. "
-                                 f"Got type: {type(image_sizes)}")
 
             # 确保pixel_values具有正确的维度
             def _ensure_3d(img):
@@ -355,10 +344,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(
-                    flatten_bn(pixel_values)),
-                image_sizes=self._validate_image_sizes(
-                    flatten_bn(image_sizes, concat=True)),
+                pixel_values=self._validate_pixel_values(flatten_bn(pixel_values)),
+                image_sizes=self._validate_image_sizes(flatten_bn(image_sizes, concat=True)),
             )
 
         if image_embeds is not None:
