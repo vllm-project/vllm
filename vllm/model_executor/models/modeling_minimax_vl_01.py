@@ -7,7 +7,13 @@ from typing import (Final, Iterable, List, Literal, Mapping, Optional,
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, LlavaNextConfig, LlavaNextProcessor
+from transformers import (
+    BatchFeature, 
+    LlavaNextConfig, 
+    LlavaNextProcessor,
+    PretrainedConfig,
+    CONFIG_MAPPING,
+)
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 from typing_extensions import NotRequired
@@ -27,6 +33,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.configuration_minimax_text_01 import MiniMaxText01Config
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -502,7 +509,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
+    @property
     def sampler(self):
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
@@ -882,6 +889,8 @@ class MiniMaxVL01Config(PretrainedConfig):
         image_seq_length=576,
         **kwargs,
     ):
+        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
+        
         self.ignore_index = ignore_index
         self.image_token_index = image_token_index
         self.projector_hidden_act = projector_hidden_act
@@ -908,7 +917,8 @@ class MiniMaxVL01Config(PretrainedConfig):
             )
             vision_config = CONFIG_MAPPING[vision_config["model_type"]](**vision_config)
         elif vision_config is None:
-            vision_config = CONFIG_MAPPING["clip_vision_model"](
+            from transformers import CLIPVisionConfig
+            vision_config = CLIPVisionConfig(
                 intermediate_size=4096,
                 hidden_size=1024,
                 patch_size=14,
@@ -929,13 +939,10 @@ class MiniMaxVL01Config(PretrainedConfig):
 
         self.text_config = text_config
 
-        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
-
 
 class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
 
     def get_hf_config(self) -> MiniMaxVL01Config:
-        from vllm.transformers_utils.configs.configuration_minimax_vl_01 import MiniMaxVL01Config
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
