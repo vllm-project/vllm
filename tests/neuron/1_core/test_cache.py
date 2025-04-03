@@ -68,11 +68,11 @@ def test_reshape_and_cache(num_tokens, n_kv_head, d_head, num_blocks,
 
     # Run vectorized implementation on XLA device
     reshape_and_cache(key, value, kv_cache, slot_mapping)
-    key_cache, value_cache = torch.split(kv_cache, [1, 1], dim=0)
+    key_cache, value_cache = torch.unbind(kv_cache, dim=0)
 
     # Move results back to CPU for comparison
-    key_cache_result = key_cache.cpu().squeeze(0)
-    value_cache_result = value_cache.cpu().squeeze(0)
+    key_cache_result = key_cache.cpu()
+    value_cache_result = value_cache.cpu()
 
     # Assert results match
     torch.testing.assert_close(key_cache_result,
