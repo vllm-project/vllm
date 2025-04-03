@@ -9,14 +9,26 @@ import torch
 # The goal is to be able to utilize different communication mechanisms with
 # any fused MoE kernel without needing to have combinatoric implementations.
 #
-# Break the fused moe layer down into the following components. Each component
-# will be independent of the others except for [Quantize-Dispatch] and
-# [Combine]. The components can then be mixed and matched with different fused
-# moe kernels so that DP+EP can be supported easily for multiple MoE
-# implementations.
+# The fused moe kernels are broken down into the following components:
 #
-# Architecture:
 # [Router] → [Quantize-Dispatch] → [Permute-Experts-Unpermute] → [Combine]
+#
+# Each component will be independent of the others except for
+# [Quantize-Dispatch] and `[Combine] (see below). The components can then be
+# mixed and matched with so that DP+EP can be supported easily for multiple
+# MoE kernel implementations.
+#
+# The following main classes are defined:
+# * FusedMoEQuantizeDispatchCombine - an abstract base class for quantization,
+#   dispatching and combing. The dispatch method takes care of any needed
+#   quantization and the combine method applies weights and does the final
+#   reduction of the output.
+# * FusedMoEPermuteExpertsUnpermute - an abstract base class for the main fused
+#   MoE operation. One important feature to note is that this class does not
+#   apply topk weights or reduce the final output.
+# * FusedMoEModularKernel - an interface class that combines a
+#   FusedMoEQuantizeDispatchCombine and a FusedMoEPermuteExpertsUnpermute to
+#   provide the standard fused MoE kernel interface.
 #
 # [Quantize-Dispatch] and [Combine] functionality are bundled into a single
 # class `FusedMoEQuantizeDispatchCombine` since they could use collective
@@ -24,7 +36,7 @@ import torch
 #
 
 
-def moe_problem_size(
+def _moe_problem_size(
     a1: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -260,7 +272,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
-        E, M, N, K, top_k = moe_problem_size(a1, w1, w2, topk_ids)
+        E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
 
         if global_num_experts == -1:
             global_num_experts = E
