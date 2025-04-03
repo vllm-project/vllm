@@ -26,10 +26,7 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            HiddenStates, SequenceGroupMetadata,
                            get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
-
-if current_platform.is_cuda_alike():
-    from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
-
+from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.medusa_worker import MedusaWorker
@@ -183,7 +180,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
-                    if current_platform.is_cuda_alike():
+                    if current_platform.supports_spec_decoding:
                         draft_worker_kwargs[
                             "model_runner_cls"] = TP1DraftModelRunner
                 else:
