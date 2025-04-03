@@ -22,14 +22,19 @@ def _resize_cache(x: torch.Tensor, v: Tuple[int, ...]) -> torch.Tensor:
 def _fp8_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
-    block_shape: Optional[List[int]],
+    block_shape: Optional[List[int]] = None,
+    per_act_token: bool = False,  # make sure this is the same default as op
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
     if block_shape is None:
-        A, A_scale = ops.scaled_fp8_quant(A, A_scale)
+        A, A_scale = ops.scaled_fp8_quant(
+            A,
+            A_scale,
+            use_per_token_if_dynamic=per_act_token
+        )
     else:
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
