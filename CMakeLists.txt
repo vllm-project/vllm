@@ -469,8 +469,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/moe/moe_mm_c3x.cu"
-             "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+    set(SRCS "csrc/cutlass_moe/moe_mm_c3x.cu"
+             "csrc/cutlass_moe/moe_data.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
