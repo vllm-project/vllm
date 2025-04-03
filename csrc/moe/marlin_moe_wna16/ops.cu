@@ -291,16 +291,10 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
                       IS_ZP_FLOAT>;                                           \
     }
 
-  #define GPTQ_GET_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)                 \
+  #define GPTQ_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)              \
     __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, true, false, 0, NUM_THREADS, \
              false)                                                            \
     __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, false, 0,             \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, false, 0,             \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, false, 0,             \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, false, 0,             \
              NUM_THREADS, false)                                               \
                                                                                \
     __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, false, -1,            \
@@ -318,6 +312,14 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, false, 4,            \
              NUM_THREADS, false)                                               \
     __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, false, 8,            \
+             NUM_THREADS, false)
+
+  #define GPTQ_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)            \
+    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, false, 0,             \
+             NUM_THREADS, false)                                               \
+    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, false, 0,             \
+             NUM_THREADS, false)                                               \
+    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, false, 0,             \
              NUM_THREADS, false)                                               \
                                                                                \
     __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, false, -1,           \
@@ -347,7 +349,7 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, false, 8,            \
              NUM_THREADS, false)
 
-  #define AWQ_GET_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)                  \
+  #define AWQ_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)               \
     __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, -1,             \
              NUM_THREADS, false)                                               \
     __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, 2, NUM_THREADS, \
@@ -363,8 +365,9 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, 4,             \
              NUM_THREADS, false)                                               \
     __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, 8,             \
-             NUM_THREADS, false)                                               \
-                                                                               \
+             NUM_THREADS, false)
+
+  #define AWQ_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
     __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, -1,            \
              NUM_THREADS, false)                                               \
     __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, 2,             \
@@ -416,23 +419,29 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   auto kernel = MarlinDefault;
   if (false) {
   }
-  GPTQ_GET_IF(vllm::kU4B8, 16, 4, 256)
-  GPTQ_GET_IF(vllm::kU4B8, 8, 8, 256)
-  GPTQ_GET_IF(vllm::kU4B8, 8, 4, 128)
-  GPTQ_GET_IF(vllm::kU4B8, 4, 8, 128)
-  GPTQ_GET_IF(vllm::kU8B128, 16, 4, 256)
-  GPTQ_GET_IF(vllm::kU8B128, 8, 8, 256)
-  GPTQ_GET_IF(vllm::kU8B128, 8, 4, 128)
-  GPTQ_GET_IF(vllm::kU8B128, 4, 8, 128)
+  GPTQ_GET_IF_M1(vllm::kU4B8, 16, 4, 256)
+  GPTQ_GET_IF_M1(vllm::kU4B8, 8, 4, 128)
+  GPTQ_GET_IF_M1(vllm::kU4B8, 4, 8, 128)
 
-  AWQ_GET_IF(vllm::kU4, 16, 4, 256)
-  AWQ_GET_IF(vllm::kU4, 8, 8, 256)
-  AWQ_GET_IF(vllm::kU4, 8, 4, 128)
-  AWQ_GET_IF(vllm::kU4, 4, 8, 128)
-  // AWQ_GET_IF(vllm::kU8, 16, 4, 256)
-  // AWQ_GET_IF(vllm::kU8, 8, 8, 256)
-  // AWQ_GET_IF(vllm::kU8, 8, 4, 128)
-  // AWQ_GET_IF(vllm::kU8, 4, 8, 128)
+  GPTQ_GET_IF_M234(vllm::kU4B8, 8, 8, 256)
+  GPTQ_GET_IF_M234(vllm::kU4B8, 8, 4, 128)
+  GPTQ_GET_IF_M234(vllm::kU4B8, 4, 8, 128)
+
+  GPTQ_GET_IF_M1(vllm::kU8B128, 16, 4, 256)
+  GPTQ_GET_IF_M1(vllm::kU8B128, 8, 4, 128)
+  GPTQ_GET_IF_M1(vllm::kU8B128, 4, 8, 128)
+
+  GPTQ_GET_IF_M234(vllm::kU8B128, 8, 8, 256)
+  GPTQ_GET_IF_M234(vllm::kU8B128, 8, 4, 128)
+  GPTQ_GET_IF_M234(vllm::kU8B128, 4, 8, 128)
+
+  AWQ_GET_IF_M1(vllm::kU4, 16, 4, 256)
+  AWQ_GET_IF_M1(vllm::kU4, 8, 4, 128)
+  AWQ_GET_IF_M1(vllm::kU4, 4, 8, 128)
+
+  AWQ_GET_IF_M234(vllm::kU4, 8, 8, 256)
+  AWQ_GET_IF_M234(vllm::kU4, 8, 4, 128)
+  AWQ_GET_IF_M234(vllm::kU4, 4, 8, 128)
 
   return kernel;
 }
