@@ -429,10 +429,10 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   AWQ_GET_IF(vllm::kU4, 8, 8, 256)
   AWQ_GET_IF(vllm::kU4, 8, 4, 128)
   AWQ_GET_IF(vllm::kU4, 4, 8, 128)
-  AWQ_GET_IF(vllm::kU8, 16, 4, 256)
-  AWQ_GET_IF(vllm::kU8, 8, 8, 256)
-  AWQ_GET_IF(vllm::kU8, 8, 4, 128)
-  AWQ_GET_IF(vllm::kU8, 4, 8, 128)
+  // AWQ_GET_IF(vllm::kU8, 16, 4, 256)
+  // AWQ_GET_IF(vllm::kU8, 8, 8, 256)
+  // AWQ_GET_IF(vllm::kU8, 8, 4, 128)
+  // AWQ_GET_IF(vllm::kU8, 4, 8, 128)
 
   return kernel;
 }
