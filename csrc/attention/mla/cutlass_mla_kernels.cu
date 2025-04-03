@@ -113,9 +113,8 @@ typename T::Fmha::Arguments args_from_options(
                        static_cast<int64_t>(page_size * (D_latent + D_rope)));
   StrideLSE stride_PT = cute::make_stride(_1{}, page_count_per_seq);
   StrideLSE stride_LSE = cute::make_tuple(_1{}, 0 + H);
-  StrideO stride_O =
-      cute::make_tuple(static_cast<int64_t>(0 + D_latent), _1{},
-                       static_cast<int64_t>(0 + H * D_latent));
+  StrideO stride_O = cute::make_tuple(static_cast<int64_t>(0 + D_latent), _1{},
+                                      static_cast<int64_t>(0 + H * D_latent));
 
   using Element = typename T::Element;
   using ElementOut = typename T::ElementOut;
