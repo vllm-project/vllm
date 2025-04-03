@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import logging
 import os
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
@@ -52,7 +51,7 @@ class AsyncLLM(EngineClient):
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[list[StatLoggerBase]] = None,
     ) -> None:
         """
         Create an AsyncLLM.
@@ -62,7 +61,7 @@ class AsyncLLM(EngineClient):
             executor_class (Executor)
             log_stats (bool): Whether to log stats.
             usage_context (UsageContext): Usage context of the LLM.
-            input_registry (InputRegistry): Input registry.
+            mm_registry (MultiModalRegistry): Multi-modal registry.
             use_cached_outputs (bool): Whether to use cached outputs.
             log_requests (bool): Whether to log requests.
             start_engine_loop (bool): Whether to start the engine loop.
@@ -87,16 +86,14 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
+
         # Set up stat loggers; independent set for each DP rank.
-        self.stat_loggers: list[list[StatLoggerBase]] = []
-        if self.log_stats:
-            for i in range(vllm_config.parallel_config.data_parallel_size):
-                loggers: list[StatLoggerBase] = []
-                if logger.isEnabledFor(logging.INFO):
-                    loggers.append(LoggingStatLogger(engine_index=i))
-                loggers.append(
-                    PrometheusStatLogger(vllm_config, engine_index=i))
-                self.stat_loggers.append(loggers)
+        self.stat_loggers: list[list[StatLoggerBase]] = setup_default_loggers(
+            vllm_config=vllm_config,
+            log_stats=self.log_stats,
+            engine_num=vllm_config.parallel_config.data_parallel_size,
+            custom_stat_loggers=stat_loggers,
+        )
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -167,7 +164,7 @@ class AsyncLLM(EngineClient):
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[list[StatLoggerBase]] = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 

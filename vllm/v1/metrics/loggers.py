@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import time
 from abc import ABC, abstractmethod
-from enum import Enum
 from typing import Optional
 
 import numpy as np
@@ -18,17 +18,6 @@ from vllm.v1.spec_decode.metrics import SpecDecodingMetrics
 logger = init_logger(__name__)
 
 _LOCAL_LOGGING_INTERVAL_SEC = 5.0
-
-
-class BuiltinLoggerName(str, Enum):
-    """Internal names for built-in metric loggers
-
-    These values are intended for internal use only. Accessing to
-    these built-in loggers is not considered to be part of the
-    public API.
-    """
-    LOGGING = "logging"
-    PROMETHEUS = "prometheus"
 
 
 class StatLoggerBase(ABC):
@@ -488,19 +477,25 @@ def build_cudagraph_buckets(vllm_config: VllmConfig) -> list[int]:
 
 
 def setup_default_loggers(
-    vllm_config: VllmConfig, log_stats: bool, enable_logging: bool,
-    custom_stat_loggers: Optional[dict[str, StatLoggerBase]]
-) -> dict[str, StatLoggerBase]:
+    vllm_config: VllmConfig,
+    log_stats: bool,
+    engine_num: int,
+    custom_stat_loggers: Optional[list[StatLoggerBase]] = None,
+) -> list[list[StatLoggerBase]]:
     """Setup logging and prometheus metrics."""
     if not log_stats:
-        return {}
+        return []
 
-    if custom_stat_loggers is not None:
-        return custom_stat_loggers
+    stat_loggers: list[list[StatLoggerBase]] = []
+    for i in range(engine_num):
+        if custom_stat_loggers is not None:
+            stat_loggers.append(custom_stat_loggers)
+        else:
+            per_engine_stat_loggers: list[StatLoggerBase] = []
+            per_engine_stat_loggers.append(PrometheusStatLogger(vllm_config))
+            if logger.isEnabledFor(logging.INFO):
+                per_engine_stat_loggers.append(
+                    LoggingStatLogger(engine_index=i))
+            stat_loggers.append(per_engine_stat_loggers)
 
-    stat_loggers: dict[str, StatLoggerBase] = {}
-    stat_loggers[BuiltinLoggerName.PROMETHEUS] = \
-        PrometheusStatLogger(vllm_config)
-    if enable_logging:
-        stat_loggers[BuiltinLoggerName.LOGGING] = LoggingStatLogger()
     return stat_loggers

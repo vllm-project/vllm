@@ -250,20 +250,15 @@ def get_customized_logger_mock() -> StatLoggerBase:
 
 @pytest.mark.parametrize(
     "loggers",
-    [{
-        TEST_LOGGER_NAME: get_customized_logger_mock()
-    }],
+    [[get_customized_logger_mock()]],
 )
 @pytest.mark.asyncio
 async def test_customize_loggers(
     monkeypatch,
-    loggers: Optional[dict[str, StatLoggerBase]],
+    loggers: Optional[list[StatLoggerBase]],
 ):
     """Test that we can customize the loggers.
-    Test case #1: Not customized logger is provided at the init, default loggers
-    would be initialized. Thus, we should be able to remove those and add a
-    customized one later.
-    Test case #2: If a customized logger is provided at the init, it should
+    If a customized logger is provided at the init, it should
     be used directly.
     """
 
@@ -277,5 +272,6 @@ async def test_customize_loggers(
         after.callback(engine.shutdown)
 
         await engine.do_log_stats()
-        for logger in engine.stat_loggers.values():
-            logger.log.assert_called_once()
+        for loggers in engine.stat_loggers:
+            for logger in loggers:
+                logger.log.assert_called_once()
