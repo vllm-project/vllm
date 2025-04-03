@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Tuple, Type
 
 import torch
 
@@ -18,6 +18,7 @@ from vllm.attention.backends.utils import (compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
                                                get_aiter_mla_metadata)
+from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -138,7 +139,7 @@ class AiterMLAMetadata(MLACommonMetadata):
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
-    BLOCK_TABLE_EXTENDER: Union[List[List[int]], List[int]] = [[]]
+    BLOCK_TABLE_EXTENDER: Iterable[list[int]] = [[]]
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         super().__init__(input_builder)
@@ -380,29 +381,32 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 "alibi_slopes, sliding_window, blocksparse_params, "
                 "logits_soft_cap")
 
-        flash_attn_varlen_func = None
-
-        if is_aiter_fa_enabled():
-            from aiter import flash_attn_varlen_func
-        else:
-            with suppress(ImportError):
+        flash_attn_func = None
+        with suppress(ImportError):
+            if is_aiter_fa_enabled():
+                from aiter import flash_attn_varlen_func
+                flash_attn_func = flash_attn_varlen_func
+            else:
                 from flash_attn import flash_attn_varlen_func
+                flash_attn_func = flash_attn_varlen_func
 
-        self.flash_attn_varlen_func = flash_attn_varlen_func
+        self.flash_attn_varlen_func = flash_attn_func
 
-    def _get_fwd_prefill_attn_output(
-            self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-            metadata: AiterMLAMetadata,
-            has_context: bool) -> Tuple[torch.Tensor, ...]:
+    def _get_fwd_prefill_attn_output(self, q: torch.Tensor, k: torch.Tensor,
+                                     v: torch.Tensor,
+                                     prefill_metadata: MLACommonMetadata,
+                                     kv_c_and_k_pe_cache: torch.Tensor,
+                                     attn_metadata: MLACommonMetadata,
+                                     has_context: bool) -> torch.Tensor:
         if is_aiter_fa_enabled():
             output = self.flash_attn_varlen_func(
                 q=q,
                 k=k,
                 v=v,
-                cu_seqlens_q=metadata.query_start_loc,
-                cu_seqlens_k=metadata.query_start_loc,
-                max_seqlen_q=metadata.max_prefill_seq_len,
-                max_seqlen_k=metadata.max_prefill_seq_len,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
                 softmax_scale=self.scale,
                 causal=True,
                 return_lse=has_context,
@@ -410,23 +414,43 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             if not has_context:
                 return output[0]
         else:
-            return self.flash_attn_varlen_func(
+            output = self.flash_attn_varlen_func(
                 q=q,
                 k=k,
                 v=v,
-                cu_seqlens_q=metadata.query_start_loc,
-                cu_seqlens_k=metadata.query_start_loc,
-                max_seqlen_q=metadata.max_prefill_seq_len,
-                max_seqlen_k=metadata.max_prefill_seq_len,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
                 softmax_scale=self.scale,
                 causal=True,
                 return_attn_probs=has_context,
             )
 
+        if has_context:
+            # ROCm flash_attn_varlen_func will return 3 objects instead of 2
+            suffix_output, suffix_lse, *rest = output
+            context_output, context_lse = self._compute_prefill_context( \
+                q, kv_c_and_k_pe_cache, attn_metadata)
+
+            output = torch.empty_like(suffix_output)
+            merge_attn_states(
+                output=output,
+                prefix_output=context_output,
+                prefix_lse=context_lse,
+                suffix_output=suffix_output,
+                suffix_lse=suffix_lse,
+            )
+
+        return output
+
     def _get_prefill_ctx_attn_output(
             self, index: int, q: torch.Tensor, k: torch.Tensor,
             v: torch.Tensor,
-            metadata: AiterMLAMetadata) -> Tuple[torch.Tensor, ...]:
+            metadata: MLACommonMetadata) -> Tuple[torch.Tensor, ...]:
+        assert metadata.context_chunk_cu_seq_lens is not None
+        assert metadata.context_chunk_max_seq_lens is not None
+
         if is_aiter_fa_enabled():
             return self.flash_attn_varlen_func(
                 q=q,

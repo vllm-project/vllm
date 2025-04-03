@@ -190,8 +190,8 @@ from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Tuple,
-                    Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
+                    Optional, Tuple, Type, TypeVar)
 
 import torch
 
@@ -739,7 +739,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     NOTE: Please read the comment at the top of the file before trying to 
     understand this class
     """
-    BLOCK_TABLE_EXTENDER: Union[List[List[int]], List[int]] = []
+    BLOCK_TABLE_EXTENDER: Iterable[list[int]] = []
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -1146,6 +1146,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             self, index: int, q: torch.Tensor, k: torch.Tensor,
             v: torch.Tensor,
             metadata: MLACommonMetadata) -> Tuple[torch.Tensor, ...]:
+        assert metadata.context_chunk_cu_seq_lens is not None
+        assert metadata.context_chunk_max_seq_lens is not None
+
         if is_vllm_fa:
             attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
                 q=q,
@@ -1250,20 +1253,22 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         return output, output_lse
 
-    def _get_fwd_prefill_attn_output(
-            self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-            metadata: MLACommonMetadata,
-            has_context: bool) -> Tuple[torch.Tensor, ...]:
+    def _get_fwd_prefill_attn_output(self, q: torch.Tensor, k: torch.Tensor,
+                                     v: torch.Tensor,
+                                     prefill_metadata: MLACommonMetadata,
+                                     kv_c_and_k_pe_cache: torch.Tensor,
+                                     attn_metadata: MLACommonMetadata,
+                                     has_context: bool) -> torch.Tensor:
         if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN and not has_context:
             output = self.triton_fa_func(
                 q,
                 k,
                 v,
                 None,
-                metadata.query_start_loc,
-                metadata.query_start_loc,
-                metadata.max_prefill_seq_len,
-                metadata.max_prefill_seq_len,
+                prefill_metadata.query_start_loc,
+                prefill_metadata.query_start_loc,
+                prefill_metadata.max_prefill_seq_len,
+                prefill_metadata.max_prefill_seq_len,
                 True,  # causal
                 self.scale,
                 None,  # attn_mask is None unless applying ALiBi mask
@@ -1276,10 +1281,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 q=q,
                 k=k,
                 v=v,
-                cu_seqlens_q=metadata.query_start_loc,
-                cu_seqlens_k=metadata.query_start_loc,
-                max_seqlen_q=metadata.max_prefill_seq_len,
-                max_seqlen_k=metadata.max_prefill_seq_len,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
                 softmax_scale=self.scale,
                 causal=True,
                 return_softmax_lse=has_context,
@@ -1289,13 +1294,28 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 q=q,
                 k=k,
                 v=v,
-                cu_seqlens_q=metadata.query_start_loc,
-                cu_seqlens_k=metadata.query_start_loc,
-                max_seqlen_q=metadata.max_prefill_seq_len,
-                max_seqlen_k=metadata.max_prefill_seq_len,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
                 softmax_scale=self.scale,
                 causal=True,
                 return_attn_probs=has_context,
+            )
+
+        if has_context:
+            # ROCm flash_attn_varlen_func will return 3 objects instead of 2
+            suffix_output, suffix_lse, *rest = output
+            context_output, context_lse = self._compute_prefill_context( \
+                q, kv_c_and_k_pe_cache, attn_metadata)
+
+            output = torch.empty_like(suffix_output)
+            merge_attn_states(
+                output=output,
+                prefix_output=context_output,
+                prefix_lse=context_lse,
+                suffix_output=suffix_output,
+                suffix_lse=suffix_lse,
             )
 
         return output
@@ -1329,22 +1349,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         output = self._get_fwd_prefill_attn_output(q, k, v_padded,
                                                    prefill_metadata,
-                                                   has_context)
-
-        if has_context:
-            # ROCm flash_attn_varlen_func will return 3 objects instead of 2
-            suffix_output, suffix_lse, *rest = output
-            context_output, context_lse = self._compute_prefill_context( \
-                q, kv_c_and_k_pe_cache, attn_metadata)
-
-            output = torch.empty_like(suffix_output)
-            merge_attn_states(
-                output=output,
-                prefix_output=context_output,
-                prefix_lse=context_lse,
-                suffix_output=suffix_output,
-                suffix_lse=suffix_lse,
-            )
+                                                   kv_c_and_k_pe_cache,
+                                                   attn_metadata, has_context)
 
         # slice by `:v.shape[-1]` in order to remove v headdim padding
         output = output\
