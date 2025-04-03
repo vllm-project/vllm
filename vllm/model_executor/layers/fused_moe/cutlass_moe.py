@@ -429,7 +429,7 @@ def modular_cutlass_moe_fp8(
     out_dtype: torch.dtype = torch.half,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
-        StandardDispatchCombine(),
+        StandardDispatchCombine(quant_dtype=torch.float8_e4m3fn),
         CutlassExperts(
             ab_strides1,
             c_strides1,

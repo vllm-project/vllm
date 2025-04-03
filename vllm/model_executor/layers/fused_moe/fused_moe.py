@@ -13,6 +13,9 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
+from vllm.model_executor.layers.fused_moe.dispatch_combine import (
+    StandardDispatchCombine
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -1566,49 +1569,6 @@ def fused_moe(
                          block_shape=block_shape)
 
 
-# TODO: merge with StandardDispatchCombine
-class TritonDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
-
-    def __init__(self, use_fp8_w8a8: bool, block_shape: Optional[List[int]]):
-        super().__init__()
-        self.use_fp8_w8a8 = use_fp8_w8a8
-        self.block_shape = block_shape
-
-    def dispatch(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if self.use_fp8_w8a8:
-            a1q, a1q_scale = _fp8_quantize(
-                a1,
-                a1_scale,
-                self.block_shape,
-            )
-        else:
-            a1q = a1
-            a1q_scale = a1_scale
-
-        return a1q, a1q_scale
-
-    def combine(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> None:
-        M, topk = topk_weights.shape
-        K = fused_expert_output.shape[-1]
-        fused_expert_output = fused_expert_output.view(-1, topk, K)
-        fused_expert_output.mul_(topk_weights.view(M, -1, 1))
-        ops.moe_sum(fused_expert_output, output)
-
-
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
@@ -1788,7 +1748,10 @@ def modular_triton_fused_moe(
         block_shape: Optional[List[int]] = None,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
-        TritonDispatchCombine(use_fp8_w8a8, block_shape),
+        StandardDispatchCombine(
+            quant_dtype=torch.float8_e4m3fn if use_fp8_w8a8 else None,
+            block_shape=block_shape
+        ),
         TritonExperts(
             use_fp8_w8a8,
             use_int8_w8a16,

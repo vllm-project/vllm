@@ -9,9 +9,14 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
 
 class StandardDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
-    def __init__(self, block_shape: Optional[list[int]] = None):
+    def __init__(
+            self,
+            quant_dtype: Optional[torch.dtype] = None,
+            block_shape: Optional[list[int]] = None
+    ):
         super().__init__()
         self.block_shape = block_shape
+        self.quant_dtype = quant_dtype
 
     def dispatch(
         self,
@@ -22,15 +27,20 @@ class StandardDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
+        if self.quant_dtype == torch.float8_e4m3fn:
+            per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+                a2_scale.numel() != 1 if a2_scale is not None else False)
 
-        a1q, a1q_scale = _fp8_quantize(
-            a1,
-            a1_scale,
-            self.block_shape,
-            per_act_token,
-        )
+            a1q, a1q_scale = _fp8_quantize(
+                a1,
+                a1_scale,
+                self.block_shape,
+                per_act_token,
+            )
+        else:
+            a1q = a1
+            a1q_scale = a1_scale
+
         return a1q, a1q_scale
 
     def combine(

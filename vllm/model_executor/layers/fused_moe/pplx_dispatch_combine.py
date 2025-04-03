@@ -17,6 +17,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             max_num_tokens: int,
             world_size: int,
             dp_size: int,
+            quant_dtype: Optional[torch.dtype] = None,
             block_shape: Optional[List[int]] = None):
         super().__init__()
         self.a2a = a2a
@@ -35,15 +36,19 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         # Is this always going to be a1.device?
         device = a1.device
 
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
+        if self.quant_dtype == torch.float8_e4m3fn:
+            per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+                a2_scale.numel() != 1 if a2_scale is not None else False)
 
-        a1q, a1q_scale = _fp8_quantize(
-            a1,
-            a1_scale,
-            self.block_shape,
-            per_act_token,
-        )
+            a1q, a1q_scale = _fp8_quantize(
+                a1,
+                a1_scale,
+                self.block_shape,
+                per_act_token,
+            )
+        else:
+            a1q = a1
+            a1q_scale = a1_scale
 
         expert_num_tokens = torch.empty(
             num_experts,
