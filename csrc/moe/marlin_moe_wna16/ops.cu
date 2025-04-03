@@ -838,6 +838,7 @@ torch::Tensor moe_wna16_marlin_gemm(
   bool has_zp = b_zeros.size(-1) > 0;
 
   if (has_zp) {
+    TORCH_CHECK(b_q_type != vllm::kU8, "int8 weith zero points is not supported.");
     TORCH_CHECK(
         b_q_type == vllm::kU4 || b_q_type == vllm::kU8,
         "b_q_type must be u4 or u8 when has_zp = True. Got = ", b_q_type.str());
