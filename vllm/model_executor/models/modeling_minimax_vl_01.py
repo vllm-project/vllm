@@ -13,7 +13,8 @@ from transformers import (
     CONFIG_MAPPING,
     AutoProcessor,
     ProcessorMixin,
-    BaseImageProcessor
+    BaseImageProcessor,
+    AutoImageProcessor
 )
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
@@ -191,8 +192,39 @@ def make_list_of_images(images):
     else:
         raise ValueError(f"images must be PIL image, numpy array, torch tensor, or list of such, got {type(images)}")
 
-# Register the processor
-AutoProcessor.register("minimax_vl_01", ImageProcessor)
+class MiniMaxVL01ImageProcessor(ImageProcessor):
+    """
+    Image processor for MiniMaxVL01.
+    """
+    model_input_names = ["pixel_values"]
+
+    def __init__(
+        self,
+        size: Optional[Union[int, Tuple[int, int], Dict[str, int]]] = None,
+        image_mean: Optional[Union[float, List[float]]] = None,
+        image_std: Optional[Union[float, List[float]]] = None,
+        process_image_mode: Optional[str] = 'resize',
+        patch_size: Optional[int] = 14,
+        image_grid_pinpoints: List = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            size=size,
+            image_mean=image_mean,
+            image_std=image_std,
+            process_image_mode=process_image_mode,
+            patch_size=patch_size,
+            image_grid_pinpoints=image_grid_pinpoints,
+            **kwargs
+        )
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
+        return cls(**kwargs)
+
+# Register the processors
+AutoImageProcessor.register("minimax_vl_01", MiniMaxVL01ImageProcessor)
+AutoProcessor.register("minimax_vl_01", MiniMaxVL01Processor)
 
 class MiniMaxVL01ProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = {
@@ -205,12 +237,12 @@ class MiniMaxVL01ProcessorKwargs(ProcessingKwargs, total=False):
 class MiniMaxVL01Processor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
     valid_kwargs = ["chat_template", "patch_size", "vision_feature_select_strategy", "image_token"]
-    image_processor_class = "ImageProcessor"
+    image_processor_class = "MiniMaxVL01ImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
     def __init__(
         self,
-        image_processor: Optional[ImageProcessor] = None,
+        image_processor: Optional[MiniMaxVL01ImageProcessor] = None,
         tokenizer = None,
         patch_size: Optional[int] = None,
         vision_feature_select_strategy: Optional[str] = None,
@@ -219,7 +251,7 @@ class MiniMaxVL01Processor(ProcessorMixin):
         **kwargs,
     ):
         if image_processor is None:
-            image_processor = ImageProcessor(patch_size=patch_size)
+            image_processor = MiniMaxVL01ImageProcessor(patch_size=patch_size)
         
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
         
@@ -230,6 +262,39 @@ class MiniMaxVL01Processor(ProcessorMixin):
         self.max_size = image_processor.size
         self.process_image_mode = image_processor.process_image_mode
 
+    def __call__(
+        self,
+        images: ImageInput = None,
+        text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
+        audio=None,
+        videos=None,
+        **kwargs,
+    ) -> BatchFeature:
+        if images is None and text is None:
+            raise ValueError("You have to specify at least one of `images` or `text`.")
+
+        output_kwargs = self._merge_kwargs(
+            MiniMaxVL01ProcessorKwargs,
+            tokenizer_init_kwargs=self.tokenizer.init_kwargs,
+            **kwargs,
+        )
+
+        if images is not None:
+            # Convert images to list if needed
+            if not isinstance(images, (list, tuple)):
+                images = [images]
+            
+            # Process images
+            image_inputs = self.image_processor(images)
+        else:
+            image_inputs = {}
+
+        if text is not None:
+            text_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
+            return CustomBatchFeature(data={**text_inputs, **image_inputs})
+        
+        return CustomBatchFeature(data=image_inputs)
+
 class LlavaNextImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     pixel_values: Union[torch.Tensor, list[torch.Tensor]]
@@ -239,13 +304,6 @@ class LlavaNextImagePixelInputs(TypedDict):
 
     Note that `num_patches` may be different per batch and image,
     in which case the data is passed as a list instead of a batched tensor.
-    """
-
-    image_sizes: NotRequired[torch.Tensor]
-    """
-    Shape: `(batch_size * num_images, 2)`
-
-    This should be in `(height, width)` format.
     """
 
 
