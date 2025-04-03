@@ -69,6 +69,9 @@ def get_vision_encoder_info(
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPEncoderInfo(vision_config)
     if isinstance(vision_config, PixtralVisionConfig):
+        # Need to sneak in spatial_merge_size for Mistral3
+        vision_config.spatial_merge_size = getattr(hf_config,
+                                                   "spatial_merge_size", 1)
         return PixtralHFEncoderInfo(vision_config)
     if isinstance(vision_config, SiglipVisionConfig):
         return SiglipEncoderInfo(vision_config)
@@ -204,7 +207,7 @@ def scatter_patch_features(
             (e_is_patch.shape[0], patches_one.shape[-1]),
             fill_value=torch.nan,
         )
-        embed_one[e_is_patch] = patches_one.flatten(0, -2)
+        embed_one[e_is_patch] = patches_one
         return embed_one
 
     return tuple(
