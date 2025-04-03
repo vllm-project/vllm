@@ -9,9 +9,6 @@ import torch
 
 class FusedMoEQuantizeDispatchCombine(ABC):
 
-    #    def __init__(self):
-    #        pass
-
     @abstractmethod
     def dispatch(
         self,
@@ -21,11 +18,9 @@ class FusedMoEQuantizeDispatchCombine(ABC):
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
-        # TODO: figure this out
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # returns (quantized+dispatched a,
-        #          quantized+dispatched a1_scales,
-        #          dispatched topk_ids)
+        #          quantized+dispatched a1_scales)
         raise NotImplementedError
 
     @abstractmethod
@@ -34,15 +29,13 @@ class FusedMoEQuantizeDispatchCombine(ABC):
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,  # not reduced or weighted
         topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> None:
         raise NotImplementedError
 
 
 # store weights, etc. here
 class FusedMoEPermuteExpertsUnpermute(ABC):
-
-    #    def __init__(self):
-    #        pass
 
     @abstractmethod
     def workspace_shapes(
@@ -115,6 +108,7 @@ class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
         # two, so it's not "correct" to extract N or K from the trailing dimension of
         # w1 or w2.  Similarly, some kernels transpose the weights, so this needs to
         # be kept in mind.
+        # TODO: make this a method/utility function, e.g. problem_size(a, w1, w2, topk_ids, ...)
         M, _ = a1.shape
         E, N, _ = w1.shape
         K = w2.shape[1]
@@ -144,7 +138,7 @@ class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
                                  device=a1.device,
                                  dtype=workspace_dtype)
 
-        a1q, a1q_scale, dispatched_topk_ids = self.dispatch_combine.dispatch(
+        a1q, a1q_scale = self.dispatch_combine.dispatch(
             a1,
             a1_scale,
             a2_scale,
@@ -157,7 +151,7 @@ class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
             a1q,
             w1,
             w2,
-            dispatched_topk_ids,
+            topk_ids,
             activation,
             global_num_experts,
             expert_map,
@@ -171,6 +165,6 @@ class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
             workspace2=workspace2,
         )
 
-        self.dispatch_combine.combine(output, fused_out, topk_weights)
+        self.dispatch_combine.combine(output, fused_out, topk_weights, topk_ids)
 
         return output
