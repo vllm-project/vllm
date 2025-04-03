@@ -2117,8 +2117,9 @@ class SpeculativeConfig:
 
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
+                    from vllm.platforms import current_platform
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  EAGLEConfig) or current_platform.is_neuron():
                         pass
                     else:
                         eagle_config = EAGLEConfig(
