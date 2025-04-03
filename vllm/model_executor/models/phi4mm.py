@@ -815,7 +815,6 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             num_img_tokens=MultiModalFieldConfig.batched("image"),
             input_audio_embeds=MultiModalFieldConfig.batched("audio"),
             audio_embed_sizes=MultiModalFieldConfig.batched("audio"),
-            audio_attention_mask=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
