@@ -103,7 +103,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         # Set up signal handlers to shutdown the executor cleanly
         # sometimes gc does not work well
 
-        self.driver_worker = WorkerWrapperBase(self.vllm_config, 0)
+        self.driver_worker = WorkerWrapperBase(self.vllm_config)
 
         all_kwargs = []
         distributed_init_method = get_distributed_init_method(
