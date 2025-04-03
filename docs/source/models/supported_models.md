@@ -218,6 +218,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc.
   * ✅︎
   * ✅︎
+- * `BambaForCausalLM`
+  * Bamba
+  * `ibm-ai-platform/Bamba-9B-fp8`, `ibm-ai-platform/Bamba-9B`
+  *
+  *
 - * `BloomForCausalLM`
   * BLOOM, BLOOMZ, BLOOMChat
   * `bigscience/bloom`, `bigscience/bloomz`, etc.
@@ -503,6 +508,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
   * ✅︎
   * ✅︎
+- * `MiniMaxText01ForCausalLM`
+  * MiniMax-Text
+  * `MiniMaxAI/MiniMax-Text-01`, etc.
+  *
+  * ✅︎
 - * `Zamba2ForCausalLM`
   * Zamba2
   * `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.
@@ -753,6 +763,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `AyaVisionForConditionalGeneration`
+  * Aya Vision
+  * T + I<sup>+</sup>
+  * `CohereForAI/aya-vision-8b`, `CohereForAI/aya-vision-32b`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `Blip2ForConditionalGeneration`
   * BLIP-2
   * T + I<sup>E</sup>
@@ -871,7 +888,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
   *
   * ✅︎
-  *
+  * ✅︎
 - * `MllamaForConditionalGeneration`
   * Llama 3.2
   * T + I<sup>+</sup>

@@ -246,6 +246,7 @@ def _test_processing_correctness_mistral(
 # yapf: disable
 @pytest.mark.parametrize("model_id", [
     "rhymes-ai/Aria",
+    "CohereForAI/aya-vision-8b",
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
     "deepseek-ai/deepseek-vl2-tiny",

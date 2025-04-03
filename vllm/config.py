@@ -761,6 +761,12 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
+
+        if parallel_config.distributed_executor_backend == "external_launcher":
+            assert self.seed is not None, (
+                "Seed must be set when using external launcher backend to "
+                "make sure sampling results are the same across workers.")
+
         total_num_attention_heads = getattr(self.hf_text_config,
                                             "num_attention_heads", 0)
         tensor_parallel_size = parallel_config.tensor_parallel_size
@@ -971,26 +977,34 @@ class ModelConfig:
             return sum(not bc.attention.no_op
                        for bc in block_configs[start:end])
         else:
-            # Hybrid model
+            # Hybrid model Jamba
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
-            if layers_block_type_value is None:
-                raise ValueError("The model is an hybrid without a "
-                                 "layers_block_type in the hf_config, "
-                                 "cannot determine the num of "
-                                 f"{block_type.value} layers")
+            if layers_block_type_value is not None:
+                if hasattr(self.hf_text_config,
+                           "model_type") and (self.hf_text_config.model_type
+                                              == "zamba2"):
+                    if attn_block_type:
+                        return sum(t == "hybrid"
+                                   for t in layers_block_type_value[start:end])
+                    else:
+                        return self.get_num_layers(parallel_config)
+                return sum(t == block_type.value
+                           for t in layers_block_type_value[start:end])
 
-            if hasattr(self.hf_text_config,
-                       "model_type") and (self.hf_text_config.model_type
-                                          == "zamba2"):
-                if attn_block_type:
-                    return sum(t == "hybrid"
-                               for t in layers_block_type_value[start:end])
-                else:
-                    return self.get_num_layers(parallel_config)
+            # Hybrid model Minimax
+            attn_type_list = getattr(self.hf_config, "attn_type_list", None)
+            if attn_type_list:
+                return sum(t == 1 for t in attn_type_list[start:end])
 
-            return sum(t == block_type.value
-                       for t in layers_block_type_value[start:end])
+            if layers_block_type_value is None and attn_type_list is None:
+                raise ValueError(
+                    "The model is an hybrid without a"
+                    "layers_block_type or an attn_type_list in the hf_config,"
+                    "cannot determine the num of "
+                    f"{block_type.value} layers")
+
+            return sum(t == 1 for t in attn_type_list[start:end])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
@@ -2152,9 +2166,10 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method == "eagle":
-                    if self.enable_chunked_prefill:
+                    if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
                         raise ValueError(
-                            "Chunked prefill and EAGLE are not compatible.")
+                            "Chunked prefill and EAGLE are not compatible "
+                            "when using V0.")
 
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
@@ -2425,9 +2440,9 @@ class LoRAConfig:
                 f"max_loras ({self.max_loras})")
 
     def verify_with_cache_config(self, cache_config: CacheConfig):
-        # TODO LoRA supports CPU offload.
-        if cache_config.cpu_offload_gb > 0:
-            raise ValueError("CPU offload is not supported with LoRA yet.")
+        if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:
+            raise ValueError(
+                "V0 LoRA does not support CPU offload, please use V1.")
 
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):
@@ -2716,6 +2731,10 @@ def _get_and_verify_max_len(
             max_len_key = key if max_len < derived_max_model_len \
                 else max_len_key
             derived_max_model_len = min(derived_max_model_len, max_len)
+    # For Command-R / Cohere, Cohere2 / Aya Vision models
+    if tmp_max_len := getattr(hf_config, "model_max_length", None):
+        max_len_key = "model_max_length"
+        derived_max_model_len = tmp_max_len
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
