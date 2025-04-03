@@ -4,6 +4,24 @@ from typing import Optional, Tuple
 
 import torch
 
+#
+# This file defines a set of base classes used to make MoE kernels more modular.
+# The goal is to be able to utilize different communication mechanisms with
+# any fused MoE kernel without needing to have combinatoric implementations.
+#
+# Break the fused moe layer down into the following components. Each component
+# will be independent of the others except for [Quantize-Dispatch] and
+# [Combine]. The components can then be mixed and matched with different fused
+# moe kernels so that DP+EP can be supported easily for multiple MoE
+# implementations.
+#
+# Architecture:
+# [Router] → [Quantize-Dispatch] → [Permute-Experts-Unpermute] → [Combine]
+#
+# [Quantize-Dispatch] and [Combine] functionality are bundled into a single
+# class `FusedMoEQuantizeDispatchCombine` since they could use collective
+# communication mechanisms that need to be consistent.
+#
 
 def moe_problem_size(
     a1: torch.Tensor,
@@ -34,23 +52,10 @@ def moe_problem_size(
     return E, M, N, K, topk
 
 
-#
-# A set of base classes used to make MoE kernels more modular.
-#
-# Architecture:
-# [Router] → [Quantize-Dispatch] → [Permute-Experts-Unpermute] → [Combine]
-#
-# [Quantize-Dispatch] and [Combine] functionality are bundled into a single
-# class `FusedMoEQuantizeDispatchCombine` since they could use collective
-# communication mechanisms that need to be consistent.
-#
-# Ideal architecture:
-# [Router] → [Quantize-Dispatch-Permute] → [Experts] → [Unpermute-Combine]
-#
-
-
 class FusedMoEQuantizeDispatchCombine(ABC):
     """
+    An abstract base class for the [Quantize-Dispatch] and [Combine] steps
+    described above.
     """
 
     @abstractmethod
@@ -102,6 +107,10 @@ class FusedMoEQuantizeDispatchCombine(ABC):
 
 
 class FusedMoEPermuteExpertsUnpermute(ABC):
+    """
+    An abstract base class for the [Permute-Experts-Unpermute] step described
+    above.
+    """
 
     @abstractmethod
     def workspace_shapes(self, a_dtype: torch.dtype, M: int, N: int, K: int,
@@ -177,10 +186,18 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         raise NotImplementedError
 
 
-# Note: only intended for use with a single model layer (due to temp buffers,
-# constants, etc.)
-class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
+class FusedMoEModularKernel(torch.nn.Module):
+    """
+    This class combines a FusedMoEQuantizeDispatchCombine instance and
+    a FusedMoEPermuteExpertsUnpermute to provide an interface that
+    is compatible with the `fused_experts` function in fused_moe.py.
 
+    It takes care of managing any required scratch space.
+
+    Note: Instances of this class should only be used for a single model
+    layer due to any layer specific state that may be used by the component
+    objects.
+    """
     def __init__(
         self,
         dispatch_combine: FusedMoEQuantizeDispatchCombine,
