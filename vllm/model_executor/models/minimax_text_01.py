@@ -1112,32 +1112,54 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                     continue
                 # 修改参数名称替换逻辑
                 if isinstance(self.config.num_local_experts, list):
-                    name = name.replace(f"experts.{expert_id}.{weight_name}", param_name)
+                    # 保持原始参数名称不变
+                    if is_pp_missing_parameter(name, self):
+                        return
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    
+                    # 根据权重名称确定 shard_id
+                    if "w1" in weight_name:
+                        shard_id = "w1"
+                    elif "w2" in weight_name:
+                        shard_id = "w2"
+                    elif "w3" in weight_name:
+                        shard_id = "w3"
+                    else:
+                        shard_id = "w1"  # 默认使用 w1
+                    
+                    weight_loader(param,
+                                loaded_weight,
+                                weight_name,
+                                expert_id=expert_id,
+                                shard_id=shard_id)
+                    loaded_params.add(name)
+                    break
                 else:
+                    # 对于非列表情况，使用替换逻辑
                     name = name.replace(f"{expert_id}.{weight_name}", param_name)
-                
-                if is_pp_missing_parameter(name, self):
-                    return
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                
-                # 根据权重名称确定 shard_id
-                if "w1" in weight_name:
-                    shard_id = "w1"
-                elif "w2" in weight_name:
-                    shard_id = "w2"
-                elif "w3" in weight_name:
-                    shard_id = "w3"
-                else:
-                    shard_id = "w1"  # 默认使用 w1
-                
-                weight_loader(param,
-                            loaded_weight,
-                            weight_name,
-                            expert_id=expert_id,
-                            shard_id=shard_id)
-                loaded_params.add(name)
-                break
+                    if is_pp_missing_parameter(name, self):
+                        return
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    
+                    # 根据权重名称确定 shard_id
+                    if "w1" in weight_name:
+                        shard_id = "w1"
+                    elif "w2" in weight_name:
+                        shard_id = "w2"
+                    elif "w3" in weight_name:
+                        shard_id = "w3"
+                    else:
+                        shard_id = "w1"  # 默认使用 w1
+                    
+                    weight_loader(param,
+                                loaded_weight,
+                                weight_name,
+                                expert_id=expert_id,
+                                shard_id=shard_id)
+                    loaded_params.add(name)
+                    break
             else:
                 if is_pp_missing_parameter(name, self):
                     return
