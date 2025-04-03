@@ -3,7 +3,7 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
 
 import torch
 import torch.distributed
@@ -1059,8 +1059,9 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                         device=device),
         })
     def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> None:
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
 
         def which_layer(name: str) -> int:
             if "layers" in name:
@@ -1105,12 +1106,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                       expert_id, weight_name)
                      for expert_id in range(self.config.num_local_experts)
                      for weight_name in ["w1", "w2", "w3"]]
-            for (param_name, weight_name, expert_id,
-                 shard_id) in expert_params_mapping:
-                name_expert_id = get_expert_id(name)
-                if name_expert_id is not None and int(name_expert_id) != int(
-                        expert_id):
-                    continue
+
+            for param_name, weight_name, expert_id in expert_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -1118,12 +1115,11 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                     return
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param,
                               loaded_weight,
                               weight_name,
-                              expert_id=expert_id,
-                              shard_id=shard_id)
+                              expert_id=expert_id)
+                loaded_params.add(name)
                 break
             else:
                 if is_pp_missing_parameter(name, self):
@@ -1131,12 +1127,12 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight)
+                loaded_params.add(name)
             return
 
         def is_shared_mlp_weight(name: str) -> bool:
-            return "shared_mlp" in name and not name.endswith(".bias")
+            return "gate_proj" in name or "up_proj" in name or "down_proj" in name
 
         def load_shared_mlp_weight(name: str, loaded_weight: torch.Tensor,
                                    self) -> None:
@@ -1170,6 +1166,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 else:
                     raise AssertionError(
                         "MLP weight not in [gate_up_proj, down_proj]")
+            loaded_params.add(name)
             return
 
         def is_mha_weight(name: str) -> bool:
@@ -1186,6 +1183,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 MiniMaxText01LinearAttention.weight_direct_load)
             weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
             return
 
         def load_flash_attn_weight(name: str, loaded_weight: torch.Tensor,
@@ -1210,6 +1208,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                         default_weight_loader)
                 weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 break
             else:
                 if is_pp_missing_parameter(name, self):
@@ -1220,11 +1219,11 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                         default_weight_loader)
                 weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight)
+                loaded_params.add(name)
             return
 
         def is_layer_norm_weight(name: str) -> bool:
-            return "norm" in name and not name.endswith(
-                ".bias") and name in params_dict
+            return "layernorm" in name or "norm" in name
 
         def load_layer_norm_weight(name: str, loaded_weight: torch.Tensor,
                                    self) -> None:
@@ -1233,8 +1232,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
             return
 
         def load_basic_weight(name: str, loaded_weight: torch.Tensor,
@@ -1244,8 +1243,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
             return
 
         for name, loaded_weight in weights:
@@ -1274,5 +1273,5 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 continue
 
             load_basic_weight(name, loaded_weight, self)
-        return
+        return loaded_params
 
