@@ -328,6 +328,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 def modular_deep_gemm_fused_moe_fp8() -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
-        StandardDispatchCombine(deep_gemm_block_shape()),
+        StandardDispatchCombine(quant_dtype=torch.float8_e4m3fn,
+                                block_shape=deep_gemm_block_shape()),
         DeepGemmExperts(),
     )
