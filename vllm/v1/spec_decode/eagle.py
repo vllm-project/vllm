@@ -4,9 +4,11 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+from vllm.model_executor.models.llama_eagle import LlamaForCausalLMEagle
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -180,14 +182,27 @@ class EagleProposer:
         return cu_num_tokens, token_indices
 
     def load_model(self, target_model: nn.Module) -> None:
-        old_config = self.vllm_config.model_config
+        loader = get_model_loader(self.vllm_config.load_config)
+        target_layer_num = self.vllm_config.model_config.get_num_layers(
+            self.vllm_config.parallel_config)
 
-        self.vllm_config.model_config = \
+        draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
-        self.model = get_model(vllm_config=self.vllm_config)
+        # FIXME(lily): This does not handle with distributed inference.
+        target_device = self.vllm_config.device_config.device
+        # We need to set the vllm_config here to register attention
+        # layers in the forward context.
+        with set_default_torch_dtype(
+                draft_model_config.dtype), set_current_vllm_config(
+                    self.vllm_config):
+            self.model = LlamaForCausalLMEagle(
+                model_config=draft_model_config,
+                start_layer_id=target_layer_num).to(target_device)
 
-        # Resume config
-        self.vllm_config.model_config = old_config
+        self.model.load_weights(
+            loader.get_all_weights(
+                self.vllm_config.speculative_config.draft_model_config,
+                self.model))
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.

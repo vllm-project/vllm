@@ -6,11 +6,11 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.llama import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
 
@@ -41,26 +41,27 @@ class LlamaModel(nn.Module):
     def __init__(
         self,
         *,
-        vllm_config: VllmConfig,
+        model_config: ModelConfig,
+        start_layer_id: int = 0,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        config = vllm_config.model_config.hf_config
-        self.config = config
-        self.vocab_size = config.vocab_size
+        self.config = model_config.hf_config
+        self.vocab_size = self.config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            self.config.vocab_size,
+            self.config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
-                config,
+                self.config,
                 i,
-                prefix=maybe_prefix(prefix, f"layers.{i + 33}"),
-            ) for i in range(config.num_hidden_layers)
+                prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+            ) for i in range(self.config.num_hidden_layers)
         ])
-        self.fc = torch.nn.Linear(config.hidden_size * 2, config.hidden_size)
+        self.fc = torch.nn.Linear(self.config.hidden_size * 2,
+                                  self.config.hidden_size)
 
     def forward(
         self,
@@ -84,33 +85,26 @@ class LlamaModel(nn.Module):
 
 class LlamaForCausalLMEagle(LlamaForCausalLM):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, model_config: ModelConfig, start_layer_id: int = 0):
         nn.Module.__init__(self)
-        config = vllm_config.model_config.hf_config
-        self.config = config
-        self.eagle_model = LlamaModel(vllm_config=vllm_config,
-                                      prefix=maybe_prefix(
-                                          prefix, "eagle_model"))
-
-        self.truncated_vocab_size = config.truncated_vocab_size
-        self.unpadded_vocab_size = self.truncated_vocab_size
+        self.config = model_config.hf_config
+        self.model = LlamaModel(model_config=model_config,
+                                start_layer_id=start_layer_id,
+                                prefix="model")
 
         # Llama 3.2 1B Instruct set tie_word_embeddings to True
         # Llama 3.1 8B Instruct set tie_word_embeddings to False
         if self.config.tie_word_embeddings:
-            self.lm_head = self.eagle_model.embed_tokens
+            self.lm_head = self.model.embed_tokens
         else:
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
-                config.hidden_size,
-                org_num_embeddings=self.truncated_vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                self.config.vocab_size,
+                self.config.hidden_size,
             )
 
-        logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                self.truncated_vocab_size,
-                                                logit_scale)
+        logit_scale = getattr(self.config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(self.config.vocab_size,
+                                                scale=logit_scale)
 
     def forward(
         self,
@@ -118,7 +112,7 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        return self.eagle_model(input_ids, positions, hidden_states)
+        return self.model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
@@ -126,7 +120,7 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         model_weights = {}
         for name, loaded_weight in weights:
             if "lm_head" not in name:
-                name = "eagle_model." + name
+                name = "model." + name
                 print(name)
                 model_weights[name] = loaded_weight
 
