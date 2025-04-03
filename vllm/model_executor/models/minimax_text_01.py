@@ -1115,10 +1115,26 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                     return
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param,
-                              loaded_weight,
-                              weight_name,
-                              expert_id=expert_id)
+                
+                # 处理 weight_scale 和 weight_zp
+                if "weight_scale" in name:
+                    weight_loader(param,
+                                loaded_weight,
+                                weight_name,
+                                expert_id=expert_id,
+                                shard_id="scale")
+                elif "weight_zp" in name:
+                    weight_loader(param,
+                                loaded_weight,
+                                weight_name,
+                                expert_id=expert_id,
+                                shard_id="zp")
+                else:
+                    weight_loader(param,
+                                loaded_weight,
+                                weight_name,
+                                expert_id=expert_id,
+                                shard_id=0)
                 loaded_params.add(name)
                 break
             else:
