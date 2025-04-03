@@ -206,6 +206,7 @@ def idefics3_trunc_hf_output(hf_output: RunnerOutput,
 
 def smolvlm_trunc_hf_output(hf_output: RunnerOutput,
                             model: str) -> RunnerOutput:
+    # Based on Idefics3
     return idefics3_trunc_hf_output(hf_output, model)
 
 
