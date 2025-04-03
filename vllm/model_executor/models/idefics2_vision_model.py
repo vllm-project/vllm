@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # adapted from https://github.com/huggingface/transformers/blob/v4.43.2/src/transformers/models/idefics2/modeling_idefics2.py
 # Copyright 2024 The vLLM team.
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.
@@ -15,14 +17,14 @@
 # limitations under the License.
 """PyTorch Idefics2 model."""
 
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
 from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2Config, Idefics2VisionConfig)
-from xformers import ops as xops
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -69,7 +71,8 @@ class Idefics2VisionEmbeddings(nn.Module):
                 patch_attention_mask: torch.BoolTensor,
                 tgt_sizes: Optional[torch.IntTensor] = None) -> torch.Tensor:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
-        patch_embeds = self.patch_embedding(pixel_values)
+        target_dtype = self.patch_embedding.weight.dtype
+        patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
         max_nb_patches_h, max_nb_patches_w = (
             max_im_h // self.patch_size,
@@ -110,7 +113,7 @@ class Idefics2VisionAttention(nn.Module):
 
     def __init__(
         self,
-        config: Idefics2Config,
+        config: Idefics2VisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -141,35 +144,18 @@ class Idefics2VisionAttention(nn.Module):
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
-        self.is_causal = False
+        self.attn = MultiHeadAttention(self.num_heads_per_partition,
+                                       self.head_dim, self.scale)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        batch_size, q_len, _ = hidden_states.size()
         qkv, _ = self.qkv_proj(
             hidden_states
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
-        query_states = query_states.view(batch_size, q_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-        key_states = key_states.view(batch_size, q_len,
-                                     self.num_heads_per_partition,
-                                     self.head_dim)
-        value_states = value_states.view(batch_size, q_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-        # see: https://facebookresearch.github.io/xformers/components/ops.html
-        out = xops.memory_efficient_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            p=self.dropout,
-            scale=self.scale,
-        )
-        out = out.view(batch_size, q_len, -1)
+        out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
         return attn_output
 
@@ -178,7 +164,7 @@ class Idefics2VisionMLP(nn.Module):
 
     def __init__(
         self,
-        config: Idefics2Config,
+        config: Idefics2VisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -263,16 +249,24 @@ class Idefics2Encoder(nn.Module):
         self,
         config: Idefics2Config,
         quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
 
         self.config = config
+
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
+
         self.layers = nn.ModuleList([
             Idefics2EncoderLayer(config,
                                  quant_config=quant_config,
                                  prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(config.num_hidden_layers)
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(
@@ -301,6 +295,9 @@ class Idefics2VisionTransformer(nn.Module):
         self,
         config: Idefics2VisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        require_post_norm: bool = True,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -308,11 +305,24 @@ class Idefics2VisionTransformer(nn.Module):
         embed_dim = config.hidden_size
         self.config = config
         self.embeddings = Idefics2VisionEmbeddings(config)
-        self.encoder = Idefics2Encoder(config,
-                                       quant_config=quant_config,
-                                       prefix=f"{prefix}.encoder")
-        self.post_layernorm = nn.LayerNorm(embed_dim,
-                                           eps=config.layer_norm_eps)
+        self.encoder = Idefics2Encoder(
+            config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override,
+            prefix=f"{prefix}.encoder")
+
+        num_hidden_layers = config.num_hidden_layers
+        if len(self.encoder.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {num_hidden_layers} "
+                f"layers, but you requested {len(self.encoder.layers)} layers."
+            )
+
+        self.require_post_norm = require_post_norm
+        self.post_layernorm = nn.LayerNorm(
+            embed_dim,
+            eps=config.layer_norm_eps,
+        ) if require_post_norm else nn.Identity()
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -326,12 +336,14 @@ class Idefics2VisionTransformer(nn.Module):
         hidden_states = self.embeddings(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
-            tgt_sizes=tgt_sizes)
+            tgt_sizes=tgt_sizes,
+        )
         encoder_outputs = self.encoder(hidden_states)
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -339,11 +351,30 @@ class Idefics2VisionTransformer(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        layer_count = len(self.encoder.layers)
+
         for name, loaded_weight in weights:
+            # skip pooling header
+            if name.startswith("head."):
+                continue
+
+            # post_layernorm is optional
+            if (name.startswith("post_layernorm.")
+                    and not self.require_post_norm):
+                continue
+
+            # omit layers when num_hidden_layers_override is set
+            if name.startswith("encoder.layers."):
+                layer_idx = int(name.split(".")[2])
+                if layer_idx >= layer_count:
+                    continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                param = params_dict[name.replace(weight_name, param_name)]
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
@@ -352,3 +383,5 @@ class Idefics2VisionTransformer(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

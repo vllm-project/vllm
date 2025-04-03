@@ -1,13 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
 """E2E tests to verify the correctness of the encoder-decoder framework
 
 Run `pytest tests/encoder_decoder/test_e2e_correctness.py`.
 """
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import pytest
 from transformers import AutoModelForSeq2SeqLM
 
-from vllm.attention.selector import (_Backend,
+from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
                                      global_force_attn_backend_context_manager)
 from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
@@ -20,8 +21,17 @@ LIST_ENC_DEC_SUPPORTED_BACKENDS = [
 ]
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    Since this module is V0 only, set VLLM_USE_V1=0 for
+    all tests in the module.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 def vllm_to_hf_output(
-    vllm_output: Tuple[List[int], str, Optional[SampleLogprobs]],
+    vllm_output: tuple[list[int], str, Optional[SampleLogprobs]],
     decoder_prompt_type: DecoderPromptType,
 ):
     """Sanitize vllm output to be comparable with hf output."""
@@ -32,6 +42,13 @@ def vllm_to_hf_output(
         hf_output_str = "<s>" + hf_output_str
 
     return output_ids, hf_output_str, out_logprobs
+
+
+@pytest.fixture(autouse=True)
+def clear_cache():
+    """Fixture to clear backend cache before each test."""
+    _cached_get_attn_backend.cache_clear()  # Clear the cache
+    yield  # This allows the test to run
 
 
 @pytest.mark.parametrize("model", ["facebook/bart-large-cnn"])

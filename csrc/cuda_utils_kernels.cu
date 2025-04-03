@@ -1,16 +1,22 @@
+#include "cuda_utils.h"
 #ifdef USE_ROCM
   #include <hip/hip_runtime.h>
   #include <hip/hip_runtime_api.h>
 #endif
+
 int64_t get_device_attribute(int64_t attribute, int64_t device_id) {
-  int device, value;
-  if (device_id < 0) {
-    cudaGetDevice(&device);
-  } else {
-    device = device_id;
-  }
-  cudaDeviceGetAttribute(&value, static_cast<cudaDeviceAttr>(attribute),
-                         device);
+  // Return the cached value on subsequent calls
+  static int value = [=]() {
+    int device = static_cast<int>(device_id);
+    if (device < 0) {
+      CUDA_CHECK(cudaGetDevice(&device));
+    }
+    int value;
+    CUDA_CHECK(cudaDeviceGetAttribute(
+        &value, static_cast<cudaDeviceAttr>(attribute), device));
+    return static_cast<int>(value);
+  }();
+
   return value;
 }
 

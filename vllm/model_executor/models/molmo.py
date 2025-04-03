@@ -1,30 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
-import re
-from array import array
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from functools import lru_cache, partial
-from typing import (Any, Iterable, List, Mapping, Optional, Tuple, TypedDict,
-                    Union)
+from functools import cached_property, partial
+from typing import List, Optional, Set, Tuple, TypedDict, Union
 
+import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
-from PIL import Image
-from torch import nn
-from torch.nn import functional as F
-from transformers import PretrainedConfig
+from transformers import (BatchFeature, PretrainedConfig, ProcessorMixin,
+                          TensorType)
+from transformers.image_utils import ImageInput
+from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention import Attention, AttentionMetadata
-from vllm.attention.selector import _Backend
+from vllm.attention import Attention
+from vllm.attention.layer import MultiHeadAttention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather)
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
+from vllm.model_executor.layers.activation import (MulAndSilu, QuickGELU,
+                                                   SiluAndMul)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -37,42 +39,61 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
-from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
-from vllm.transformers_utils.processor import get_processor
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
+                                   MultiModalDataItems)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptIndexTargets,
+                                        PromptInsertion, PromptUpdate)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (get_vit_attn_backend,
-                    make_empty_intermediate_tensors_factory, make_layers)
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP, SupportsQuant)
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix, merge_multimodal_embeddings)
+from .vision import scatter_patch_features, select_patch_features
 
 # TODO: hard-coded for now. Consider making it configurable.
 VIT_LAYERS = [-2, -9]
 NUM_PREFIX_TOKENS = 1
 ADDITIONAL_VOCAB_SIZE = 128
+IMAGE_PATCH_TOKEN = "<im_patch>"
+IM_COL_TOKEN = "<im_col>"
+IM_START_TOKEN = "<im_start>"
+IM_END_TOKEN = "<im_end>"
+POOLING_SIZE = 2
 
 
 class MolmoImageInputs(TypedDict):
-    images: torch.Tensor
-    """Shape:
-    `(batch_size, num_crops, num_patch, patch_dim)`
+    images: Union[torch.Tensor, list[torch.Tensor]]
+    """Shape: `(batch_size * num_images, num_crops, num_patch, patch_dim)`"""
+
+    image_masks: Optional[Union[torch.Tensor, list[torch.Tensor]]]
+    """Shape: `(batch_size * num_images, num_crops, num_patch)`"""
+
+    feat_is_patch: Union[torch.Tensor, list[torch.Tensor]]
+    """
+    A boolean mask indicating which image features correspond
+    to patch tokens.
+
+    Shape: `(batch_size * num_images, num_crops, num_patch)`
     """
 
-    image_input_idx: torch.Tensor
-    """Shape:
-    `(batch_size, num_crops, num_patch)`
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
+    """
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
+    
+    Shape: `(batch_size * num_images, num_embeds)`
     """
 
-    seq_len: torch.Tensor
-    """Shape:
-    `(batch_size, )`
-    """
-
-    image_masks: Optional[torch.Tensor]
-    """Shape:
-    `(batch_size, num_crops, num_patch)`
-    """
+    num_crops: torch.Tensor
+    """Shape: `(batch_size * num_images)`"""
 
 
 @dataclass
@@ -186,13 +207,11 @@ class MultiHeadDotProductAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend()
-        if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
-        }:
-            raise RuntimeError(
-                f"Molmo does not support {self.attn_backend} backend now.")
+        self.scale = self.head_dim**-0.5
+        self.attn = MultiHeadAttention(self.num_heads,
+                                       self.head_dim,
+                                       self.scale,
+                                       num_kv_heads=self.num_kv_heads)
 
     def forward(self,
                 inputs_q: torch.Tensor,
@@ -208,25 +227,8 @@ class MultiHeadDotProductAttention(nn.Module):
         xq, _ = self.wq(inputs_q)
         xk, _ = self.wk(inputs_k)
         xv, _ = self.wv(inputs_v)
-        q_shape = xq.size()[:-1] + (self.num_heads, self.head_dim)
-        kv_shape = xk.size()[:-1] + (self.num_kv_heads, self.head_dim)
-        xq = xq.view(*q_shape)
-        xk = xk.view(*kv_shape)
-        xv = xv.view(*kv_shape)
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            from flash_attn import flash_attn_func
-            output = flash_attn_func(xq, xk, xv, dropout_p=0.0, causal=False)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
-            xq, xk, xv = (rearrange(x, "b s h d -> b h s d")
-                          for x in (xq, xk, xv))
-            output = F.scaled_dot_product_attention(xq, xk, xv)
-            output = rearrange(output, "b h s d -> b s h d ")
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            output = xops.memory_efficient_attention_forward(xq, xk, xv, p=0)
-
-        output = rearrange(output, "b s h d -> b s (h d)").contiguous()
+        output = self.attn(xq, xk, xv)
         output, _ = self.wo(output)
 
         return output
@@ -340,7 +342,7 @@ class VisionTransformer(nn.Module):
 
     def forward(self,
                 x: torch.Tensor,
-                patch_num: int = None) -> List[torch.Tensor]:
+                patch_num: Optional[int] = None) -> List[torch.Tensor]:
         """
         : param x: (batch_size, num_patch, n_pixels)
         """
@@ -370,6 +372,7 @@ class MolmoAttention(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -427,7 +430,8 @@ class MolmoAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
         # Attention output projection.
         self.o_proj = RowParallelLinear(
@@ -455,43 +459,36 @@ class MolmoAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.q_norm is not None and self.k_norm is not None:
             q, k = self._apply_qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
 
-class MolmoMLP(nn.Module):
+class LanguageModelMLP(nn.Module):
     """Molmo's LLM mlp."""
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        input_dim: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+    def __init__(self,
+                 config: PretrainedConfig,
+                 input_dim: Optional[int] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size // 2
 
-        # Feed-forward input projection.
         self.gate_up_proj = MergedColumnParallelLinear(
             input_dim or self.hidden_size,
             [self.intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
         )
-
         # Activation function.
-        self.act_fn = SiluAndMul()
-
+        self.act_fn = MulAndSilu()
         # Feed-forward output projection.
         self.down_proj = RowParallelLinear(
             self.intermediate_size,
@@ -510,6 +507,46 @@ class MolmoMLP(nn.Module):
         return x
 
 
+class ImageProjectorMLP(nn.Module):
+    """Molmo's image_projector mlp."""
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        input_dim: Optional[int] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size // 2
+
+        self.merged_linear = MergedColumnParallelLinear(
+            input_dim or self.hidden_size,
+            [self.intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+        )
+        # Activation function.
+        self.act_fn = SiluAndMul()
+
+        # Feed-forward output projection.
+        self.down_proj = RowParallelLinear(
+            self.intermediate_size,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        gate_up, _ = self.merged_linear(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
 class MolmoDecoderLayer(nn.Module):
 
     def __init__(
@@ -517,13 +554,17 @@ class MolmoDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         # Attention block.
-        self.self_attn = MolmoAttention(config, cache_config, quant_config)
+        self.self_attn = MolmoAttention(config,
+                                        cache_config,
+                                        quant_config,
+                                        prefix=f"{prefix}.self_attn")
 
         # MLP block.
-        self.mlp = MolmoMLP(config, quant_config=quant_config)
+        self.mlp = LanguageModelMLP(config, quant_config=quant_config)
 
         # LayerNorm
         assert config.layer_norm_type == "rms"
@@ -536,8 +577,6 @@ class MolmoDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Self Attention
@@ -550,8 +589,6 @@ class MolmoDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         hidden_states, residual = self.post_attention_layernorm(
@@ -566,8 +603,6 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Self Attention
@@ -575,8 +610,6 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -590,7 +623,8 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
         return hidden_states, residual
 
 
-class MolmoVisionBackbone(nn.Module):
+class MolmoVisionBackbone(nn.Module, SupportsQuant):
+    packed_modules_mapping = {"merged_linear": ["gate_proj", "up_proj"]}
 
     def __init__(
         self,
@@ -602,8 +636,8 @@ class MolmoVisionBackbone(nn.Module):
         self.vit_layers = VIT_LAYERS
         self.image_num_patch = vision_config.image_num_patch
         self.llm_patches_per_crop = (
-            (self.image_num_patch[0] + 1) // 2,
-            (self.image_num_patch[1] + 1) // 2,
+            (self.image_num_patch[0] + 1) // POOLING_SIZE,
+            (self.image_num_patch[1] + 1) // POOLING_SIZE,
         )
         self.image_vit = VisionTransformer(vision_config,
                                            quant_config=quant_config)
@@ -615,7 +649,7 @@ class MolmoVisionBackbone(nn.Module):
             vision_config,
             nlayers=len(self.vit_layers),
             quant_config=quant_config)
-        self.image_projector = MolmoMLP(
+        self.image_projector = ImageProjectorMLP(
             config,
             input_dim=vision_config.image_emb_dim,
             quant_config=quant_config,
@@ -661,9 +695,10 @@ class MolmoVisionBackbone(nn.Module):
         return image_features
 
     def forward(
-        self, images: torch.Tensor, image_masks: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-
+        self,
+        images: torch.Tensor,
+        image_masks: torch.Tensor,
+    ) -> torch.Tensor:
         # image_features: (batch_size, num_crops(=num_image), num_patch, nximage_emb_dim) # noqa: E501
         batch_size, num_image = images.shape[:2]
         images = images.to(device=self.device, dtype=self.dtype)
@@ -687,19 +722,19 @@ class MolmoVisionBackbone(nn.Module):
         image_features = image_features.reshape(
             (batch_size, num_image) + self.image_num_patch + (-1, ), )
 
-        if self.image_num_patch[0] % 2 == 1:
-            # Pad so we can still pool 2x2 patches
+        if (missing_w := self.image_num_patch[0] % POOLING_SIZE):
+            # Padding for image pooling (see below)
             image_features = F.pad(
                 image_features,
-                (0, 0, 0, 1, 0, 1, 0, 0, 0, 0),
+                (0, 0, 0, missing_w, 0, missing_w, 0, 0, 0, 0),
             )
 
         # image pooling
         image_features = rearrange(
             image_features,
             'b n (h dh) (w dw) c -> (b n h w) (dh dw) c',
-            dh=2,
-            dw=2,
+            dh=POOLING_SIZE,
+            dw=POOLING_SIZE,
         )
 
         query = image_features.mean(-2, keepdim=True)
@@ -713,18 +748,53 @@ class MolmoVisionBackbone(nn.Module):
         # image_features: (batch_size, num_image, num_patch, d_model)
         return image_features
 
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("merged_linear", "gate_proj", 0),
+            ("merged_linear", "up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+
+        for name, loaded_weight in weights:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 @support_torch_compile
-class MolmoModel(nn.Module):
+class MolmoModel(nn.Module, SupportsQuant):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
 
         self.embedding_size = config.embedding_size or config.vocab_size
@@ -739,7 +809,8 @@ class MolmoModel(nn.Module):
             else MolmoDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: decoder_layer(config, cache_config, quant_config),
+            lambda prefix: decoder_layer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -750,12 +821,16 @@ class MolmoModel(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -771,13 +846,10 @@ class MolmoModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         # Apply blocks one-by-one.
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
@@ -791,256 +863,578 @@ class MolmoModel(nn.Module):
             hidden_states = self.norm(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
 
-cached_get_processor = lru_cache(get_processor)
+        for name, loaded_weight in weights:
+            if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
+                continue
+
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
-def get_num_patches(num_tiles: int, crop_patches: int, left_margin: int,
-                    right_margin: int, pooling_size: int) -> int:
+def _lowest_multiple(x: int, k: int) -> int:
+    return (x // k) * k
+
+
+def get_num_patches(
+    num_tiles: int,
+    *,
+    crop_patches: int,
+    left_margin: int,
+    right_margin: int,
+    pooling_size: int,
+) -> int:
+    if num_tiles == 1:
+        return _lowest_multiple(crop_patches + pooling_size - 1, pooling_size)
+
     crop_window_patches = crop_patches - (left_margin + right_margin)
-    if num_tiles > 1:
-        left_crop_window_patches = (crop_window_patches + left_margin +
-                                    pooling_size -
-                                    1) // pooling_size * pooling_size
-        middle_crop_window_patches = (crop_window_patches + pooling_size -
-                                      1) // pooling_size * pooling_size
-        right_crop_window_patches = (crop_window_patches + right_margin +
-                                     pooling_size -
-                                     1) // pooling_size * pooling_size
-        return left_crop_window_patches + (
-            num_tiles -
-            2) * middle_crop_window_patches + right_crop_window_patches
-    else:
-        single_crop_window_patches = (crop_patches + pooling_size -
-                                      1) // pooling_size * pooling_size
-        return single_crop_window_patches
 
-
-def get_tokens(tiling_h: int, tiling_w: int, crop_patches: int,
-               left_margin: int, right_margin: int, pooling_size: int) -> int:
-    h = get_num_patches(tiling_h, crop_patches, left_margin, right_margin,
-                        pooling_size)
-    w = get_num_patches(tiling_w, crop_patches, left_margin, right_margin,
-                        pooling_size)
-    per_row = w // pooling_size + 1
-    joint = per_row * (h // pooling_size) + 2
-    image_token_length = (crop_patches + pooling_size - 1) // pooling_size
-    resize = (image_token_length + 1) * image_token_length + 2
-    return resize + joint
-
-
-def get_max_tokens(max_crops: int, crop_patches: int, left_margin: int,
-                   right_margin: int, pooling_size: int) -> int:
-    tilings = []
-    for i in range(1, max_crops + 1):
-        for j in range(1, max_crops + 1):
-            if i * j <= max_crops:
-                tilings.append((i, j))
-    tokens = [
-        get_tokens(tilings[i][0], tilings[i][1], crop_patches, left_margin,
-                   right_margin, pooling_size) for i in range(len(tilings))
-    ]
-    return max(tokens)
-
-
-def get_max_molmo_image_tokens(ctx: InputContext) -> int:
-    processor = cached_get_processor(
-        ctx.model_config.model,
-        trust_remote_code=ctx.model_config.trust_remote_code,
-        revision=ctx.model_config.code_revision)
-    image_processor = processor.image_processor
-    max_llm_image_tokens = get_max_tokens(
-        image_processor.max_crops,
-        image_processor.base_image_input_size[0] //
-        image_processor.image_patch_size,
-        image_processor.overlap_margins[0],
-        image_processor.overlap_margins[1],
-        2,
+    left_num = _lowest_multiple(
+        crop_window_patches + left_margin + pooling_size - 1,
+        pooling_size,
     )
-    return max_llm_image_tokens
+    middle_num = _lowest_multiple(
+        crop_window_patches + pooling_size - 1,
+        pooling_size,
+    )
+    right_num = _lowest_multiple(
+        crop_window_patches + right_margin + pooling_size - 1,
+        pooling_size,
+    )
+
+    return left_num + (num_tiles - 2) * middle_num + right_num
 
 
-# NOTE: preprocessing for the image data has been included in the
-# 'input_processor_for_molmo' function
-def image_input_mapper_for_molmo(
-    ctx: InputContext,
-    data: object,
+def get_patches_grid_size(
+    *,
+    tiling_h: int,
+    tiling_w: int,
+    crop_patches: int,
+    left_margin: int,
+    right_margin: int,
+    pooling_size: int,
+) -> tuple[int, int]:
+    nrows = get_num_patches(
+        tiling_h,
+        crop_patches=crop_patches,
+        left_margin=left_margin,
+        right_margin=right_margin,
+        pooling_size=pooling_size,
+    )
+    ncols = get_num_patches(
+        tiling_w,
+        crop_patches=crop_patches,
+        left_margin=left_margin,
+        right_margin=right_margin,
+        pooling_size=pooling_size,
+    )
+
+    return nrows, ncols
+
+
+def get_candidate_tilings(max_num: int) -> list[tuple[int, int]]:
+    tilings = [(i, j) for i in range(1, max_num + 1)
+               for j in range(1, max_num + 1) if i * j <= max_num]
+    return sorted(tilings, key=lambda x: x[0] * x[1])
+
+
+def select_tiling(
+    *,
+    height: int,
+    width: int,
+    patch_size: int,
+    max_num_patches: int,
 ):
-    return MultiModalInputs(data)
+    tilings = get_candidate_tilings(max_num_patches)
+    candidate_tilings = np.array(tilings, dtype=np.int32)
+    candidate_resolutions = candidate_tilings * patch_size
 
+    original_size = np.array([height, width], dtype=np.float32)
+    required_scale_d = candidate_resolutions.astype(np.float32) / original_size
+    required_scale = required_scale_d.min(axis=-1, keepdims=True)
 
-def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
-                         mm_counts: Mapping[str, int]):
-    processor = cached_get_processor(
-        ctx.model_config.model,
-        trust_remote_code=ctx.model_config.trust_remote_code,
-        revision=ctx.model_config.code_revision)
-    image_processor = processor.image_processor
-
-    base_image_input_d = image_processor.image_patch_size
-    left_margin, right_margin = image_processor.overlap_margins
-    max_crops = image_processor.max_crops
-
-    # Assume: prompt_token_ids always starts with bos_token_id followed image tokens # noqa: E501
-    max_llm_image_tokens = get_max_molmo_image_tokens(ctx)
-    if seq_len - max_llm_image_tokens - 1 < 0:
-        raise RuntimeError(
-            f"Molmo cannot process {max_crops} crops in a prompt, "
-            "please increase max_model_len or reduce number of crops")
-
-    # The vertical image has the maximum number of image tokens due to column tokens. # noqa: E501
-    tiling = (max_crops, 1)
-    total_margin_pixels = base_image_input_d * (right_margin + left_margin)
-    crop_patches = image_processor.base_image_input_size[
-        0] // base_image_input_d
-    crop_window_patches = crop_patches - (right_margin + left_margin)
-    crop_window_size = crop_window_patches * base_image_input_d
-
-    h = crop_window_size * tiling[0] + total_margin_pixels
-    w = crop_window_size * tiling[1] + total_margin_pixels
-
-    dummy_image = Image.new("RGB", (w, h), color="red")
-
-    out = processor.process("dummy prompt", dummy_image)
-
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      out["input_ids"][:1 + max_llm_image_tokens])
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - max_llm_image_tokens - 1)
-    dummy_seqdata = SequenceData(token_ids)
-    dummy_imgdata = {
-        "images": out["images"],
-        "image_input_idx": out["image_input_idx"],
-    }
-    if "image_masks" in out:
-        dummy_imgdata["image_masks"] = out["image_masks"]
-    dummy_imgdata["seq_len"] = torch.tensor(seq_len, dtype=torch.long)
-    return DummyData(dummy_seqdata, {"image": dummy_imgdata})
-
-
-def pad_images(
-    max_total_crops: int,
-    images: torch.Tensor,
-    image_input_idx: torch.Tensor,
-    image_masks: Optional[torch.Tensor] = None,
-):
-    n = max_total_crops - images.shape[0]
-    images = F.pad(images, (0, 0, 0, 0, 0, n), value=-1)
-    image_input_idx = F.pad(image_input_idx, (0, 0, 0, n), value=-1)
-    if image_masks is not None:
-        image_masks = F.pad(image_masks, (0, 0, 0, n), value=-1)
-    return images, image_input_idx, image_masks
-
-
-def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
-    prompt = inputs.get("prompt")
-    multi_modal_data = inputs.get("multi_modal_data")
-    image = None if multi_modal_data is None else multi_modal_data.get("image")
-
-    model_config = ctx.model_config
-    processor = cached_get_processor(
-        ctx.model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        revision=ctx.model_config.code_revision)
-    tokenizer = cached_get_tokenizer(
-        model_config.tokenizer,
-        trust_remote_code=model_config.trust_remote_code)
-
-    # NOTE: message formatting for raw text prompt is only applied for
-    # offline inference; for online inference, the prompt is always in
-    # instruction format and tokenized.
-    if prompt is not None and re.match(r"^User:[\s\S]*?(Assistant:)*$",
-                                       prompt):
-        out = processor.process(prompt, image, message_format="none")
-    elif prompt is not None:
-        out = processor.process(prompt, image)
+    if (required_scale < 1).all():
+        ix = required_scale.argmax()
     else:
-        out = processor.process(None, image, tokens=inputs["prompt_token_ids"])
+        ix = np.where(required_scale < 1.0, 10e9, required_scale).argmin()
 
-    image_processor = processor.image_processor
-    max_total_crops = 1 + image_processor.max_crops
-    if image is not None:
-        images, image_input_idx, image_masks = pad_images(
-            max_total_crops,
-            out["images"],
-            out["image_input_idx"],
-            out.get("image_masks"),
-        )
-    else:
-        base_image_input_size = image_processor.base_image_input_size
-        image_patch_size = image_processor.image_patch_size
-        image_num_patch = (
-            base_image_input_size[0] // image_patch_size,
-            base_image_input_size[1] // image_patch_size,
-        )
-        n_pixels = image_patch_size * image_patch_size * 3
-        n_patches = image_num_patch[0] * image_num_patch[1]
-
-        image_length_w = image_processor.image_token_length_w
-        image_length_h = image_processor.image_token_length_h
-        tokens_per_image = image_length_w * image_length_h
-        images = torch.full(
-            (max_total_crops, n_patches, n_pixels),
-            -1,
-            dtype=torch.float32,
-        )
-        image_input_idx = torch.full(
-            (max_total_crops, tokens_per_image),
-            -1,
-            dtype=torch.int32,
-        )
-        if image_processor.image_padding_mask:
-            image_masks = torch.full(
-                (max_total_crops, n_patches),
-                -1,
-                dtype=torch.float32,
-            )
-
-    image_data = dict(
-        images=images,
-        image_input_idx=image_input_idx,
-    )
-    if image_masks is not None:
-        image_data["image_masks"] = image_masks
-
-    image_data["seq_len"] = torch.tensor(len(out["input_ids"]),
-                                         dtype=torch.long)
-
-    multi_modal_data = dict(image=image_data)
-
-    prompt = inputs.get("prompt")
-    if prompt is None:
-        prompt = tokenizer.decode(out["input_ids"])
-
-    return token_inputs(
-        prompt_token_ids=out["input_ids"],
-        prompt=prompt,
-        multi_modal_data=multi_modal_data,
-    )
+    return candidate_tilings[ix]
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(image_input_mapper_for_molmo)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_molmo_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_molmo)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_molmo)
-class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class MolmoProcessorWrapper:
+    """
+    Wraps :class:`MolmoProcessor` so that it can be called directly.
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        multimodal_config: Optional[MultiModalConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[Mapping[str, Any]] = None,
-    ) -> None:
+    The original definition can be found here:
+    https://huggingface.co/allenai/Molmo-7B-D-0924/blob/main/preprocessing_molmo.py
+    """
+
+    def __init__(self, processor: ProcessorMixin):
         super().__init__()
 
+        self.processor = processor
+
+    @cached_property
+    def vocab(self) -> dict[str, int]:
+        return self.processor.tokenizer.vocab  # type: ignore
+
+    @cached_property
+    def max_crops(self) -> int:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        max_crops = image_processor.max_crops
+        assert isinstance(max_crops, int)
+
+        return max_crops
+
+    @cached_property
+    def base_image_input_size(self) -> tuple[int, int]:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        base_image_input_size = image_processor.base_image_input_size
+        if isinstance(base_image_input_size, int):
+            return base_image_input_size, base_image_input_size
+
+        return tuple(base_image_input_size)
+
+    @cached_property
+    def image_patch_size(self) -> int:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        image_patch_size = image_processor.image_patch_size
+        assert isinstance(image_patch_size, int)
+
+        return image_patch_size
+
+    @cached_property
+    def overlap_margins(self) -> tuple[int, int]:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        left_margin, right_margin = image_processor.overlap_margins
+        assert isinstance(left_margin, int)
+        assert isinstance(right_margin, int)
+
+        return left_margin, right_margin
+
+    @cached_property
+    def image_token_length_w(self) -> int:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        image_token_length_w = image_processor.image_token_length_w
+        assert isinstance(image_token_length_w, int)
+
+        return image_token_length_w
+
+    @cached_property
+    def image_token_length_h(self) -> int:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        image_token_length_h = image_processor.image_token_length_h
+        assert isinstance(image_token_length_h, int)
+
+        return image_token_length_h
+
+    @property
+    def message_format(self) -> Optional[str]:
+        return "role"
+
+    @property
+    def always_start_with_space(self) -> bool:
+        return True
+
+    @cached_property
+    def image_patch_id(self) -> int:
+        return self.vocab[IMAGE_PATCH_TOKEN]
+
+    @cached_property
+    def im_col_id(self) -> int:
+        return self.vocab[IM_COL_TOKEN]
+
+    @cached_property
+    def im_start_id(self) -> int:
+        return self.vocab[IM_START_TOKEN]
+
+    @cached_property
+    def im_end_id(self) -> int:
+        return self.vocab[IM_END_TOKEN]
+
+    @property
+    def pooling_size(self) -> int:
+        return POOLING_SIZE
+
+    def select_tiling(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        max_crops = self.max_crops
+        left_margin, right_margin = self.overlap_margins
+        base_image_input_size = self.base_image_input_size
+        base_image_input_d = self.image_patch_size
+
+        total_margin_pixels = base_image_input_d * (right_margin + left_margin)
+        crop_patches = base_image_input_size[0] // base_image_input_d
+        crop_window_patches = crop_patches - (right_margin + left_margin)
+        crop_window_size = crop_window_patches * base_image_input_d
+        tiling_h, tiling_w = select_tiling(
+            height=image_height - total_margin_pixels,
+            width=image_width - total_margin_pixels,
+            patch_size=crop_window_size,
+            max_num_patches=max_crops,
+        )
+
+        return tiling_w, tiling_h
+
+    def get_patches_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        left_margin, right_margin = self.overlap_margins
+        base_image_input_size = self.base_image_input_size
+        base_image_input_d = self.image_patch_size
+        pooling_size = self.pooling_size
+
+        crop_patches = base_image_input_size[0] // base_image_input_d
+        tiling_w, tiling_h = self.select_tiling(
+            image_height=image_height,
+            image_width=image_width,
+        )
+
+        nrows, ncols = get_patches_grid_size(
+            tiling_h=tiling_h,
+            tiling_w=tiling_w,
+            crop_patches=crop_patches,
+            left_margin=left_margin,
+            right_margin=right_margin,
+            pooling_size=pooling_size,
+        )
+
+        return ncols, nrows
+
+    def __call__(
+        self,
+        text: Optional[Union[TextInput, list[TextInput]]] = None,
+        images: Optional[Union[ImageInput, list[ImageInput]]] = None,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+        **kwargs,
+    ) -> BatchFeature:
+        outputs = self.processor.process(  # type: ignore
+            text, images, **kwargs)
+
+        if images is None:
+            images = []
+        if not isinstance(images, list):
+            images = [images]
+
+        input_ids: torch.Tensor = outputs.pop("input_ids")
+        outputs["input_ids"] = input_ids.unsqueeze(0)
+
+        image_input_idx = outputs.pop("image_input_idx", None)
+        if image_input_idx is not None:
+            feat_is_patch = image_input_idx >= 0
+
+            input_is_embed = torch.isin(
+                input_ids,
+                torch.tensor([
+                    self.image_patch_id,
+                    self.im_col_id,
+                    self.im_start_id,
+                    self.im_end_id,
+                ]),
+            )
+            embed_ids = input_ids[input_is_embed]
+            embed_is_patch = embed_ids == self.image_patch_id
+            assert embed_is_patch.sum() == feat_is_patch.sum()
+
+            # image_tokens = extra_joint + joint
+            # Both `extra_joint` and `joint` have `im_start_id` and `im_end_id`
+            embed_start = torch.nonzero(embed_ids == self.im_start_id)[::2, 0]
+            embed_end = torch.nonzero(embed_ids == self.im_end_id)[1::2, 0]
+            assert len(embed_start) == len(embed_end) == len(images)
+
+            embed_is_patch = [
+                embed_is_patch[start:end + 1]
+                for start, end in zip(embed_start, embed_end)
+            ]
+
+            tilings = [
+                self.select_tiling(
+                    image_width=image.size[0],
+                    image_height=image.size[1],
+                ) for image in images
+            ]
+            # For each image: tiling_h * tiling_w + extra
+            num_crops = torch.tensor(tilings).prod(-1) + 1
+            assert num_crops.sum() == len(feat_is_patch)
+
+            outputs["feat_is_patch"] = feat_is_patch
+            outputs["embed_is_patch"] = embed_is_patch
+            outputs["num_crops"] = num_crops
+            outputs["img_patch_id"] = self.image_patch_id
+
+        return BatchFeature(outputs)
+
+
+class MolmoProcessingInfo(BaseProcessingInfo):
+
+    def get_hf_processor(self, **kwargs: object) -> MolmoProcessorWrapper:
+        processor = self.ctx.get_hf_processor(**kwargs)
+        return MolmoProcessorWrapper(processor)
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {"image": self.get_max_image_tokens()}
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: Optional[MolmoProcessorWrapper],
+    ) -> int:
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        ncols, nrows = processor.get_patches_grid_size(
+            image_width=image_width,
+            image_height=image_height,
+        )
+        pooling_size = processor.pooling_size
+
+        base_image_input_size = processor.base_image_input_size
+        base_image_input_d = processor.image_patch_size
+
+        crop_patches = base_image_input_size[0] // base_image_input_d
+
+        per_row = ncols // pooling_size + 1
+        joint = per_row * (nrows // pooling_size) + 2
+        image_token_length = (crop_patches + pooling_size - 1) // pooling_size
+        resize = (image_token_length + 1) * image_token_length + 2
+
+        return resize + joint
+
+    def get_max_image_tokens(self) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        return self.get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            processor=None,
+        )
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        processor = self.get_hf_processor()
+
+        tilings = get_candidate_tilings(processor.max_crops)
+        base_h, base_w = processor.base_image_input_size
+
+        largest_feature_size, largest_feature_pinpoint = 0, None
+        for wr, hr in tilings:
+            width, height = base_w * wr, base_h * hr
+
+            feat_size = self.get_num_image_tokens(
+                image_width=width,
+                image_height=height,
+                processor=processor,
+            )
+            if feat_size > largest_feature_size:
+                largest_feature_size = feat_size
+                largest_feature_pinpoint = ImageSize(width=width,
+                                                     height=height)
+
+        if largest_feature_size == 0 or largest_feature_pinpoint is None:
+            raise ValueError("Cannot have a largest feature size of 0!")
+
+        return largest_feature_pinpoint
+
+
+class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+        num_images = mm_counts.get("image", 0)
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text="",
+            mm_data=mm_data,
+        )
+
+
+class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        processor = self.info.get_hf_processor()
+
+        # Apply the chat template to the tokens
+        tokens = processor.processor.get_tokens_input(  # type: ignore
+            self.info.get_tokenizer().decode(prompt_tokens),
+            message_format=processor.message_format,
+            always_start_with_space=processor.always_start_with_space,
+        )
+
+        processed_data = self.info.ctx.call_hf_processor(
+            processor,  # type: ignore
+            dict(tokens=tokens),
+        )
+        prompt_ids, = processed_data.pop("input_ids").tolist()
+
+        return prompt_ids
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        num_crops = hf_inputs.get("num_crops", torch.empty(0))
+        num_images = len(num_crops)
+
+        return dict(
+            images=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
+            image_masks=MultiModalFieldConfig.flat_from_sizes(
+                "image", num_crops),
+            feat_is_patch=MultiModalFieldConfig.flat_from_sizes(
+                "image", num_crops),
+            embed_is_patch=MultiModalFieldConfig.batched("image"),
+            num_crops=MultiModalFieldConfig.batched("image"),
+            img_patch_id=MultiModalFieldConfig.shared("image", num_images),
+        )
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+        image_token_length_w = processor.image_token_length_w
+        image_token_length_h = processor.image_token_length_h
+        pooling_size = processor.pooling_size
+
+        img_patch_id = processor.image_patch_id
+        img_col_id = processor.im_col_id
+        img_start_id = processor.im_start_id
+        img_end_id = processor.im_end_id
+
+        extra_row = [img_patch_id] * image_token_length_w + [img_col_id]
+        extra_joint = ([img_start_id] + extra_row * image_token_length_h +
+                       [img_end_id])
+
+        def get_insertion_molmo(item_idx: int):
+            images = mm_items.get_items("image", ImageProcessorItems)
+            image_size = images.get_image_size(item_idx)
+
+            ncols, nrows = processor.get_patches_grid_size(
+                image_width=image_size.width,
+                image_height=image_size.height,
+            )
+
+            joint_row = ([img_patch_id] * ((ncols + 1) // pooling_size) +
+                         [img_col_id])
+            joint = ([img_start_id] + joint_row *
+                     ((nrows + 1) // pooling_size) + [img_end_id])
+
+            image_tokens = extra_joint + joint
+            return image_tokens
+
+        return [
+            PromptInsertion(
+                modality="image",
+                target=PromptIndexTargets.prefix("<|endoftext|>"),
+                insertion=get_insertion_molmo,
+            )
+        ]
+
+
+@MULTIMODAL_REGISTRY.register_processor(MolmoMultiModalProcessor,
+                                        info=MolmoProcessingInfo,
+                                        dummy_inputs=MolmoDummyInputsBuilder)
+class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
+                       SupportsQuant):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            # vision backbone mapping
+            "image_projector.w1.": "image_projector.gate_proj.",
+            "image_projector.w3.": "image_projector.up_proj.",
+            "image_projector.w2.": "image_projector.down_proj.",
+            # language backbone mapping
+            "att_proj": "self_attn.qkv_proj",
+            "attn_out": "self_attn.o_proj",
+            "q_norm": "self_attn.q_norm",
+            "k_norm": "self_attn.k_norm",
+            "ff_proj": "mlp.gate_up_proj",
+            "ff_out": "mlp.down_proj",
+            "attn_norm": "input_layernorm",
+            "ff_norm": "post_attention_layernorm",
+        },
+        orig_to_new_prefix={
+            # vision backbone mapping
+            "model.vision_backbone.": "vision_backbone.",
+            # language backbone mapping
+            "model.transformer.blocks.": "model.layers.",
+            "model.transformer.ln_f.": "model.norm.",
+            # lm_head is renamed to model.transformer.mlp.down_proj firstly,
+            # we need to run a second renaming for it
+            "model.transformer.mlp.down_proj.": "lm_head.",
+        },
+    )
+
+    packed_modules_mapping = {
+        "qkv_proj": ["qkv_proj"],
+        "gate_up_proj": ["gate_up_proj"],  # language model
+        "merged_linear": ["gate_proj", "up_proj"]  # image_projector
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
+        lora_config = vllm_config.lora_config
         self.config = config
         self.multimodal_config = multimodal_config
+        self.lora_config = lora_config
 
         vision_config = VisionBackboneConfig()
         self.vision_backbone = MolmoVisionBackbone(config, vision_config,
                                                    quant_config)
-        self.model = MolmoModel(config, cache_config, quant_config)
+        self.model = MolmoModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
+        self.img_patch_id = None
 
         if self.config.weight_tying:
             self.lm_head = self.model.transformer.wte
@@ -1063,118 +1457,134 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         **kwargs: object,
     ) -> Optional[MolmoImageInputs]:
         images = kwargs.pop("images", None)
-        image_masks = kwargs.pop("image_masks", None)
         if images is None:
             return None
 
-        image_input_idx = kwargs.pop("image_input_idx", None)
-        seq_len = kwargs.pop("seq_len", None)
-        if image_input_idx is None:
-            raise ValueError("image_input_idx is required for Molmo model.")
-        if seq_len is None:
-            raise ValueError("seq_len is required for Molmo model.")
-        if not isinstance(seq_len, torch.Tensor):
-            seq_len = torch.tensor(seq_len)
+        if not isinstance(images, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of images. "
+                             f"Got type: {type(images)}")
+
+        image_masks = kwargs.pop("image_masks", None)
+        if not (image_masks is None or isinstance(image_masks,
+                                                  (torch.Tensor, list))):
+            raise ValueError("Incorrect type of image_masks. "
+                             f"Got type: {type(image_masks)}")
+
+        feat_is_patch = kwargs.pop("feat_is_patch", None)
+        if not isinstance(feat_is_patch, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of feat_is_patch. "
+                             f"Got type: {type(feat_is_patch)}")
+
+        embed_is_patch = kwargs.pop("embed_is_patch", None)
+        if not isinstance(embed_is_patch, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of embed_is_patch. "
+                             f"Got type: {type(embed_is_patch)}")
+
+        num_crops = kwargs.pop("num_crops", None)
+        if not isinstance(num_crops, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of num_crops. "
+                             f"Got type: {type(num_crops)}")
+
+        img_patch_id = kwargs.pop("img_patch_id", None)
+        if not isinstance(img_patch_id, torch.Tensor):
+            raise ValueError("Incorrect type of img_patch_id. "
+                             f"Got type: {type(img_patch_id)}")
+        self.img_patch_id = img_patch_id.flatten().unique().item()
+
+        embed_is_patch = flatten_bn(embed_is_patch)
+        num_crops = flatten_bn(num_crops, concat=True)
 
         return MolmoImageInputs(
             images=images,
-            image_input_idx=image_input_idx,
-            seq_len=seq_len,
             image_masks=image_masks,
+            feat_is_patch=feat_is_patch,
+            embed_is_patch=embed_is_patch,
+            num_crops=num_crops,
         )
 
     def _process_image_input(
         self,
         image_input: MolmoImageInputs,
-    ) -> torch.Tensor:
+    ) -> list[torch.Tensor]:
+        images = image_input["images"]
+        image_masks = image_input["image_masks"]
+        feat_is_patch = image_input["feat_is_patch"]
+        num_crops = image_input["num_crops"]
 
-        image_features = self.vision_backbone(
-            images=image_input["images"],
-            image_masks=image_input["image_masks"],
+        # Call the vision backbone on the whole batch at once
+        images_flat = flatten_bn(images, concat=True)
+        image_masks_flat = (None if image_masks is None else flatten_bn(
+            image_masks, concat=True))
+        feat_is_patch_flat = flatten_bn(feat_is_patch, concat=True)
+
+        image_features_flat = self.vision_backbone(
+            images=images_flat.unsqueeze(0),
+            image_masks=(None if image_masks_flat is None else
+                         image_masks_flat.unsqueeze(0)),
+        ).squeeze(0)
+
+        # Only the features corresponding to patch tokens are relevant
+        return [
+            feats[f_is_patch] for feats, f_is_patch in zip(
+                image_features_flat.split(num_crops.tolist()),
+                feat_is_patch_flat.split(num_crops.tolist()),
+            )
+        ]
+
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+
+        image_features = self._process_image_input(image_input)
+
+        return scatter_patch_features(
+            image_features,
+            image_input["embed_is_patch"],
         )
 
-        return image_features
-
-    def _merge_multimodal_embeddings(
+    def get_input_embeddings(
         self,
-        inputs_embeds: torch.Tensor,
-        image_features: torch.Tensor,
-        image_input_idx: torch.Tensor,
-        seq_len: Union[torch.Tensor, List[torch.Tensor]],
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
-        batch_size, num_image, num_patch = image_features.shape[:3]
-        assert image_input_idx.shape == (batch_size, num_image, num_patch)
+        inputs_embeds = self.model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            assert self.img_patch_id is not None
 
-        image_features = image_features.to(inputs_embeds.device)
-        seq_len = seq_len.to(inputs_embeds.device)
-
-        # insert the image feature into the embedding.
-        image_features = image_features.view(batch_size, num_image * num_patch,
-                                             -1)
-        image_input_idx = image_input_idx.view(batch_size,
-                                               num_image * num_patch)
-
-        valid = image_input_idx >= 0
-        image_features = image_features * valid[:, :, None].to(
-            image_features.dtype)
-        image_features = image_features.view(
-            batch_size * num_image * num_patch, -1).contiguous()
-
-        image_input_idx = image_input_idx * valid.to(image_input_idx.dtype)
-        offset = torch.cat([seq_len.new_zeros(1),
-                            seq_len.cumsum(dim=0)[:-1]],
-                           dim=0)[:, None]
-        image_input_idx = image_input_idx + offset.to(image_input_idx.dtype)
-        image_input_idx = image_input_idx.flatten()[:, None]
-        mat = image_input_idx == torch.arange(
-            seq_len.sum().item(), device=inputs_embeds.device)[None, :]
-        mat = mat.to(image_features.dtype)
-
-        inputs_embeds = inputs_embeds + torch.einsum('nd,nm->md',
-                                                     image_features, mat)
-
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                select_patch_features(multimodal_embeddings),
+                self.img_patch_id,
+            )
         return inputs_embeds
 
     def forward(
         self,
         input_ids: torch.LongTensor,
         positions: torch.LongTensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> SamplerOutput:
+
         if intermediate_tensors is not None:
             inputs_embeds = None
-        else:
-            image_input = self._parse_and_validate_image_input(**kwargs)
 
-            if image_input is not None:
-                inputs_embeds = self.model.embed_tokens(input_ids)
-                image_features = self._process_image_input(image_input)
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
-                inputs_embeds = self._merge_multimodal_embeddings(
-                    inputs_embeds,
-                    image_features,
-                    image_input["image_input_idx"],
-                    image_input["seq_len"],
-                )
-            else:
-                inputs_embeds = self.model.embed_tokens(input_ids)
-
-        # always pass the input via `inputs_embeds`
-        # to make sure the computation graph is consistent
-        # for `torch.compile` integration
-        input_ids = None
-
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+        hidden_states = self.model(input_ids,
+                                   positions,
+                                   intermediate_tensors,
+                                   inputs_embeds=inputs_embeds)
 
         return hidden_states
 
@@ -1194,102 +1604,36 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
 
-        params_mapping = [
-            ("model.transformer.ln_f.weight", "model.norm.weight"),
-            ("attn_out", "self_attn.o_proj"),
-            ("att_proj", "self_attn.qkv_proj"),
-            ("q_norm", "self_attn.q_norm"),
-            ("k_norm", "self_attn.k_norm"),
-            ("attn_norm", "input_layernorm"),
-            ("ff_norm", "post_attention_layernorm"),
-        ]
+        loader = AutoWeightsLoader(self)
+        weights = _get_weights_with_merged_embedding(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="model",
+            connector="vision_backbone.image_projector",
+            tower_model="vision_backbone",
+        )
 
-        embedding_weight = dict()
-        projector_weight = dict()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if self.config.tie_word_embeddings and "lm_head.weight" in name:
-                continue
 
-            if "wte.embedding" in name:
-                embedding_weight["embedding"] = loaded_weight
-                continue
-
-            if "wte.new_embedding" in name:
-                embedding_weight["new_embedding"] = loaded_weight
-                continue
-
-            if "vision_backbone" in name:
-                if name.startswith("model"):
-                    name = name[len("model."):]
-                if 'image_projector' in name:
-                    if 'w1' in name:
-                        projector_weight['gate_proj'] = loaded_weight
-                    elif 'w3' in name:
-                        projector_weight['up_proj'] = loaded_weight
-                    elif 'w2' in name:
-                        projector_weight['down_proj'] = loaded_weight
-                    else:
-                        raise ValueError(
-                            f"Unexpected projector weight: {name}")
-                    continue
-            else:
-                if "transformer.blocks" in name:
-                    name = name.replace("transformer.blocks", "layers")
-
-                if "ff_proj" in name:
-                    name = name.replace("ff_proj", "mlp.gate_up_proj")
-                    assert 'weight' in name
-                    up_weight, gate_weight = loaded_weight.chunk(2, dim=0)
-                    loaded_weight = torch.cat([gate_weight, up_weight], dim=0)
-
-                elif "ff_out" in name:
-                    if "layers" in name:
-                        name = name.replace("ff_out", "mlp.down_proj")
-                    else:
-                        # lm head
-                        name = name.replace("model.transformer.ff_out",
-                                            "lm_head")
-
-                else:
-                    for (param_name, weight_name) in params_mapping:
-                        if param_name in name:
-                            name = name.replace(param_name, weight_name)
-                            break
-
-            try:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-            except KeyError:
-                raise ValueError(f"Unexpected weight: {name}") from None
-
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        gate_up_proj_weight = torch.cat(
-            [projector_weight["gate_proj"], projector_weight["up_proj"]],
-            dim=0)
-        name = "vision_backbone.image_projector.gate_up_proj.weight"
-        param = params_dict[name]
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, gate_up_proj_weight)
-
-        down_proj_weight = projector_weight["down_proj"]
-        name = "vision_backbone.image_projector.down_proj.weight"
-        param = params_dict[name]
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, down_proj_weight)
-
-        embedding_weight = torch.cat(
-            [embedding_weight["embedding"], embedding_weight["new_embedding"]],
-            dim=0)
-        name = "model.embed_tokens.weight"
-        param = params_dict[name]
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, embedding_weight)
+def _get_weights_with_merged_embedding(
+    weights: Iterable[Tuple[str, torch.Tensor]]
+) -> Iterable[Tuple[str, torch.Tensor]]:
+    embedding_weights = {}
+    for name, weight in weights:
+        if "wte.embedding" in name:
+            embedding_weights["embedding"] = weight
+        elif "wte.new_embedding" in name:
+            embedding_weights["new_embedding"] = weight
+        else:
+            yield (name, weight)
+    # this is compatible with most of quantization,
+    # because they won't quantize embed_tokens
+    embedding_weights = torch.cat(
+        [embedding_weights["embedding"], embedding_weights["new_embedding"]],
+        dim=0,
+    )
+    yield ("model.embed_tokens.weight", embedding_weights)

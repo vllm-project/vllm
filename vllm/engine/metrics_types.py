@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 These types are defined in this file to avoid importing vllm.engine.metrics
 and therefore importing prometheus_client.
@@ -14,8 +15,9 @@ do this in Python code and lazily import prometheus_client.
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Protocol
+from typing import List, Optional
 
+from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -39,6 +41,7 @@ class Stats:
     # Iteration stats (should have _iter suffix)
     num_prompt_tokens_iter: int
     num_generation_tokens_iter: int
+    num_tokens_iter: int
     time_to_first_tokens_iter: List[float]
     time_per_output_tokens_iter: List[float]
     num_preemption_iter: int
@@ -46,6 +49,10 @@ class Stats:
     # Request stats (should have _requests suffix)
     #   Latency
     time_e2e_requests: List[float]
+    time_queue_requests: List[float]
+    time_inference_requests: List[float]
+    time_prefill_requests: List[float]
+    time_decode_requests: List[float]
     time_in_queue_requests: List[float]
     model_forward_time_requests: List[float]
     model_execute_time_requests: List[float]
@@ -53,6 +60,7 @@ class Stats:
     num_prompt_tokens_requests: List[int]
     num_generation_tokens_requests: List[int]
     n_requests: List[int]
+    max_num_generation_tokens_requests: List[int]
     max_tokens_requests: List[int]
     finished_reason_requests: List[str]
     waiting_lora_adapters: List[str]
@@ -62,16 +70,10 @@ class Stats:
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
 
-class SupportsMetricsInfo(Protocol):
-
-    def metrics_info(self) -> Dict[str, str]:
-        ...
-
-
 class StatLoggerBase(ABC):
     """Base class for StatLogger."""
 
-    def __init__(self, local_interval: float) -> None:
+    def __init__(self, local_interval: float, vllm_config: VllmConfig) -> None:
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: List[int] = []
         self.num_generation_tokens: List[int] = []

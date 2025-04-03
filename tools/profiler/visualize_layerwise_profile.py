@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import copy
 import json
 import math
 import os
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -22,7 +24,7 @@ def largest_dist_from_leaf(node: dict, depth: int = 0):
 
 
 def get_entries_at_depth(depth: int,
-                         entries_and_traces: List[Tuple[Any, Any]],
+                         entries_and_traces: list[tuple[Any, Any]],
                          node: dict,
                          curr_depth: int = 0,
                          trace=()):
@@ -46,9 +48,9 @@ def get_entries_at_depth(depth: int,
                              trace=trace)
 
 
-def fold_nodes(root: dict, nodes_to_fold: List[str]):
+def fold_nodes(root: dict, nodes_to_fold: list[str]):
 
-    stack: List[dict] = [root]
+    stack: list[dict] = [root]
     while len(stack) != 0:
         node = stack.pop()
         if node['entry']['name'] in nodes_to_fold:
@@ -151,16 +153,31 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
            "scaled_int8_quant" in op_name:
             return True
 
+    # LoRA ops
+    def is_sgmv_shrink(op_name: str):
+        return "sgmv_shrink" in op_name
+
+    def is_sgmv_expand(op_name: str):
+        return "sgmv_expand" in op_name
+
+    def is_bgmv_shrink(op_name: str):
+        return "bgmv_shrink" in op_name
+
+    def is_bgmv_expand(op_name: str):
+        return "bgmv_expand" in op_name
+
+    def is_cutlass_gemm_op(op_name: str):
+        return "void cutlass::Kernel" in op_name or \
+           "void cutlass::device_kernel" in op_name
+
     def is_gemm_op(op_name: str):
         if is_quant(op_name):
             return False
-        if "xmma_gemm" in op_name  or \
+        return is_cutlass_gemm_op(op_name) or \
+           "xmma_gemm" in op_name  or \
            "gemv2T_kernel" in op_name or \
            "splitKreduce" in op_name or \
-           "void cutlass::Kernel" in op_name or \
-           "void cutlass::device_kernel" in op_name or \
-           "s16816gemm" in op_name:
-            return True
+           "s16816gemm" in op_name
 
     def is_elementwise_op(op_name: str):
         return "elementwise_kernel" in op_name
@@ -211,6 +228,18 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
     quant_ops = list(filter(lambda x: is_quant(x), ops))
     ops = list(filter(lambda x: x not in quant_ops, ops))
 
+    sgmv_shrink_ops = list(filter(lambda x: is_sgmv_shrink(x), ops))
+    ops = list(filter(lambda x: x not in sgmv_shrink_ops, ops))
+    sgmv_expand_ops = list(filter(lambda x: is_sgmv_expand(x), ops))
+    ops = list(filter(lambda x: x not in sgmv_expand_ops, ops))
+    bgmv_shrink_ops = list(filter(lambda x: is_bgmv_shrink(x), ops))
+    ops = list(filter(lambda x: x not in bgmv_shrink_ops, ops))
+    bgmv_expand_ops = list(filter(lambda x: is_bgmv_expand(x), ops))
+    ops = list(filter(lambda x: x not in bgmv_expand_ops, ops))
+
+    cutlass_gemm_ops = list(filter(lambda x: is_cutlass_gemm_op(x), ops))
+    ops = list(filter(lambda x: x not in cutlass_gemm_ops, ops))
+
     gemm_ops = list(filter(lambda x: is_gemm_op(x), ops))
     ops = list(filter(lambda x: x not in gemm_ops, ops))
 
@@ -257,6 +286,24 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
         trace_df['attention'] = trace_df[attention_ops].agg("sum", axis=1)
     if len(quant_ops):
         trace_df['quant_ops'] = trace_df[quant_ops].agg("sum", axis=1)
+
+    if len(sgmv_shrink_ops):
+        trace_df['sgmv_shrink_ops'] = trace_df[sgmv_shrink_ops].agg("sum",
+                                                                    axis=1)
+    if len(sgmv_expand_ops):
+        trace_df['sgmv_expand_ops'] = trace_df[sgmv_expand_ops].agg("sum",
+                                                                    axis=1)
+    if len(bgmv_shrink_ops):
+        trace_df['bgmv_shrink_ops'] = trace_df[bgmv_shrink_ops].agg("sum",
+                                                                    axis=1)
+    if len(bgmv_expand_ops):
+        trace_df['bgmv_expand_ops'] = trace_df[bgmv_expand_ops].agg("sum",
+                                                                    axis=1)
+
+    if len(cutlass_gemm_ops):
+        trace_df['cutlass_gemm_ops'] = trace_df[cutlass_gemm_ops].agg("sum",
+                                                                      axis=1)
+
     if len(gemm_ops):
         trace_df['gemm_ops'] = trace_df[gemm_ops].agg("sum", axis=1)
     if len(rms_norm_ops):
@@ -296,7 +343,9 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
         trace_df['reduce_kernel_ops'] = trace_df[reduce_kernel_ops].agg("sum",
                                                                         axis=1)
 
-    trace_df.drop(attention_ops + quant_ops + gemm_ops + rms_norm_ops +
+    trace_df.drop(attention_ops + quant_ops + sgmv_shrink_ops +
+                  sgmv_expand_ops + bgmv_shrink_ops + bgmv_expand_ops +
+                  cutlass_gemm_ops + gemm_ops + rms_norm_ops +
                   vocab_embed_ops + mem_ops + elementwise_ops +
                   nccl_all_reduce_ops + nccl_gather_ops + nccl_broadcast_ops +
                   nccl_other_ops + cross_device_reduce_1stage_ops +
@@ -315,7 +364,14 @@ def plot_trace_df(traces_df: pd.DataFrame,
                   plot_title: str,
                   output: Optional[Path] = None):
 
+    def get_phase_description(traces_df: pd.DataFrame, phase: str) -> str:
+        phase_df = traces_df.query(f'phase == "{phase}"')
+        descs = phase_df['phase_desc'].to_list()
+        assert all([desc == descs[0] for desc in descs])
+        return descs[0]
+
     phases = traces_df['phase'].unique()
+    phase_descs = [get_phase_description(traces_df, p) for p in phases]
     traces_df = traces_df.pivot_table(index="phase",
                                       columns="name",
                                       values=plot_metric,
@@ -324,7 +380,8 @@ def plot_trace_df(traces_df: pd.DataFrame,
     traces_df = group_trace_by_operations(traces_df)
 
     # Make the figure
-    fig, ax = plt.subplots(1, figsize=(5, 8), sharex=True)
+    fig_size_x = max(5, len(phases))
+    fig, ax = plt.subplots(1, figsize=(fig_size_x, 8), sharex=True)
 
     # Draw the stacked bars
     ops = list(traces_df)
@@ -332,7 +389,7 @@ def plot_trace_df(traces_df: pd.DataFrame,
     for op in ops:
         values = [traces_df[op][phase] for phase in phases]
         values = list(map(lambda x: 0.0 if math.isnan(x) else x, values))
-        ax.bar(phases, values, label=op, bottom=bottom)
+        ax.bar(phase_descs, values, label=op, bottom=bottom)
         bottom = [bottom[j] + values[j] for j in range(len(phases))]
 
     # Write the values as text on the bars
@@ -370,12 +427,12 @@ def main(
         plot_metric: str,
         make_names_unique: bool,
         top_k: int,
-        json_nodes_to_fold: List[str]):
+        json_nodes_to_fold: list[str]):
 
-    def prepare_data(profile_json: dict, step_keys: List[str]) -> pd.DataFrame:
+    def prepare_data(profile_json: dict, step_keys: list[str]) -> pd.DataFrame:
 
         def get_entries_and_traces(key: str):
-            entries_and_traces: List[Tuple[Any, Any]] = []
+            entries_and_traces: list[tuple[Any, Any]] = []
             for root in profile_json[key]["summary_stats"]:
                 # Fold nodes in the traces as per user request. i.e. simply
                 # make the requested nodes leaf-nodes.
@@ -389,6 +446,14 @@ def main(
             df.loc[df.nsmallest(len(df) - top_k + 1, metric).index,
                    ["name"]] = "others"
             return df
+
+        def get_phase_description(key: str) -> str:
+            num_running_seqs = profile_json[key]['metadata'][
+                'num_running_seqs']
+            if num_running_seqs is not None:
+                return f"{key}-seqs-{num_running_seqs}"
+            else:
+                return key
 
         # Get data for each key
         traces = list(map(lambda x: get_entries_and_traces(x), step_keys))
@@ -413,6 +478,7 @@ def main(
         # Fill in information about the step-keys
         for trace_df, step_key in zip(trace_dfs, step_keys):
             trace_df['phase'] = step_key
+            trace_df['phase_desc'] = get_phase_description(step_key)
 
         # Combine all data frames so they can be put in a single plot
         traces_df = pd.concat(trace_dfs)
@@ -426,12 +492,16 @@ def main(
     def make_plot_title_suffix(profile_json: dict) -> str:
         context = profile_json["context"]
         sparsity = context.get('sparsity', None)
-        return (f"{context['model']}\n"
+        run_type = \
+            f'Run {context["num_steps"]} steps' if context['num_steps'] else \
+                (f'Complete {context["complete_num_requests_per_step"]} per '
+                 f'step; Run till completion')
+        return (f"{context['engine_args']['model']}\n"
                 f"Batch={context['batch_size']}, "
                 f"PromptLen={context['prompt_len']}, "
-                f"OutputLen={context['output_len']},"
-                f"NumGpus={context['tensor_parallel_size']}"
-                f"{', Sparsity ' + sparsity if sparsity else ''}")
+                f"NumGpus={context['engine_args']['tensor_parallel_size']}"
+                f"{', Sparsity ' + sparsity if sparsity else ''}\n"
+                f"Run Type: {run_type}")
 
     profile_json = None
     with open(json_trace) as f:
@@ -466,11 +536,11 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--json-trace",
-        type=str,
-        required=True,
-        help="json trace file output by examples/offline_profile.py")
+    parser.add_argument("--json-trace",
+                        type=str,
+                        required=True,
+                        help="json trace file output by \
+                              examples/offline_inference/profiling.py")
     parser.add_argument("--output-directory",
                         type=str,
                         required=False,

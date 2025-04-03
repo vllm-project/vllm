@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import functools
 from typing import Callable, List, cast
 
@@ -65,7 +67,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     @staticmethod
     @functools.lru_cache
     def _log_prompt_logprob_unsupported_warning_once():
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         logger.warning(
             "Prompt logprob is not supported by multi step workers. "
@@ -97,6 +99,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         if seqs is None:
             seqs = sequence_group.get_seqs(
                 status=SequenceStatus.FINISHED_ABORTED)
+
+        for output in outputs:
+            if output.samples[0].output_token != VLLM_INVALID_TOKEN_ID:
+                sequence_group.metrics.spec_token_acceptance_counts[
+                    output.step_index] += 1
 
         assert seqs, "Expected RUNNING or FINISHED_ABORTED sequences"
         assert len(seqs) == 1, (
@@ -144,7 +151,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def _process_decode_and_stop(self, seq: Sequence,
                                  sampling_params: SamplingParams) -> None:
         new_char_count = 0
-        if sampling_params.detokenize:
+        if sampling_params.detokenize and self.detokenizer:
             new_char_count = self.detokenizer.decode_sequence_inplace(
                 seq, sampling_params)
 

@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Set
+from typing import List, Optional, Set, Union
 
 import torch
 
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import ExecuteModelRequest, PromptLogprobs
 from vllm.worker.worker_base import WorkerBase
 
 
@@ -54,6 +56,10 @@ class SpeculativeScores:
     # Optional last hidden states from the scoring model.
     hidden_states: Optional[torch.Tensor] = None
 
+    # Scoring model may also return logprobs for prompt tokens
+    # for each request, when chunked prefill is enabled.
+    prompt_logprobs: Optional[List[PromptLogprobs]] = None
+
     def __repr__(self):
         return (f"SpeculativeScores("
                 f"probs={self.probs.shape}, "
@@ -75,9 +81,11 @@ class SpeculativeProposer(ABC):
 
 class SpeculativeScorer(ABC):
 
-    def __init__(self, scorer_worker: WorkerBase, device: str,
-                 vocab_size: int):
+    def __init__(self, scorer_worker: WorkerBase,
+                 device: Union[torch.device, str], vocab_size: int):
         self._scorer_worker = scorer_worker
+        if isinstance(device, torch.device):
+            device = device.type
         self._device = device
         self._vocab_size = vocab_size
 

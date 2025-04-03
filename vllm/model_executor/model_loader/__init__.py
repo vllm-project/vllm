@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from torch import nn
 
 from vllm.config import VllmConfig

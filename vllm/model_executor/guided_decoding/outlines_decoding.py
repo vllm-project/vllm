@@ -1,14 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import concurrent.futures
+import os
 from enum import Enum
 from json import dumps as json_dumps
 from re import escape as regex_escape
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 from transformers import PreTrainedTokenizerBase
 
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
+from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import GuidedDecodingParams
 
 
@@ -48,9 +52,16 @@ pair   : UNESCAPED_STRING ":" value
 
 global_thread_pool = None  # used for generating logits processor fsm
 
+# It's not yet clear that using more provides a benefit, and it could
+# potentially starve other processes on the machine. We'll cap this for now and
+# adjust later if testing proves it to help overcome a bottleneck.
+_MAX_THREADPOOL_WORKERS = 16
+
 
 async def get_outlines_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizerBase
+    guided_params: GuidedDecodingParams,
+    tokenizer: PreTrainedTokenizerBase,
+    reasoner: Optional[ReasoningParser],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
            None]:
     """
@@ -65,17 +76,23 @@ async def get_outlines_guided_decoding_logits_processor(
         return None
 
     if global_thread_pool is None:
+        max_workers = os.cpu_count() or 2
+        if max_workers > _MAX_THREADPOOL_WORKERS:
+            max_workers = _MAX_THREADPOOL_WORKERS
         global_thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2)
+            max_workers=max_workers)
     loop = asyncio.get_running_loop()
 
     return await loop.run_in_executor(global_thread_pool,
                                       _get_logits_processor, guide, tokenizer,
-                                      mode, guided_params.whitespace_pattern)
+                                      mode, guided_params.whitespace_pattern,
+                                      reasoner)
 
 
 def get_local_outlines_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizerBase
+    guided_params: GuidedDecodingParams,
+    tokenizer: PreTrainedTokenizerBase,
+    reasoner: Optional[ReasoningParser],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
            None]:
     """
@@ -89,7 +106,7 @@ def get_local_outlines_guided_decoding_logits_processor(
         return None
 
     return _get_logits_processor(guide, tokenizer, mode,
-                                 guided_params.whitespace_pattern)
+                                 guided_params.whitespace_pattern, reasoner)
 
 
 def _get_guide_and_mode(
@@ -120,14 +137,18 @@ def _get_guide_and_mode(
 
 
 def _get_logits_processor(
-    guide: str, tokenizer: PreTrainedTokenizerBase, mode: GuidedDecodingMode,
-    whitespace_pattern: Union[str, None]
+    guide: str,
+    tokenizer: PreTrainedTokenizerBase,
+    mode: GuidedDecodingMode,
+    whitespace_pattern: Union[str, None],
+    reasoner: Optional[ReasoningParser],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor]:
     if mode == GuidedDecodingMode.JSON:
-        return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern)
+        return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern,
+                                   reasoner)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
-        return RegexLogitsProcessor(guide, tokenizer)
+        return RegexLogitsProcessor(guide, tokenizer, reasoner)
     elif mode == GuidedDecodingMode.GRAMMAR:
-        return CFGLogitsProcessor(guide, tokenizer)
+        return CFGLogitsProcessor(guide, tokenizer, reasoner)
     else:
         raise ValueError(f"Unknown guided decoding mode {mode}")

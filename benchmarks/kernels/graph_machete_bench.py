@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 import pickle
 import re
 from collections import defaultdict
-from typing import List
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -20,10 +21,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     with open(args.filename, 'rb') as f:
-        data: List[TMeasurement] = pickle.load(f)
+        data = pickle.load(f)
+        raw_results: list[TMeasurement] = data["results"]
 
     results = defaultdict(lambda: list())
-    for v in data:
+    for v in raw_results:
         result = re.search(r"MKN=\(\d+x(\d+x\d+)\)", v.task_spec.sub_label)
         if result is not None:
             KN = result.group(1)

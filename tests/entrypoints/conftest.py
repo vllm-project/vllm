@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 
@@ -66,6 +68,117 @@ def sample_json_schema():
             }
         },
         "required": ["name", "age", "skills", "work_history"]
+    }
+
+
+@pytest.fixture
+def sample_complex_json_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "score": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100  # Numeric range
+            },
+            "grade": {
+                "type": "string",
+                "pattern": "^[A-D]$"  # Regex pattern
+            },
+            "email": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+            },
+            "tags": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "pattern":
+                    "^[a-z]{1,10}$"  # Combining length and pattern restrictions
+                }
+            }
+        },
+        "required": ["score", "grade", "email", "tags"]
+    }
+
+
+@pytest.fixture
+def sample_definition_json_schema():
+    return {
+        '$defs': {
+            'Step': {
+                'properties': {
+                    'explanation': {
+                        'title': 'Explanation',
+                        'type': 'string'
+                    },
+                    'output': {
+                        'title': 'Output',
+                        'type': 'string'
+                    }
+                },
+                'required': ['explanation', 'output'],
+                'title': 'Step',
+                'type': 'object'
+            }
+        },
+        'properties': {
+            'steps': {
+                'items': {
+                    '$ref': '#/$defs/Step'
+                },
+                'title': 'Steps',
+                'type': 'array'
+            },
+            'final_answer': {
+                'title': 'Final Answer',
+                'type': 'string'
+            }
+        },
+        'required': ['steps', 'final_answer'],
+        'title': 'MathReasoning',
+        'type': 'object'
+    }
+
+
+@pytest.fixture
+def sample_enum_json_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["active", "inactive",
+                         "pending"]  # Literal values using enum
+            },
+            "priority": {
+                "type": "string",
+                "enum": ["low", "medium", "high", "critical"]
+            },
+            "category": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["bug", "feature", "improvement"]
+                    },
+                    "severity": {
+                        "type": "integer",
+                        "enum": [1, 2, 3, 4,
+                                 5]  # Enum can also contain numbers
+                    }
+                },
+                "required": ["type", "severity"]
+            },
+            "flags": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["urgent", "blocked", "needs_review", "approved"]
+                }
+            }
+        },
+        "required": ["status", "priority", "category", "flags"]
     }
 
 

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 scversion="stable"
 
@@ -18,4 +19,4 @@ if ! [ -x "$(command -v shellcheck)" ]; then
 fi
 
 # TODO - fix warnings in .buildkite/run-amd-test.sh
-find . -name "*.sh" -not -path "./.deps/*" -not -path "./.buildkite/run-amd-test.sh" -exec shellcheck {} +
+find . -name "*.sh" ".git" -prune -not -path "./.buildkite/run-amd-test.sh" -print0 | xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash "{}"'

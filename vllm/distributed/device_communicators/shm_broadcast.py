@@ -1,10 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import pickle
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 from unittest.mock import patch
 
 import torch
@@ -14,12 +17,28 @@ from zmq import IPV6  # type: ignore
 from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
 import vllm.envs as envs
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.utils import get_ip, get_open_port, is_valid_ipv6_address
+from vllm.utils import (get_ip, get_open_port, get_open_zmq_ipc_path,
+                        is_valid_ipv6_address)
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
 logger = init_logger(__name__)
+
+# We prefer to use os.sched_yield as it results in tighter polling loops,
+# measured to be around 3e-7 seconds. However on earlier versions of Python
+# os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
+USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
+                   or (sys.version_info[:2] == (3, 10)
+                       and sys.version_info[2] >= 8))
+
+
+def sched_yield():
+    if USE_SCHED_YIELD:
+        os.sched_yield()
+    else:
+        time.sleep(0)
 
 
 class ShmRingBuffer:
@@ -106,19 +125,27 @@ class ShmRingBuffer:
                        lambda *args, **kwargs: None):
                 try:
                     self.shared_memory = shared_memory.SharedMemory(name=name)
-                    assert (
-                        self.shared_memory.size == self.total_bytes_of_buffer)
+                    # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
+                    # Some platforms allocate memory based on page size,
+                    # so the shared memory block size may be larger or equal
+                    # to the requested size. The size parameter is ignored
+                    # when attaching to an existing block.
+                    assert (self.shared_memory.size
+                            >= self.total_bytes_of_buffer)
                 except FileNotFoundError:
                     # we might deserialize the object in a different node
                     # in this case, this object is not used,
                     # and we should suppress the error
                     pass
 
+    def handle(self):
+        return (self.n_reader, self.max_chunk_bytes, self.max_chunks,
+                self.shared_memory.name)
+
     def __reduce__(self):
         return (
             self.__class__,
-            (self.n_reader, self.max_chunk_bytes, self.max_chunks,
-             self.shared_memory.name),
+            self.handle(),
         )
 
     def __del__(self):
@@ -144,12 +171,12 @@ class ShmRingBuffer:
 
 @dataclass
 class Handle:
-    connect_ip: str
     local_reader_ranks: List[int] = field(default_factory=list)
 
-    buffer: Optional[ShmRingBuffer] = None
-    local_subscribe_port: Optional[int] = None
-    remote_subscribe_port: Optional[int] = None
+    buffer_handle: Optional[Tuple[int, int, int, str]] = None
+    local_subscribe_addr: Optional[str] = None
+    remote_subscribe_addr: Optional[str] = None
+    remote_addr_ipv6: bool = False
 
 
 class MessageQueue:
@@ -171,9 +198,6 @@ class MessageQueue:
         n_remote_reader = n_reader - n_local_reader
         self.n_remote_reader = n_remote_reader
 
-        if connect_ip is None:
-            connect_ip = get_ip() if n_remote_reader > 0 else "127.0.0.1"
-
         context = Context()
 
         if n_local_reader > 0:
@@ -191,32 +215,35 @@ class MessageQueue:
             # message. otherwise, we will only receive the first subscription
             # see http://api.zeromq.org/3-3:zmq-setsockopt for more details
             self.local_socket.setsockopt(XPUB_VERBOSE, True)
-            local_subscribe_port = get_open_port()
-            socket_addr = f"tcp://127.0.0.1:{local_subscribe_port}"
-            logger.debug("Binding to %s", socket_addr)
-            self.local_socket.bind(socket_addr)
+            local_subscribe_addr = get_open_zmq_ipc_path()
+            logger.debug("Binding to %s", local_subscribe_addr)
+            self.local_socket.bind(local_subscribe_addr)
 
             self.current_idx = 0
-
         else:
             self.buffer = None  # type: ignore
-            local_subscribe_port = None
+            local_subscribe_addr = None
             self.local_socket = None
             self.current_idx = -1
 
+        remote_addr_ipv6 = False
         if n_remote_reader > 0:
             # for remote readers, we will:
             # create a publish-subscribe socket to communicate large data
+            if not connect_ip:
+                connect_ip = get_ip()
             self.remote_socket = context.socket(XPUB)
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
             remote_subscribe_port = get_open_port()
             if is_valid_ipv6_address(connect_ip):
                 self.remote_socket.setsockopt(IPV6, 1)
+                remote_addr_ipv6 = True
+                connect_ip = f"[{connect_ip}]"
             socket_addr = f"tcp://*:{remote_subscribe_port}"
             self.remote_socket.bind(socket_addr)
-
+            remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
         else:
-            remote_subscribe_port = None
+            remote_subscribe_addr = None
             self.remote_socket = None
 
         self._is_writer = True
@@ -226,11 +253,12 @@ class MessageQueue:
         self._is_remote_reader = False
 
         self.handle = Handle(
-            connect_ip=connect_ip,
             local_reader_ranks=local_reader_ranks,
-            buffer=self.buffer,
-            local_subscribe_port=local_subscribe_port,
-            remote_subscribe_port=remote_subscribe_port,
+            buffer_handle=self.buffer.handle()
+            if self.buffer is not None else None,
+            local_subscribe_addr=local_subscribe_addr,
+            remote_subscribe_addr=remote_subscribe_addr,
+            remote_addr_ipv6=remote_addr_ipv6,
         )
 
         logger.info("vLLM message queue communication handle: %s", self.handle)
@@ -247,8 +275,8 @@ class MessageQueue:
         context = Context()
 
         if rank in handle.local_reader_ranks:
-            assert handle.buffer is not None
-            self.buffer = handle.buffer
+            assert handle.buffer_handle is not None
+            self.buffer = ShmRingBuffer(*handle.buffer_handle)
             self.current_idx = 0
             self.local_reader_rank = handle.local_reader_ranks.index(rank)
             self._is_local_reader = True
@@ -256,7 +284,7 @@ class MessageQueue:
 
             self.local_socket = context.socket(SUB)
             self.local_socket.setsockopt_string(SUBSCRIBE, "")
-            socket_addr = f"tcp://127.0.0.1:{handle.local_subscribe_port}"
+            socket_addr = handle.local_subscribe_addr
             logger.debug("Connecting to %s", socket_addr)
             self.local_socket.connect(socket_addr)
 
@@ -272,9 +300,9 @@ class MessageQueue:
 
             self.remote_socket = context.socket(SUB)
             self.remote_socket.setsockopt_string(SUBSCRIBE, "")
-            if is_valid_ipv6_address(handle.connect_ip):
+            if handle.remote_addr_ipv6:
                 self.remote_socket.setsockopt(IPV6, 1)
-            socket_addr = f"tcp://{handle.connect_ip}:{handle.remote_subscribe_port}"
+            socket_addr = handle.remote_subscribe_addr
             logger.debug("Connecting to %s", socket_addr)
             self.remote_socket.connect(socket_addr)
 
@@ -314,7 +342,7 @@ class MessageQueue:
             assert recv == b"READY"
 
     @contextmanager
-    def acquire_write(self):
+    def acquire_write(self, timeout: Optional[float] = None):
         assert self._is_writer, "Only writers can acquire write"
         start_time = time.monotonic()
         n_warning = 1
@@ -329,15 +357,22 @@ class MessageQueue:
                     # we need to wait until it is read by all readers
 
                     # Release the processor to other threads
-                    os.sched_yield()
+                    sched_yield()
 
-                    # if we wait for a long time, we should warn the user
-                    if (time.monotonic() - start_time >
-                            VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.warning(
-                            "No available block found in %s second. ",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                    # if we wait for a long time, log a message
+                    if (time.monotonic() - start_time
+                            > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
+                        logger.debug(
+                            ("No available shared memory broadcast block found"
+                             " in %s second."),
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                        )
                         n_warning += 1
+
+                    # if we time out, raise an exception
+                    if (timeout is not None
+                            and time.monotonic() - start_time > timeout):
+                        raise TimeoutError
 
                     continue
                 # found a block that is either
@@ -365,7 +400,7 @@ class MessageQueue:
                 break
 
     @contextmanager
-    def acquire_read(self):
+    def acquire_read(self, timeout: Optional[float] = None):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
@@ -383,15 +418,22 @@ class MessageQueue:
                     # we need to wait until it is written
 
                     # Release the processor to other threads
-                    os.sched_yield()
+                    sched_yield()
 
-                    # if we wait for a long time, we should warn the user
-                    if (time.monotonic() - start_time >
-                            VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.warning(
-                            "No available block found in %s second. ",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                    # if we wait for a long time, log a message
+                    if (time.monotonic() - start_time
+                            > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
+                        logger.debug(
+                            ("No available shared memory broadcast block found"
+                             "in %s second."),
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                        )
                         n_warning += 1
+
+                    # if we time out, raise an exception
+                    if (timeout is not None
+                            and time.monotonic() - start_time > timeout):
+                        raise TimeoutError
 
                     continue
                 # found a block that is not read by this reader
@@ -406,24 +448,26 @@ class MessageQueue:
                                     1) % self.buffer.max_chunks
                 break
 
-    def enqueue(self, obj):
+    def enqueue(self, obj, timeout: Optional[float] = None):
+        """ Write to message queue with optional timeout (in seconds) """
         assert self._is_writer, "Only writers can enqueue"
         serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
         if self.n_local_reader > 0:
             if len(serialized_obj) >= self.buffer.max_chunk_bytes:
-                with self.acquire_write() as buf:
+                with self.acquire_write(timeout) as buf:
                     buf[0] = 1  # overflow
                 self.local_socket.send(serialized_obj)
             else:
-                with self.acquire_write() as buf:
+                with self.acquire_write(timeout) as buf:
                     buf[0] = 0  # not overflow
                     buf[1:len(serialized_obj) + 1] = serialized_obj
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
-    def dequeue(self):
+    def dequeue(self, timeout: Optional[float] = None):
+        """ Read from message queue with optional timeout (in seconds) """
         if self._is_local_reader:
-            with self.acquire_read() as buf:
+            with self.acquire_read(timeout) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
                     # no need to know the size of serialized object
@@ -448,13 +492,19 @@ class MessageQueue:
             return self.dequeue()
 
     @staticmethod
-    def create_from_process_group(pg: ProcessGroup,
+    def create_from_process_group(pg: Union[ProcessGroup,
+                                            StatelessProcessGroup],
                                   max_chunk_bytes,
                                   max_chunks,
                                   writer_rank=0) -> "MessageQueue":
-        group_rank = dist.get_rank(pg)
-        group_world_size = dist.get_world_size(pg)
-        global_ranks = dist.get_process_group_ranks(pg)
+        if isinstance(pg, ProcessGroup):
+            group_rank = dist.get_rank(pg)
+            group_world_size = dist.get_world_size(pg)
+            global_ranks = dist.get_process_group_ranks(pg)
+        else:
+            group_rank = pg.rank
+            group_world_size = pg.world_size
+            global_ranks = list(range(pg.world_size))
 
         from vllm.distributed.parallel_state import in_the_same_node_as
         status = in_the_same_node_as(pg, source_rank=writer_rank)
@@ -472,15 +522,21 @@ class MessageQueue:
                 max_chunks=max_chunks,
             )
             handle = buffer_io.export_handle()
-            dist.broadcast_object_list([handle],
-                                       src=global_ranks[writer_rank],
-                                       group=pg)
+            if isinstance(pg, ProcessGroup):
+                dist.broadcast_object_list([handle],
+                                           src=global_ranks[writer_rank],
+                                           group=pg)
+            else:
+                pg.broadcast_obj(handle, writer_rank)
         else:
-            recv = [None]
-            dist.broadcast_object_list(recv,
-                                       src=global_ranks[writer_rank],
-                                       group=pg)
-            handle = recv[0]  # type: ignore
+            if isinstance(pg, ProcessGroup):
+                recv = [None]
+                dist.broadcast_object_list(recv,
+                                           src=global_ranks[writer_rank],
+                                           group=pg)
+                handle = recv[0]  # type: ignore
+            else:
+                handle = pg.broadcast_obj(None, writer_rank)
             buffer_io = MessageQueue.create_from_handle(handle, group_rank)
         buffer_io.wait_until_ready()
         return buffer_io

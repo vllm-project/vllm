@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 '''Tests whether bitsandbytes computation is enabled correctly.
 
 Run `pytest tests/quantization/test_bitsandbytes.py`.
@@ -9,10 +10,13 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
-from tests.utils import fork_new_process_for_each_test
+
+from ..utils import compare_two_settings, create_new_process_for_each_test
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
+    ("mistralai/Mistral-7B-Instruct-v0.3",
+     "quantize inflight model with both HF and Mistral format weights")
 ]
 
 models_pre_qaunt_4bit_to_test = [
@@ -31,7 +35,7 @@ models_pre_quant_8bit_to_test = [
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
@@ -44,7 +48,7 @@ def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description",
                          models_pre_qaunt_4bit_to_test)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                        model_name, description) -> None:
 
@@ -56,7 +60,7 @@ def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description",
                          models_pre_quant_8bit_to_test)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
@@ -69,7 +73,7 @@ def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                 model_name, description) -> None:
 
@@ -80,6 +84,32 @@ def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name,
                              hf_model_kwargs,
                              vllm_tp_size=2)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason='Test requires at least 2 GPUs.')
+@pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
+                    reason='bitsandbytes is not supported on this GPU type.')
+@pytest.mark.parametrize("model_name, description", models_4bit_to_test)
+@create_new_process_for_each_test()
+def test_load_pp_4bit_bnb_model(model_name, description) -> None:
+    common_args = [
+        "--disable-log-stats",
+        "--disable-log-requests",
+        "--dtype",
+        "bfloat16",
+        "--enable-prefix-caching",
+        "--quantization",
+        "bitsandbytes",
+        "--gpu-memory-utilization",
+        "0.7",
+    ]
+    pp_args = [
+        *common_args,
+        "--pipeline-parallel-size",
+        "2",
+    ]
+    compare_two_settings(model_name, common_args, pp_args)
 
 
 def log_generated_texts(prompts, outputs, runner_name):
@@ -105,7 +135,6 @@ def validate_generated_texts(hf_runner,
     # when using distributed inference
     with vllm_runner(model_name,
                      quantization='bitsandbytes',
-                     load_format='bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
                      enforce_eager=False) as llm:
         vllm_outputs = llm.generate_greedy(prompts, 8)

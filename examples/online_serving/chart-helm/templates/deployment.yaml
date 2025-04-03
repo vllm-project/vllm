@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "{{ .Release.Name }}-deployment-vllm"
+  namespace: {{ .Release.Namespace }}
+  labels:
+  {{- include "chart.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- include "chart.strategy" . | nindent 2 }}
+  selector:                                                                                                                                  
+    matchLabels:
+      environment: "test"
+      release: "test"
+  progressDeadlineSeconds: 1200
+  template:
+    metadata:
+      labels:
+        environment: "test"
+        release: "test"
+    spec:
+      containers:
+        - name: "vllm"
+          image: "{{ required "Required value 'image.repository' must be defined !" .Values.image.repository }}:{{ required "Required value 'image.tag' must be defined !" .Values.image.tag }}"
+          {{- if .Values.image.command }}
+          command :
+            {{- with .Values.image.command }}
+            {{- toYaml . | nindent 10 }}
+            {{- end }}
+          {{- end }}
+          securityContext:
+            {{- if .Values.image.securityContext }}
+              {{- with .Values.image.securityContext }}
+              {{- toYaml . | nindent 12 }}
+              {{- end }}
+            {{- else }}
+            runAsNonRoot: false
+              {{- include "chart.user" . | indent 12 }}
+            {{- end }}
+          imagePullPolicy: IfNotPresent
+          {{- if .Values.image.env }}
+          env :
+            {{- with .Values.image.env }}
+            {{- toYaml . | nindent 10 }}
+            {{- end }}
+          {{- else }}
+          env: []
+          {{- end }}
+          {{- if or .Values.externalConfigs .Values.configs .Values.secrets }}
+          envFrom:
+            {{- if .Values.configs }}
+            - configMapRef:
+                name: "{{ .Release.Name }}-configs"
+            {{- end }}
+            {{- if .Values.secrets}}
+            - secretRef:
+                name: "{{ .Release.Name }}-secrets"
+            {{- end }}
+            {{- include "chart.externalConfigs" . | nindent 12 }}
+          {{- end }}          
+          ports:
+            - name: {{ include "chart.container-port-name" . }}
+              containerPort: {{ include "chart.container-port" . }}
+            {{- include "chart.extraPorts" . | nindent 12 }}
+          {{- include "chart.probes" . | indent 10 }}
+          resources: {{- include "chart.resources" . | nindent 12 }}
+          volumeMounts:
+          - name: {{ .Release.Name }}-storage
+            mountPath: /data
+
+        {{- with .Values.extraContainers }}
+        {{ toYaml . | nindent 8 }}
+        {{- end }}
+
+      {{-   if .Values.extraInit  }}
+      initContainers:
+      - name: wait-download-model
+        image: {{ include "chart.extraInitImage" . }}
+        command: 
+          - /bin/bash
+        args:
+          - -eucx
+          - while aws --endpoint-url $S3_ENDPOINT_URL s3 sync --dryrun s3://$S3_BUCKET_NAME/$S3_PATH /data | grep -q download; do sleep 10; done
+        env: {{- include "chart.extraInitEnv" . | nindent 10 }}
+        resources:
+          requests:
+            cpu: 200m
+            memory: 1Gi
+          limits:
+            cpu: 500m
+            memory: 2Gi
+        volumeMounts:
+        - name: {{ .Release.Name }}-storage
+          mountPath: /data
+      {{- end }}
+      volumes:
+        - name: {{ .Release.Name }}-storage
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-storage-claim     
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and (gt (int (index .Values.resources.requests "nvidia.com/gpu")) 0) (gt (int (index .Values.resources.limits "nvidia.com/gpu")) 0) }}
+      runtimeClassName: nvidia
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.product
+                  operator: In
+                  {{- with .Values.gpuModels }}
+                  values:
+                    {{- toYaml . | nindent 20 }}
+                  {{- end }}
+      {{- end }} 

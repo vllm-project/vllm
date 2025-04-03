@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Make sure ray assigns GPU workers to the correct node.
 
 Run:

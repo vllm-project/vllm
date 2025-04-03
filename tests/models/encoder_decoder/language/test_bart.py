@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM for BART models using greedy sampling.
 
 Run `pytest tests/models/encoder_decoder/language/test_bart.py`.
 """
-from typing import List, Optional, Tuple, Type
+from typing import Optional
 
 import pytest
 from transformers import AutoModelForSeq2SeqLM
@@ -14,11 +15,9 @@ from ....conftest import (DecoderPromptType, ExplicitEncoderDecoderPrompt,
 from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
 
-MODELS = ["facebook/bart-base", "facebook/bart-large-cnn"]
-
 
 def vllm_to_hf_output(
-    vllm_output: Tuple[List[int], str, Optional[SampleLogprobs]],
+    vllm_output: tuple[list[int], str, Optional[SampleLogprobs]],
     decoder_prompt_type: DecoderPromptType,
 ):
     """Sanitize vllm output to be comparable with hf output."""
@@ -32,9 +31,9 @@ def vllm_to_hf_output(
 
 
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
     decoder_prompt_type: DecoderPromptType,
     model: str,
     *,
@@ -170,7 +169,14 @@ def run_test(
     )
 
 
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param("facebook/bart-base",
+                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param("facebook/bart-large-cnn"),
+    ],
+)
 @pytest.mark.parametrize("dtype", ["float", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])

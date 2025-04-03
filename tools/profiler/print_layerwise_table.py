@@ -1,12 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import json
-from typing import Dict
 
 from vllm.profiler.layerwise_profile import ModelStatsEntry, SummaryStatsEntry
 from vllm.profiler.utils import TablePrinter, indent_string
 
 
-def flatten_entries(entry_cls, profile_dict: Dict):
+def flatten_entries(entry_cls, profile_dict: dict):
     entries_and_depth = []
 
     def get_entries(node, curr_depth=0):
@@ -31,12 +32,13 @@ if __name__ == "__main__":
                         type=str,
                         required=True,
                         help="json trace file output by "
-                        "examples/offline_profile.py")
+                        "examples/offline_inference/profiling.py")
     parser.add_argument("--phase",
                         type=str,
-                        choices=["prefill", "decode_1"],
                         required=True,
-                        help="The phase to print the table for.")
+                        help="The phase to print the table for. This is either"
+                        "prefill or decode_n, where n is the decode step "
+                        "number")
     parser.add_argument("--table",
                         type=str,
                         choices=["summary", "model"],
@@ -48,6 +50,10 @@ if __name__ == "__main__":
 
     with open(args.json_trace) as f:
         profile_data = json.load(f)
+
+    assert args.phase in profile_data, \
+       (f"Cannot find phase {args.phase} in profile data. Choose one among"
+        f'{[x for x in profile_data.keys() if "prefill" in x or "decode" in x]}') #noqa
 
     if args.table == "summary":
         entries_and_depths = flatten_entries(

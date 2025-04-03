@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -5,6 +7,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SequenceGroupMetadata,
                            SequenceOutput)
@@ -39,13 +42,15 @@ def get_sampled_token_logprobs(
     """
     num_steps, batch_size, vocab_size = logprob_tensor.shape
 
-    selected_logprobs = logprob_tensor[torch.arange(num_steps).unsqueeze(1),
-                                       torch.arange(batch_size),
-                                       sampled_token_ids, ]
+    selected_logprobs = logprob_tensor[
+        torch.arange(num_steps).unsqueeze(1),
+        torch.arange(batch_size),
+        sampled_token_ids,
+    ]
     expanded_selected_logprobs = selected_logprobs.unsqueeze(-1).expand(
         -1, -1, vocab_size)
-    sampled_token_ids_ranks = (logprob_tensor >
-                               expanded_selected_logprobs).sum(-1).add_(1)
+    sampled_token_ids_ranks = (logprob_tensor
+                               > expanded_selected_logprobs).sum(-1).add_(1)
 
     return sampled_token_ids_ranks, selected_logprobs
 
@@ -88,14 +93,14 @@ def create_logprobs_output(
 
 
 def create_sequence_group_output(
-    token_id: int,
-    token_id_logprob_rank: int,
-    token_id_logprob: float,
-    seq_id: SeqId,
-    topk_token_ids: List[Optional[int]],
-    topk_logprobs: List[Optional[float]],
-    prompt_logprobs: Optional[PromptLogprobs] = None,
-) -> CompletionSequenceGroupOutput:
+        token_id: int,
+        token_id_logprob_rank: int,
+        token_id_logprob: float,
+        seq_id: SeqId,
+        topk_token_ids: List[Optional[int]],
+        topk_logprobs: List[Optional[float]],
+        prompt_logprobs: Optional[PromptLogprobs] = None,
+        step_index: Optional[int] = 0) -> CompletionSequenceGroupOutput:
     """Create a SequenceGroupOutput given the sampling results.
 
     Args:
@@ -105,6 +110,7 @@ def create_sequence_group_output(
         seq_id (int): The sequence id.
         topk_token_ids (List[Optional[int]]): The list of top-k token ids.
         topk_logprobs (List[Optional[float]]): The list of top-k logprobs.
+        step_index: (Optional[int]): The index of the speculative token.
     """
 
     logprobs = create_logprobs_output(
@@ -115,14 +121,13 @@ def create_sequence_group_output(
         topk_logprobs,
     )
 
-    return CompletionSequenceGroupOutput(
-        samples=[
-            SequenceOutput(parent_seq_id=seq_id,
-                           output_token=token_id,
-                           logprobs=logprobs)
-        ],
-        prompt_logprobs=prompt_logprobs,
-    )
+    return CompletionSequenceGroupOutput(samples=[
+        SequenceOutput(parent_seq_id=seq_id,
+                       output_token=token_id,
+                       logprobs=logprobs)
+    ],
+                                         prompt_logprobs=prompt_logprobs,
+                                         step_index=step_index)
 
 
 def split_batch_by_proposal_len(
@@ -247,11 +252,14 @@ def nvtx_range(msg, *args, **kwargs):
     Arguments:
         msg (string): message to associate with the range
     """
-    torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
-    try:
+    if current_platform.is_cuda_alike():
+        torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
+        try:
+            yield
+        finally:
+            torch.cuda.nvtx.range_pop()
+    else:
         yield
-    finally:
-        torch.cuda.nvtx.range_pop()
 
 
 class Timer:

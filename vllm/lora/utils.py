@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import re
 from typing import List, Optional, Set, Tuple, Type, Union
@@ -13,23 +15,25 @@ from vllm.logger import init_logger
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora, QKVParallelLinearWithShardedLora,
+    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA)
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLora,
+                              LinearScalingRotaryEmbeddingWithLoRA,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
-                              MergedQKVParallelLinearWithLora,
-                              QKVParallelLinearWithLora,
+                              MergedQKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
+from vllm.model_executor.layers.linear import LinearBase
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -37,17 +41,17 @@ _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
-    QKVParallelLinearWithLora,
-    MergedQKVParallelLinearWithLora,
+    QKVParallelLinearWithLoRA,
+    MergedQKVParallelLinearWithLoRA,
     RowParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
     LogitsProcessorWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
-    QKVParallelLinearWithShardedLora,
+    QKVParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora,
+    MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
-    LinearScalingRotaryEmbeddingWithLora,
+    LinearScalingRotaryEmbeddingWithLoRA,
 }
 
 
@@ -62,9 +66,10 @@ def from_layer(layer: nn.Module,
                                       lora_config=lora_config,
                                       packed_modules_list=packed_modules_list,
                                       model_config=model_config):
-            ret = lora_cls(layer)
-            ret.create_lora_weights(max_loras, lora_config, model_config)
-            return ret
+            instance_layer = lora_cls(layer)
+            instance_layer.create_lora_weights(max_loras, lora_config,
+                                               model_config)
+            return instance_layer
     return layer
 
 
@@ -91,25 +96,46 @@ def replace_submodule(model: nn.Module, module_name: str,
     return new_module
 
 
-def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool]:
+def parse_fine_tuned_lora_name(
+        name: str,
+        weights_mapper: Optional[WeightsMapper] = None
+) -> Tuple[str, bool, bool]:
     """Parse the name of lora weights.
 
     args:
         name: the name of the fine-tuned LoRA, e.g.
             base_model.model.dense1.weight
+        weights_mapper: maps the name of weight, e.g.
+            `model.` -> `language_model.model.`,
     return:
         Tuple(module_name, is_lora_a):
             module_name: the name of the module, e.g. model.dense1,
             is_lora_a whether the tensor is lora_a or lora_b.
+            is_bias whether the tensor is lora bias.
     """
-    parts = name.split(".")
 
-    if len(parts) >= 2 and parts[0] == "base_model" and parts[1] == "model":
-        if parts[-1] == "weight":
-            if parts[-2] == "lora_A" or parts[-2] == "lora_B":
-                return ".".join(parts[2:-2]), parts[-2] == "lora_A"
-        elif parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
-            return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A"
+    # LoRA weight qualified name always starts with `base_model.model.`,
+    # so we remove the prefix `base_model.model.` to make the following
+    # mapping correctly.
+    if "base_model.model." in name:
+        name = name.replace("base_model.model.", "")
+        name = weights_mapper._map_name(name) if weights_mapper else name
+        # recover the prefix `base_model.model.`
+        name = "base_model.model." + name
+
+    parts = name.split(".")
+    if parts[-1] == "weight" and (parts[-2] == "lora_A"
+                                  or parts[-2] == "lora_B"):
+        new_name = ".".join(parts[2:-2])
+        return new_name, parts[-2] == "lora_A", False
+
+    if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
+        new_name = ".".join(parts[2:-1])
+        return new_name, parts[-1] == "lora_embedding_A", False
+
+    if parts[-1] == "bias":
+        new_name = ".".join(parts[2:-2])
+        return new_name, False, True
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 
@@ -144,6 +170,23 @@ def is_regex_target_modules(load_modules: Union[str, List[str]],
             suffix = match.group(1).split("|")
             return is_subset(suffix, expected_lora_modules)
     return False
+
+
+def get_supported_lora_modules(model: nn.Module) -> List[str]:
+    """
+    In vLLM, all linear layers support LoRA.
+    """
+    supported_lora_modules: Set[str] = set()
+    # step1: traverse the model to get all the linear subfixes.
+    for name, module in model.named_modules():
+        if isinstance(module, (LinearBase, )):
+            supported_lora_modules.add(name.split(".")[-1])
+    # step 2: get the embedding modules if the model's mbedding_modules
+    # is not empty.
+    if model.embedding_modules:
+        for name in model.embedding_modules:
+            supported_lora_modules.add(name)
+    return list(supported_lora_modules)
 
 
 def get_adapter_absolute_path(lora_path: str) -> str:

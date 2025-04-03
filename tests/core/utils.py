@@ -1,24 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
-from typing import List, Optional
-from typing import Sequence as GenericSequence
-from typing import Tuple
+from collections import defaultdict
+from collections.abc import Sequence as GenericSequence
+from typing import Any, Optional
 
 from vllm import SamplingParams
+from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.inputs import EncoderDecoderInputs, token_inputs
 from vllm.lora.request import LoRARequest
-from vllm.sequence import Logprob, Sequence, SequenceGroup
+from vllm.sequence import (Logprob, Sequence, SequenceGroup,
+                           SequenceGroupMetadata)
 
 
 def create_dummy_prompt(
     request_id: str,
-    prompt_length: int,
+    prompt_length: int = -1,
     block_size: Optional[int] = None,
     lora_request: Optional[LoRARequest] = None,
-    best_of: int = 1,
-    prompt_tokens: Optional[List[int]] = None,
+    prompt_tokens: Optional[list[int]] = None,
     min_tokens: int = 0,
     max_tokens: int = 16,
-) -> Tuple[Sequence, SequenceGroup]:
+) -> tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
 
@@ -26,20 +29,42 @@ def create_dummy_prompt(
         # Create dummy prompt sequence with tokens 0...block_size-1
         # and prompt "0 ... block_size".
         prompt_tokens = list(range(prompt_length))
+
     prompt_str = " ".join([str(t) for t in prompt_tokens])
-    prompt = Sequence(int(request_id),
-                      inputs=token_inputs(prompt_tokens, prompt=prompt_str),
-                      block_size=block_size)
-    seq_group = SequenceGroup(request_id=request_id,
-                              seqs=[prompt],
-                              arrival_time=time.time(),
-                              sampling_params=SamplingParams(
-                                  best_of=best_of,
-                                  max_tokens=max_tokens,
-                                  min_tokens=min_tokens),
-                              lora_request=lora_request)
+    prompt = Sequence(
+        int(request_id),
+        inputs=token_inputs(prompt_tokens, prompt=prompt_str),
+        block_size=block_size,
+    )
+    seq_group = SequenceGroup(
+        request_id=request_id,
+        seqs=[prompt],
+        arrival_time=time.time(),
+        sampling_params=SamplingParams(max_tokens=max_tokens,
+                                       min_tokens=min_tokens),
+        lora_request=lora_request,
+    )
 
     return prompt, seq_group
+
+
+def create_dummy_lora_sequence(request_id: int, token_ids: list[int],
+                               block_size: int, lora_int_id: int) -> Sequence:
+    return Sequence(seq_id=request_id,
+                    inputs=token_inputs(token_ids),
+                    block_size=block_size,
+                    lora_request=LoRARequest(lora_name="dummy",
+                                             lora_path="/dummy",
+                                             lora_int_id=lora_int_id))
+
+
+def create_dummy_sequence(request_id: int, token_ids: list[int],
+                          block_size: int) -> Sequence:
+    return Sequence(
+        seq_id=request_id,
+        inputs=token_inputs(token_ids),
+        block_size=block_size,
+    )
 
 
 def create_dummy_prompt_encoder_decoder(
@@ -48,8 +73,7 @@ def create_dummy_prompt_encoder_decoder(
     encoder_prompt_length: int,
     block_size: Optional[int] = None,
     lora_request: Optional[LoRARequest] = None,
-    best_of: int = 1,
-) -> Tuple[Sequence, Sequence, SequenceGroup]:
+) -> tuple[Sequence, Sequence, SequenceGroup]:
     if not block_size:
         block_size = decoder_prompt_length
 
@@ -78,7 +102,6 @@ def create_dummy_prompt_encoder_decoder(
 
     seq_group = SequenceGroup(request_id=request_id,
                               seqs=[decoder_prompt],
-                              sampling_params=SamplingParams(best_of=best_of),
                               arrival_time=time.time(),
                               lora_request=lora_request,
                               encoder_seq=encoder_prompt)
@@ -100,7 +123,7 @@ def create_seq_group(
 
     prompt_token_ids = [0] * seq_prompt_len
 
-    seqs: List[Sequence] = []
+    seqs: list[Sequence] = []
     for seq_id_offset, output_len in enumerate(seq_output_lens):
         seq = Sequence(
             seq_id=seq_id_start + seq_id_offset,
@@ -194,12 +217,40 @@ def append_new_token(out, token_id: int):
 
 def schedule_and_update_computed_tokens(scheduler):
     metas, out, _ = scheduler.schedule()
-    for s, meta in zip(out.scheduled_seq_groups, metas):
-        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
+    for s in out.scheduled_seq_groups:
+        s.seq_group.update_num_computed_tokens(s.token_chunk_size)
     return metas, out
+
+
+def append_new_token_seq(seq: Sequence, token_id: int):
+    seq.append_token_id(token_id, {token_id: Logprob(token_id)})
 
 
 def append_new_token_seq_group(token_chunk_size, seq_group, token_id: int):
     seq_group.update_num_computed_tokens(token_chunk_size)
     for seq in seq_group.get_seqs():
         seq.append_token_id(token_id, {token_id: Logprob(token_id)})
+
+
+class SchedulerProxy:
+    """
+    A proxy class to forward calls to the scheduler.
+    """
+
+    def __init__(self, scheduler: Scheduler):
+        self.scheduler_ = scheduler
+        self.call_history: dict[str, list[Any]] = defaultdict(list)
+
+    def __getattr__(self, name: str) -> Any:
+
+        def wrapper(*args, **kwargs):
+            result = getattr(self.scheduler_, name)(*args, **kwargs)
+            self.call_history[name].append((args, kwargs, result))
+            return result
+
+        return wrapper
+
+    def last_schedule_ret(
+        self, ) -> tuple[list[SequenceGroupMetadata], SchedulerOutputs, Any]:
+        _, _, ret = self.call_history["schedule"][-1]
+        return ret

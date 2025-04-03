@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -34,7 +36,7 @@ class PagedAttention:
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
-        return [64, 80, 96, 112, 120, 128, 192, 256]
+        return [32, 64, 80, 96, 112, 120, 128, 192, 256]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -69,8 +71,8 @@ class PagedAttention:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
     ) -> None:
         ops.reshape_and_cache(
             key,
@@ -95,8 +97,8 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -200,12 +202,11 @@ class PagedAttention:
         block_tables: torch.Tensor,
         query_start_loc: torch.Tensor,
         seq_lens_tensor: torch.Tensor,
-        context_lens: torch.Tensor,
         max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
         sliding_window: Optional[int],
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
         context_attention_fwd(
@@ -218,9 +219,8 @@ class PagedAttention:
             value_cache,
             block_tables,
             # query_start_loc is (batch_size + 1,)
-            query_start_loc[:-1],
+            query_start_loc,
             seq_lens_tensor,
-            context_lens,
             max_query_len,
             k_scale,
             v_scale,

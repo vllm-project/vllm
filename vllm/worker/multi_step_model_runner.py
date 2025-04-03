@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import functools
 from dataclasses import dataclass, field
@@ -14,7 +16,7 @@ from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
                                                 get_pythonized_sample_results)
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
-from vllm.utils import PyObjectCache, async_tensor_h2d
+from vllm.utils import PyObjectCache, async_tensor_h2d, current_stream
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -29,8 +31,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-MULTI_STEP_ATTENTION_BACKENDS = ["FLASH_ATTN", "ROCM_FLASH", "FLASHINFER"]
-MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS = ["FLASH_ATTN"]
+MULTI_STEP_ATTENTION_BACKENDS = [
+    "FLASH_ATTN", "ROCM_FLASH", "FLASHINFER", "NO_ATTENTION"
+]
+MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS = ["FLASH_ATTN", "FLASHINFER"]
 
 def _get_supported_attention_backends(chunked_prefill_enabled: bool) \
     -> List[str]:
@@ -404,8 +408,9 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             if not cont:
                 break
 
-    def _final_process_outputs(self, model_input: StatefulModelInput,
-                               output_proc_callback: Optional[Callable]):
+    def _final_process_outputs(
+            self, model_input: StatefulModelInput,
+            output_proc_callback: Optional[Callable]) -> List[SamplerOutput]:
         assert model_input.frozen_model_input is not None
 
         has_async_callback = output_proc_callback is not None
@@ -471,7 +476,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # path for warm up runs
         if not model_input.is_multi_step:
             return self._base_model_runner.execute_model(
-                frozen_model_input, kv_caches, intermediate_tensors, num_steps)
+                frozen_model_input, None, intermediate_tensors, num_steps)
 
         # make sure we skip the sampler on the lask rank and only pythonize
         # if CPU is ahead.
@@ -495,7 +500,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         #   appended sampler output from last iteration
         #   - also maybe pythonize if CPU is ahead of GPU
 
-        current_stream = torch.cuda.current_stream()
+        stream = current_stream()
         if not model_input.is_first_multi_step:
             # Explicitly block on the previous step's forward to make sure we
             # don't clobber any GPU tensors still in use.
@@ -533,14 +538,15 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         # Execute the model
         output = self._base_model_runner.execute_model(frozen_model_input,
-                                                       kv_caches,
+                                                       None,
                                                        intermediate_tensors,
                                                        num_steps=1)
 
         # record the event for the current step so that the next step can sync
-        model_input.record_step_event(current_stream)
+        model_input.record_step_event(stream)
 
         if get_pp_group().is_last_rank and self.is_driver_worker:
+            assert isinstance(output, list)
             assert len(
                 output
             ) == 1, "MultiStepModelRunner requires single-step base_models"
@@ -548,7 +554,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             # event for the pythonization so that we only pythonize if the
             # tensors are ready. May be able to be combined with the step event
             output_ready_event = torch.cuda.Event()
-            output_ready_event.record(current_stream)
+            output_ready_event.record(stream)
             if self.parallel_config.pipeline_parallel_size > 1:
                 output[0].sampled_token_ids_cpu = output[
                     0].sampled_token_ids.cpu()
@@ -592,8 +598,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # should be [SamplerOutput]
         return output
 
-    def _update_sampling_metadata(self, sampling_metadata, num_seqs,
-                                  num_queries):
+    def _update_sampling_metadata(self, sampling_metadata: SamplingMetadata,
+                                  num_seqs: Optional[int], num_queries: int):
 
         assert sampling_metadata.num_prompts == 0
         assert len(sampling_metadata.seq_groups) == num_queries
@@ -643,7 +649,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return model_input
 
     def load_model(self) -> None:
-        return self._base_model_runner.load_model()
+        self._base_model_runner.load_model()
+        self.model_memory_usage = self._base_model_runner.model_memory_usage
 
     def save_sharded_state(
         self,
@@ -817,7 +824,7 @@ def _pythonize_sampler_output(
 
     for sgdx, (seq_group,
                sample_result) in enumerate(zip(seq_groups, samples_list)):
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         # (Check for Guided Decoding)
         if seq_group.sampling_params.logits_processors:
@@ -847,13 +854,13 @@ def _pythonize_sampler_output(
         seq_ids = seq_group.seq_ids
         next_token_ids = sample_result
         parent_ids = [0]
+        seq_outputs: List[SequenceOutput]
 
         if cache is not None:
             completion_seq_group_output: CompletionSequenceGroupOutput = \
                 cache.cached_completion_seq_group_output.get_object()
             completion_seq_group_output.samples.clear()
-            seq_outputs: List[
-                SequenceOutput] = completion_seq_group_output.samples
+            seq_outputs = completion_seq_group_output.samples
         else:
             seq_outputs = []
 

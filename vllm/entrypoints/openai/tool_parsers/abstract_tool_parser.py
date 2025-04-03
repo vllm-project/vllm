@@ -1,15 +1,16 @@
-import importlib
-import importlib.util
+# SPDX-License-Identifier: Apache-2.0
+
 import os
+from collections.abc import Sequence
 from functools import cached_property
-from typing import Callable, Dict, List, Optional, Sequence, Type, Union
+from typing import Callable, Optional, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import is_list_of
+from vllm.utils import import_from_path, is_list_of
 
 logger = init_logger(__name__)
 
@@ -22,16 +23,16 @@ class ToolParser:
     """
 
     def __init__(self, tokenizer: AnyTokenizer):
-        self.prev_tool_call_arr: List[Dict] = []
+        self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.streamed_args_for_tool: List[str] = []
+        self.streamed_args_for_tool: list[str] = []
 
         self.model_tokenizer = tokenizer
 
     @cached_property
-    def vocab(self) -> Dict[str, int]:
+    def vocab(self) -> dict[str, int]:
         # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
@@ -79,10 +80,10 @@ class ToolParser:
 
 
 class ToolParserManager:
-    tool_parsers: Dict[str, Type] = {}
+    tool_parsers: dict[str, type] = {}
 
     @classmethod
-    def get_tool_parser(cls, name) -> Type:
+    def get_tool_parser(cls, name) -> type:
         """
         Get tool parser by name which is registered by `register_module`.
 
@@ -95,8 +96,8 @@ class ToolParserManager:
 
     @classmethod
     def _register_module(cls,
-                         module: Type,
-                         module_name: Optional[Union[str, List[str]]] = None,
+                         module: type,
+                         module_name: Optional[Union[str, list[str]]] = None,
                          force: bool = True) -> None:
         if not issubclass(module, ToolParser):
             raise TypeError(
@@ -116,9 +117,9 @@ class ToolParserManager:
     @classmethod
     def register_module(
             cls,
-            name: Optional[Union[str, List[str]]] = None,
+            name: Optional[Union[str, list[str]]] = None,
             force: bool = True,
-            module: Union[Type, None] = None) -> Union[type, Callable]:
+            module: Union[type, None] = None) -> Union[type, Callable]:
         """
         Register module with the given name or name list. it can be used as a
         decoder(with module as None) or normal function(with module as not 
@@ -149,13 +150,14 @@ class ToolParserManager:
     @classmethod
     def import_tool_parser(cls, plugin_path: str) -> None:
         """
-        Import a user defined tool parser by the path of the tool parser define
+        Import a user-defined tool parser by the path of the tool parser define
         file.
         """
         module_name = os.path.splitext(os.path.basename(plugin_path))[0]
-        spec = importlib.util.spec_from_file_location(module_name, plugin_path)
-        if spec is None or spec.loader is None:
-            logger.error("load %s from %s failed.", module_name, plugin_path)
+
+        try:
+            import_from_path(module_name, plugin_path)
+        except Exception:
+            logger.exception("Failed to load module '%s' from %s.",
+                             module_name, plugin_path)
             return
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)

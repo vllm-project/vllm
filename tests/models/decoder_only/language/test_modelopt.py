@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # flake8: noqa
 """Tests Model Optimizer fp8 models against ground truth generation
 Note: these tests will only pass on H100
 """
 import os
-from typing import List
 
 import pytest
 from transformers import AutoTokenizer
@@ -39,6 +40,7 @@ EXPECTED_STRS_MAP = {
 @pytest.mark.skip(
     reason=
     "Prevent unstable test based on golden strings from breaking the build.")
+@pytest.mark.quant_model
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
@@ -62,7 +64,7 @@ def test_models(example_prompts, model_name) -> None:
         for prompt in example_prompts
     ]
     params = SamplingParams(max_tokens=20, temperature=0)
-    generations: List[str] = []
+    generations: list[str] = []
     # Note: these need to be run 1 at a time due to numerical precision,
     # since the expected strs were generated this way.
     for prompt in formatted_prompts:

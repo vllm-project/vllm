@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of a GPTQ model to a Marlin_24 model.
 
 Note: GPTQ and Marlin_24 do not have bitwise correctness.
@@ -38,6 +39,7 @@ model_pairs = [
 ]
 
 
+@pytest.mark.quant_model
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin_24"),
                     reason="Marlin24 is not supported on this GPU type.")

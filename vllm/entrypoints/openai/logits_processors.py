@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
+from collections.abc import Iterable
 from functools import lru_cache, partial
-from typing import Dict, FrozenSet, Iterable, List, Optional, Union
+from typing import Optional, Union
 
 import torch
 
@@ -12,10 +15,10 @@ class AllowedTokenIdsLogitsProcessor:
     specific set of token ids."""
 
     def __init__(self, allowed_ids: Iterable[int]):
-        self.allowed_ids: Optional[List[int]] = list(allowed_ids)
+        self.allowed_ids: Optional[list[int]] = list(allowed_ids)
         self.mask: Optional[torch.Tensor] = None
 
-    def __call__(self, token_ids: List[int],
+    def __call__(self, token_ids: list[int],
                  logits: torch.Tensor) -> torch.Tensor:
         if self.mask is None:
             self.mask = torch.ones((logits.shape[-1], ),
@@ -29,7 +32,7 @@ class AllowedTokenIdsLogitsProcessor:
 
 @lru_cache(maxsize=32)
 def _get_allowed_token_ids_logits_processor(
-    allowed_token_ids: FrozenSet[int],
+    allowed_token_ids: frozenset[int],
     vocab_size: int,
 ) -> LogitsProcessor:
     if not allowed_token_ids:
@@ -41,8 +44,8 @@ def _get_allowed_token_ids_logits_processor(
 
 
 def logit_bias_logits_processor(
-    logit_bias: Dict[int, float],
-    token_ids: List[int],
+    logit_bias: dict[int, float],
+    token_ids: list[int],
     logits: torch.Tensor,
 ) -> torch.Tensor:
     for token_id, bias in logit_bias.items():
@@ -51,16 +54,16 @@ def logit_bias_logits_processor(
 
 
 def get_logits_processors(
-    logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]],
-    allowed_token_ids: Optional[List[int]],
+    logit_bias: Optional[Union[dict[int, float], dict[str, float]]],
+    allowed_token_ids: Optional[list[int]],
     tokenizer: AnyTokenizer,
-) -> List[LogitsProcessor]:
-    logits_processors: List[LogitsProcessor] = []
+) -> list[LogitsProcessor]:
+    logits_processors: list[LogitsProcessor] = []
     if logit_bias:
         try:
             # Convert token_id to integer
             # Clamp the bias between -100 and 100 per OpenAI API spec
-            clamped_logit_bias: Dict[int, float] = {
+            clamped_logit_bias: dict[int, float] = {
                 int(token_id): min(100.0, max(-100.0, bias))
                 for token_id, bias in logit_bias.items()
             }
@@ -71,7 +74,7 @@ def get_logits_processors(
 
         # Check if token_id is within the vocab size
         for token_id, bias in clamped_logit_bias.items():
-            if token_id < 0 or token_id >= tokenizer.vocab_size:
+            if token_id < 0 or token_id >= len(tokenizer):
                 raise ValueError(f"token_id {token_id} in logit_bias contains "
                                  "out-of-vocab token id")
 
@@ -81,6 +84,6 @@ def get_logits_processors(
     if allowed_token_ids is not None:
         logits_processors.append(
             _get_allowed_token_ids_logits_processor(
-                frozenset(allowed_token_ids), tokenizer.vocab_size))
+                frozenset(allowed_token_ids), len(tokenizer)))
 
     return logits_processors

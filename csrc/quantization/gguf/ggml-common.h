@@ -1,7 +1,7 @@
 // copied from https://github.com/ggerganov/llama.cpp/blob/b2899/ggml-common.h
 #define QK_K 256
 #define K_QUANTS_PER_ITERATION 2
-#define WARP_SIZE 32
+#define WARP_SIZE_GGUF 32
 #define K_SCALE_SIZE 12
 #define CUDA_DEQUANTIZE_BLOCK_SIZE 256
 #define CUDA_QUANTIZE_BLOCK_SIZE 256
@@ -1063,7 +1063,8 @@ static const __device__ int8_t kvalues_iq4nl[16] = {-127, -104, -83, -65, -49, -
 typedef half dfloat; // dequantize float
 typedef half2 dfloat2;
 typedef void (*dequantize_kernel_t)(const void * vx, const int ib, const int iqs, dfloat2 & v);
-typedef void (*to_fp16_cuda_t)(const void * __restrict__ x, dfloat * __restrict__ y, int k, cudaStream_t stream);
+template<typename dst_t>
+using to_cuda_ggml_t = void (*)(const void * __restrict__ x, dst_t * __restrict__ y, int k, cudaStream_t stream);
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs);
 typedef void (*allocate_tiles_cuda_t)(int ** x_ql, half2 ** x_dm, int ** x_qh, int ** x_sc);
 typedef void (*load_tiles_cuda_t)(
@@ -1074,6 +1075,20 @@ typedef float (*vec_dot_q_mul_mat_cuda_t)(
     const int * __restrict__ y_qs, const half2 * __restrict__ y_ms, const int & i, const int & j, const int & k);
 
 // Utility function
+
+template<typename dst_t>
+static __device__ __forceinline__ dst_t convert_from_half(half val) {
+    return val;
+}
+
+template<>
+__device__ __forceinline__ c10::BFloat16 convert_from_half<c10::BFloat16>(half val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    return __float2bfloat16(__half2float(val));
+#else
+    return __half2float(val);
+#endif  // defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+}
 
 #if defined(USE_ROCM)
 
@@ -1111,5 +1126,20 @@ static __device__ __forceinline__ int __dp4a(const int a, const int b, int c) {
     c += va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2] + va[3] * vb[3];
 #endif
     return c;
+}
+
+static __device__ __forceinline__ uint32_t __vcmpeq4(const uint32_t a, const uint32_t b) {
+    uint32_t neq = a^b;
+    return !(neq & 0xff000000) * 0xff000000 |
+           !(neq & 0x00ff0000) * 0x00ff0000 |
+           !(neq & 0x0000ff00) * 0x0000ff00 |
+           !(neq & 0x000000ff) * 0x000000ff;
+}
+
+static __device__ __forceinline__ uint32_t __vsub4(const uint32_t a, const uint32_t b) {
+    return (static_cast<uint8_t>(((a & 0xff000000) >> 24) - ((b & 0xff000000) >> 24)) << 24) +
+           (static_cast<uint8_t>(((a & 0x00ff0000) >> 16) - ((b & 0x00ff0000) >> 16)) << 16) +
+           (static_cast<uint8_t>(((a & 0x0000ff00) >>  8) - ((b & 0x0000ff00) >>  8)) <<  8) +
+           (static_cast<uint8_t>(((a & 0x000000ff) >>  0) - ((b & 0x000000ff) >>  0)) <<  0);
 }
 #endif // defined(USE_ROCM)

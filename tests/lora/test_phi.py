@@ -1,4 +1,6 @@
-from typing import List
+# SPDX-License-Identifier: Apache-2.0
+
+import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -8,7 +10,15 @@ MODEL_PATH = "microsoft/phi-2"
 PROMPT_TEMPLATE = "### Instruct: {sql_prompt}\n\n### Context: {context}\n\n### Output:"  # noqa: E501
 
 
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
+def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     prompts = [
         PROMPT_TEMPLATE.format(
             sql_prompt=
@@ -37,7 +47,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
         if lora_id else None,
     )
     # Print the outputs.
-    generated_texts: List[str] = []
+    generated_texts: list[str] = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text.strip()
@@ -46,6 +56,9 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
+# Skipping for V1 for now as we are hitting,
+# "Head size 80 is not supported by FlashAttention." error.
+@pytest.mark.skip_v1
 def test_phi2_lora(phi2_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.
@@ -53,7 +66,8 @@ def test_phi2_lora(phi2_lora_files):
                    max_model_len=1024,
                    enable_lora=True,
                    max_loras=2,
-                   enforce_eager=True)
+                   enforce_eager=True,
+                   enable_chunked_prefill=True)
 
     expected_lora_output = [
         "SELECT catalog_publisher, COUNT(*) as num_catalogs FROM catalogs GROUP BY catalog_publisher ORDER BY num_catalogs DESC LIMIT 1;",  # noqa: E501
