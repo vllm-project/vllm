@@ -990,6 +990,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `SmolVLMForConditionalGeneration`
+  * SmolVLM2-2.2B-Instruct
+  * T + I
+  * `Skywork/Skywork-R1V-38B`
+  *
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
