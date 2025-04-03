@@ -1204,6 +1204,30 @@ def fused_experts(hidden_states: torch.Tensor,
             a2_scale=a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
+    elif hidden_states.shape[0] <= envs.VLLM_FUSED_MOE_CHUNK_SIZE:
+        fe = modular_triton_fused_moe(
+            use_fp8_w8a8,
+            use_int8_w8a16,
+            use_int4_w4a16,
+            block_shape,
+        )
+        return fe(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            inplace,
+            activation,
+            global_num_experts,
+            expert_map,
+            w1_scale,
+            w2_scale,
+            w1_zp,
+            w2_zp,
+            a1_scale,
+            a2_scale,
+        )
     else:
         return dispatch_fused_experts_func(inplace)(
             hidden_states=hidden_states,
@@ -1211,6 +1235,7 @@ def fused_experts(hidden_states: torch.Tensor,
             w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            inplace=inplace,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             use_fp8_w8a8=use_fp8_w8a8,
@@ -1437,11 +1462,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
-        _moe_unpermute_and_reduce(
-            out_hidden_states[begin_chunk_idx:end_chunk_idx],
-            intermediate_cache3.view(*intermediate_cache3.shape), inv_perm,
-            expert_ids, top_k_num, global_num_experts, K, curr_topk_weights,
-            curr_topk_ids, use_dg)
+        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                    out_hidden_states[begin_chunk_idx:end_chunk_idx])
 
     return out_hidden_states
 
