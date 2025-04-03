@@ -92,7 +92,7 @@ class EngineCoreClient(ABC):
     def sleep(self, level: int = 1) -> None:
         raise NotImplementedError
 
-    def wake_up(self) -> None:
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         raise NotImplementedError
 
     def is_sleeping(self) -> bool:
@@ -119,6 +119,12 @@ class EngineCoreClient(ABC):
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
+    def save_sharded_state(self,
+                           path: str,
+                           pattern: Optional[str] = None,
+                           max_size: Optional[int] = None) -> None:
+        raise NotImplementedError
+
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
@@ -141,7 +147,7 @@ class EngineCoreClient(ABC):
     async def sleep_async(self, level: int = 1) -> None:
         raise NotImplementedError
 
-    async def wake_up_async(self) -> None:
+    async def wake_up_async(self, tags: Optional[list[str]] = None) -> None:
         raise NotImplementedError
 
     async def is_sleeping_async(self) -> bool:
@@ -160,6 +166,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def pin_lora_async(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    async def save_sharded_state_async(self,
+                                       path: str,
+                                       pattern: Optional[str] = None,
+                                       max_size: Optional[int] = None) -> None:
         raise NotImplementedError
 
     async def collective_rpc_async(
@@ -206,8 +218,8 @@ class InprocClient(EngineCoreClient):
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
 
-    def wake_up(self) -> None:
-        self.engine_core.wake_up()
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        self.engine_core.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
@@ -226,6 +238,12 @@ class InprocClient(EngineCoreClient):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.engine_core.pin_lora(lora_id)
+
+    def save_sharded_state(self,
+                           path: str,
+                           pattern: Optional[str] = None,
+                           max_size: Optional[int] = None) -> None:
+        self.engine_core.save_sharded_state(path, pattern, max_size)
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
@@ -520,8 +538,8 @@ class SyncMPClient(MPClient):
     def sleep(self, level: int = 1) -> None:
         self.call_utility("sleep", level)
 
-    def wake_up(self) -> None:
-        self.call_utility("wake_up")
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        self.call_utility("wake_up", tags)
 
     def is_sleeping(self) -> bool:
         return self.call_utility("is_sleeping")
@@ -536,6 +554,12 @@ class SyncMPClient(MPClient):
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return self.call_utility("collective_rpc", method, timeout, args,
                                  kwargs)
+
+    def save_sharded_state(self,
+                           path: str,
+                           pattern: Optional[str] = None,
+                           max_size: Optional[int] = None) -> None:
+        self.call_utility("save_sharded_state", path, pattern, max_size)
 
 
 class AsyncMPClient(MPClient):
@@ -647,8 +671,8 @@ class AsyncMPClient(MPClient):
     async def sleep_async(self, level: int = 1) -> None:
         await self.call_utility_async("sleep", level)
 
-    async def wake_up_async(self) -> None:
-        await self.call_utility_async("wake_up")
+    async def wake_up_async(self, tags: Optional[list[str]] = None) -> None:
+        await self.call_utility_async("wake_up", tags)
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
@@ -667,6 +691,13 @@ class AsyncMPClient(MPClient):
 
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self.call_utility_async("pin_lora", lora_id)
+
+    async def save_sharded_state_async(self,
+                                       path: str,
+                                       pattern: Optional[str] = None,
+                                       max_size: Optional[int] = None) -> None:
+        await self.call_utility_async("save_sharded_state", path, pattern,
+                                      max_size)
 
     async def collective_rpc_async(
             self,
