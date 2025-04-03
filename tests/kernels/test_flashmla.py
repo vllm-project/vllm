@@ -5,7 +5,11 @@ import random
 
 import pytest
 import torch
-import triton
+
+from vllm.triton_utils.importing import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
 
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,

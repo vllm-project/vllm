@@ -8,14 +8,21 @@
 import math
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+
 from packaging import version
+
+from vllm.triton_utils import triton_autotune_decorator, triton_jit_decorator
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
 
-@triton.autotune(
+@triton_autotune_decorator(
     configs=[
         triton.Config(
             {
@@ -108,7 +115,7 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
     ],
     key=['chunk_size', 'hdim', 'dstate', 'IS_CAUSAL'],
 )
-@triton.jit
+@triton_jit_decorator
 def _chunk_scan_fwd_kernel(
     # Pointers to matrices
     cb_ptr,
