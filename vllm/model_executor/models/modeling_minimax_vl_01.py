@@ -11,6 +11,8 @@ from transformers import (
     BatchFeature, 
     PretrainedConfig,
     CONFIG_MAPPING,
+    AutoProcessor,
+    ProcessorMixin,
 )
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
@@ -195,6 +197,10 @@ class ImageProcessor(BaseImageProcessor):
         self.image_grid_pinpoints = image_grid_pinpoints
         self.patch_size = patch_size
 
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        return cls(**kwargs)
+
     def preprocess(
         self,
         images,
@@ -316,15 +322,12 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor, **kwargs)
+        if "image_processor" not in kwargs:
+            kwargs["image_processor"] = self.get_image_processor(**kwargs)
+        return MiniMaxVL01Processor(**kwargs)
 
-        # In case patch_size is omitted from `processor_config.json`
-        # e.g. for E5-V: https://huggingface.co/royokong/e5-v
-        if hf_processor.patch_size is None:
-            patch_size = self.get_vision_encoder_info().get_patch_size()
-            hf_processor.patch_size = patch_size
-
-        return hf_processor
+    def get_image_processor(self, **kwargs: object) -> ImageProcessor:
+        return ImageProcessor(**kwargs)
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
     def get_num_image_tokens(
@@ -1210,15 +1213,12 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor, **kwargs)
+        if "image_processor" not in kwargs:
+            kwargs["image_processor"] = self.get_image_processor(**kwargs)
+        return MiniMaxVL01Processor(**kwargs)
 
-        # In case patch_size is omitted from `processor_config.json`
-        # e.g. for E5-V: https://huggingface.co/royokong/e5-v
-        if hf_processor.patch_size is None:
-            patch_size = self.get_vision_encoder_info().get_patch_size()
-            hf_processor.patch_size = patch_size
-
-        return hf_processor
+    def get_image_processor(self, **kwargs: object) -> ImageProcessor:
+        return ImageProcessor(**kwargs)
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
     def get_num_image_tokens(
@@ -1385,3 +1385,6 @@ class LlavaNextMultiModalProcessor(
         tokenizer_input_names = self.tokenizer.model_input_names
         image_processor_input_names = self.image_processor.model_input_names
         return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
+
+# Register the ImageProcessor with AutoProcessor
+AutoProcessor.register("minimax_vl_01", ImageProcessor)
