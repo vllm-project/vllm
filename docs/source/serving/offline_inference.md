@@ -11,6 +11,8 @@ For example, the following code downloads the [`facebook/opt-125m`](https://hugg
 and runs it in vLLM using the default configuration.
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="facebook/opt-125m")
 ```
 
@@ -47,6 +49,8 @@ To fix this, explicitly specify the model architecture by passing `config.json` 
 For example:
 
 ```python
+from vllm import LLM
+
 model = LLM(
     model="cerebras/Cerebras-GPT-1.3B",
     hf_overrides={"architectures": ["GPT2LMHeadModel"]},  # GPT-2
@@ -92,10 +96,19 @@ You can further reduce memory usage by limiting the context length of the model 
 and the maximum batch size (`max_num_seqs` option).
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="adept/fuyu-8b",
           max_model_len=2048,
           max_num_seqs=2)
 ```
+
+#### Adjust cache size
+
+If you run out of CPU RAM, try the following options:
+
+- (Multi-modal models only) you can set the size of multi-modal input cache using `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
+- (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable (default 4 GiB).
 
 ### Performance optimization and tuning
 
