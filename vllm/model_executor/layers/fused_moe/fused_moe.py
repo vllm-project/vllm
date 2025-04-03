@@ -1566,6 +1566,7 @@ def fused_moe(
                          block_shape=block_shape)
 
 
+# TODO: merge with StandardDispatchCombine
 class TritonDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
     def __init__(self, use_fp8_w8a8: bool, block_shape: Optional[List[int]]):
@@ -1581,7 +1582,7 @@ class TritonDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if self.use_fp8_w8a8:
             a1q, a1q_scale = _fp8_quantize(
                 a1,
@@ -1592,13 +1593,14 @@ class TritonDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             a1q = a1
             a1q_scale = a1_scale
 
-        return a1q, a1q_scale, topk_ids
+        return a1q, a1q_scale
 
     def combine(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> None:
         M, topk = topk_weights.shape
         K = fused_expert_output.shape[-1]

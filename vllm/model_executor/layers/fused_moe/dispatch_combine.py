@@ -21,7 +21,7 @@ class StandardDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
             a2_scale.numel() != 1 if a2_scale is not None else False)
 
@@ -31,14 +31,14 @@ class StandardDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             self.block_shape,
             per_act_token,
         )
-        return a1q, a1q_scale, topk_ids
+        return a1q, a1q_scale
 
     def combine(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> None:
         _moe_unpermute_and_reduce(output, fused_expert_output, None,
                                   topk_weights)
-

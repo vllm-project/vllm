@@ -1,64 +1,106 @@
 import torch
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import pplx_kernels as pplx
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
 
 
+# Note use: layer.get_all_to_all() to get an AllToAll instance
+# The max_num_tokens, world_size and dp_size must be the same
+# as the ones used to create the AllToAll.  Unfortunately, there's
+# no way(?) to extract this info from AllToAll
 class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
-    def __init__(self, a2a: pplx.AllToAll):
+    def __init__(
+            self,
+            a2a: pplx.AllToAll,
+            max_num_tokens: int,
+            world_size: int,
+            dp_size: int,
+            block_shape: Optional[List[int]] = None):
         super().__init__()
         self.a2a = a2a
+        self.block_shape = block_shape
+        self.dp_num_tokens = max_num_tokens * (world_size // dp_size)
 
     def dispatch(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
-        topk_ids: torch.Tensor,
+        rank_topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
-        self.a2a.dispatch(
-            out_expert_num_tokens, # torch.Tensor,
-            out_expert_x, # torch.Tensor,
-            out_expert_x_scale, # torch.Tensor | None,
-            dp_x, # torch.Tensor,
-            dp_x_scale, # torch.Tensor | None,
-            indices, # torch.Tensor,
-            bound_m, # torch.Tensor | None,
-            do_send, # bool = True,
-            do_recv, # bool = True,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # Is this always going to be a1.device?
+        device = a1.device
+
+        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+            a2_scale.numel() != 1 if a2_scale is not None else False)
+
+        a1q, a1q_scale = _fp8_quantize(
+            a1,
+            a1_scale,
+            self.block_shape,
+            per_act_token,
         )
-        return 1q, a1q_scale, topk_ids
+
+        expert_num_tokens = torch.empty(
+            num_experts,
+            dtype=torch.int32,
+            device=device,
+        )
+
+        expert_x = torch.empty(
+            (num_experts, self.dp_num_tokens, a1q.shape[-1]),
+            dtype=a1q.dtype,
+            device=device,
+        )
+
+        expert_x_scale: torch.Tensor | None = None
+        if a1q.dtype.itemsize == 1:
+            float32_size = torch.float32.itemsize
+            block_size = (self.block_shape[0] if self.block_shape is not None else 1) * float32_size
+            expert_x_scale = torch.empty(
+                (
+                    num_experts,
+                    expert_x.size(1),
+                    (expert_x.size(2) + block_size - 1) // block_size,
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
+
+        # This argument is optional
+        bound_m = torch.tensor([a1q.shape[0]], dtype=torch.uint32, device=device)
+
+        self.a2a.dispatch(
+            out_expert_num_tokens=expert_num_tokens,
+            out_expert_x=expert_x,
+            out_expert_x_scale=expert_x_scale,
+            dp_x=a1q,
+            dp_x_scale=a1q_scale,
+            indices=rank_topk_ids,
+            bound_m=bound_m,
+        )
+        return expert_x, expert_x_scale
 
     def combine(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> None:
+        # This argument is optional
+        bound_m = torch.tensor([output.shape[0]], dtype=torch.uint32, device=output.device)
+
+        # TODO assert output is the proper size
+
         self.a2a.combine(
-            out_tokens, #: torch.Tensor,
-            indices, #: torch.Tensor,
-            weights, #: torch.Tensor,
-            expert_y, #: torch.Tensor,
-            bound_m, #: torch.Tensor | None,
-            do_send, #: bool = True,
-            do_recv, #: bool = True,
+            out_tokens=output,
+            indices=topk_ids,
+            weights=topk_weights,
+            expert_y=fused_expert_output,
+            bound_m=bound_m
         )
-
-
-# singleton-ish
-def get_a2a(
-        max_num_tokens: int,
-        num_experts: int,
-        experts_per_token: int,
-        rank: int,
-        world_size: int,
-        dp_size: int,
-        hidden_dim: int,
-        hidden_dim_bytes: int,
-        hidden_dim_scale_bytes: int,
-) -> pplx.AllToAll:
-    pass
