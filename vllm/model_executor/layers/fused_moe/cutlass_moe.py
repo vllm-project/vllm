@@ -359,7 +359,6 @@ class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
     ) -> torch.Tensor:
-        # TODO: chunking in here or in FusedMoEModularKernel? ignore for now
         M = a1q.shape[0]
         _, N, K = w2.shape  # because w1 + w2 are transposed
         topk = topk_ids.shape[1]
@@ -440,4 +439,77 @@ def modular_cutlass_moe_fp8(
             c_strides2,
             out_dtype,
         ),
+    )
+
+
+#TODO make the grouped gemm kernel consistent with scaled gemm kernel
+def cutlass_moe_fp8(
+    a: torch.Tensor,
+    w1_q: torch.Tensor,
+    w2_q: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    ab_strides1: torch.Tensor,
+    c_strides1: torch.Tensor,
+    ab_strides2: torch.Tensor,
+    c_strides2: torch.Tensor,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    out_dtype: torch.dtype = torch.half,
+) -> torch.Tensor:
+    """
+    This function computes a a8w8-quantized Mixture of Experts (MoE) layer
+    using two sets of quantized weights, w1_q and w2_q, and top-k gating
+    mechanism. The matrix multiplications are implemented with CUTLASS
+    grouped gemm.
+
+    Parameters:
+    - a (torch.Tensor): The input tensor to the MoE layer.
+        Shape: [M, K]
+    - w1_q (torch.Tensor): The first set of fp8-quantized expert weights.
+        Shape: [num_experts, K, 2N] (the weights are passed transposed)
+    - w2_q (torch.Tensor): The second set of fp8-quantized expert weights.
+        Shape: [num_experts, N, K] (the weights are passed transposed)
+    - w1_scale (torch.Tensor): The fp32 scale to dequantize w1_q.
+        Shape: [num_experts] or [num_experts, 2N]
+    - w2_scale (torch.Tensor): The fp32 scale to dequantize w2_q.
+        Shape: [num_experts] or [num_experts, K]
+    - gating_output (torch.Tensor): The output of the gating operation
+        (before softmax).
+    - topk_weights (torch.Tensor): The weights of each token->expert mapping.
+    - ab_strides1 (torch.Tensor): The input and weights strides of the first
+        grouped gemm.
+    - c_strides1 (torch.Tensor): The output strides of the first grouped gemm.
+    - ab_strides2 (torch.Tensor): The input and weights strides of the second
+        grouped gemm.
+    - c_strides2 (torch.Tensor): The output strides of the second grouped gemm.
+    - a1_scale (Optional[torch.Tensor]): The optional fp32 scale to quantize a.
+        Shape: scalar or [M]
+    - a2_scale (Optional[torch.Tensor]): The optional fp32 scale to
+        quantize the intermediate result between the gemms.
+        Shape: scalar or [M]
+    - out_dtype (torch.dtype): The output tensor type.
+
+    Returns:
+    - torch.Tensor: The fp16 output tensor after applying the MoE layer.
+    """
+    fn = modular_cutlass_moe_fp8(
+        ab_strides1,
+        c_strides1,
+        ab_strides2,
+        c_strides2,
+        out_dtype,
+    )
+    return fn(
+        a,
+        w1_q,
+        w2_q,
+        topk_weights,
+        topk_ids,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
     )

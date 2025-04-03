@@ -1154,30 +1154,6 @@ def fused_experts(hidden_states: torch.Tensor,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
         )
-    elif hidden_states.shape[0] <= envs.VLLM_FUSED_MOE_CHUNK_SIZE:
-        fe = modular_triton_fused_moe(
-            use_fp8_w8a8,
-            use_int8_w8a16,
-            use_int4_w4a16,
-            block_shape,
-        )
-        return fe(
-            hidden_states,
-            w1,
-            w2,
-            topk_weights,
-            topk_ids,
-            inplace,
-            activation,
-            global_num_experts,
-            expert_map,
-            w1_scale,
-            w2_scale,
-            w1_zp,
-            w2_zp,
-            a1_scale,
-            a2_scale,
-        )
     else:
         return dispatch_fused_experts_func(inplace)(
             hidden_states=hidden_states,
@@ -1631,19 +1607,17 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             global_num_experts = E
         top_k_num = topk_ids.shape[1]
 
-        # We execute the fused_moe kernel in chunks to circumvent this issue:
-        # https://github.com/vllm-project/vllm/issues/5938
         config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
                                             use_int8_w8a16=self.use_int8_w8a16,
                                             use_int4_w4a16=self.use_int4_w4a16,
                                             dtype=hidden_states.dtype)
 
-        get_config_func = functools.partial(
-            try_get_optimal_moe_config,
+        config = try_get_optimal_moe_config(
             w1.shape,
             w2.shape,
             top_k_num,
             config_dtype,
+            num_tokens,
             block_shape=self.block_shape,
         )
 
@@ -1659,29 +1633,20 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             raise ValueError(
                 f"Unsupported compute_type: {hidden_states.dtype}")
 
-        curr_hidden_states = hidden_states
-        tokens_in_chunk, _ = curr_hidden_states.shape
-
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
         intermediate_cache1 = _resize_cache(workspace13,
-                                            (tokens_in_chunk, top_k_num, N))
-        intermediate_cache2 = _resize_cache(
-            workspace2, (tokens_in_chunk * top_k_num, N // 2))
+                                            (num_tokens, top_k_num, N))
+        intermediate_cache2 = _resize_cache(workspace2,
+                                            (num_tokens * top_k_num, N // 2))
         intermediate_cache3 = _resize_cache(workspace13,
-                                            (tokens_in_chunk, top_k_num, K))
-
-        config = get_config_func(tokens_in_chunk)
-
-        curr_topk_ids = topk_ids
-
-        qcurr_hidden_states, a1q_scale = hidden_states, a1q_scale
+                                            (num_tokens, top_k_num, K))
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
+            moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
-        invoke_fused_moe_kernel(qcurr_hidden_states,
+        invoke_fused_moe_kernel(hidden_states,
                                 w1,
                                 intermediate_cache1,
                                 a1q_scale,
