@@ -119,6 +119,12 @@ class EngineCoreClient(ABC):
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
+    def save_sharded_state(self,
+                           path: str,
+                           pattern: Optional[str] = None,
+                           max_size: Optional[int] = None) -> None:
+        raise NotImplementedError
+
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
@@ -160,6 +166,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def pin_lora_async(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    async def save_sharded_state_async(self,
+                                       path: str,
+                                       pattern: Optional[str] = None,
+                                       max_size: Optional[int] = None) -> None:
         raise NotImplementedError
 
     async def collective_rpc_async(
@@ -226,6 +238,12 @@ class InprocClient(EngineCoreClient):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.engine_core.pin_lora(lora_id)
+
+    def save_sharded_state(self,
+                           path: str,
+                           pattern: Optional[str] = None,
+                           max_size: Optional[int] = None) -> None:
+        self.engine_core.save_sharded_state(path, pattern, max_size)
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
@@ -537,6 +555,12 @@ class SyncMPClient(MPClient):
         return self.call_utility("collective_rpc", method, timeout, args,
                                  kwargs)
 
+    def save_sharded_state(self,
+                           path: str,
+                           pattern: Optional[str] = None,
+                           max_size: Optional[int] = None) -> None:
+        self.call_utility("save_sharded_state", path, pattern, max_size)
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -667,6 +691,13 @@ class AsyncMPClient(MPClient):
 
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self.call_utility_async("pin_lora", lora_id)
+
+    async def save_sharded_state_async(self,
+                                       path: str,
+                                       pattern: Optional[str] = None,
+                                       max_size: Optional[int] = None) -> None:
+        await self.call_utility_async("save_sharded_state", path, pattern,
+                                      max_size)
 
     async def collective_rpc_async(
             self,
