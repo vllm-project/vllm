@@ -256,31 +256,27 @@ class FlashAttentionImpl(AttentionImpl):
         # not padded. However, we don't need to do key[:num_actual_tokens] and
         # value[:num_actual_tokens] because the reshape_and_cache_flash op uses
         # the slot_mapping's shape to determine the number of actual tokens.
-        if kv_cache.numel() > 0:
-            key_cache, value_cache = kv_cache.unbind(0)
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+        key_cache, value_cache = kv_cache.unbind(0)
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            attn_metadata.slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
 
-            if self.kv_cache_dtype.startswith("fp8"):
-                key_cache = key_cache.view(torch.float8_e4m3fn)
-                value_cache = value_cache.view(torch.float8_e4m3fn)
-                num_tokens, num_heads, head_size = query.shape
-                query, _ = ops.scaled_fp8_quant(
-                    query.reshape(
-                        (num_tokens, num_heads * head_size)).contiguous(),
-                    layer._q_scale)
-                query = query.reshape((num_tokens, num_heads, head_size))
-        else:
-            key_cache = key
-            value_cache = value
+        if self.kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(torch.float8_e4m3fn)
+            value_cache = value_cache.view(torch.float8_e4m3fn)
+            num_tokens, num_heads, head_size = query.shape
+            query, _ = ops.scaled_fp8_quant(
+                query.reshape(
+                    (num_tokens, num_heads * head_size)).contiguous(),
+                layer._q_scale)
+            query = query.reshape((num_tokens, num_heads, head_size))
 
         # Compute attention and update output up to `num_actual_tokens`.
         if not attn_metadata.use_cascade:
@@ -288,48 +284,26 @@ class FlashAttentionImpl(AttentionImpl):
 
             descale_shape = (attn_metadata.query_start_loc.shape[0] - 1,
                              key.shape[1])
-            if kv_cache.numel() > 0:
-                flash_attn_varlen_func(
-                    q=query[:num_actual_tokens],
-                    k=key_cache,
-                    v=value_cache,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=attn_metadata.query_start_loc,
-                    max_seqlen_q=attn_metadata.max_query_len,
-                    seqused_k=attn_metadata.seq_lens,
-                    max_seqlen_k=attn_metadata.max_seq_len,
-                    softmax_scale=self.scale,
-                    causal=_get_causal_option(self.attn_type),
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=self.sliding_window,
-                    block_table=attn_metadata.block_table,
-                    softcap=self.logits_soft_cap,
-                    fa_version=self.vllm_flash_attn_version,
-                    q_descale=layer._q_scale.expand(descale_shape),
-                    k_descale=layer._k_scale.expand(descale_shape),
-                    v_descale=layer._v_scale.expand(descale_shape),
-                )
-            else:
-                flash_attn_varlen_func(
-                    q=query[:num_actual_tokens],
-                    k=key,
-                    v=value,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=attn_metadata.query_start_loc,
-                    max_seqlen_q=attn_metadata.max_query_len,
-                    #seqused_k=attn_metadata.seq_lens,
-                    cu_seqlens_k=attn_metadata.query_start_loc,
-                    max_seqlen_k=attn_metadata.max_seq_len,
-                    softmax_scale=self.scale,
-                    causal=_get_causal_option(self.attn_type),
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=self.sliding_window,
-                    softcap=self.logits_soft_cap,
-                    fa_version=self.vllm_flash_attn_version,
-                    q_descale=layer._q_scale.expand(descale_shape),
-                    k_descale=layer._k_scale.expand(descale_shape),
-                    v_descale=layer._v_scale.expand(descale_shape),
-                )
+            flash_attn_varlen_func(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=attn_metadata.query_start_loc,
+                max_seqlen_q=attn_metadata.max_query_len,
+                seqused_k=attn_metadata.seq_lens,
+                max_seqlen_k=attn_metadata.max_seq_len,
+                softmax_scale=self.scale,
+                causal=_get_causal_option(self.attn_type),
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=attn_metadata.block_table,
+                softcap=self.logits_soft_cap,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=layer._q_scale.expand(descale_shape),
+                k_descale=layer._k_scale.expand(descale_shape),
+                v_descale=layer._v_scale.expand(descale_shape),
+            )
             return output
 
         # Cascade attention (rare case).

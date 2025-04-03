@@ -1677,7 +1677,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention
             assert isinstance(attn_module, Attention)
-            if attn_module.attn_type == AttentionType.DECODER:
+            # encoder only can also benefit from KV cache for prefix caching
+            if attn_module.attn_type in (AttentionType.DECODER,
+                                         AttentionType.ENCODER_ONLY):
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -1693,9 +1695,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         use_mla=use_mla)
-            elif attn_module.attn_type in (AttentionType.ENCODER,
-                                           AttentionType.ENCODER_ONLY):
-                # encoder-only attention does not need KV cache.
+            elif attn_module.attn_type == AttentionType.ENCODER:
+                # encoder attention does not need KV cache.
                 continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                 raise NotImplementedError

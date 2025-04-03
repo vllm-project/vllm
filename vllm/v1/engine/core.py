@@ -56,8 +56,6 @@ class EngineCore:
         executor_class: type[Executor],
         log_stats: bool,
     ):
-        assert vllm_config.model_config.runner_type != "pooling"
-
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
