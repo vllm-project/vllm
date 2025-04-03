@@ -1075,11 +1075,11 @@ class MllamaTextModel(nn.Module):
 
         if is_hpu:
             for idx, decoder_layer in enumerate(self.layers):
-                if isinstance(decoder_layer, LlamaDecoderLayer):
+                if idx not in self.cross_attention_layers:
                     self.layers[idx].self_attn.rotary_emb.prepare_cos_sin(
                         positions)
         for idx, decoder_layer in enumerate(self.layers):
-            if isinstance(decoder_layer, MllamaCrossAttentionDecoderLayer):
+            if idx in self.cross_attention_layers:
                 if not skip_cross_attention:
                     hidden_states = decoder_layer(
                         hidden_states=hidden_states,
@@ -1091,7 +1091,7 @@ class MllamaTextModel(nn.Module):
                         kv_cache=kv_caches[idx],
                         attn_metadata=attn_metadata,
                     )
-            elif isinstance(decoder_layer, LlamaDecoderLayer):
+            else:
                 hidden_states, residual = decoder_layer(
                     positions=positions,
                     hidden_states=hidden_states,
@@ -1100,9 +1100,6 @@ class MllamaTextModel(nn.Module):
                     residual=None,
                 )
                 hidden_states = hidden_states + residual
-            else:
-                raise ValueError(
-                    f"Unknown decoder layer type {type(decoder_layer)}")
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
