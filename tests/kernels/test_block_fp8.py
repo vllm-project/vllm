@@ -9,8 +9,11 @@ import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    deep_gemm_moe_fp8, fused_topk, moe_align_block_size)
+from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+    deep_gemm_moe_fp8)
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
@@ -437,7 +440,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         pytest.skip(
             f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
 
-    if (N <= 512):
+    if N <= 512:
         pytest.skip("Skipping N <= 512 until performance issues solved.")
 
     vllm_config = VllmConfig()

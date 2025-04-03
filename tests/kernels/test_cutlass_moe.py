@@ -4,8 +4,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe_fp8,
-                                                            fused_experts,
+from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp8
+from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
                                                             fused_topk)
 from vllm.platforms import current_platform
 
@@ -131,9 +131,9 @@ def test_cutlass_moe_no_graph(
                                          c_strides2,
                                          a1_scale=a_scale1)
 
-        print(triton_output)
-        print(cutlass_output)
-        print("*")
+        #print(triton_output)
+        #print(cutlass_output)
+        #print("*")
 
         torch.testing.assert_close(triton_output,
                                    cutlass_output,
@@ -234,9 +234,9 @@ def test_cutlass_moe_cuda_graph(
         graph.replay()
         torch.cuda.synchronize()
 
-        print(triton_output)
-        print(cutlass_output)
-        print("*")
+        #print(triton_output)
+        #print(cutlass_output)
+        #print("*")
 
         torch.testing.assert_close(triton_output,
                                    cutlass_output,
