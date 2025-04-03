@@ -36,7 +36,9 @@ docker run --privileged --net host --shm-size=16G -it \
     && echo TEST_6 \
     && pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py \
     && echo TEST_7 \
-    && pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py" \
+    && pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py \
+    && echo TEST_8 \
+    && pytest -s -v /workspace/vllm/tests/v1/tpu/test_topk_topp_sampler.py" \
 
 
 # TODO: This test fails because it uses RANDOM_SEED sampling
