@@ -182,7 +182,7 @@ class InputPreprocessor:
     def _tokenize_prompt(
         self,
         prompt: str,
-        request_id=request_id,
+        request_id: str,
         lora_request: Optional[LoRARequest],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[int]:
