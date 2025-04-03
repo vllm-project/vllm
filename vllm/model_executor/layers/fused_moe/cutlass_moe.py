@@ -8,6 +8,9 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.dispatch_combine import (
+    StandardDispatchCombine
+)
 from vllm.model_executor.layers.fused_moe.utils import (_resize_cache,
                                                         _fp8_perm)
 from vllm.scalar_type import scalar_types
@@ -312,59 +315,6 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     return out.to(dtype=out_dtype)
 
 
-class CutlassDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
-
-    def __init__(self, out_dtype: torch.dtype):
-        super().__init__()
-        self.out_dtype = out_dtype
-
-    def dispatch(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
-        # why do we need to check a2_scale here?
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
-
-        a1q, a1q_scale = ops.scaled_fp8_quant(
-            a1, a1_scale, use_per_token_if_dynamic=per_act_token)
-
-        return a1q, a1_scale, topk_ids
-
-    def combine(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-    ) -> None:
-        M, topk = topk_weights.shape
-        K = fused_expert_output.shape[-1]
-        fused_expert_output = (fused_expert_output.view(-1, topk, K) *
-                               topk_weights.view(M, -1, 1))
-        assert output.dtype == self.out_dtype
-        ops.moe_sum(fused_expert_output, output)
-
-        ops.get_cutlass_moe_mm_data(topk_ids,
-                                    expert_offsets,
-                                    problem_sizes1,
-                                    problem_sizes2,
-                                    a_map,
-                                    c_map,
-                                    num_experts,
-                                    k,
-                                    n)
-
-        rep_a_q = _fp8_perm(a_q, a_map)
-        rep_a1_scales = a1_scale[a_map] if per_act_token else a1_scale
-
-        return rep_a_q, rep_a1_scales, expert_offsets, c_map, (problem_sizes1, problem_sizes2)
-
-
 class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
@@ -479,7 +429,7 @@ def modular_cutlass_moe_fp8(
     out_dtype: torch.dtype = torch.half,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
-        CutlassDispatchCombine(out_dtype),
+        StandardDispatchCombine(),
         CutlassExperts(
             ab_strides1,
             c_strides1,

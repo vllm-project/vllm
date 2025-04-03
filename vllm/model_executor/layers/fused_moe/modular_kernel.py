@@ -109,10 +109,15 @@ class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        # Note: extracting the problem shape from the weight and activation tensors is
+        # tricky.  It needs to be done this way specifically due to subtle issues with
+        # particular kernels, e.g. the int4 kernels divide the trailing dimension by
+        # two, so it's not "correct" to extract N or K from the trailing dimension of
+        # w1 or w2.  Similarly, some kernels transpose the weights, so this needs to
+        # be kept in mind.
         M, _ = a1.shape
         E, N, _ = w1.shape
         K = w2.shape[1]
-        #E, K, N = w2.shape
         if global_num_experts == -1:
             global_num_experts = E
         top_k = topk_ids.shape[1]
