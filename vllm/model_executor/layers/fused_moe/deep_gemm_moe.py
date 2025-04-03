@@ -12,6 +12,13 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
                                                         _resize_cache)
+from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    _moe_permute,
+    _moe_unpermute_and_reduce
+)
+from vllm.model_executor.layers.fused_moe.dispatch_combine import (
+    StandardDispatchCombine
+)
 from vllm.utils import round_up
 
 logger = init_logger(__name__)
