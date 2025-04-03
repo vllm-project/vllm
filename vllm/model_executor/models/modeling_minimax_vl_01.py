@@ -316,7 +316,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor, **kwargs)
 
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
@@ -964,239 +964,132 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(
-            MiniMaxVL01Processor,
-            image_processor=self.get_image_processor(**kwargs),
-            **kwargs,
-        )
+        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor, **kwargs)
 
-    def _get_image_processor_kwargs(
+        # In case patch_size is omitted from `processor_config.json`
+        # e.g. for E5-V: https://huggingface.co/royokong/e5-v
+        if hf_processor.patch_size is None:
+            patch_size = self.get_vision_encoder_info().get_patch_size()
+            hf_processor.patch_size = patch_size
+
+        return hf_processor
+
+    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
+    def get_num_image_tokens(
         self,
         *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ):
-        if self.ctx.model_config.mm_processor_kwargs:
-            kwargs.update(self.ctx.model_config.mm_processor_kwargs)
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_encoder_info = self.get_vision_encoder_info()
 
-        if min_pixels is not None:
-            kwargs["min_pixels"] = min_pixels
+        base_feature_size = self._apply_feature_select_strategy(
+            hf_config.vision_feature_select_strategy,
+            vision_encoder_info.get_num_image_tokens(
+                image_width=image_width,
+                image_height=image_height,
+            ),
+        )
 
-            if size is None:
-                size = {"shortest_edge": min_pixels}
-            else:
-                size["shortest_edge"] = min_pixels
+        num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+            image_size=(image_height, image_width),
+            grid_pinpoints=hf_config.image_grid_pinpoints,
+            patch_size=vision_encoder_info.get_image_size(),
+        )
 
-        if max_pixels is not None:
-            kwargs["max_pixels"] = max_pixels
+        (
+            unpadded_feature_size,
+            newline_feature_size,
+        ) = self._get_num_unpadded_features(
+            original_height=image_height,
+            original_width=image_width,
+            npatches=vision_encoder_info.get_patch_grid_length(),
+            num_patch_height=num_patch_height,
+            num_patch_width=num_patch_width,
+        )
 
-            if size is None:
-                size = {"longest_edge": max_pixels}
-            else:
-                size["longest_edge"] = max_pixels
+        return unpadded_feature_size + newline_feature_size + base_feature_size
 
-        if size is not None:
-            kwargs["size"] = size
-
-        return kwargs
-
-    def get_image_processor(
+    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
+    def _get_num_unpadded_features(
         self,
         *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ) -> ImageProcessor:
-        kwargs = self._get_image_processor_kwargs(
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-            size=size,
-            **kwargs,
-        )
-        return ImageProcessor(**kwargs)
+        original_height: int,
+        original_width: int,
+        npatches: int,
+        num_patch_height: int,
+        num_patch_width: int,
+    ) -> tuple[int, int]:
+        current_height = npatches * num_patch_height
+        current_width = npatches * num_patch_width
 
+        aspect_ratio = original_width / original_height
+        current_aspect_ratio = current_width / current_height
 
-class MiniMaxVL01Processor(ProcessorMixin):
-    r"""
-    Constructs a MiniMaxVL01 processor which wraps a MiniMaxVL01 image processor and a MiniMaxVL01 tokenizer into a single processor.
-    Args:
-        image_processor ([`ImageProcessor`], *optional*):
-            The image processor is a required input.
-        tokenizer ([`PreTrainedTokenizer`], *optional*):
-            The tokenizer is a required input.
-        patch_size (`int`, *optional*):
-            Patch size from the vision tower.
-        vision_feature_select_strategy (`str`, *optional*):
-            The feature selection strategy used to select the vision feature from the vision backbone.
-            Should be same as in model's config
-        chat_template (`str`, *optional*): A Jinja template which will be used to convert lists of messages
-            in a chat into a tokenizable string.
-        image_token (`str`, *optional*, defaults to `"<image>"`):
-            Special token used to denote image location.
-    """
-
-    attributes = ["image_processor", "tokenizer"]
-    valid_kwargs = ["chat_template", "patch_size", "vision_feature_select_strategy", "image_token"]
-    image_processor_class = "ImageProcessor"
-    tokenizer_class = "AutoTokenizer"
-
-    def __init__(
-        self,
-        image_processor=None,
-        tokenizer=None,
-        patch_size=None,
-        vision_feature_select_strategy=None,
-        chat_template=None,
-        image_token="<image>",
-        **kwargs,
-    ):
-        self.patch_size = patch_size
-        self.vision_feature_select_strategy = vision_feature_select_strategy
-        self.image_token = image_token
-        super().__init__(image_processor, tokenizer, chat_template=chat_template)
-        self.patch_size = image_processor.patch_size
-        self.grid_pinpoints = image_processor.image_grid_pinpoints
-        self.max_size = image_processor.size
-        self.process_image_mode = image_processor.process_image_mode
-
-    def __call__(
-        self,
-        images: ImageInput = None,
-        text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
-        audio=None,
-        videos=None,
-        **kwargs,
-    ) -> BatchFeature:
-        """
-        Main method to prepare for the model one or several sequences(s) and image(s).
-        Args:
-            images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `List[PIL.Image.Image]`, `List[np.ndarray]`, `List[torch.Tensor]`):
-                The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch
-                tensor. Both channels-first and channels-last formats are supported.
-            text (`str`, `List[str]`, `List[List[str]]`):
-                The sequence or batch of sequences to be encoded. Each sequence can be a string or a list of strings
-                (pretokenized string). If the sequences are provided as list of strings (pretokenized), you must set
-                `is_split_into_words=True` (to lift the ambiguity with a batch of sequences).
-            return_tensors (`str` or [`~utils.TensorType`], *optional*):
-                If set, will return tensors of a particular framework. Acceptable values are:
-                - `'tf'`: Return TensorFlow `tf.constant` objects.
-                - `'pt'`: Return PyTorch `torch.Tensor` objects.
-                - `'np'`: Return NumPy `np.ndarray` objects.
-                - `'jax'`: Return JAX `jnp.ndarray` objects.
-        Returns:
-            [`BatchFeature`]: A [`BatchFeature`] with the following fields:
-            - **input_ids** -- List of token ids to be fed to a model. Returned when `text` is not `None`.
-            - **attention_mask** -- List of indices specifying which tokens should be attended to by the model.
-            - **pixel_values** -- Pixel values to be fed to a model. Returned when `images` is not `None`.
-        """
-        if images is None and text is None:
-            raise ValueError("You have to specify at least one of `images` or `text`.")
-
-        output_kwargs = self._merge_kwargs(
-            MiniMaxVL01ProcessorKwargs,
-            tokenizer_init_kwargs=self.tokenizer.init_kwargs,
-            **kwargs,
-        )
-
-        if images is not None:
-            # Convert images to list if needed
-            if not isinstance(images, (list, tuple)):
-                images = [images]
-            
-            # Process images
-            image_inputs = self._process_image_input(images)
+        if aspect_ratio > current_aspect_ratio:
+            new_height = (original_height * current_width) // original_width
+            padding = (current_height - new_height) // 2
+            current_height = current_height - (2 * padding)
         else:
-            image_inputs = {}
+            new_width = (original_width * current_height) // original_height
+            padding = (current_width - new_width) // 2
+            current_width = current_width - (2 * padding)
 
-        if isinstance(text, str):
-            text = [text]
-        elif not isinstance(text, list) and not isinstance(text[0], str):
-            raise ValueError("Invalid input text. Please provide a string, or a list of strings")
+        unpadded_features = current_height * current_width
+        newline_features = current_height
 
-        # try to expand inputs in processing if we have the necessary parts
-        prompt_strings = text
-        if image_inputs.get("pixel_values") is not None:
-            if self.process_image_mode == 'anyres':
-                if LEGACY_PROCESSING:# 推理时不提前替换image token
-                    pixel_values = image_inputs["pixel_values"]
-                    image_sizes = image_inputs["image_sizes"]
-                    all_image_tokens = []
-                    for pixel_value, image_size in zip(pixel_values, image_sizes):
-                        height, width = image_size
-                        num_image_tokens = get_num_token(height, width, self.grid_pinpoints, self.patch_size)
-                        all_image_tokens.append(num_image_tokens)
-                    prompt_strings = []
-                    image_index = 0
-                    for sample in text:
-                        split_text = split_special_tokens(sample, [self.image_token])
-                        final_text = ''
-                        for i, _sample in enumerate(split_text):
-                            if _sample == self.image_token:
-                                final_text += _sample * all_image_tokens[image_index]
-                                image_index += 1
-                            else:
-                                final_text += _sample
-                        prompt_strings.append(final_text)
-            elif self.process_image_mode == 'resize':
-                pixel_values = image_inputs["pixel_values"]
-                all_image_tokens = []
-                for pixel_value in pixel_values:
-                    height, width = get_image_size(to_numpy_array(pixel_value))
-                    all_image_tokens.append(int(height*width/self.patch_size**2))
-                
-                prompt_strings = []
-                image_index = 0
-                for sample in text:
-                    split_text = split_special_tokens(sample, [self.image_token])
-                    final_text = ''
-                    for i, _sample in enumerate(split_text):
-                        if _sample == self.image_token:
-                            final_text += _sample * all_image_tokens[image_index]
-                            image_index += 1
-                        else:
-                            final_text += _sample
-                    prompt_strings.append(final_text)
-            else:
-                if self.patch_size is not None:
-                    pixel_values = image_inputs["pixel_values"]
-                    all_image_tokens = []
-                    for pixel_value in pixel_values:
-                        height, width = get_image_size(to_numpy_array(pixel_value))
-                        new_width, new_height = get_hw_multiple_of((width, height), self.patch_size, self.max_size)
-                        num_image_tokens = (new_height // self.patch_size) * (new_width // self.patch_size)
-                        all_image_tokens.append(num_image_tokens)
-                    
-                    prompt_strings = []
-                    image_index = 0
-                    for sample in text:
-                        split_text = split_special_tokens(sample, [self.image_token])
-                        final_text = ''
-                        for i, _sample in enumerate(split_text):
-                            if _sample == self.image_token:
-                                final_text += _sample * all_image_tokens[image_index]
-                                image_index += 1
-                            else:
-                                final_text += _sample
-                        prompt_strings.append(final_text)
-                else:
-                    logger.warning_once(
-                        "Expanding inputs for image tokens in MiniMaxVL01 should be done in processing. "
-                        "Please add `patch_size` and `vision_feature_select_strategy` to the model's processing config or set directly "
-                        "with `processor.patch_size = {{patch_size}}` and processor.vision_feature_select_strategy = {{vision_feature_select_strategy}}`. "
-                        "Using processors without these attributes in the config is deprecated and will throw an error in v4.47."
-                    )
-                    raise ValueError(
-                        "You need to provide `patch_size` and `vision_feature_select_strategy` in the model's processing config to expand inputs for image tokens."
-                    )
+        return (unpadded_features, newline_features)
 
-        text_inputs = self.tokenizer(prompt_strings, **output_kwargs["text_kwargs"])
-        return CustomBatchFeature(data={**text_inputs, **image_inputs})
+    def get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self.get_hf_config()
 
-    def _process_image_input(self, images: List[Image.Image]) -> Dict[str, Any]:
-        """Process image inputs."""
+        largest_feature_size, largest_feature_pinpoint = 0, None
+        for (height, width) in hf_config.image_grid_pinpoints:
+            feat_size = self.get_num_image_tokens(image_width=width,
+                                                  image_height=height)
+            if feat_size > largest_feature_size:
+                largest_feature_size = feat_size
+                largest_feature_pinpoint = ImageSize(width=width,
+                                                     height=height)
+
+        if largest_feature_size == 0 or largest_feature_pinpoint is None:
+            raise ValueError("Cannot have a largest feature size of 0!")
+
+        return largest_feature_pinpoint
+
+
+_I = TypeVar("_I", bound=LlavaNextProcessingInfo)
+
+
+class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
+
+    # Copied from BaseMultiModalProcessor
+    @abstractmethod
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        raise NotImplementedError
+
+
+class LlavaNextMultiModalProcessor(
+        BaseLlavaNextMultiModalProcessor[LlavaNextProcessingInfo]):
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _process_image_input(self, images: List[Image.Image], **kwargs) -> Dict[str, Any]:
+        """Process image inputs without relying on LlavaNextProcessor."""
         all_images = []
         image_sizes = []
         
