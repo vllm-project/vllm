@@ -1571,7 +1571,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention
             assert isinstance(attn_module, Attention)
             if attn_module.attn_type in \
-                [AttentionType.DECODER, AttentionType.ENCODER]:
+                [AttentionType.DECODER]:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,

@@ -117,7 +117,7 @@ class BertEncoder(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        for layer in self.layer:
+        for i, layer in enumerate(self.layer):
             hidden_states = layer(hidden_states)
         return hidden_states
 
@@ -432,9 +432,11 @@ class BertEmbeddingModel(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
+        print(f"{hidden_states=}")
         logits = torch.zeros(
             (hidden_states.shape[0], self.model.config.vocab_size),
-            dtype=torch.half)
+            dtype=torch.half,
+            device=hidden_states.device)
         logits[:, 333] = 1.0
 
         return logits
@@ -450,6 +452,7 @@ class BertEmbeddingModel(nn.Module):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
+        print(f"{hidden_states[-1]=}")
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
