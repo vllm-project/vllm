@@ -267,7 +267,7 @@ class Qwen2Model(nn.Module):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 decoder_layer_type=None):
+                 decoder_layer_type: type[nn.Module] = Qwen2DecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
