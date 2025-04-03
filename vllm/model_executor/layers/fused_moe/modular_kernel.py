@@ -72,6 +72,7 @@ def _moe_problem_size(
     return E, M, N, K, topk
 
 
+
 class FusedMoEQuantizeDispatchCombine(ABC):
     """
     An abstract base class for the [Quantize-Dispatch] and [Combine] steps

@@ -9,9 +9,6 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.dispatch_combine import (
     StandardDispatchCombine)
 from vllm.model_executor.layers.fused_moe.utils import _fp8_perm, _resize_cache
-from vllm.model_executor.layers.fused_moe.dispatch_combine import (
-    StandardDispatchCombine
-)
 
 
 class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
