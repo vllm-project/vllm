@@ -37,7 +37,7 @@
 using namespace cute;
 using namespace cutlass::fmha::kernel;
 
-template<bool v>
+template <bool v>
 struct IsPersistent {
   static const bool value = v;
 };
@@ -54,31 +54,28 @@ struct MlaSm100 {
 
   // H K (D_latent D_rope) B
   using ProblemShape = cute::tuple<TileShapeH, int, TileShapeD, int>;
-  
+
   using StrideQ = cute::tuple<int64_t, _1, int64_t>;  // H D B
   using StrideK = cute::tuple<int64_t, _1, int64_t>;  // K D B
   using StrideO = StrideK;                            // H D B
   using StrideLSE = cute::tuple<_1, int>;             // H B
 
-  using TileScheduler = std::conditional_t<
-      PersistenceOption::value,
-      Sm100MlaPersistentTileScheduler,
-      Sm100MlaIndividualTileScheduler>;
+  using TileScheduler = std::conditional_t<PersistenceOption::value,
+                                           Sm100MlaPersistentTileScheduler,
+                                           Sm100MlaIndividualTileScheduler>;
 
   using FmhaKernel =
       cutlass::fmha::kernel::Sm100FmhaMlaKernelTmaWarpspecialized<
-          TileShape, Element, ElementAcc, ElementOut, ElementAcc,
-          TileScheduler, /*kIsCpAsync=*/true>;
+          TileShape, Element, ElementAcc, ElementOut, ElementAcc, TileScheduler,
+          /*kIsCpAsync=*/true>;
   using Fmha = cutlass::fmha::device::MLA<FmhaKernel>;
 };
 
-
 template <typename T>
-typename T::Fmha::Arguments args_from_options(at::Tensor const& out,
-                                              at::Tensor const& q_nope_and_q_pe,
-                                              at::Tensor const& kv_c_and_k_pe_cache,
-                                              at::Tensor const& seq_lens,
-                                              at::Tensor const& page_table) {
+typename T::Fmha::Arguments args_from_options(
+    at::Tensor const& out, at::Tensor const& q_nope_and_q_pe,
+    at::Tensor const& kv_c_and_k_pe_cache, at::Tensor const& seq_lens,
+    at::Tensor const& page_table) {
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = q_nope_and_q_pe.device().index();
   hw_info.sm_count =
@@ -92,8 +89,8 @@ typename T::Fmha::Arguments args_from_options(at::Tensor const& out,
   int max_seq_len = page_size * page_count_per_seq;
   using TileShapeH = typename T::TileShapeH;
   using TileShapeD = typename T::TileShapeD;
-  auto problem_shape = cute::make_tuple(
-      TileShapeH{}, max_seq_len, TileShapeD{}, batches);
+  auto problem_shape =
+      cute::make_tuple(TileShapeH{}, max_seq_len, TileShapeD{}, batches);
 
   auto [H, K, D, B] = problem_shape;
   auto [D_latent, D_rope] = D;
@@ -108,20 +105,17 @@ typename T::Fmha::Arguments args_from_options(at::Tensor const& out,
   using StrideO = typename T::StrideO;
   using StrideLSE = typename T::StrideLSE;
 
-  StrideQ stride_Q = cute::make_tuple(
-      static_cast<int64_t>(0 + D_latent + D_rope),
-      _1{},
-      static_cast<int64_t>(H * (0 + D_latent + D_rope)));
-  StrideK stride_C = cute::make_tuple(
-      static_cast<int64_t>(0 + D_latent + D_rope),
-      _1{},
-      static_cast<int64_t>(page_size * (D_latent + D_rope)));
+  StrideQ stride_Q =
+      cute::make_tuple(static_cast<int64_t>(0 + D_latent + D_rope), _1{},
+                       static_cast<int64_t>(H * (0 + D_latent + D_rope)));
+  StrideK stride_C =
+      cute::make_tuple(static_cast<int64_t>(0 + D_latent + D_rope), _1{},
+                       static_cast<int64_t>(page_size * (D_latent + D_rope)));
   StrideLSE stride_PT = cute::make_stride(_1{}, page_count_per_seq);
   StrideLSE stride_LSE = cute::make_tuple(_1{}, 0 + H);
-  StrideO stride_O = cute::make_tuple(
-      static_cast<int64_t>(0 + D_latent),
-      _1{},
-      static_cast<int64_t>(0 + H * D_latent));
+  StrideO stride_O =
+      cute::make_tuple(static_cast<int64_t>(0 + D_latent), _1{},
+                       static_cast<int64_t>(0 + H * D_latent));
 
   using Element = typename T::Element;
   using ElementOut = typename T::ElementOut;
@@ -129,24 +123,19 @@ typename T::Fmha::Arguments args_from_options(at::Tensor const& out,
   auto Q_ptr = static_cast<Element*>(q_nope_and_q_pe.data_ptr());
   auto C_ptr = static_cast<Element*>(kv_c_and_k_pe_cache.data_ptr());
   typename T::Fmha::Arguments arguments{
-    problem_shape,
-    { scale,
-      Q_ptr, stride_Q,
-      Q_ptr + D_latent, stride_Q,
-      C_ptr, stride_C,
-      C_ptr + D_latent, stride_C,
-      static_cast<int*>(seq_lens.data_ptr()),
-      static_cast<int*>(page_table.data_ptr()), stride_PT,
-      page_count_total, page_size},
-    { static_cast<ElementOut*>(out.data_ptr()), stride_O,
-      // static_cast<ElementAcc*>(lse.data_ptr()), stride_LSE},
-      static_cast<ElementAcc*>(nullptr), stride_LSE},
-    hw_info,
-    -1, // split_kv
-    nullptr, // is_var_split_kv
+      problem_shape,
+      {scale, Q_ptr, stride_Q, Q_ptr + D_latent, stride_Q, C_ptr, stride_C,
+       C_ptr + D_latent, stride_C, static_cast<int*>(seq_lens.data_ptr()),
+       static_cast<int*>(page_table.data_ptr()), stride_PT, page_count_total,
+       page_size},
+      {static_cast<ElementOut*>(out.data_ptr()), stride_O,
+       static_cast<ElementAcc*>(nullptr), stride_LSE},
+      hw_info,
+      -1,       // split_kv
+      nullptr,  // is_var_split_kv
   };
   // TODO(kaixih@nvidia): When split_kv=-1 and is_var_split_kv=false, we compute
-  // split_kv automatically based on batch size and sequence length to balance 
+  // split_kv automatically based on batch size and sequence length to balance
   // workload across available SMs. Consider using var_split_kv for manual
   // control if needed.
   T::Fmha::set_split_kv(arguments);
@@ -154,20 +143,17 @@ typename T::Fmha::Arguments args_from_options(at::Tensor const& out,
 }
 
 template <typename Element>
-void runMla(at::Tensor const& out,
-            at::Tensor const& q_nope_and_q_pe,
-            at::Tensor const& kv_c_and_k_pe_cache,
-            at::Tensor const& seq_lens,
-            at::Tensor const& page_table,
-            cudaStream_t stream) {
+void runMla(at::Tensor const& out, at::Tensor const& q_nope_and_q_pe,
+            at::Tensor const& kv_c_and_k_pe_cache, at::Tensor const& seq_lens,
+            at::Tensor const& page_table, cudaStream_t stream) {
   using MlaSm100Type = MlaSm100<Element>;
   typename MlaSm100Type::Fmha fmha;
-  auto arguments =
-      args_from_options<MlaSm100Type>(out, q_nope_and_q_pe, kv_c_and_k_pe_cache,
-                                      seq_lens, page_table);
+  auto arguments = args_from_options<MlaSm100Type>(
+      out, q_nope_and_q_pe, kv_c_and_k_pe_cache, seq_lens, page_table);
   size_t workspace_size = MlaSm100Type::Fmha::get_workspace_size(arguments);
-  auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(q_nope_and_q_pe.device());
+  auto const workspace_options = torch::TensorOptions()
+                                     .dtype(torch::kUInt8)
+                                     .device(q_nope_and_q_pe.device());
   auto workspace = torch::empty(workspace_size, workspace_options);
 
   CUTLASS_CHECK(fmha.can_implement(arguments));
@@ -182,20 +168,20 @@ void cutlass_mla_decode_sm100a(torch::Tensor const& out,
                                torch::Tensor const& kv_c_and_k_pe_cache,
                                torch::Tensor const& seq_lens,
                                torch::Tensor const& page_table) {
-    auto in_dtype = q_nope_and_q_pe.dtype();
-    at::cuda::CUDAGuard device_guard{(char)q_nope_and_q_pe.get_device()};
-    const cudaStream_t stream = at::cuda::getCurrentCUDAStream(
-                                    q_nope_and_q_pe.get_device());
-    if (in_dtype == at::ScalarType::Half) {
-        runMla<cutlass::half_t>(
-            out, q_nope_and_q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, stream);
-    } else if (in_dtype == at::ScalarType::BFloat16) {
-        runMla<cutlass::bfloat16_t>(
-            out, q_nope_and_q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, stream);
-    } else if (in_dtype == at::ScalarType::Float8_e4m3fn) {
-        runMla<cutlass::float_e4m3_t>(
-            out, q_nope_and_q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, stream);
-    } else {
-        TORCH_CHECK(false, "Unsupported input data type of MLA");
-    }
+  auto in_dtype = q_nope_and_q_pe.dtype();
+  at::cuda::CUDAGuard device_guard{(char)q_nope_and_q_pe.get_device()};
+  const cudaStream_t stream =
+      at::cuda::getCurrentCUDAStream(q_nope_and_q_pe.get_device());
+  if (in_dtype == at::ScalarType::Half) {
+    runMla<cutlass::half_t>(out, q_nope_and_q_pe, kv_c_and_k_pe_cache, seq_lens,
+                            page_table, stream);
+  } else if (in_dtype == at::ScalarType::BFloat16) {
+    runMla<cutlass::bfloat16_t>(out, q_nope_and_q_pe, kv_c_and_k_pe_cache,
+                                seq_lens, page_table, stream);
+  } else if (in_dtype == at::ScalarType::Float8_e4m3fn) {
+    runMla<cutlass::float_e4m3_t>(out, q_nope_and_q_pe, kv_c_and_k_pe_cache,
+                                  seq_lens, page_table, stream);
+  } else {
+    TORCH_CHECK(false, "Unsupported input data type of MLA");
+  }
 }

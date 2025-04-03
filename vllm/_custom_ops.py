@@ -1432,10 +1432,11 @@ def flash_mla_with_kvcache(
     )
     return out, softmax_lse
 
+
 def cutlass_mla_decode(q_nope_and_q_pe: torch.Tensor,
-                      kv_c_and_k_pe_cache: torch.Tensor,
-                      seq_lens: torch.Tensor,
-                      page_table: torch.Tensor) -> torch.Tensor:
+                       kv_c_and_k_pe_cache: torch.Tensor,
+                       seq_lens: torch.Tensor,
+                       page_table: torch.Tensor) -> torch.Tensor:
     assert not current_platform.is_rocm()
     assert q_nope_and_q_pe.ndim == 3, f"q_nope_and_q_pe must be a 3D tensor, but got {q_nope_and_q_pe.ndim}"
     assert kv_c_and_k_pe_cache.ndim == 3, f"kv_c_and_k_pe_cache must be a 3D tensor, but got {kv_c_and_k_pe_cache.ndim}"
@@ -1446,13 +1447,17 @@ def cutlass_mla_decode(q_nope_and_q_pe: torch.Tensor,
     D_rope = 64
     assert D_q == D_ckv and D_q == D_latent + D_rope, (
         f"D_q must be equal to D_ckv and D_q must be equal to D_latent + D_rope, "
-        f"but got D_q = {D_q}, D_ckv = {D_ckv}, D_latent = {D_latent}, D_rope = {D_rope}")
+        f"but got D_q = {D_q}, D_ckv = {D_ckv}, D_latent = {D_latent}, D_rope = {D_rope}"
+    )
     assert H == 128, f"H must be 128, but got {H}"
-    assert PAGE_SIZE > 0 and (PAGE_SIZE & (PAGE_SIZE - 1)) == 0, f"PAGE_SIZE must be a power of 2, but got {PAGE_SIZE}"
-    
+    assert PAGE_SIZE > 0 and (
+        PAGE_SIZE & (PAGE_SIZE - 1)
+    ) == 0, f"PAGE_SIZE must be a power of 2, but got {PAGE_SIZE}"
+
     # TODO(kaixih@nvidia): support fp8
     assert q_nope_and_q_pe.dtype in (torch.float16, torch.bfloat16), (
-        f'q_nope_and_q_pe.dtype needs to be fp16 or bf16 but got {q_nope_and_q_pe.dtype}.')
+        f'q_nope_and_q_pe.dtype needs to be fp16 or bf16 but got {q_nope_and_q_pe.dtype}.'
+    )
     assert kv_c_and_k_pe_cache.dtype == q_nope_and_q_pe.dtype, (
         f'kv_c_and_k_pe_cache.dtype needs to be the same as q_nope_and_q_pe.dtype, '
         f'but got {kv_c_and_k_pe_cache.dtype}.')
@@ -1461,7 +1466,9 @@ def cutlass_mla_decode(q_nope_and_q_pe: torch.Tensor,
     assert page_table.dtype == torch.int32, (
         f'page_table.dtype needs to be int32 but got {page_table.dtype}.')
 
-    out = torch.empty((B_q, H, D_latent), device=q_nope_and_q_pe.device, dtype=q_nope_and_q_pe.dtype)
+    out = torch.empty((B_q, H, D_latent),
+                      device=q_nope_and_q_pe.device,
+                      dtype=q_nope_and_q_pe.dtype)
 
     torch.ops._C.cutlass_mla_decode(out, q_nope_and_q_pe, kv_c_and_k_pe_cache,
                                     seq_lens, page_table)

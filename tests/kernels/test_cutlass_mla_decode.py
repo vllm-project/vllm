@@ -8,8 +8,10 @@ import vllm._custom_ops as ops
 from vllm.platforms import current_platform
 
 if not current_platform.has_device_capability(100):
-    pytest.skip(reason="Cutlass MLA Requires compute capability of 10 or above.",
-                allow_module_level=True)
+    pytest.skip(
+        reason="Cutlass MLA Requires compute capability of 10 or above.",
+        allow_module_level=True)
+
 
 def ref_mla(
         out: Tensor,  # (bs, num_heads, v_head_dim)
@@ -40,12 +42,14 @@ def ref_mla(
 
     return out
 
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("mean_seq_len", [128, 1024, 4096])
 @pytest.mark.parametrize("bs", [1, 2, 4])
 @pytest.mark.parametrize("varlen", [False, True])
 @pytest.mark.parametrize("block_size", [16, 128])
-def test_cutlass_mla_decode(dtype: torch.dtype, mean_seq_len: int, bs: int, varlen: bool, block_size: int):
+def test_cutlass_mla_decode(dtype: torch.dtype, mean_seq_len: int, bs: int,
+                            varlen: bool, block_size: int):
     torch.set_default_dtype(dtype)
     torch.set_default_device('cuda')
     torch.manual_seed(42)
@@ -53,7 +57,7 @@ def test_cutlass_mla_decode(dtype: torch.dtype, mean_seq_len: int, bs: int, varl
     d = 576
     h_q = 128
     dv = 512
-    
+
     q_nope_dim = 128
     q_pe_dim = 64
     scale = (q_nope_dim + q_pe_dim)**(-0.5)
@@ -66,7 +70,9 @@ def test_cutlass_mla_decode(dtype: torch.dtype, mean_seq_len: int, bs: int, varl
     block_num = (max_seq_len + block_size - 1) // block_size
 
     q = torch.randn(bs, h_q, d)
-    block_table = torch.randint(0, bs * block_num, (bs, block_num), dtype=torch.int32)
+    block_table = torch.randint(0,
+                                bs * block_num, (bs, block_num),
+                                dtype=torch.int32)
 
     kv_cache = torch.randn(block_table.numel(), block_size, d)
 
