@@ -7,8 +7,8 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
-                    List, Mapping, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
+                    Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
@@ -67,6 +67,7 @@ _LOCAL_LOGGING_INTERVAL_SEC = 5
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
+_R = TypeVar("_R", default=Any)
 
 
 @dataclass
@@ -1937,10 +1938,10 @@ class LLMEngine:
             "Sleep mode is not enabled in the model config")
         self.model_executor.sleep(level=level)
 
-    def wake_up(self) -> None:
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         assert self.vllm_config.model_config.enable_sleep_mode, (
             "Sleep mode is not enabled in the model config")
-        self.model_executor.wake_up()
+        self.model_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.model_executor.is_sleeping
@@ -2080,8 +2081,9 @@ class LLMEngine:
             guided_decoding.backend = guided_decoding.backend or \
                 self.decoding_config.guided_decoding_backend
 
-            logger.debug("Reasoning backend: %s",
-                         self.decoding_config.reasoning_backend)
+            if self.decoding_config.reasoning_backend is not None:
+                logger.debug("Building with reasoning backend %s",
+                             self.decoding_config.reasoning_backend)
 
             processor = get_local_guided_decoding_logits_processor(
                 guided_params=guided_decoding,
@@ -2121,6 +2123,14 @@ class LLMEngine:
                 sampling_params.logits_processors.extend(logits_processors)
 
         return sampling_params
+
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return self.model_executor.collective_rpc(method, timeout, args,
+                                                  kwargs)
 
 
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
