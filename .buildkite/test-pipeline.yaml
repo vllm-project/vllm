@@ -336,7 +336,7 @@ steps:
   source_file_dependencies:
   - benchmarks/
   commands:
-  - bash run-benchmarks.sh
+  - bash scripts/run-benchmarks.sh
 
 - label: Quantization Test # 33min
   source_file_dependencies:
