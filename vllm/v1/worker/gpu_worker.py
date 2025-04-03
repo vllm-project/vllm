@@ -269,6 +269,20 @@ class Worker(WorkerBase):
         # worker will always be healthy as long as it's running.
         return
 
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        from vllm.model_executor.model_loader.loader import ShardedStateLoader
+        ShardedStateLoader.save_model(
+            self.model_runner.model,
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
+
 
 def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
