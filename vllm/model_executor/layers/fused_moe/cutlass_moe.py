@@ -336,10 +336,12 @@ class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
             self,
             a_dtype: torch.dtype,
             M: int,
-            K: int,  # Note that K, N are transposed
             N: int,
+            K: int,
             topk: int,
             num_experts: int) -> Tuple[int, int, torch.dtype]:
+        # Note that K, N are transposed
+        N, K = K, N
         workspace1 = M * topk * max(2 * N, K)
         workspace2 = M * topk * N
         return (workspace1, workspace2, self.out_dtype)
@@ -370,6 +372,7 @@ class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert w1.shape[1] == K
         assert global_num_experts != -1
+        assert a1q_scale is not None
 
         per_act_token = a1q_scale.numel() != 1 if a1q_scale is not None else (
             a2_scale.numel() != 1 if a2_scale is not None else False)
