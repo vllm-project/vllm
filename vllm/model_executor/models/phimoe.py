@@ -249,6 +249,7 @@ class PhiMoE(nn.Module):
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -272,7 +273,8 @@ class PhiMoE(nn.Module):
             renormalize=False,
             quant_config=quant_config,
             tp_size=tp_size,
-            custom_routing_function=phimoe_routing_function)
+            custom_routing_function=phimoe_routing_function,
+            prefix=f"{prefix}.experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -396,6 +398,7 @@ class PhiMoEDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.block_sparse_moe",
         )
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.rms_norm_eps,
@@ -441,7 +444,6 @@ class PhiMoEModel(nn.Module):
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
-        self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
                        (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab

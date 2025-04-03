@@ -34,13 +34,20 @@ def decode_tokens(
     tokenizer: AnyTokenizer,
     token_ids: list[int],
     *,
-    skip_special_tokens: bool = False,
+    skip_special_tokens: Optional[bool] = None,
 ) -> str:
     """
     Backend-agnostic equivalent of HF's
-    :code:`tokenizer.decode(token_ids, skip_special_tokens=...)`.
+    :code:`tokenizer.decode(token_ids, ...)`.
+
+    :code:`skip_special_tokens=None` means to use the backend's default
+    settings.
     """
-    return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
+    if skip_special_tokens is not None:
+        return tokenizer.decode(token_ids,
+                                skip_special_tokens=skip_special_tokens)
+
+    return tokenizer.decode(token_ids)
 
 
 def encode_tokens(
@@ -51,10 +58,14 @@ def encode_tokens(
 ) -> list[int]:
     """
     Backend-agnostic equivalent of HF's
-    :code:`tokenizer.encode(text, add_special_tokens=...)`.
+    :code:`tokenizer.encode(text, ...)`.
+
+    :code:`add_special_tokens=None` means to use the backend's default
+    settings.
     """
     if add_special_tokens is not None:
         return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+
     return tokenizer.encode(text)
 
 

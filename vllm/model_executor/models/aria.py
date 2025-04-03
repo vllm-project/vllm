@@ -21,8 +21,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
@@ -35,7 +34,7 @@ from .idefics2_vision_model import Idefics2VisionConfig
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer)
 # yapf: enable
-from .interfaces import SupportsMultiModal, SupportsQuant
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     is_pp_missing_parameter, maybe_prefix,
@@ -46,7 +45,7 @@ class AriaImagePixelInputs(TypedDict):
     pixel_values: torch.Tensor
     pixel_mask: Optional[torch.Tensor]
     """
-    Shape: 
+    Shape:
         pixel_values: `(batch_size * num_images, num_channels, height, width)`
         pixel_mask: `(batch_size * num_images, height, width)`
     """
@@ -61,7 +60,7 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, quant_config, prefix)
+        super().__init__(config, quant_config=quant_config, prefix=prefix)
         # Unlike Idefics3VisionTransformer which uses LayerNorm after the
         # final layer, Aria omits this normalization, so we replace it with an
         # Identity layer
@@ -135,11 +134,11 @@ class AriaProjector(nn.Module):
         query numbers,
             e.g., {1225: 128, 4900: 256}. This allows for different query sizes
             based on image resolution.
-        embed_dim (int): Embedding dimension. 
-        num_heads (int): Number of attention heads. 
-        kv_dim (int): Dimension of key and value. 
-        ff_dim (int): Hidden dimension of the feed-forward network. 
-        output_dim (int): Output dimension. 
+        embed_dim (int): Embedding dimension.
+        num_heads (int): Number of attention heads.
+        kv_dim (int): Dimension of key and value.
+        ff_dim (int): Hidden dimension of the feed-forward network.
+        output_dim (int): Output dimension.
         norm_layer (nn.Module): Normalization layer. Default is nn.LayerNorm.
 
     Outputs:
@@ -239,6 +238,7 @@ class AriaTextMoELayer(nn.Module):
         self,
         config: AriaTextConfig,
         quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
@@ -254,6 +254,7 @@ class AriaTextMoELayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             reduce_results=True,
+            prefix=f"{prefix}.experts",
         )
         self.shared_experts = LlamaMLP(
             config.hidden_size,
@@ -301,7 +302,9 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
     ) -> None:
         super().__init__(config, cache_config, quant_config, prefix)
-        self.mlp = AriaTextMoELayer(config, quant_config=quant_config)
+        self.mlp = AriaTextMoELayer(config,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.mlp")
 
 
 class AriaTextModel(LlamaModel, SupportsQuant):
@@ -509,7 +512,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.config = config
         self.vision_tower = AriaVisionTransformer(
             config.vision_config,
-            quant_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.vision_tower",
         )
         self.multi_modal_projector = AriaProjector(config)
@@ -602,7 +605,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return self.multi_modal_projector(image_outputs, image_attn_mask)
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -612,7 +616,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:

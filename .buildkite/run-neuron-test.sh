@@ -35,7 +35,7 @@ else
     date "+%s" > /tmp/neuron-docker-build-timestamp
 fi
 
-docker build -t "${image_name}" -f Dockerfile.neuron .
+docker build -t "${image_name}" -f docker/Dockerfile.neuron .
 
 # Setup cleanup
 remove_docker_container() {
@@ -44,11 +44,11 @@ remove_docker_container() {
 trap remove_docker_container EXIT
 
 # Run the image
-docker run --rm -it --device=/dev/neuron0 --device=/dev/neuron1 --network host \
+docker run --rm -it --device=/dev/neuron0 --network bridge \
        -v "${HF_CACHE}:${HF_MOUNT}" \
        -e "HF_HOME=${HF_MOUNT}" \
        -v "${NEURON_COMPILE_CACHE_URL}:${NEURON_COMPILE_CACHE_MOUNT}" \
        -e "NEURON_COMPILE_CACHE_URL=${NEURON_COMPILE_CACHE_MOUNT}" \
        --name "${container_name}" \
        ${image_name} \
-       /bin/bash -c "python3 /workspace/vllm/examples/offline_inference/neuron.py && python3 -m pytest /workspace/vllm/tests/neuron/ -v --capture=tee-sys"
+       /bin/bash -c "python3 /workspace/vllm/examples/offline_inference/neuron.py && python3 -m pytest /workspace/vllm/tests/neuron/1_core/ -v --capture=tee-sys && python3 -m pytest /workspace/vllm/tests/neuron/2_core/ -v --capture=tee-sys"

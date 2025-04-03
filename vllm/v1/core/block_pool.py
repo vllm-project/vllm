@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Optional
+from typing import Callable, Optional
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
@@ -15,10 +15,10 @@ logger = init_logger(__name__)
 
 class BlockPool:
     """BlockPool that manages KVCacheBlocks.
-    It provides methods to allocate, free and cache the kv cache blocks. The 
-    free_block_queue stores the free blocks in eviction order to enable 
-    allocation, free, and cache eviction. The cached_block_hash_to_block 
-    maps between block hash and cached block to support finding cached blocks 
+    It provides methods to allocate, free and cache the kv cache blocks. The
+    free_block_queue stores the free blocks in eviction order to enable
+    allocation, free, and cache eviction. The cached_block_hash_to_block
+    maps between block hash and cached block to support finding cached blocks
     by their block hash.
 
     Args:
@@ -27,6 +27,7 @@ class BlockPool:
     """
 
     def __init__(self, num_gpu_blocks: int, enable_caching: bool):
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         # All kv-cache blocks.
@@ -49,6 +50,11 @@ class BlockPool:
         # block tables are append-only.
         self.cached_block_hash_to_block: dict[BlockHashType, dict[
             int, KVCacheBlock]] = defaultdict(dict)
+
+        # To represent a placeholder block with block_id=0.
+        # The ref_cnt of null_block is not maintained, needs special care to
+        # avoid freeing it.
+        self.null_block = self.free_block_queue.popleft()
 
     def get_cached_block(self,
                          block_hash: BlockHashType) -> Optional[KVCacheBlock]:
@@ -75,11 +81,12 @@ class BlockPool:
         num_cached_blocks: int,
         num_full_blocks: int,
         block_size: int,
+        hash_fn: Callable,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
         metadata to be updated and cached. Given a request, it computes the
-        block hashes for the blocks starting from `num_cached_blocks` to 
+        block hashes for the blocks starting from `num_cached_blocks` to
         `num_full_blocks`, updating the metadata for each block
         and caching them in the `cached_block_hash_to_block`.
 
@@ -87,12 +94,13 @@ class BlockPool:
             request: The request to cache the blocks.
             blocks: All blocks in the request.
             block_hashes: Block hashes of the blocks in the request. Note that
-            this list may be shorter than the blocks list. In this case the 
+            this list may be shorter than the blocks list. In this case the
             missed block hash will be computed in this function.
             num_cached_blocks: The number of blocks that are already cached.
-            num_full_blocks: The number of blocks that are full and should 
+            num_full_blocks: The number of blocks that are full and should
                 be cached after this function.
             block_size: Number of tokens in each block.
+            hash_fn: The hash function to use for block hashes.
         """
         if num_cached_blocks == num_full_blocks:
             return
@@ -138,7 +146,7 @@ class BlockPool:
                     request, start_token_idx, end_token_idx, -1)
 
                 # Compute the hash of the current block.
-                block_hash = hash_block_tokens(prev_block_hash_value,
+                block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
                                                block_tokens, extra_keys)
                 block_hashes.append(block_hash)
 
@@ -212,7 +220,7 @@ class BlockPool:
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
-            if block.ref_cnt == 0:
+            if block.ref_cnt == 0 and block != self.null_block:
                 self.free_block_queue.remove(block)
             block.incr_ref()
 
@@ -226,7 +234,8 @@ class BlockPool:
         """
         for block in ordered_blocks:
             block.decr_ref()
-            if block.ref_cnt == 0:
+            # null_block should not be added to the free list.
+            if block.ref_cnt == 0 and block != self.null_block:
                 self.free_block_queue.append(block)
 
     def reset_prefix_cache(self) -> bool:
@@ -239,10 +248,10 @@ class BlockPool:
             False otherwise.
         """
         num_used_blocks = (self.num_gpu_blocks - self.get_num_free_blocks())
-        if num_used_blocks > 0:
+        if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(
                 "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet", num_used_blocks)
+                "blocks (%d) are not freed yet", num_used_blocks - 1)
             return False
 
         # Remove all hashes so that no new blocks will hit.

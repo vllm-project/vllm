@@ -142,8 +142,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             layer.w2_input_scale = torch.nn.Parameter(
                 layer.w2_input_scale.max(), requires_grad=False)
 
-        # If rocm, normalize the weights and scales to e4m3fnuz
-        if current_platform.is_rocm():
+        if current_platform.is_fp8_fnuz():
             # Normalize the weights and scales
             w13_weight, w13_weight_scale, w13_input_scale = \
                 normalize_e4m3fn_to_e4m3fnuz(

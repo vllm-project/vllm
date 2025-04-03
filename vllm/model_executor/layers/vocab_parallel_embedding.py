@@ -235,7 +235,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another
         # layer type like ParallelLMHead, this is not important.
-        is_embedding_layer = type(self.__class__) is VocabParallelEmbedding
+        is_embedding_layer = type(self) is VocabParallelEmbedding
         quant_method_implements_embedding = method_has_implemented_embedding(
             type(quant_method))
         if is_embedding_layer and not quant_method_implements_embedding:

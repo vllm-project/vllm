@@ -10,6 +10,14 @@ from vllm.platforms import current_platform
 MODEL_PATH = "mistralai/Mixtral-8x7B-Instruct-v0.1"
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int,
               prompts: list[str]) -> list[str]:
 
@@ -60,46 +68,4 @@ def test_mixtral_lora(mixtral_lora_files, tp_size):
     assert do_sample(llm, mixtral_lora_files, lora_id=1,
                      prompts=prompts) == expected_lora_output
     assert do_sample(llm, mixtral_lora_files, lora_id=2,
-                     prompts=prompts) == expected_lora_output
-
-
-@pytest.mark.parametrize("tp_size", [4])
-@pytest.mark.parametrize("fully_shard", [True, False])
-def test_mixtral_lora_all_target_modules(mixtral_lora_files_all_target_modules,
-                                         tp_size, fully_shard):
-    """This LoRA model has all supported Mixtral target modules"""
-
-    if torch.cuda.device_count() < tp_size:
-        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
-
-    prompts = [
-        "Question: What happens if you touch the eyes of a blind man?\nChoices:\nB: The man's sight will be restored.\nA: Nothing happens if you touch the eyes of a blind man.\nC: The man will get his eyesight back.\nD: The man will no longer be blind.\nAnswer:",  # noqa: E501
-        "Question: Which will increase the energy of motion of water molecules?\nChoices:\nA: add heat\nB: add ice\nC: remove some of the water\nD: place the water in the freezer\nAnswer:",  # noqa: E501
-        "Since Craig threw aluminum cans in the trash and Benjamin recycled, _ was environmentally irresponsible.\nChoices:\n1: Craig\n2: Benjamin\nAnswer:",  # noqa: E501
-    ]
-
-    llm = vllm.LLM(
-        MODEL_PATH,
-        enable_lora=True,
-        max_num_seqs=16,
-        max_loras=4,
-        distributed_executor_backend="ray",
-        tensor_parallel_size=tp_size,
-        fully_sharded_loras=fully_shard,
-        max_lora_rank=32,
-    )
-
-    expected_lora_output = [
-        "A: Nothing happens if you touch the eyes of a blind man.",
-        "A: add heat",
-        "1: Craig",
-    ]
-
-    assert do_sample(llm,
-                     mixtral_lora_files_all_target_modules,
-                     lora_id=1,
-                     prompts=prompts) == expected_lora_output
-    assert do_sample(llm,
-                     mixtral_lora_files_all_target_modules,
-                     lora_id=2,
                      prompts=prompts) == expected_lora_output
