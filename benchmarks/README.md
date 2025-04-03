@@ -44,13 +44,19 @@ become available.
       <td><strong>HuggingFace-VisionArena</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
-      <td><code>lmarena-ai/VisionArena-Chat</code></td>
+      <td><code>lmarena-ai/VisionArena-Chat</code>, <code>lmarena-ai/vision-arena-bench-v0.1</code></td>
     </tr>
     <tr>
       <td><strong>HuggingFace-InstructCoder</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
       <td><code>likaixin/InstructCoder</code></td>
+    </tr>
+      <tr>
+      <td><strong>HuggingFace-AIMO</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>AI-MO/aimo-validation-aime</code>, <code>AI-MO/NuminaMath-1.5</code>, <code>AI-MO/NuminaMath-CoT</code></td>
     </tr>
     <tr>
       <td><strong>HuggingFace-Other</strong></td>
