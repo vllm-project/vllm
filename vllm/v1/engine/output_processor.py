@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -14,6 +15,46 @@ from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
+
+
+class RequestOutputCollector:
+    """
+    Collects streamed RequestOutputs per individual request,
+    for hand-off to the consuming asyncio generate task.
+
+    When streaming deltas, RequestOutputs are merged if the
+    producer gets ahead of the consumer.
+    """
+
+    def __init__(self, output_kind: RequestOutputKind):
+        self.aggregate = output_kind == RequestOutputKind.DELTA
+        self.output: Optional[RequestOutput] = None
+        self.ready = asyncio.Event()
+
+    def put(self, output: RequestOutput) -> None:
+        if self.output is None:
+            self.output = output
+            self.ready.set()
+        elif self.aggregate:
+            # Coalesce the outputs in delta case.
+            self.output.add(output)
+        else:
+            # Just replace latest in non-delta case.
+            self.output = output
+
+    async def get(self) -> RequestOutput:
+        while (output := self.output) is None:
+            await self.ready.wait()
+        self.output = None
+        self.ready.clear()
+        return output
+
+    def get_nowait(self) -> Optional[RequestOutput]:
+        output = self.output
+        if output is not None:
+            self.output = None
+            self.ready.clear()
+        return output
 
 
 @dataclass
@@ -38,7 +79,7 @@ class RequestState:
         detokenizer: IncrementalDetokenizer,
         max_tokens_param: Optional[int],
         arrival_time: float,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ):
         self.request_id = request_id
@@ -65,7 +106,7 @@ class RequestState:
         request: EngineCoreRequest,
         parent_req: Optional[ParentRequest],
         request_index: int,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ) -> "RequestState":
         if not request.sampling_params.detokenize:
@@ -102,33 +143,30 @@ class RequestState:
     ) -> Optional[RequestOutput]:
 
         finished = finish_reason is not None
-        output_kind = self.output_kind
-        final_only = output_kind == RequestOutputKind.FINAL_ONLY
+        final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
 
-        # In follow up, we will switch to invariant where EngineCore
-        # does not stream partial prefills.
-        if not finished and (self.is_prefilling or final_only):
+        if not finished and final_only:
             # Only the final output is required in FINAL_ONLY mode.
             return None
-
-        def new_request_output(request_id: str) -> RequestOutput:
-            return self._new_request_output(request_id, finished)
 
         completion_output = self._new_completion_output(
             new_token_ids, finish_reason, stop_reason)
 
-        if self.parent_req is not None:
-            return self.parent_req.make_request_output(final_only,
-                                                       completion_output,
-                                                       new_request_output)
+        request_id = self.request_id
+        if self.parent_req is None:
+            outputs = [completion_output]
+        else:
+            request_id, outputs, finished = self.parent_req.get_outputs(
+                request_id, completion_output)
+            if not outputs:
+                return None
 
-        request_output = new_request_output(self.request_id)
-        request_output.outputs.append(completion_output)
-        return request_output
+        return self._new_request_output(request_id, outputs, finished)
 
     def _new_request_output(
         self,
         request_id: str,
+        outputs: list[CompletionOutput],
         finished: bool,
     ) -> RequestOutput:
 
@@ -143,7 +181,7 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=self.prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
-            outputs=[],
+            outputs=outputs,
             finished=finished,
         )
 
@@ -188,6 +226,7 @@ class OutputProcessor:
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: dict[str, RequestState] = {}
+        self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
 
     def get_num_unfinished_requests(self):
@@ -198,21 +237,27 @@ class OutputProcessor:
 
     def abort_requests(
         self,
-        request_ids: list[str],
-    ) -> None:
+        request_ids: Iterable[str],
+    ) -> list[str]:
+        request_ids_to_abort = []
         for request_id in request_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
                 self.lora_states.abort_request(req_state)
-                if req_state.parent_req is not None:
-                    req_state.parent_req.finish_child_request(request_id)
+                request_ids_to_abort.append(request_id)
+            else:
+                parent = self.parent_requests.pop(request_id, None)
+                if parent and parent.child_requests:
+                    self.abort_requests(parent.child_requests)
+                    request_ids_to_abort.extend(parent.child_requests)
+        return request_ids_to_abort
 
     def add_request(
         self,
         request: EngineCoreRequest,
         parent_req: Optional[ParentRequest] = None,
         request_index: int = 0,
-        queue: Optional[asyncio.Queue[RequestOutput]] = None,
+        queue: Optional[RequestOutputCollector] = None,
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
@@ -227,6 +272,8 @@ class OutputProcessor:
             log_stats=self.log_stats)
         self.request_states[request_id] = req_state
         self.lora_states.add_request(req_state)
+        if parent_req:
+            self.parent_requests[parent_req.request_id] = parent_req
 
     def process_outputs(
         self,
@@ -276,29 +323,16 @@ class OutputProcessor:
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
 
-            # TODO(andy): prompt logprobs + chunked prefill can
-            # result in engine core returning an output for a
-            # partial prefill (in order to send back partial
-            # prompt logprobs.) This breaks the invariant that
-            # process_outputs is only operating on engine core
-            # outputs associated with non-partial completions.
-            # Currently this is handled by having `is_prefilling`
-            # check for new decoded tokens, indicating that
-            # the completion is not partial.
-            #
-            # Follow up will aggregate partial prompt logprobs
-            # in the EngineCore.
-            req_state.is_prefilling = not new_token_ids
+            req_state.is_prefilling = False
 
-            # 2) Detokenize the token ids into text and check for stop
-            #    strings.
-            stop_string = req_state.detokenizer.update(new_token_ids)
-            if stop_string and finish_reason != FinishReason.STOP:
+            # 2) Detokenize the token ids into text and perform stop checks.
+            stop_string = req_state.detokenizer.update(
+                new_token_ids, finish_reason == FinishReason.STOP)
+            if stop_string:
                 finish_reason = FinishReason.STOP
                 stop_reason = stop_string
 
-            # 3) Compute sample and prompt logprobs for request,
-            #    if required.
+            # 3) Compute sample and prompt logprobs for request, if required.
             req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
@@ -306,7 +340,7 @@ class OutputProcessor:
                     new_token_ids, finish_reason, stop_reason):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
-                    req_state.queue.put_nowait(request_output)
+                    req_state.queue.put(request_output)
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
@@ -314,12 +348,14 @@ class OutputProcessor:
             # Free completed requests.
             if finish_reason is not None:
                 self.request_states.pop(req_id)
+                # Remove parent request if applicable.
+                parent_req = req_state.parent_req
+                if parent_req and not parent_req.child_requests:
+                    self.parent_requests.pop(parent_req.request_id, None)
                 if not engine_core_output.finished:
                     # If req not finished in EngineCore, but Detokenizer
                     # detected stop string, abort needed in EngineCore.
                     reqs_to_abort.append(req_id)
-                if req_state.parent_req is not None:
-                    req_state.parent_req.finish_child_request(req_id)
 
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,

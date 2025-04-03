@@ -17,7 +17,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.scheduler import SchedulerOutput
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
@@ -66,20 +66,30 @@ class TPUWorker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
+        # Delay profiler initialization to the start of the profiling.
+        # This is because in vLLM V1, MP runtime is initialized before the
+        # TPU Worker is initialized. The profiler server needs to start after
+        # MP runtime is initialized.
         self.profiler = None
+        self.profile_dir = None
         if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
-            self.profiler = xp.start_server(9012)
 
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
+        # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
+        # ring, the xla tpu compiler flag
+        # `xla_tpu_force_1d_allreduce_at_chunk_count` is a temporary solution to
+        # fix this. It will be removed after the bug in XLA compiler is fixed.
+        os.environ["LIBTPU_INIT_ARGS"] = (
+            "--xla_tpu_force_1d_allreduce_at_chunk_count=1")
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
@@ -101,17 +111,24 @@ class TPUWorker:
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
-        # NOTE(woosuk): Usually, we compile 10-15 graphs for prefill and
-        # 30-40 graphs for decode. 128 is an arbitrary safe number.
+        # TODO (NickLucche) On gsm we compile 80+ graphs.
+        # Re-evaluate limit, with MM we may get close to this limit.
         torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): Set per-rank cache path since different ranks
         # can have slightly different XLA graphs.
         world_size = self.parallel_config.world_size
         rank = xr.global_ordinal()
-        per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                     f"tp{world_size}_rank{rank}")
-        xr.initialize_cache(per_rank_path, readonly=False)
+        # The PyTorch/XLA compilation cache uses the Torch IR to generate keys.
+        # Consequently, changes in optimization flags, which affect compilation
+        # results, don't change the cache key. This can result in the wrong
+        # compilation being used. To prevent this, disabling the XLA compilation
+        # cache during development is recommended.We can disable it by
+        # `export VLLM_XLA_CACHE_PATH=`
+        if envs.VLLM_XLA_CACHE_PATH:
+            per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
+                                         f"tp{world_size}_rank{rank}")
+            xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
@@ -125,10 +142,10 @@ class TPUWorker:
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                tpu_k_cache = torch.tensor([], dtype=dtype, device=self.device)
-                tpu_v_cache = torch.tensor([], dtype=dtype, device=self.device)
-
-                kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                tpu_kv_cache = torch.tensor([],
+                                            dtype=dtype,
+                                            device=self.device)
+                kv_caches[layer_name] = tpu_kv_cache
             else:
                 raise NotImplementedError
 
@@ -150,7 +167,13 @@ class TPUWorker:
         # intermediate activations.
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
-        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
+        current_mem = m["bytes_used"]
+        # Ideally we would use profiled = m["peak_bytes_used"] to
+        # get weights + activations. But there is memory used during
+        # compilation / weight loading that impacts the peak and
+        # there is no way to reset peak memory in XLA, So we
+        # use the heuristic of 2% of weights.
+        profiled = current_mem * 1.02
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
@@ -168,9 +191,11 @@ class TPUWorker:
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
-            if self.profiler is None:
+            if self.profile_dir is None:
                 raise RuntimeError("Profiler is not enabled.")
             if is_start:
+                if self.profiler is None:
+                    self.profiler = xp.start_server(9012)
                 xp.start_trace(self.profile_dir)
             else:
                 xp.stop_trace()
@@ -189,7 +214,7 @@ class TPUWorker:
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:

@@ -6,6 +6,8 @@ import pytest
 from transformers import PretrainedConfig
 
 from vllm import LLM
+from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
+from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from .registry import HF_EXAMPLE_MODELS
 
@@ -36,18 +38,26 @@ def test_can_initialize(model_arch):
         return hf_config
 
     # Avoid calling model.forward()
-    def _initialize_kv_caches(self) -> None:
+    def _initialize_kv_caches_v0(self) -> None:
         self.cache_config.num_gpu_blocks = 0
         self.cache_config.num_cpu_blocks = 0
 
-    with patch.object(LLM.get_engine_class(), "_initialize_kv_caches",
-                      _initialize_kv_caches):
+    def _initalize_kv_caches_v1(self, vllm_config):
+        # gpu_blocks (> 0), cpu_blocks
+        return 1, 0
+
+    with (patch.object(V0LLMEngine, "_initialize_kv_caches",
+                       _initialize_kv_caches_v0),
+          patch.object(V1EngineCore, "_initialize_kv_caches",
+                       _initalize_kv_caches_v1)):
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
             tokenizer_mode=model_info.tokenizer_mode,
-            speculative_model=model_info.speculative_model,
-            num_speculative_tokens=1 if model_info.speculative_model else None,
+            speculative_config={
+                "model": model_info.speculative_model,
+                "num_speculative_tokens": 1,
+            } if model_info.speculative_model else None,
             trust_remote_code=model_info.trust_remote_code,
             load_format="dummy",
             hf_overrides=hf_overrides,

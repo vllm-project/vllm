@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import re
+import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
@@ -11,19 +11,21 @@ from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
+import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
+from vllm.jsontree import json_map_leaves, json_reduce_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
-from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
+from vllm.utils import GiB_bytes, LRUCache, flatten_2d_lists, full_groupby
 
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalFieldConfig, MultiModalInputs, MultiModalKwargs,
-                     MultiModalKwargsItem, PlaceholderRange)
+                     MultiModalKwargsItem, NestedTensors, PlaceholderRange)
 from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
@@ -74,7 +76,9 @@ class PromptIndexTargets:
             else:
                 if isinstance(prefix, str):
                     # Make both `list[int]`
-                    prefix = encode_tokens(tokenizer, prefix)
+                    prefix = encode_tokens(tokenizer,
+                                           prefix,
+                                           add_special_tokens=False)
 
             match_idx = len(prefix)
             return match_idx if prompt[:match_idx] == prefix else None
@@ -98,13 +102,13 @@ The token sequence or text to update.
 
 
 @dataclass
-class PromptUpdateDetails:
+class PromptUpdateDetails(Generic[_S]):
     """Details about the token sequence or text that are part of the update."""
 
-    full: PromptSeq
+    full: _S
     """The full content."""
 
-    features: PromptSeq
+    features: _S
     """
     The part of the content that corresponds to feature placeholders;
     this will be replaced by the output of the vision encoder during model
@@ -112,7 +116,7 @@ class PromptUpdateDetails:
     """
 
     @staticmethod
-    def from_seq(seq: PromptSeq) -> "PromptUpdateDetails":
+    def from_seq(seq: _S) -> "PromptUpdateDetails[_S]":
         return PromptUpdateDetails(full=seq, features=seq)
 
 
@@ -315,7 +319,7 @@ def _cached_encode(
     tokenizer: AnyTokenizer,
     text: str,
     *,
-    add_special_tokens: bool = False,
+    add_special_tokens: Optional[bool] = None,
 ) -> list[int]:
     return encode_tokens(tokenizer,
                          text,
@@ -327,7 +331,7 @@ def _cached_decode(
     tokenizer: AnyTokenizer,
     token_ids: tuple[int, ...],
     *,
-    skip_special_tokens: bool = False,
+    skip_special_tokens: Optional[bool] = None,
 ) -> str:
     return decode_tokens(tokenizer,
                          list(token_ids),
@@ -392,7 +396,9 @@ class _BoundPromptSequence:
     def token_ids(self) -> list[int]:
         if self._token_ids is None:
             assert self._text is not None
-            self._token_ids = _cached_encode(self.tokenizer, self._text)
+            self._token_ids = _cached_encode(self.tokenizer,
+                                             self._text,
+                                             add_special_tokens=False)
 
         return self._token_ids
 
@@ -504,8 +510,35 @@ def iter_token_matches(
             start_idx += 1
 
 
+def replace_token_matches(
+    token_ids: list[int],
+    match_ids: list[int],
+    new_ids: list[int],
+) -> list[int]:
+    """
+    Replace each occurrence of :code:`match_ids` in :code:`token_ids`
+    with :code:`new_ids`.
+
+    Note that empty matches are ignored.
+    """
+    out_seqs = list[list[int]]()
+    prev_end_idx = 0
+
+    for match in iter_token_matches(token_ids, match_ids):
+        start_idx = match.start_idx
+        end_idx = match.end_idx
+
+        out_seqs.append(token_ids[prev_end_idx:start_idx])
+        out_seqs.append(new_ids)
+        prev_end_idx = end_idx
+
+    out_seqs.append(token_ids[prev_end_idx:])
+
+    return flatten_2d_lists(out_seqs)
+
+
 @dataclass(repr=False)
-class _PromptTargetMatch(ABC):
+class PromptTargetMatch(ABC):
     _origin: BoundPromptUpdate
 
     @property
@@ -528,7 +561,7 @@ class _PromptTargetMatch(ABC):
 
 
 @dataclass(repr=False)
-class _PromptTargetIndexMatch(_PromptTargetMatch):
+class _PromptTargetIndexMatch(PromptTargetMatch):
     match_idx: int
 
     @property
@@ -541,7 +574,7 @@ class _PromptTargetIndexMatch(_PromptTargetMatch):
 
 
 @dataclass(repr=False)
-class _PromptTargetTokenMatch(_PromptTargetMatch):
+class _PromptTargetTokenMatch(PromptTargetMatch):
     match: _TokenMatch
 
     @property
@@ -554,7 +587,7 @@ class _PromptTargetTokenMatch(_PromptTargetMatch):
 
 
 @dataclass(repr=False)
-class _PromptTargetTextMatch(_PromptTargetMatch):
+class _PromptTargetTextMatch(PromptTargetMatch):
     match: re.Match[str]
 
     @property
@@ -587,7 +620,7 @@ class PlaceholderFeaturesInfo:
 def find_token_matches(
     prompt: list[int],
     prompt_updates: Sequence[BoundPromptUpdate],
-) -> Sequence[_PromptTargetMatch]:
+) -> Sequence[PromptTargetMatch]:
     """Return each target of :code:`prompt_updates` found in :code:`prompt`."""
 
     def get_matches(update: BoundPromptUpdate):
@@ -613,7 +646,7 @@ def find_token_matches(
 def find_text_matches(
     prompt: str,
     prompt_updates: Sequence[BoundPromptUpdate],
-) -> Sequence[_PromptTargetMatch]:
+) -> Sequence[PromptTargetMatch]:
     """Return each target of :code:`prompt_updates` found in :code:`prompt`."""
 
     def get_matches(update: BoundPromptUpdate):
@@ -638,15 +671,15 @@ def find_text_matches(
 
 def _resolve_matches(
     prompt: PromptSeq,
-    mm_matches: Mapping[str, Sequence[_PromptTargetMatch]],
-) -> list[_PromptTargetMatch]:
+    mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
+) -> list[PromptTargetMatch]:
     """
     Resolve :code:`mm_matches` to ensure that there are no overlapping matches,
     and sort them such that earlier matches take priority over later ones.
     """
     matches = [m for matches in mm_matches.values() for m in matches]
 
-    seen_matches: list[Optional[_PromptTargetMatch]] = [None] * len(prompt)
+    seen_matches: list[Optional[PromptTargetMatch]] = [None] * len(prompt)
 
     for match in matches:
         for idx in range(match.start_idx, match.end_idx):
@@ -662,7 +695,7 @@ def _resolve_matches(
 
 def _apply_matches(
     prompt: _S,
-    mm_matches: Mapping[str, Sequence[_PromptTargetMatch]],
+    mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> list[_S]:
     """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
@@ -711,7 +744,7 @@ def _apply_matches(
 
 def apply_token_matches(
     prompt: list[int],
-    mm_matches: Mapping[str, Sequence[_PromptTargetMatch]],
+    mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> list[int]:
     """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
@@ -725,7 +758,7 @@ def apply_token_matches(
 
 def apply_text_matches(
     prompt: str,
-    mm_matches: Mapping[str, Sequence[_PromptTargetMatch]],
+    mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> str:
     """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
@@ -812,25 +845,82 @@ def find_mm_placeholders(
     return dict(full_groupby_modality(it))
 
 
+_V = TypeVar("_V", bound="Union[MultiModalKwargs, MultiModalKwargsItem]")
+
+
 class ProcessingCache:
 
-    def __init__(self, capacity: int) -> None:
+    @staticmethod
+    def get_lru_cache(
+        capacity_gb: float,
+        value_type: type[_V],
+        *,
+        debug: bool = False,
+    ) -> LRUCache[str, _V]:
+
+        def get_leaf_size(leaf: object) -> int:
+            # MultiModalKwargs is not a subclass of dict
+            if isinstance(leaf, MultiModalKwargs):
+                return get_item_size(leaf.data)
+
+            # MultiModalKwargsItem is not a subclass of dict
+            if isinstance(leaf, MultiModalKwargsItem):
+                leaf_data = {k: v.data for k, v in leaf.items()}
+                return get_item_size(leaf_data)
+
+            # sys.getsizeof doesn't work for tensors
+            if isinstance(leaf, torch.Tensor):
+                return leaf.nbytes
+
+            return sys.getsizeof(leaf)
+
+        def get_item_size(
+            value: Union[MultiModalKwargs, MultiModalKwargsItem,
+                         Mapping[str, NestedTensors]]
+        ) -> int:
+            size = json_reduce_leaves(
+                lambda a, b: a + b,
+                json_map_leaves(get_leaf_size, value),
+            )
+
+            if debug:
+                logger.debug("Calculated size of %s to be %.2f GiB",
+                             type(value), size / GiB_bytes)
+
+            return size
+
+        return LRUCache(GiB_bytes * capacity_gb, getsizeof=get_item_size)
+
+    def __init__(
+        self,
+        capacity_gb: float,
+        *,
+        debug_cache_hit_ratio_steps: Optional[int] = None,
+    ) -> None:
         super().__init__()
 
-        # DEBUG: Set to None to disable
-        self.debug_cache_hit_ratio_steps: Optional[int] = None
+        self.debug_cache_hit_ratio_steps = debug_cache_hit_ratio_steps
+        self.debug_cache_hits = 0
+        self.debug_cache_total = 0
 
-        self._cache = LRUCache[str, MultiModalKwargsItem](capacity)
+        self._cache = self.get_lru_cache(
+            capacity_gb,
+            MultiModalKwargsItem,
+            debug=bool(debug_cache_hit_ratio_steps),
+        )
 
     def _maybe_log_cache_stats(self) -> None:
         steps = self.debug_cache_hit_ratio_steps
         if not steps:
             return
 
-        cache_stats = self._cache.stat()
-        if cache_stats.total % steps == 0:
+        total = self.debug_cache_total
+        if total > 0 and total % steps == 0:
             logger.debug("ProcessingCache: hit_ratio = %.2f",
-                         cache_stats.hit_ratio)
+                         self.debug_cache_hits / total)
+            logger.debug("ProcessingCache: size = %.2f / %.2f GiB",
+                         self._cache.currsize / GiB_bytes,
+                         self._cache.maxsize / GiB_bytes)
 
     def get(
         self,
@@ -853,6 +943,13 @@ class ProcessingCache:
         cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                  **{modality: input_item},
                                                  **input_kwargs)
+
+        if self.debug_cache_hit_ratio_steps:
+            if cache_key in self._cache:
+                self.debug_cache_hits += 1
+
+            self.debug_cache_total += 1
+
         return self._cache.get(cache_key)
 
     def put(
@@ -870,7 +967,7 @@ class ProcessingCache:
         cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                  **{modality: input_item},
                                                  **input_kwargs)
-        self._cache.put(cache_key, output_kwargs)
+        self._cache[cache_key] = output_kwargs
 
 
 class BaseProcessingInfo:
@@ -1011,19 +1108,19 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptUpdate]:
+    ) -> Sequence[PromptUpdate]:
         """
         Given the original multi-modal items for this modality
         and HF-processed data, output the updates to perform.
 
-        Notes:
-            - You should not assume that HF processor always performs prompt
-              updates: in :meth:`_apply_hf_processor_missing`, this method
-              is called on text-only and multimodal-only inputs separately,
-              instead of passing them in the same call.
-            - The update information returned by this method is also used to
-              determine the placeholder token positions for each multi-modal
-              item.
+        The information returned by this method is used to update token inputs
+        which bypass the HF processor. It is also used to update the output of
+        HF processor if the HF process does not apply prompt updates to text
+        inputs.
+
+        Moreover, this information is critical to determine the token positions
+        in order to construct  :class:`~vllm-multimodal.input.PlaceholderRange`
+        for each multi-modal item.
         """
         raise NotImplementedError
 
@@ -1311,12 +1408,28 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _bind_and_group_updates(
         self,
-        prompt_updates: list[PromptUpdate],
-    ) -> dict[str, list[BoundPromptUpdate]]:
+        prompt_updates: Sequence[PromptUpdate],
+    ) -> dict[str, Sequence[BoundPromptUpdate]]:
         tokenizer = self.info.get_tokenizer()
 
         it = (update.bind(tokenizer) for update in prompt_updates)
         return dict(full_groupby_modality(it))
+
+    def _apply_token_matches(
+        self,
+        prompt: list[int],
+        mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
+        mm_item_counts: Mapping[str, int],
+    ) -> list[int]:
+        return apply_token_matches(prompt, mm_matches, mm_item_counts)
+
+    def _apply_text_matches(
+        self,
+        prompt: str,
+        mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
+        mm_item_counts: Mapping[str, int],
+    ) -> str:
+        return apply_text_matches(prompt, mm_matches, mm_item_counts)
 
     def _apply_prompt_updates(
         self,
@@ -1349,7 +1462,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_match_counts.get(modality, 0) >= item_count
             for modality, item_count in mm_item_counts.items()
         ):  # yapf: disable
-            token_ids = apply_token_matches(
+            token_ids = self._apply_token_matches(
                 token_ids,
                 mm_token_matches,
                 mm_item_counts,
@@ -1367,7 +1480,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 modality: find_text_matches(text, updates)
                 for modality, updates in mm_prompt_updates.items()
             }
-            text = apply_text_matches(
+            text = self._apply_text_matches(
                 text,
                 mm_text_matches,
                 mm_item_counts,

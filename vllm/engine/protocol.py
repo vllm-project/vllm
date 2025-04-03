@@ -18,7 +18,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import collect_from_async_generator, random_uuid
+from vllm.utils import Device, collect_from_async_generator, random_uuid
 
 logger = init_logger(__name__)
 
@@ -81,10 +81,7 @@ class EngineClient(ABC):
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
         else:
-            processed_inputs = preprocessor._prompt_to_llm_inputs(
-                prompt,
-                request_id=request_id,
-            )
+            processed_inputs = preprocessor._prompt_to_llm_inputs(prompt)
 
         prompt_token_ids = processed_inputs["prompt_token_ids"]
         prompt_text = processed_inputs.get("prompt")
@@ -274,7 +271,8 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self) -> None:
+    async def reset_prefix_cache(self,
+                                 device: Optional[Device] = None) -> None:
         """Reset the prefix cache"""
         ...
 
@@ -284,8 +282,13 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def wake_up(self) -> None:
+    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """Wake up the engine"""
+        ...
+
+    @abstractmethod
+    async def is_sleeping(self) -> bool:
+        """Check whether the engine is sleeping"""
         ...
 
     @abstractmethod

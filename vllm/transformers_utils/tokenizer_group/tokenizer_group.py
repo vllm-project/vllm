@@ -74,7 +74,6 @@ class TokenizerGroup(BaseTokenizerGroup):
     async def encode_async(
             self,
             prompt: str,
-            request_id: Optional[str] = None,
             lora_request: Optional[LoRARequest] = None,
             add_special_tokens: Optional[bool] = None) -> List[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)

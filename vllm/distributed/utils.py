@@ -5,6 +5,7 @@
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import dataclasses
+import datetime
 import pickle
 import time
 from collections import deque
@@ -14,6 +15,7 @@ import torch
 from torch.distributed import ProcessGroup, TCPStore
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
+                                                _unregister_process_group,
                                                 is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
 
@@ -205,10 +207,7 @@ class StatelessProcessGroup:
     def barrier(self):
         """A barrier to synchronize all ranks."""
         for i in range(self.world_size):
-            if i == self.rank:
-                self.broadcast_obj(None, src=self.rank)
-            else:
-                self.broadcast_obj(None, src=i)
+            self.broadcast_obj(None, src=i)
 
     @staticmethod
     def create(
@@ -217,6 +216,7 @@ class StatelessProcessGroup:
         rank: int,
         world_size: int,
         data_expiration_seconds: int = 3600,
+        store_timeout: int = 300,
     ) -> "StatelessProcessGroup":
         """A replacement for `torch.distributed.init_process_group` that does not
         pollute the global state.
@@ -238,6 +238,7 @@ class StatelessProcessGroup:
             port=port,
             world_size=world_size,
             is_master=(rank == 0),
+            timeout=datetime.timedelta(seconds=store_timeout),
         )
 
         return StatelessProcessGroup(
@@ -296,13 +297,10 @@ def stateless_init_torch_distributed_process_group(
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
 
-    pg_options = ProcessGroup.Options(backend=backend, timeout=timeout)
-
     pg: ProcessGroup = ProcessGroup(
         prefix_store,
         group_rank,
         group_size,
-        pg_options,
     )
 
     if backend == "gloo":
@@ -324,9 +322,24 @@ def stateless_init_torch_distributed_process_group(
                                          backend_options)
         backend_type = ProcessGroup.BackendType.NCCL
         device = torch.device("cuda")
+    else:
+        raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
+    pg._set_default_backend(backend_type)
     backend_class._set_sequence_number_for_group()
 
     pg._register_backend(device, backend_type, backend_class)
 
     return pg
+
+
+def stateless_destroy_torch_distributed_process_group(
+        pg: ProcessGroup) -> None:
+    """
+    Destroy ProcessGroup returned by
+        stateless_init_torch_distributed_process_group().
+    """
+    # Lazy import for non-CUDA backends.
+    from torch.distributed.distributed_c10d import _shutdown_backend
+    _shutdown_backend(pg)
+    _unregister_process_group(pg.group_name)

@@ -5,7 +5,7 @@ from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
 
 import torch
 from torch import Tensor
-from typing_extensions import TypeIs, TypeVar
+from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -20,7 +20,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-T = TypeVar("T", default=Union[list[Tensor], Tensor, tuple[Tensor, ...]])
+MultiModalEmbeddings = Union[list[Tensor], Tensor, tuple[Tensor, ...]]
+"""
+The output embeddings must be one of the following formats:
+
+- A list or tuple of 2D tensors, where each tensor corresponds to
+    each input multimodal data item (e.g, image).
+- A single 3D tensor, with the batch dimension grouping the 2D tensors.
+"""
 
 
 @runtime_checkable
@@ -36,16 +43,11 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def get_multimodal_embeddings(self, **kwargs) -> T:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
-
-        The output embeddings must be one of the following formats:
-    
-        - A list or tuple of 2D tensors, where each tensor corresponds to
-          each input multimodal data item (e.g, image).
-        - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 
         Note:
             The returned multimodal embeddings must be in the same order as
@@ -60,7 +62,7 @@ class SupportsMultiModal(Protocol):
     def get_input_embeddings(
         self,
         input_ids: Tensor,
-        multimodal_embeddings: Optional[T] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         attn_metadata: Optional["AttentionMetadata"] = None,
     ) -> Tensor:
         ...
@@ -69,7 +71,7 @@ class SupportsMultiModal(Protocol):
     def get_input_embeddings(
         self,
         input_ids: Tensor,
-        multimodal_embeddings: Optional[T] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 
@@ -410,6 +412,35 @@ def is_hybrid(
 
 
 @runtime_checkable
+class HasNoOps(Protocol):
+    has_noops: ClassVar[Literal[True]] = True
+
+
+@runtime_checkable
+class _HasNoOpsType(Protocol):
+    has_noops: ClassVar[Literal[True]]
+
+
+@overload
+def has_noops(model: object) -> TypeIs[HasNoOps]:
+    ...
+
+
+@overload
+def has_noops(model: Type[object]) -> TypeIs[Type[HasNoOps]]:
+    ...
+
+
+def has_noops(
+    model: Union[Type[object], object]
+) -> Union[TypeIs[Type[HasNoOps]], TypeIs[HasNoOps]]:
+    if isinstance(model, type):
+        return isinstance(model, _HasNoOpsType)
+
+    return isinstance(model, HasNoOps)
+
+
+@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 
@@ -449,7 +480,7 @@ class SupportsQuant:
     packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
     quant_config: Optional[QuantizationConfig] = None
 
-    def __new__(cls, *args, **kwargs) -> "SupportsQuant":
+    def __new__(cls, *args, **kwargs) -> Self:
         instance = super().__new__(cls)
         quant_config = cls._find_quant_config(*args, **kwargs)
         if quant_config is not None:

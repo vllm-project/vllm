@@ -10,7 +10,6 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
@@ -98,6 +97,13 @@ MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 
 def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
                   qweight_type: int) -> torch.Tensor:
+    # HACK: when doing chunked prefill we don't generate output tokens
+    # so input to logits generator is empty which causes invalid parameter
+    if x.shape[0] == 0:
+        return torch.empty(x.shape[0],
+                           qweight.shape[0],
+                           dtype=x.dtype,
+                           device=x.device)
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
@@ -111,7 +117,7 @@ def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
     elif qweight_type in DEQUANT_TYPES:
         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
         shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
-        weight = ops.ggml_dequantize(qweight, qweight_type, *shape)
+        weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
         y = x @ weight.T
     else:
         # Raise an error if the quantization type is not supported.
@@ -133,6 +139,10 @@ def _fused_moe_gguf(
     qweight_type2: int,
     act,
 ) -> torch.Tensor:
+    # lazy import to avoid triggering triton import in CPU backend
+    from vllm.model_executor.layers.fused_moe.fused_moe import (
+        moe_align_block_size)
+
     out_hidden_states = torch.empty_like(x)
     if qweight_type2 in MMQ_QUANT_TYPES and qweight_type in MMQ_QUANT_TYPES:
         num_tokens, _ = x.shape
@@ -367,7 +377,7 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
         x_flat = x.flatten()
         quant = torch.index_select(qweight, dim=0, index=x_flat)
         dequant = ops.ggml_dequantize(quant, qweight_type, hidden_size,
-                                      x_flat.shape[0]).to(self.params_dtype)
+                                      x_flat.shape[0], self.params_dtype)
         return dequant.view(*x.shape, hidden_size)
 
 

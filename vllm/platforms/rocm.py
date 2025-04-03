@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from functools import lru_cache, wraps
+from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
@@ -12,15 +12,17 @@ from vllm.logger import init_logger
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
+    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
 
 try:
-    from amdsmi import (amdsmi_get_gpu_asic_info, amdsmi_get_processor_handles,
-                        amdsmi_init, amdsmi_shut_down)
+    from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
+                        amdsmi_get_processor_handles, amdsmi_init,
+                        amdsmi_shut_down, amdsmi_topo_get_link_type)
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
 
@@ -96,6 +98,26 @@ def device_id_to_physical_device_id(device_id: int) -> int:
         return device_id
 
 
+@cache
+def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
+                                    block_size: int, gqa_ratio: int,
+                                    max_seq_len: int,
+                                    sliding_window: int) -> bool:
+
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    ON_NAVI = "gfx1" in GPU_ARCH
+    ON_MI250_MI300 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
+
+    # rocm custom page attention not support on navi (gfx1*)
+    return (ON_MI250_MI300 and not ON_NAVI
+            and (sliding_window == 0 or sliding_window == (-1, -1))
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and (head_size == 64 or head_size == 128)
+            and (block_size == 16 or block_size == 32)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
+            and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -120,8 +142,9 @@ class RocmPlatform(Platform):
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if envs.VLLM_USE_V1:
-            logger.info("Using ROCm Attention backend on V1 engine.")
-            return "vllm.v1.attention.backends.rocm_attn.ROCmAttentionBackend"
+            logger.info("Using Triton Attention backend on V1 engine.")
+            return ("vllm.v1.attention.backends."
+                    "triton_attn.TritonAttentionBackend")
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.
@@ -133,9 +156,35 @@ class RocmPlatform(Platform):
 
     @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+    def get_device_capability(cls,
+                              device_id: int = 0
+                              ) -> Optional[DeviceCapability]:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
+
+    @staticmethod
+    @with_amdsmi_context
+    def is_fully_connected(physical_device_ids: List[int]) -> bool:
+        """
+        Query if the set of gpus are fully connected by xgmi (1 hop)
+        """
+        handles = [
+            amdsmi_get_processor_handles()[i] for i in physical_device_ids
+        ]
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i < j:
+                    try:
+                        link_type = amdsmi_topo_get_link_type(
+                            handle, peer_handle)
+                        # type is 2 for XGMI
+                        if link_type["hops"] != 1 or link_type["type"] != 2:
+                            return False
+                    except AmdSmiException as error:
+                        logger.error("AMD 1 hop XGMI detection failed.",
+                                     exc_info=error)
+                        return False
+        return True
 
     @classmethod
     @with_amdsmi_context
@@ -248,3 +297,8 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fnuz
         else:
             return torch.float8_e4m3fn
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        # V1 support on AMD gpus is experimental
+        return True

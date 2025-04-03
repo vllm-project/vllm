@@ -10,12 +10,14 @@ import torch.nn as nn
 from torch.func import functional_call
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available
+from vllm.utils import (get_cuda_view_from_cpu_tensor, is_pin_memory_available,
+                        is_uva_available)
 
 logger = init_logger(__name__)
 
@@ -156,6 +158,26 @@ class AutoWeightsLoader:
 
             yield weight_qualname
 
+    def _add_loadable_non_param_tensors(self, module: nn.Module,
+                                        child_params: Dict[str, torch.Tensor]):
+        """
+        Add tensor names that are not in the model params that may be in the
+        safetensors, e.g., batch normalization stats.
+        """
+        if isinstance(module, (
+                nn.BatchNorm1d,
+                nn.BatchNorm2d,
+                nn.BatchNorm3d,
+                nn.LazyBatchNorm1d,
+                nn.LazyBatchNorm2d,
+                nn.LazyBatchNorm3d,
+                nn.SyncBatchNorm,
+        )):
+            module_state_dict = module.state_dict()
+            for stat_name in ("running_mean", "running_var",
+                              "num_batches_tracked"):
+                child_params[stat_name] = module_state_dict[stat_name]
+
     def _load_module(
         self,
         base_prefix: str,
@@ -183,6 +205,10 @@ class AutoWeightsLoader:
 
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
+
+        # Add missing tensors the weight loader needs to be able to load
+        # that aren't registered as params, e.g., batchnorm statistics.
+        self._add_loadable_non_param_tensors(module, child_params)
 
         for child_prefix, child_weights in self._groupby_prefix(weights):
             prefix = self._get_qualname(base_prefix, child_prefix)
@@ -472,6 +498,16 @@ class PPMissingLayer(torch.nn.Identity):
 
     def __init__(self, *args, **kwargs):
         super().__init__()
+        self.return_tuple = kwargs.get("return_tuple", False)
+
+    def forward(self, *args, **kwargs):
+        """
+        Return the first arg from args or the first value from kwargs.
+
+        Wraps the input in a tuple if `self.return_tuple` is True.
+        """
+        input = args[0] if args else next(iter(kwargs.values()))
+        return (input, ) if self.return_tuple else input
 
 
 _CPU_OFFLOAD_BYTES = 0
@@ -485,7 +521,10 @@ def set_cpu_offload_max_bytes(max_bytes: int) -> None:
 
 
 def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
-    device = next(module.parameters()).device
+    if (params := next(module.parameters(), None)) is None:
+        return module
+
+    device = params.device
 
     if device == torch.device("cpu"):
         return module
@@ -495,6 +534,14 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
         return module
 
     pin_memory = is_pin_memory_available()
+    uva_available = is_uva_available()
+
+    if envs.VLLM_USE_V1:
+        assert uva_available, ("V1 CPU offloading requires"
+                               " uva (pin memory) support")
+        uva_offloading = True
+    else:
+        uva_offloading = False
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
@@ -513,11 +560,16 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
                                        device='cpu',
                                        pin_memory=pin_memory)
         cpu_data.copy_(p.data)
-        p.data = cpu_data
+        if not uva_offloading:
+            p.data = cpu_data
+        else:
+            # keep the cpu data alive
+            p._vllm_offloaded_cpu_data = cpu_data
+            p.data = get_cuda_view_from_cpu_tensor(cpu_data)
         _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
         offloaded_parameters = True
 
-    if offloaded_parameters:
+    if offloaded_parameters and not uva_offloading:
         original_forward = module.forward
 
         def forward(*args, **kwargs):

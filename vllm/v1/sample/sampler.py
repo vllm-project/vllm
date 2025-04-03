@@ -47,6 +47,11 @@ class Sampler(nn.Module):
         logits = self.apply_penalties(logits, sampling_metadata)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
+        # Convert sampled token ids to int64 (long) type to ensure compatibility
+        # with subsequent operations that may use these values as indices.
+        # This conversion is necessary because FlashInfer sampling operations
+        # return int32 (while PyTorch argmax and topk return int64).
+        sampled = sampled.long()
 
         # Gather the logprobs of the topk and sampled token (if requested).
         # Get logprobs and rank tensors (if requested)
@@ -82,6 +87,12 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
+        """Sample logits based on sampling metadata.
+
+        The various logits processing functions called in this method
+        may update the logits tensor in-place.
+        """
+
         assert not (sampling_metadata.all_greedy
                     and sampling_metadata.all_random)
         if sampling_metadata.all_random:
@@ -119,14 +130,6 @@ class Sampler(nn.Module):
         )
         return sampled
 
-    def compute_probs(self, logits: torch.Tensor,
-                      sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        if sampling_metadata.all_greedy:
-            return logits
-        # Apply temperature. This is an in-place op changing logits.
-        logits = self.apply_temperature(logits, sampling_metadata.temperature)
-        return logits.softmax(dim=-1, dtype=torch.float32)
-
     def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
 
@@ -140,19 +143,21 @@ class Sampler(nn.Module):
         Gather logprobs for topk and sampled/prompt token.
 
         Args:
-          logits: (num tokens) x (vocab) tensor
+          logprobs: (num tokens) x (vocab) tensor
           num_logprobs: minimum number of logprobs to
                         retain per token
           token_ids: prompt tokens (if prompt logprobs)
                      or sampled tokens (if sampled
                      logprobs); 1D token ID tensor
                      with (num tokens) elements
+                     Must be int64.
 
         Returns:
           Top-k int indices tensor, (num tokens) x (num_logprobs + 1)
           Top-k float logprobs tensor, (num tokens) x (num_logprobs + 1)
           Sampled token rank tensor, (num tokens)
         """
+        assert token_ids.dtype == torch.int64
         # Find the topK values.
         topk_logprobs, topk_indices = torch.topk(logprobs,
                                                  num_logprobs,

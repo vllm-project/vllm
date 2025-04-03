@@ -14,10 +14,10 @@ static __device__ __forceinline__ void mul_mat_q(
 
     const int & ncols_dst = ncols_y;
 
-    const int row_dst_0 = blockIdx.x*mmq_y;
+    const auto row_dst_0 = blockIdx.x*mmq_y;
     const int & row_x_0 = row_dst_0;
 
-    const int col_dst_0 = blockIdx.y*mmq_x;
+    const auto col_dst_0 = blockIdx.y*mmq_x;
     const int & col_y_0 = col_dst_0;
 
     int   * tile_x_ql = nullptr;
@@ -39,7 +39,7 @@ static __device__ __forceinline__ void mul_mat_q(
 
 #pragma unroll
         for (int ir = 0; ir < qr && ib0 + ir * blocks_per_warp/qr < blocks_per_row_x; ++ir) {
-            const int kqs = ir*WARP_SIZE_GGUF + threadIdx.x;
+            const auto kqs = ir*WARP_SIZE_GGUF + threadIdx.x;
             const int kbxd = kqs / QI8_1;
 
 #pragma unroll
@@ -53,7 +53,7 @@ static __device__ __forceinline__ void mul_mat_q(
 #pragma unroll
             for (int ids0 = 0; ids0 < mmq_x; ids0 += nwarps * QI8_1) {
                 const int ids = (ids0 + threadIdx.y * QI8_1 + threadIdx.x / (WARP_SIZE_GGUF/QI8_1)) % mmq_x;
-                const int kby = threadIdx.x % (WARP_SIZE_GGUF/QI8_1);
+                const auto kby = threadIdx.x % (WARP_SIZE_GGUF/QI8_1);
                 const int col_y_eff = min(col_y_0 + ids, ncols_y-1);
 
                 // if the sum is not needed it's faster to transform the scale to f32 ahead of time
@@ -87,14 +87,14 @@ static __device__ __forceinline__ void mul_mat_q(
 
 #pragma unroll
     for (int j = 0; j < mmq_x; j += nwarps) {
-        const int col_dst = col_dst_0 + j + threadIdx.y;
+        const auto col_dst = col_dst_0 + j + threadIdx.y;
         if (col_dst >= ncols_dst) {
             return;
         }
 
 #pragma unroll
         for (int i = 0; i < mmq_y; i += WARP_SIZE_GGUF) {
-            const int row_dst = row_dst_0 + threadIdx.x + i;
+            const auto row_dst = row_dst_0 + threadIdx.x + i;
             if (row_dst >= nrows_dst) {
                 continue;
             }

@@ -9,13 +9,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, List
 
 import torch
-from transformers import PreTrainedTokenizerFast
 
 from vllm.logger import init_logger
 
 try:
     import xgrammar as xgr
-    from xgrammar.base import _core as xgr_core
     xgr_installed = True
 except ImportError:
     xgr_installed = False
@@ -29,18 +27,17 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
     from vllm.config import ModelConfig
-    from vllm.model_executor.guided_decoding.reasoner import Reasoner
+    from vllm.reasoning import ReasoningParser
     from vllm.sampling_params import GuidedDecodingParams
 
 logger = init_logger(__name__)
 
 
-# TODO: passing batch size to max threads here
 def get_local_xgrammar_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams,
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
-        reasoner: Reasoner | None,
+        reasoner: ReasoningParser | None,
         max_threads: int = 8):
     config = GrammarConfig.from_guided_params(guided_params=guided_params,
                                               model_config=model_config,
@@ -52,18 +49,8 @@ def get_local_xgrammar_guided_decoding_logits_processor(
 @dataclass(frozen=True)
 class TokenizerData:
     """Immutable container for cached tokenizer data."""
+    metadata: str
     encoded_vocab: list[str] = field(default_factory=list)
-    stop_token_ids: list[int] | None = None
-    # These fields are mutually exclusive: `backend_str` is used to create a
-    # TokenizeInfo with `TokenizerInfo.from_huggingface` while `vocab_type` is
-    # used within the constructor of TokenizeInfo
-    backend_str: str | None = None
-    vocab_type: xgr.VocabType | None = None
-
-    def __post_init__(self):
-        # Check for mutual exclusive
-        assert not (self.backend_str and self.vocab_type), \
-            "backend_str and vocab_type are mutual exclusive"
 
 
 class TokenizerDataCache:
@@ -71,46 +58,52 @@ class TokenizerDataCache:
     _cache: dict[int, TokenizerData] = {}
 
     @classmethod
-    def get_tokenizer_data(cls,
-                           tokenizer: PreTrainedTokenizer) -> TokenizerData:
-        tokenizer_hash = hash(tokenizer)
+    def get_tokenizer_data(
+        cls,
+        tokenizer: PreTrainedTokenizer,
+        /,
+        *,
+        tokenizer_hash: int,
+        vocab_size: int,
+    ) -> TokenizerData:
 
         if tokenizer_hash not in cls._cache:
-            # Vendored from xgrammar logic since we cannot pickle the tokenizer
-            # https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98 # noqa: E501
+            tokenizer_info = xgr.TokenizerInfo.from_huggingface(
+                tokenizer,
+                # NOTE: We will need to use lm_head's vocab_size
+                # to determine correct special_token_ids for this tokenizer.
+                # See https://github.com/mlc-ai/xgrammar/commit/70c959fb6d9cea75aae33c414763cd0602022d92  # noqa: E501
+                vocab_size=vocab_size,
+            )
+            metadata = json.loads(tokenizer_info.dump_metadata())
+
+            # Vendored from xgrammar logic to get encoded_vocab
+            # https://github.com/mlc-ai/xgrammar/blob/989222175c2a30fb7987d8bcce35bec1bf6817f2/python/xgrammar/tokenizer_info.py#L127 # noqa: E501
             try:
-                encoded_vocab = [
-                    token for token, _ in sorted(tokenizer.get_vocab().items(),
-                                                 key=lambda x: x[1])
-                ]
+                vocab_dict = tokenizer.get_vocab()
             except AttributeError as e:
                 raise ValueError(
                     f"Cannot get the vocabulary of the tokenizer "
                     f"{type(tokenizer)}. The tokenizer should have a "
                     "get_vocab method.") from e
 
-            stop_token_ids = None
-            backend_str = ""
-            vocab_type = xgr.VocabType.RAW
+            # maintain tokenizer's indexing
+            encoded_vocab = [""] * tokenizer_info.vocab_size
+            for token, idx in vocab_dict.items():
+                if idx < tokenizer_info.vocab_size:
+                    encoded_vocab[idx] = token
 
-            if stop_token_ids is None and hasattr(
-                    tokenizer,
-                    "eos_token_id") and tokenizer.eos_token_id is not None:
-                stop_token_ids = [tokenizer.eos_token_id]
-
-            if isinstance(tokenizer, PreTrainedTokenizerFast):
-                backend_str = tokenizer.backend_tokenizer.to_str()
-                vocab_type = None
-
-            elif isinstance(tokenizer, MistralTokenizer):
+            if isinstance(tokenizer, MistralTokenizer):
                 # REF: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
-                vocab_type = xgr.VocabType.BYTE_FALLBACK
+                metadata.update({
+                    "vocab_type": xgr.VocabType.BYTE_FALLBACK,
+                    "add_prefix_space": True
+                })
 
             cls._cache[tokenizer_hash] = TokenizerData(
                 encoded_vocab=encoded_vocab,
-                stop_token_ids=stop_token_ids,
-                backend_str=backend_str,
-                vocab_type=vocab_type)
+                metadata=json.dumps(metadata),
+            )
 
         return cls._cache[tokenizer_hash]
 
@@ -129,30 +122,15 @@ class GrammarCompilerCache:
         cache_key = str(config.tokenizer_hash)
 
         if cache_key not in cls._cache:
-            assert config.tokenizer_data is not None
-            assert config.tokenizer_data.encoded_vocab is not None
-
             config_data = config.tokenizer_data
 
             # In TokenizerDataCache.get_tokenizer_data, a serializable
             # tokenizer_data is created and cached. This data is used to build
             # a tokenizer_info and create an xgrammar compiler.
-            # - If tokenizer_data has backend_str set, use
-            # xgr_core.TokenizerInfo.from_huggingface (a C++ bind).
-            # - Otherwise, use the default constructor with vocab_type.
-            # - xgr_core.TokenizerInfo.from_huggingface !=
-            #   xgr.TokenizerInfo.from_huggingface.
-            if config_data.backend_str:
-                tokenizer_info = xgr.TokenizerInfo._create_from_handle(
-                    xgr_core.TokenizerInfo.from_huggingface(
-                        config_data.encoded_vocab, config_data.backend_str,
-                        config.vocab_size, config_data.stop_token_ids))
-            else:
-                tokenizer_info = xgr.TokenizerInfo(
-                    config_data.encoded_vocab,
-                    config_data.vocab_type,
-                    vocab_size=config.vocab_size,
-                    stop_token_ids=config_data.stop_token_ids)
+            tokenizer_info = xgr.TokenizerInfo.from_vocab_and_metadata(
+                encoded_vocab=config_data.encoded_vocab,
+                metadata=config_data.metadata,
+            )
             cls._cache[cache_key] = xgr.GrammarCompiler(
                 tokenizer_info, max_threads=config.max_threads)
 
@@ -163,13 +141,12 @@ class GrammarCompilerCache:
 class GrammarConfig:
     """Serializable configuration for grammar compilation"""
     tokenizer_hash: int
-    vocab_size: int
+    tokenizer_data: TokenizerData
     json_str: str | None = None
     grammar_str: str | None = None
     json_object: bool | None = None
     any_whitespace: bool = True
     max_threads: int = 8
-    tokenizer_data: TokenizerData | None = None
 
     @classmethod
     def from_guided_params(cls,
@@ -179,7 +156,11 @@ class GrammarConfig:
                            max_threads: int = 8) -> GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
-        tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
+        tokenizer_data = TokenizerDataCache.get_tokenizer_data(
+            tokenizer,
+            tokenizer_hash=tokenizer_hash,
+            vocab_size=model_config.hf_text_config.vocab_size,
+        )
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
@@ -218,7 +199,6 @@ class GrammarConfig:
                 raise ValueError(str(err)) from err
 
             return cls(json_str=json_str,
-                       vocab_size=model_config.hf_text_config.vocab_size,
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads,
                        tokenizer_data=tokenizer_data,
@@ -246,14 +226,12 @@ class GrammarConfig:
                 raise ValueError(str(err)) from err
 
             return cls(grammar_str=grammar_str,
-                       vocab_size=model_config.hf_text_config.vocab_size,
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads,
                        tokenizer_data=tokenizer_data)
         elif guided_params.json_object:
             return cls(
                 json_object=True,
-                vocab_size=model_config.hf_text_config.vocab_size,
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
@@ -267,7 +245,6 @@ class GrammarConfig:
 
             return cls(
                 grammar_str=choice_str,
-                vocab_size=model_config.hf_text_config.vocab_size,
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
@@ -291,18 +268,30 @@ class GrammarConfig:
         grammar = ('root ::= ' + ' | '.join(f'"{c}"' for c in escaped_choices))
         return grammar
 
+    @staticmethod
+    def tokenizer_info(tokenizer_data: TokenizerData) -> xgr.TokenizerInfo:
+        return xgr.TokenizerInfo.from_vocab_and_metadata(
+            encoded_vocab=tokenizer_data.encoded_vocab,
+            metadata=tokenizer_data.metadata,
+        )
+
 
 @dataclass
 class XGrammarLogitsProcessor:
     """Wrapper class to support pickle protocol"""
     config: GrammarConfig
-    reasoner: Reasoner | None = None
+    reasoner: ReasoningParser | None = None
 
     ctx: xgr.CompiledGrammar | None = None
+    tokenizer_info: xgr.TokenizerInfo = None  # type: ignore[assignment]
     token_bitmask: torch.Tensor = None  # type: ignore[assignment]
     matchers: list[xgr.GrammarMatcher] = field(default_factory=list)
     batch_size: int = field(default=1)
     prefilled: bool = field(default=False)
+
+    def __post_init__(self):
+        self.tokenizer_info = self.config.tokenizer_info(
+            self.config.tokenizer_data)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config, 'reasoner': self.reasoner}
@@ -311,6 +300,8 @@ class XGrammarLogitsProcessor:
         self.config = state['config']
         self.reasoner = state['reasoner']
 
+        self.tokenizer_info = GrammarConfig.tokenizer_info(
+            self.config.tokenizer_data)
         self.ctx = None
         self.matchers = []
         self.batch_size = 1
@@ -329,7 +320,10 @@ class XGrammarLogitsProcessor:
             elif self.config.grammar_str is not None:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
             elif self.config.json_object:
-                self.ctx = compiler.compile_builtin_json_grammar()
+                any_whitespace = self.config.any_whitespace
+                self.ctx = compiler\
+                    .compile_json_schema('{"type": "object"}',
+                                         any_whitespace=any_whitespace)
             else:
                 raise ValueError(
                     "Invalid configuration for xgrammar logits processor")
@@ -352,7 +346,7 @@ class XGrammarLogitsProcessor:
                 xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
             ]
             self.token_bitmask = xgr.allocate_token_bitmask(
-                self.batch_size, self.config.vocab_size)
+                self.batch_size, self.tokenizer_info.vocab_size)
 
         if not self.prefilled:
             # Have not sampled a token yet

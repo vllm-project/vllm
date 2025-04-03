@@ -20,8 +20,9 @@ from vllm.utils import import_pynvml
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
+    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
@@ -100,7 +101,7 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def is_full_nvlink(cls, device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, device_ids: List[int]) -> bool:
         raise NotImplementedError
 
     @classmethod
@@ -152,7 +153,7 @@ class CudaPlatformBase(Platform):
             # here
             use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None \
                 or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
-            from vllm.attention.backends.flashmla import is_flashmla_supported
+            from vllm.attention.ops.flashmla import is_flashmla_supported
             if use_flashmla and is_flashmla_supported()[0] \
                 and cache_config.block_size != 64:
                 cache_config.block_size = 64
@@ -212,9 +213,14 @@ class CudaPlatformBase(Platform):
                         return ("vllm.attention.backends."
                                 "flashmla.FlashMLABackend")
         if use_v1:
-            logger.info_once("Using Flash Attention backend on V1 engine.")
-            return ("vllm.v1.attention.backends.flash_attn."
-                    "FlashAttentionBackend")
+            if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+                logger.info_once("Using Triton backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "triton_attn.TritonAttentionBackend")
+            if cls.has_device_capability(80):
+                logger.info_once("Using Flash Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "flash_attn.FlashAttentionBackend")
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
@@ -240,15 +246,6 @@ class CudaPlatformBase(Platform):
                 "Cannot use FlashAttention-2 backend for dtype other than "
                 "torch.float16 or torch.bfloat16.")
             target_backend = _Backend.XFORMERS
-        elif kv_cache_dtype is not None and \
-            kv_cache_dtype.startswith("fp8"):
-            logger.info(
-                "Cannot use FlashAttention-2 backend for FP8 KV cache.")
-            logger.warning(
-                "Please use FlashInfer backend with FP8 KV Cache for "
-                "better performance by setting environment variable "
-                "VLLM_ATTENTION_BACKEND=FLASHINFER")
-            target_backend = _Backend.XFORMERS
         elif block_size % 16 != 0:
             logger.info(
                 "Cannot use FlashAttention-2 backend for block size not "
@@ -261,7 +258,7 @@ class CudaPlatformBase(Platform):
             try:
                 import vllm.vllm_flash_attn  # noqa: F401
                 from vllm.attention.backends.flash_attn import (  # noqa: F401
-                    FlashAttentionBackend)
+                    FlashAttentionBackend, flash_attn_supports_fp8)
 
                 supported_sizes = \
                     FlashAttentionBackend.get_supported_head_sizes()
@@ -269,6 +266,16 @@ class CudaPlatformBase(Platform):
                     logger.info(
                         "Cannot use FlashAttention-2 backend for head size %d.",
                         head_size)
+                    target_backend = _Backend.XFORMERS
+                fp8_kv_cache = (kv_cache_dtype is not None
+                                and kv_cache_dtype.startswith("fp8"))
+                if (fp8_kv_cache and not flash_attn_supports_fp8()):
+                    logger.info(
+                        "Cannot use FlashAttention backend for FP8 KV cache.")
+                    logger.warning(
+                        "Please use FlashInfer backend with FP8 KV Cache for "
+                        "better performance by setting environment variable "
+                        "VLLM_ATTENTION_BACKEND=FLASHINFER")
                     target_backend = _Backend.XFORMERS
             except ImportError:
                 logger.info(
@@ -296,6 +303,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def supports_fp8(cls) -> bool:
         return cls.has_device_capability(89)
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        return True
 
 
 # NVML utils
@@ -351,7 +362,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
-    def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, physical_device_ids: List[int]) -> bool:
         """
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
@@ -416,7 +427,7 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
         return device_props.total_memory
 
     @classmethod
-    def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, physical_device_ids: List[int]) -> bool:
         logger.exception(
             "NVLink detection not possible, as context support was"
             " not found. Assuming no NVLink available.")

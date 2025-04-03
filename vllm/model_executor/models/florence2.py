@@ -20,7 +20,7 @@ from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
                                              BartParallelLMHead,
                                              BartScaledWordEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
@@ -30,7 +30,8 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsV0Only
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
+                         SupportsV0Only)
 from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 
 
@@ -874,7 +875,8 @@ class Florence2MultiModalProcessor(
     Florence2MultiModalProcessor,
     info=Florence2ProcessingInfo,
     dummy_inputs=Florence2DummyInputsBuilder)
-class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                        SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1037,8 +1039,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         return self._encode_image(pixel_values)
 
     def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -1048,7 +1049,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:

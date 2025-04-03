@@ -6,6 +6,7 @@ Run `pytest tests/models/embedding/language/test_embedding.py`.
 import pytest
 
 from vllm.config import PoolerConfig
+from vllm.platforms import current_platform
 
 from ..utils import check_embeddings_close
 
@@ -18,15 +19,15 @@ from ..utils import check_embeddings_close
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-small"),
+        pytest.param("Alibaba-NLP/gte-Qwen2-7B-instruct"),
         # [Decoder-only]
         pytest.param("BAAI/bge-multilingual-gemma2",
                      marks=[pytest.mark.core_model]),
         pytest.param("intfloat/e5-mistral-7b-instruct",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
-        pytest.param("Alibaba-NLP/gte-Qwen2-7B-instruct"),
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
-        # [Encoder-decoder]
+        # [Cross-Encoder]
         pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
 )
@@ -37,11 +38,19 @@ def test_models(
     example_prompts,
     model,
     dtype: str,
+    monkeypatch,
 ) -> None:
+
+    if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
+        # ROCm Triton FA does not currently support sliding window attention
+        # switch to use ROCm CK FA backend
+        monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
+
     vllm_extra_kwargs = {}
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
         vllm_extra_kwargs["override_pooler_config"] = \
             PoolerConfig(pooling_type="MEAN")
+
     if model == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
         vllm_extra_kwargs["hf_overrides"] = {"is_causal": True}
 
@@ -63,13 +72,6 @@ def test_models(
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
-
-        # This test is for verifying whether the model's extra_repr
-        # can be printed correctly.
-        def print_model(model):
-            print(model)
-
-        vllm_model.apply_model(print_model)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,

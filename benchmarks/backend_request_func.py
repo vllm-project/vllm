@@ -14,7 +14,8 @@ from tqdm.asyncio import tqdm
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
-from vllm.model_executor.model_loader.weight_utils import get_lock
+# NOTE(simon): do not import vLLM here so the benchmark script
+# can run without vLLM installed.
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -62,7 +63,7 @@ async def async_request_tgi(
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
             "top_p": 0.99,  # TGI does not accept 1.0 top_p.
             "truncate": request_func_input.prompt_len,
-            # TGI does not accept ignore_eos flag.
+            "ignore_eos_token": request_func_input.ignore_eos,
         }
         payload = {
             "inputs": request_func_input.prompt,
@@ -70,6 +71,10 @@ async def async_request_tgi(
         }
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
+        if request_func_input.ignore_eos:
+            output.output_tokens = request_func_input.output_len
+        else:
+            output.output_tokens = None
 
         ttft = 0.0
         st = time.perf_counter()
@@ -214,7 +219,15 @@ async def async_request_deepspeed_mii(
                 if response.status == 200:
                     parsed_resp = await response.json()
                     output.latency = time.perf_counter() - st
-                    output.generated_text = parsed_resp["text"][0]
+                    if "choices" in parsed_resp:
+                        output.generated_text = parsed_resp["choices"][0][
+                            "text"]
+                    elif "text" in parsed_resp:
+                        output.generated_text = parsed_resp["text"][0]
+                    else:
+                        output.error = ("Unexpected response format: "
+                                        "neither 'choices' nor 'text' found")
+                        output.success = False
                     output.success = True
                 else:
                     output.error = response.reason or ""
@@ -333,7 +346,7 @@ async def async_request_openai_chat_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        "chat/completions"
+        ("chat/completions", "profile")
     ), "OpenAI Chat Completions API URL must end with 'chat/completions'."
 
     async with aiohttp.ClientSession(trust_env=True,
@@ -426,6 +439,8 @@ async def async_request_openai_chat_completions(
 def get_model(pretrained_model_name_or_path: str) -> str:
     if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
         from modelscope import snapshot_download
+
+        from vllm.model_executor.model_loader.weight_utils import get_lock
 
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
