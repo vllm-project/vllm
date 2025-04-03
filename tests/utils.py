@@ -104,6 +104,9 @@ class RemoteOpenAIServer:
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
+        self.show_hidden_metrics = \
+            args.show_hidden_metrics_for_version is not None
+
         # download the model before starting the server to avoid timeout
         is_local = os.path.isdir(model)
         if not is_local:
@@ -317,6 +320,37 @@ def _test_completion_close(
     return results
 
 
+def _test_chat(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+):
+    results = []
+
+    messages = [{
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": prompt
+        }]
+    }]
+
+    # test with text prompt
+    chat_response = client.chat.completions.create(model=model,
+                                                   messages=messages,
+                                                   max_tokens=5,
+                                                   temperature=0.0)
+
+    results.append({
+        "test": "completion_close",
+        "text": chat_response.choices[0].message.content,
+        "finish_reason": chat_response.choices[0].finish_reason,
+        "usage": chat_response.usage,
+    })
+
+    return results
+
+
 def _test_embeddings(
     client: openai.OpenAI,
     model: str,
@@ -512,6 +546,8 @@ def compare_all_settings(model: str,
                 results += _test_completion(client, model, prompt, token_ids)
             elif method == "generate_close":
                 results += _test_completion_close(client, model, prompt)
+            elif method == "generate_chat":
+                results += _test_chat(client, model, prompt)
             elif method == "generate_with_image":
                 results += _test_image_text(
                     client, model,
@@ -579,7 +615,16 @@ def multi_process_parallel(
     # as compared to multiprocessing.
     # NOTE: We need to set working_dir for distributed tests,
     # otherwise we may get import errors on ray workers
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
+    # NOTE: Force ray not to use gitignore file as excluding, otherwise
+    # it will not move .so files to working dir.
+    # So we have to manually add some of large directories
+    os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
+    ray.init(
+        runtime_env={
+            "working_dir": VLLM_PATH,
+            "excludes":
+            ["build", ".git", "cmake-build-*", "shellcheck", "dist"]
+        })
 
     distributed_init_port = get_open_port()
     refs = []

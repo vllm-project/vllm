@@ -53,3 +53,8 @@ KVConnectorFactory.register_connector(
     "LMCacheConnector",
     "vllm.distributed.kv_transfer.kv_connector.lmcache_connector",
     "LMCacheConnector")
+
+KVConnectorFactory.register_connector(
+    "MooncakeStoreConnector",
+    "vllm.distributed.kv_transfer.kv_connector.mooncake_store_connector",
+    "MooncakeStoreConnector")
