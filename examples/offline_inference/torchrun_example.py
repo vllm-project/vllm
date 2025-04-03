@@ -23,10 +23,14 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Use `distributed_executor_backend="external_launcher"` so that
 # this llm engine/instance only creates one worker.
+# it is important to set an explicit seed to make sure that
+# all ranks have the same random seed, so that sampling can be
+# deterministic across ranks.
 llm = LLM(
     model="facebook/opt-125m",
     tensor_parallel_size=2,
     distributed_executor_backend="external_launcher",
+    seed=0,
 )
 
 outputs = llm.generate(prompts, sampling_params)
