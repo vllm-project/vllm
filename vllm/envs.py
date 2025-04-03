@@ -692,14 +692,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
-
-    # If set to false, we do not want to partially schedule a multimodal item.
-    # This ensures that if a request has a mixed prompt
-    # (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
-    # some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
-    # it will be scheduled as TTTT in one step and IIIIIIIIII in the next.
-    "VLLM_V1_MM_INPUT_CHUNKING":
-    lambda: os.environ.get("VLLM_V1_MM_INPUT_CHUNKING", "1") == "1",
 }
 
 # end-env-vars-definition
