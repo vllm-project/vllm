@@ -17,7 +17,6 @@ from transformers import (
 )
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
-from transformers.models.auto.processing_auto import _BaseAutoProcessor
 from typing_extensions import NotRequired
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
 from transformers.processing_utils import ProcessingKwargs
@@ -174,6 +173,7 @@ class CustomBatchFeature(BatchFeature):
 
 class ImageProcessor(BaseImageProcessor):
     model_input_names = ["pixel_values"]
+    auto_processor_class = "AutoProcessor"
 
     def __init__(
         self,
