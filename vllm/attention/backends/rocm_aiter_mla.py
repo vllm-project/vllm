@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterable, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Optional, Tuple, Type
 
 import torch
 
@@ -139,7 +139,7 @@ class AiterMLAMetadata(MLACommonMetadata):
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
-    BLOCK_TABLE_EXTENDER: Iterable[list[int]] = [[]]
+    BLOCK_TABLE_EXTENDER: list[list[int]] = [[]]
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         super().__init__(input_builder)

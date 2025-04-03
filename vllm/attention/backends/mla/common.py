@@ -190,8 +190,8 @@ from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
-                    Optional, Tuple, Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Tuple,
+                    Type, TypeVar)
 
 import torch
 
@@ -739,7 +739,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     NOTE: Please read the comment at the top of the file before trying to 
     understand this class
     """
-    BLOCK_TABLE_EXTENDER: Iterable[list[int]] = []
+    BLOCK_TABLE_EXTENDER: list[list[int]] = []
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -891,7 +891,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         if use_captured_graph:
             num_decode_tokens = batch_size - self.num_prefill_tokens
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.block_tables.extend(self.BLOCK_TABLE_EXTENDER *
+            self.block_tables.extend(self.__class__.BLOCK_TABLE_EXTENDER *
                                      cuda_graph_pad_size)
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
