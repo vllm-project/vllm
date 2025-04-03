@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -20,10 +20,16 @@ logger = init_logger(__name__)
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
-def deep_gemm_block_shape() -> List[int]:
+def deep_gemm_block_shape() -> list[int]:
+    # Lazy import to avoid CUDA initialization problems.
     import deep_gemm as dg
     block = dg.get_m_alignment_for_contiguous_layout()
     return [block, block]
+
+
+def _valid_deep_gemm_shape(M: int, N: int, K: int):
+    align = deep_gemm_block_shape()[0]
+    return M >= align and N % align == 0 and K % align == 0
 
 
 # TODO: check types?
@@ -39,23 +45,13 @@ def _valid_deep_gemm(hidden_states: torch.Tensor,
     if not has_deep_gemm:
         return False
 
-    # Lazy import to avoid CUDA initialization problems.
-    import deep_gemm as dg
-
     # Expert maps not supported yet.
     if expert_map is not None:
         return False
 
-    align = dg.get_m_alignment_for_contiguous_layout()
     M = hidden_states.shape[0]
     _, K, N = w2.shape
-
-    # For now, disable DeepGemm for small N until better permute/unpermute
-    # ops are available.
-    if N <= 512:
-        return False
-
-    if align > M or N % align != 0 or K % align != 0:
+    if not _valid_deep_gemm_shape(M, N, K):
         return False
 
     return (hidden_states.is_contiguous() and w1.is_contiguous()
