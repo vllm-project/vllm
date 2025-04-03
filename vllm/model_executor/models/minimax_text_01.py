@@ -1098,12 +1098,12 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 expert_params_mapping = [
                     ("w13_scale" if weight_name in ["w1", "w3"] else
                      "w2_scale", f"{expert_id}.{weight_name}.weight_scale",
-                     expert_id, weight_name)
+                     expert_id)
                     for expert_id in range(self.config.num_local_experts)
                     for weight_name in ["w1", "w2", "w3"]
                 ] + [("w13_weight" if weight_name in ["w1", "w3"] else
                       "w2_weight", f"{expert_id}.{weight_name}.weight",
-                      expert_id, weight_name)
+                      expert_id)
                      for expert_id in range(self.config.num_local_experts)
                      for weight_name in ["w1", "w2", "w3"]]
 
