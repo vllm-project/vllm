@@ -198,6 +198,46 @@ class AyaVisionDummyInputsBuilder(
 class AyaVisionMultiModalProcessor(
         BaseMultiModalProcessor[AyaVisionProcessingInfo]):
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processed_outputs = super()._call_hf_processor(
+            prompt,
+            mm_data,
+            mm_kwargs,
+        )
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        image_processor = hf_processor.image_processor
+
+        # HF processor pops the `num_patches` kwarg, which is needed by vLLM
+        if (images :=
+                mm_data.get("images")) is not None and '<image>' in prompt:
+            assert isinstance(images, list)
+            parsed_images = (self._get_data_parser().parse_mm_data({
+                "image":
+                images
+            }).get_items("image", ImageProcessorItems))
+            image_sizes = [
+                parsed_images.get_image_size(i)
+                for i in range(len(parsed_images))
+            ]
+
+            num_patches = [
+                self.info.get_num_patches(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                    size=image_processor.size,
+                    min_patches=image_processor.min_patches,
+                    max_patches=image_processor.max_patches)
+                for image_size in image_sizes
+            ]
+            processed_outputs["num_patches"] = torch.tensor(num_patches)
+
+        return processed_outputs
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
