@@ -598,9 +598,10 @@ def get_requirements() -> list[str]:
             elif not line.startswith("--") and not line.startswith(
                     "#") and line.strip() != "":
                 # tricky way to fix #15985
-                if sys.platform.startswith("darwin") and "torch" in line.lower(
-                ) and "darwin" in line.lower():
-                    resolved_requirements.append(line)
+                if filename.startswith("cpu") and "torch" in line.lower():
+                    if sys.platform.startswith(
+                            "darwin") and "darwin" in line.lower():
+                        resolved_requirements.append(line)
                 else:
                     resolved_requirements.append(line)
         return resolved_requirements
