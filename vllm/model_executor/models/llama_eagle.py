@@ -57,7 +57,7 @@ class LlamaModel(nn.Module):
             LlamaDecoderLayer(
                 config,
                 i,
-                prefix=maybe_prefix(prefix, f"layers.{i}"),
+                prefix=maybe_prefix(prefix, f"layers.{i + 33}"),
             ) for i in range(config.num_hidden_layers)
         ])
         self.fc = torch.nn.Linear(config.hidden_size * 2, config.hidden_size)
@@ -88,8 +88,9 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         self.config = config
-        self.model = LlamaModel(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
+        self.eagle_model = LlamaModel(vllm_config=vllm_config,
+                                      prefix=maybe_prefix(
+                                          prefix, "eagle_model"))
 
         self.truncated_vocab_size = config.truncated_vocab_size
         self.unpadded_vocab_size = self.truncated_vocab_size
@@ -97,7 +98,7 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         # Llama 3.2 1B Instruct set tie_word_embeddings to True
         # Llama 3.1 8B Instruct set tie_word_embeddings to False
         if self.config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens
+            self.lm_head = self.eagle_model.embed_tokens
         else:
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
@@ -117,7 +118,7 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, hidden_states)
+        return self.eagle_model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
@@ -125,7 +126,7 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         model_weights = {}
         for name, loaded_weight in weights:
             if "lm_head" not in name:
-                name = "model." + name
+                name = "eagle_model." + name
                 print(name)
                 model_weights[name] = loaded_weight
 

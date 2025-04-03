@@ -23,7 +23,8 @@ class EagleProposer:
             vllm_config.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
         self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs,
-                                   device=device)
+                                   device=device,
+                                   dtype=torch.int32)
 
     def propose(
         self,
@@ -55,7 +56,9 @@ class EagleProposer:
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         input_ids[last_token_indices] = next_token_ids
 
-        seq_lens = target_positions[last_token_indices] + 1
+        # FA requires seq_len to have dtype int32.
+        seq_lens = (target_positions[last_token_indices] + 1).int()
+
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         max_seq_len = seq_lens.max().item()
         max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
@@ -99,7 +102,7 @@ class EagleProposer:
         hidden_states = sample_hidden_states
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
-        attn_metadata.query_start_loc = self.arange[:batch_size]
+        attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         for _ in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             input_ids = draft_token_ids_list[-1]
@@ -177,13 +180,14 @@ class EagleProposer:
         return cu_num_tokens, token_indices
 
     def load_model(self, target_model: nn.Module) -> None:
-        import copy
-        eagle_vllm_config = copy.deepcopy(self.vllm_config)
-        eagle_vllm_config.model_config = \
+        old_config = self.vllm_config.model_config
+
+        self.vllm_config.model_config = \
             self.vllm_config.speculative_config.draft_model_config
-        print(eagle_vllm_config)
-        self.model = get_model(vllm_config=eagle_vllm_config)
-        print(f"Loaded draft model: {self.model}")
+        self.model = get_model(vllm_config=self.vllm_config)
+
+        # Resume config
+        self.vllm_config.model_config = old_config
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
