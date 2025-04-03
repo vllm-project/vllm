@@ -617,7 +617,6 @@ def main(args: argparse.Namespace):
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
-            random_seed=args.seed,
             output_len=args.hf_output_len,
         )
 
