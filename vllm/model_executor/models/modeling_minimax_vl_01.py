@@ -296,18 +296,23 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         def _validate_shape(d: torch.Tensor):
             actual_dims = tuple(d.shape)
-            if actual_dims != expected_dims:
+            if len(actual_dims) == 2:
+                # 如果是2D图像,添加通道维度
+                d = d.unsqueeze(0)
+            elif len(actual_dims) == 3 and actual_dims[0] != 3:
+                # 如果通道维度不在第一维,调整维度顺序
+                d = d.permute(2, 0, 1)
+            
+            if d.shape != expected_dims:
                 raise ValueError(
                     f"The expected shape of pixel values is {expected_dims}. "
-                    f"You supplied {actual_dims}.")
+                    f"You supplied {d.shape}.")
+            return d
 
         if isinstance(data, torch.Tensor):
-            _validate_shape(data)
+            return _validate_shape(data)
         else:
-            for d in data:
-                _validate_shape(d)
-
-        return data
+            return [_validate_shape(d) for d in data]
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaNextImageInputs]:
@@ -345,7 +350,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
                 pixel_values=self._validate_pixel_values(flatten_bn(pixel_values)),
-                image_sizes=self._validate_image_sizes(flatten_bn(image_sizes, concat=True)),
+                image_sizes=self._validate_image_sizes(flatten_bn(image_sizes, concat=True)) if image_sizes is not None else None,
             )
 
         if image_embeds is not None:
