@@ -172,8 +172,12 @@ class CustomBatchFeature(BatchFeature):
         return self
 
 class ImageProcessor(BaseImageProcessor):
+    """
+    Image processor for MiniMaxVL01.
+    """
     model_input_names = ["pixel_values"]
     auto_processor_class = "AutoProcessor"
+    processor_type = "ImageProcessor"
 
     def __init__(
         self,
@@ -504,22 +508,25 @@ class MiniMaxVL01Processor(ProcessorMixin):
 
     def __init__(
         self,
-        image_processor=None,
-        tokenizer=None,
-        patch_size=None,
-        vision_feature_select_strategy=None,
-        chat_template=None,
-        image_token="<image>",
+        image_processor: Optional[ImageProcessor] = None,
+        tokenizer = None,
+        patch_size: Optional[int] = None,
+        vision_feature_select_strategy: Optional[str] = None,
+        chat_template: Optional[str] = None,
+        image_token: str = "<image>",
         **kwargs,
     ):
-        self.patch_size = patch_size
+        if image_processor is None:
+            image_processor = ImageProcessor(patch_size=patch_size)
+        
+        super().__init__(image_processor, tokenizer, chat_template=chat_template)
+        
+        self.patch_size = patch_size if patch_size is not None else image_processor.patch_size
         self.vision_feature_select_strategy = vision_feature_select_strategy
         self.image_token = image_token
-        super().__init__(image_processor, tokenizer, chat_template=chat_template)
-        self.patch_size = image_processor.patch_size if image_processor is not None else patch_size
-        self.grid_pinpoints = image_processor.image_grid_pinpoints if image_processor is not None else None
-        self.max_size = image_processor.size if image_processor is not None else None
-        self.process_image_mode = image_processor.process_image_mode if image_processor is not None else 'resize'
+        self.grid_pinpoints = image_processor.image_grid_pinpoints
+        self.max_size = image_processor.size
+        self.process_image_mode = image_processor.process_image_mode
 
     def __call__(
         self,
