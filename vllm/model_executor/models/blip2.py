@@ -24,7 +24,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .blip import BlipVisionModel
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
+                         SupportsQuant)
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -498,7 +499,8 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(Blip2MultiModalProcessor,
                                         info=Blip2ProcessingInfo,
                                         dummy_inputs=Blip2DummyInputsBuilder)
-class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
+                                    SupportsQuant):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 
