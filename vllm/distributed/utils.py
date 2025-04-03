@@ -256,7 +256,7 @@ class StatelessProcessGroup:
             world_size=world_size,
             is_master=launch_server,
             timeout=datetime.timedelta(seconds=store_timeout),
-            use_libuv=False, # could be enabled with recent torch versions, see https://github.com/pytorch/pytorch/pull/150215
+            use_libuv=False, # for now: github.com/pytorch/pytorch/pull/150215
             master_listen_fd=listen_fd,
         )
 
