@@ -1122,13 +1122,13 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                 loaded_weight,
                                 weight_name,
                                 expert_id=expert_id,
-                                shard_id="scale")
+                                shard_id=1)
                 elif "weight_zp" in name:
                     weight_loader(param,
                                 loaded_weight,
                                 weight_name,
                                 expert_id=expert_id,
-                                shard_id="zp")
+                                shard_id=2)
                 else:
                     weight_loader(param,
                                 loaded_weight,
