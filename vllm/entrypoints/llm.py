@@ -7,7 +7,6 @@ from contextlib import contextmanager
 from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 
 import cloudpickle
-import torch
 import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
@@ -1239,7 +1238,6 @@ class LLM:
         self,
         prompts: Optional[Union[str, list[str]]],
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]],
-        prompt_embeds: Optional[torch.Tensor] = None,
     ):
         # skip_tokenizer_init is now checked in engine
 
@@ -1277,8 +1275,6 @@ class LLM:
 
             parsed_prompts.append(item)
 
-        # We don't need to handle prompt_embeds here since it's handled in the
-        # generate method
         return parsed_prompts
 
     def _validate_and_add_requests(
