@@ -335,20 +335,23 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                  f"Got type: {type(image_sizes)}")
 
             # 确保pixel_values具有正确的维度
-            if isinstance(pixel_values, torch.Tensor):
-                if len(pixel_values.shape) == 2:
+            def _ensure_3d(img):
+                if len(img.shape) == 2:
                     # 如果是2维的,添加通道维度
-                    pixel_values = pixel_values.unsqueeze(0)
-                elif len(pixel_values.shape) == 3:
+                    return img.unsqueeze(0)
+                elif len(img.shape) == 3:
                     # 如果已经是3维的,检查通道维度
-                    if pixel_values.shape[0] != 3:
-                        pixel_values = pixel_values.permute(2, 0, 1)
+                    if img.shape[0] != 3:
+                        return img.permute(2, 0, 1)
+                return img
+
+            if isinstance(pixel_values, torch.Tensor):
+                if len(pixel_values.shape) == 4:  # (batch, channels, height, width)
+                    pixel_values = [_ensure_3d(img) for img in pixel_values]
+                else:
+                    pixel_values = _ensure_3d(pixel_values)
             elif isinstance(pixel_values, list):
-                # 如果是列表,对每个元素进行处理
-                pixel_values = [
-                    img.unsqueeze(0) if len(img.shape) == 2 else img.permute(2, 0, 1) if img.shape[0] != 3 else img
-                    for img in pixel_values
-                ]
+                pixel_values = [_ensure_3d(img) for img in pixel_values]
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
