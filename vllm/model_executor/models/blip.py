@@ -16,6 +16,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from .interfaces import SupportsQuant
+
 
 def get_blip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
     assert image_size % patch_size == 0
@@ -243,9 +245,10 @@ class BlipEncoder(nn.Module):
         return hidden_states
 
 
-class BlipVisionModel(nn.Module):
+class BlipVisionModel(nn.Module, SupportsQuant):
     config_class = BlipVisionConfig
     main_input_name = "pixel_values"
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(
         self,
