@@ -27,6 +27,7 @@ llm = LLM(
     model="facebook/opt-125m",
     tensor_parallel_size=2,
     distributed_executor_backend="external_launcher",
+    seed=0,
 )
 
 outputs = llm.generate(prompts, sampling_params)
