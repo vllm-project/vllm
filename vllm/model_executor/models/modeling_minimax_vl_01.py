@@ -3,7 +3,7 @@
 from abc import abstractmethod
 from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, TypedDict, TypeVar, Union)
+                    Protocol, Set, Tuple, TypedDict, TypeVar, Union, Dict)
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,11 @@ from typing_extensions import NotRequired
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
-from transformers.utils import logging
+from transformers.utils import logging, TensorType
+from transformers.image_processing_utils import BaseImageProcessor
+from transformers.image_transforms import to_channel_dimension_format
+from transformers.image_utils import ChannelDimension
+from torchvision.transforms import Compose, ToTensor, Normalize
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -32,17 +36,229 @@ from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
-from .image_processor import (ImageProcessor, get_hw_multiple_of, select_best_resolution,
-                            get_num_token, split_special_tokens, CustomBatchFeature)
 
 import os
 import re
 import numpy as np
 from PIL import Image
+try:
+    from torchvision.transforms import InterpolationMode
+    BICUBIC = InterpolationMode.BICUBIC
+except ImportError:
+    BICUBIC = Image.BICUBIC
 
 logger = logging.get_logger(__name__)
 
 LEGACY_PROCESSING = int(os.getenv('LEGACY_PROCESSING', 1))
+
+def get_hw_multiple_of(image_size, multiple, max_size=None):
+    w, h = image_size
+    new_w = w if w % multiple == 0 else w + (multiple - w % multiple)
+    new_h = h if h % multiple == 0 else h + (multiple - h % multiple)
+    if max_size is not None:
+        assert isinstance(max_size, (list, tuple)) and len(max_size) == 2
+        max_w, max_h = max_size
+        assert max_w % multiple == 0 and max_h % multiple == 0
+        if new_w > max_w or new_h > max_h:
+            new_w = min((new_w * max_w) // new_w, (new_w * max_h) // new_h)
+            new_h = min((new_h * max_w) // new_w, (new_h * max_h) // new_h)
+
+            new_w = new_w if new_w % multiple == 0 else new_w + (multiple - new_w % multiple)
+            new_h = new_h if new_h % multiple == 0 else new_h + (multiple - new_h % multiple)
+        assert new_w % multiple == 0 and new_h % multiple == 0
+        assert new_w <= max_w and new_h <= max_h
+    return new_w, new_h
+
+def select_best_resolution(original_size, possible_resolutions):
+    """
+    Selects the best resolution from a list of possible resolutions based on the original size.
+    Args:
+        original_size (tuple): The original size of the image in the format (width, height).
+        possible_resolutions (list): A list of possible resolutions in the format [(width1, height1), (width2, height2), ...].
+    Returns:
+        tuple: The best fit resolution in the format (width, height).
+    """
+    original_width, original_height = original_size
+    best_fit = None
+    max_effective_resolution = 0
+    min_wasted_resolution = float("inf")
+
+    for width, height in possible_resolutions:
+        scale = min(width / original_width, height / original_height)
+        downscaled_width, downscaled_height = int(original_width * scale), int(original_height * scale)
+
+        effective_resolution = min(downscaled_width * downscaled_height, original_width * original_height)
+        wasted_resolution = (width * height) - effective_resolution
+
+        if effective_resolution > max_effective_resolution or (effective_resolution == max_effective_resolution and wasted_resolution < min_wasted_resolution):
+            max_effective_resolution = effective_resolution
+            min_wasted_resolution = wasted_resolution
+            best_fit = (width, height)
+
+    return best_fit
+
+def get_num_token(img_h, img_w, grid_pinpoints, patch_size):
+    best_resolution = select_best_resolution((img_w,img_h), grid_pinpoints)
+    resized_w, resized_h = best_resolution
+    w_num, h_num = get_w_h_num((img_w, img_h), (resized_w// patch_size, resized_h// patch_size))
+    total_token = int((w_num+1) * h_num) + (336//patch_size)**2
+    return total_token
+
+def get_w_h_num(resolution, best_resolution):
+    original_width, original_height = resolution
+    current_width, current_height = best_resolution
+
+    current_height = int(current_height)
+    current_width = int(current_width)
+    original_height = int(original_height)
+    original_width = int(original_width)
+
+    original_aspect_ratio = original_width / original_height
+    current_aspect_ratio = current_width / current_height
+
+    if original_aspect_ratio > current_aspect_ratio:
+        scale_factor = current_width / original_width
+        new_height = int(original_height * current_width) // original_width
+        padding = (current_height - new_height) // 2
+        w_num = current_width
+        h_num = current_height - 2*padding
+    else:
+        scale_factor = current_height / original_height
+        new_width = int(original_width * current_height) // original_height
+        
+        padding = (current_width - new_width) // 2
+        w_num = current_width - 2*padding
+        h_num = current_height
+
+    return (w_num, h_num)
+
+def split_special_tokens(text, special_tokens):
+    pattern = '|'.join(map(re.escape, special_tokens))
+    return re.split(f'({pattern})', text)
+
+class CustomBatchFeature(BatchFeature):
+    def convert_to_tensors(self, tensor_type: Optional[Union[str, TensorType]] = None):
+        if tensor_type is None:
+            return self
+
+        is_tensor, as_tensor = self._get_is_as_tensor_fns(tensor_type)
+
+        for key, value in self.items():
+            if key == "pixel_values":
+                for i, image in enumerate(value):
+                    if not is_tensor(image):
+                        tensor = as_tensor(image)
+                        self[key][i] = tensor
+                continue
+            try:
+                if not is_tensor(value):
+                    tensor = as_tensor(value)
+                    self[key] = tensor
+            except:
+                if key == "overflowing_values":
+                    raise ValueError("Unable to create tensor returning overflowing values of different lengths. ")
+                raise ValueError(
+                    "Unable to create tensor, you should probably activate padding "
+                    "with 'padding=True' to have batched tensors with the same length."
+                )
+
+        return self
+
+class ImageProcessor(BaseImageProcessor):
+    model_input_names = ["pixel_values"]
+
+    def __init__(
+        self,
+        size: Optional[Union[int, Tuple[int, int], Dict[str, int]]] = None,
+        image_mean: Optional[Union[float, List[float]]] = None,
+        image_std: Optional[Union[float, List[float]]] = None,
+        process_image_mode: Optional[str] = 'resize',
+        patch_size: Optional[int] = 14,
+        image_grid_pinpoints: List = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.size = size # (width, height)
+        self.image_mean = image_mean if image_mean is not None else [0.48145466, 0.4578275, 0.40821073]
+        self.image_std = image_std if image_std is not None else [0.26862954, 0.26130258, 0.27577711]
+        self.process_image_mode = process_image_mode
+        image_grid_pinpoints = (
+            image_grid_pinpoints
+            if image_grid_pinpoints is not None
+            else [[336, 672], [672, 336], [672, 672], [1008, 336], [336, 1008]]
+        )
+        self.image_grid_pinpoints = image_grid_pinpoints
+        self.patch_size = patch_size
+
+    def preprocess(
+        self,
+        images,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+        data_format: Optional[ChannelDimension] = ChannelDimension.FIRST,
+        input_data_format: Optional[Union[str, ChannelDimension]] = None,
+        **kwargs,
+    ):
+        """
+        Preprocess an image or batch of images.
+        """
+        images = make_list_of_images(images)
+        if self.process_image_mode == 'resize':
+            all_images = []
+            for image in images:
+                resized_image = image.resize(self.size, Image.BICUBIC)
+                transform_img = self._transform(resized_image)
+                all_images.append(to_numpy_array(transform_img))
+
+            images = [
+                to_channel_dimension_format(image, data_format, input_channel_dim=input_data_format)
+                for image in all_images
+            ]
+
+            data = {"pixel_values": images}
+            return CustomBatchFeature(data=data, tensor_type=return_tensors)
+        else:
+            all_images = []
+            image_sizes = []
+            for image in images:
+                ori_w, ori_h = image.size
+                image_sizes.append([ori_h, ori_w])
+                resized_image = resize_multiple_of(image, self.patch_size, max_size=self.size)
+                transform_img = self._transform(resized_image)
+                all_images.append(to_numpy_array(transform_img))
+
+            images = [
+                to_channel_dimension_format(image, data_format, input_channel_dim=input_data_format)
+                for image in all_images
+            ]
+
+            data = {"pixel_values": images, "image_sizes": image_sizes}
+            return CustomBatchFeature(data=data, tensor_type=return_tensors)
+
+    def _transform(self, image):
+        """Convert PIL image to tensor and normalize."""
+        image = _convert_image_to_rgb(image)
+        image = ToTensor()(image)
+        image = Normalize(mean=self.image_mean, std=self.image_std)(image)
+        return image
+
+def _convert_image_to_rgb(image):
+    """Convert PIL image to RGB mode."""
+    return image.convert("RGB")
+
+def resize_multiple_of(image, multiple, max_size=None):
+    """Resize image to be multiple of a number."""
+    width, height = image.size
+    new_width, new_height = get_hw_multiple_of((width, height), multiple, max_size)
+    return image.resize((new_width, new_height), Image.BICUBIC)
+
+def make_list_of_images(images):
+    """Convert input image to list of PIL images."""
+    if isinstance(images, (Image.Image, np.ndarray, torch.Tensor)):
+        return [images]
+    elif isinstance(images, (list, tuple)):
+        return images
+    else:
+        raise ValueError(f"images must be PIL image, numpy array, torch tensor, or list of such, got {type(images)}")
 
 class MiniMaxVL01ProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = {
