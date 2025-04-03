@@ -47,8 +47,6 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
         assert expert_map is None, "NYI"
 
-        # TBD
-        assert not apply_router_weight_on_input
         if apply_router_weight_on_input:
             topk = rank_topk_ids.shape[1]
             # TODO: this only works for topK=1, will need to update for topK>1
@@ -131,8 +129,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         assert output.shape[0] <= self.max_num_tokens
         assert output.shape[1] == fused_expert_output.shape[-1]
 
-        # Set weights to 1?
-        assert not apply_router_weight_on_input
+        # Set weights to 1 if we did them in dispatch.  This is hacky.
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
