@@ -725,6 +725,7 @@ if triton.__version__ >= "2.1.0":
                               b_loc,
                               b_start_loc,
                               b_seq_len,
+                              max_seq_len,
                               max_input_len,
                               k_scale: torch.Tensor,
                               v_scale: torch.Tensor,
