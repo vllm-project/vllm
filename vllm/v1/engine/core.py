@@ -264,8 +264,8 @@ class EngineCore:
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 
-    def wake_up(self):
-        self.model_executor.wake_up()
+    def wake_up(self, tags: Optional[list[str]] = None):
+        self.model_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.model_executor.is_sleeping
@@ -284,6 +284,16 @@ class EngineCore:
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        self.model_executor.save_sharded_state(path=path,
+                                               pattern=pattern,
+                                               max_size=max_size)
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],

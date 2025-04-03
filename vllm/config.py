@@ -761,6 +761,12 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
+
+        if parallel_config.distributed_executor_backend == "external_launcher":
+            assert self.seed is not None, (
+                "Seed must be set when using external launcher backend to "
+                "make sure sampling results are the same across workers.")
+
         total_num_attention_heads = getattr(self.hf_text_config,
                                             "num_attention_heads", 0)
         tensor_parallel_size = parallel_config.tensor_parallel_size
@@ -1869,7 +1875,10 @@ class DeviceConfig:
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
             if not self.device_type:
-                raise RuntimeError("Failed to infer device type")
+                raise RuntimeError(
+                    "Failed to infer device type, please set "
+                    "the environment variable `VLLM_LOGGING_LEVEL=DEBUG` "
+                    "to turn on verbose logging to help debug the issue.")
         else:
             # Device type is assigned explicitly
             self.device_type = device
@@ -2434,9 +2443,9 @@ class LoRAConfig:
                 f"max_loras ({self.max_loras})")
 
     def verify_with_cache_config(self, cache_config: CacheConfig):
-        # TODO LoRA supports CPU offload.
-        if cache_config.cpu_offload_gb > 0:
-            raise ValueError("CPU offload is not supported with LoRA yet.")
+        if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:
+            raise ValueError(
+                "V0 LoRA does not support CPU offload, please use V1.")
 
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):
