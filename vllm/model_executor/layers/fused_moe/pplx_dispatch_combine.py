@@ -25,6 +25,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         self.a2a = a2a
         self.block_shape = block_shape
         self.dp_num_tokens = max_num_tokens * (world_size // dp_size)
+        self.quant_dtype = quant_dtype
 
     def dispatch(
         self,

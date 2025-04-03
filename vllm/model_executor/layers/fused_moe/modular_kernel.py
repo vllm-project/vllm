@@ -28,7 +28,7 @@ def moe_problem_size(
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_ids: torch.Tensor,
-) -> Tuple[int, int, int, int]:
+) -> Tuple[int, int, int, int, int]:
     """
     Extract the MoE problem size from the given tensor arguments:
     - a: The hidden states, input to the MoE layer.
