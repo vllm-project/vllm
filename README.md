@@ -101,7 +101,7 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 ## Contributing
 
 We welcome and value any contributions and collaborations.
-Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
+Please check out [Contributing to vLLM](https://docs.vllm.ai/en/stable/contributing/overview.html) for how to get involved.
 
 ## Sponsors
 
