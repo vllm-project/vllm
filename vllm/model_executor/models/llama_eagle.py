@@ -121,8 +121,7 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         for name, loaded_weight in weights:
             if "lm_head" not in name:
                 name = "model." + name
-                print(name)
-                model_weights[name] = loaded_weight
+            model_weights[name] = loaded_weight
 
         loader.load_weights(
             self.maybe_remap_mistral(name, loaded_weight)
