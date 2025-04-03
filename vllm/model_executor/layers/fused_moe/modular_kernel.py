@@ -102,6 +102,7 @@ class FusedMoEQuantizeDispatchCombine(ABC):
         - num_experts: The total number of experts in the global expert space.
         - expert_map: A tensor mapping expert indices from the global expert
           space to the local expert space of the expert parallel shard.
+        - apply_router_weight_on_input: When True, apply the weights to the activations, before quantization + dispatching.
 
         Returns a tuple of:
         - quantized + dispatched a.
