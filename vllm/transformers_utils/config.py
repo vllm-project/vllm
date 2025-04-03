@@ -334,7 +334,7 @@ def get_config(
         ]
         raise ValueError(
             f"Unsupported config format: {config_format}. "
-            f"Supported are: {', '.join(supported_formats)}. "
+            f"Supported formats are: {', '.join(supported_formats)}. "
             f"Ensure your model uses one of these configuration formats "
             f"or specify the correct format explicitly.")
 
