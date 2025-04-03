@@ -333,14 +333,13 @@ class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.out_dtype = out_dtype
 
     def workspace_shapes(
-        self,
-        a_dtype: torch.dtype,
-        M: int,
-        K: int,  # Note that K, N are transposed
-        N: int,
-        topk: int,
-        num_experts: int
-    ) -> Tuple[int, int, torch.dtype]:
+            self,
+            a_dtype: torch.dtype,
+            M: int,
+            K: int,  # Note that K, N are transposed
+            N: int,
+            topk: int,
+            num_experts: int) -> Tuple[int, int, torch.dtype]:
         workspace1 = M * topk * max(2 * N, K)
         workspace2 = M * topk * N
         return (workspace1, workspace2, self.out_dtype)
@@ -375,9 +374,15 @@ class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
         per_act_token = a1q_scale.numel() != 1 if a1q_scale is not None else (
             a2_scale.numel() != 1 if a2_scale is not None else False)
 
-        expert_offsets = torch.empty((global_num_experts + 1), dtype=torch.int32, device=device)
-        problem_sizes1 = torch.empty((global_num_experts, 3), dtype=torch.int32, device=device)
-        problem_sizes2 = torch.empty((global_num_experts, 3), dtype=torch.int32, device=device)
+        expert_offsets = torch.empty((global_num_experts + 1),
+                                     dtype=torch.int32,
+                                     device=device)
+        problem_sizes1 = torch.empty((global_num_experts, 3),
+                                     dtype=torch.int32,
+                                     device=device)
+        problem_sizes2 = torch.empty((global_num_experts, 3),
+                                     dtype=torch.int32,
+                                     device=device)
 
         a_map = torch.empty((topk_ids.numel()),
                             dtype=torch.int32,
@@ -387,8 +392,8 @@ class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
                             device=device)
 
         ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
-                                    problem_sizes2, a_map, c_map, global_num_experts,
-                                    N, K)
+                                    problem_sizes2, a_map, c_map,
+                                    global_num_experts, N, K)
 
         a1q = _fp8_perm(a1q, a_map)
         a1q_scale = a1q_scale[a_map] if per_act_token else a1q_scale

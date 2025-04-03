@@ -14,8 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.dispatch_combine import (
-    StandardDispatchCombine
-)
+    StandardDispatchCombine)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -1570,6 +1569,7 @@ def fused_moe(
 
 
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+
     def __init__(
         self,
         use_fp8_w8a8: bool,
@@ -1583,15 +1583,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_int8_w8a16 = use_int8_w8a16
         self.block_shape = block_shape
 
-    def workspace_shapes(
-        self,
-        a_dtype: torch.dtype,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        num_experts: int
-    ) -> Tuple[int, int, torch.dtype]:
+    def workspace_shapes(self, a_dtype: torch.dtype, M: int, N: int, K: int,
+                         topk: int,
+                         num_experts: int) -> Tuple[int, int, torch.dtype]:
         workspace1 = M * topk * max(N * 2, K)
         workspace2 = M * topk * N
         return (workspace1, workspace2, a_dtype)
@@ -1619,9 +1613,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             assert hidden_states.shape[1] // 2 == w1.shape[
                 2], "Hidden size mismatch"
         else:
-            assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
+            assert hidden_states.shape[1] == w1.shape[
+                2], "Hidden size mismatch"
 
-        assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
+        assert hidden_states.is_contiguous(
+        ), "Hidden_states must be contiguous"
         assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
         assert w2.stride(-1) == 1, "Stride of last dimension must be 1"
         assert hidden_states.dtype in [
@@ -1634,9 +1630,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if global_num_experts == -1:
             global_num_experts = E
         top_k_num = topk_ids.shape[1]
+
         # We execute the fused_moe kernel in chunks to circumvent this issue:
         # https://github.com/vllm-project/vllm/issues/5938
-        M = num_tokens
         config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
                                             use_int8_w8a16=self.use_int8_w8a16,
                                             use_int4_w4a16=self.use_int4_w4a16,
@@ -1660,16 +1656,20 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         elif hidden_states.dtype == torch.float8_e4m3fn:
             compute_type = tl.bfloat16
         else:
-            raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
+            raise ValueError(
+                f"Unsupported compute_type: {hidden_states.dtype}")
 
         curr_hidden_states = hidden_states
         tokens_in_chunk, _ = curr_hidden_states.shape
 
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
-        intermediate_cache1 = _resize_cache(workspace13, (tokens_in_chunk, top_k_num, N))
-        intermediate_cache2 = _resize_cache(workspace2, (tokens_in_chunk * top_k_num, N // 2))
-        intermediate_cache3 = _resize_cache(workspace13, (tokens_in_chunk, top_k_num, K))
+        intermediate_cache1 = _resize_cache(workspace13,
+                                            (tokens_in_chunk, top_k_num, N))
+        intermediate_cache2 = _resize_cache(
+            workspace2, (tokens_in_chunk * top_k_num, N // 2))
+        intermediate_cache3 = _resize_cache(workspace13,
+                                            (tokens_in_chunk, top_k_num, K))
 
         config = get_config_func(tokens_in_chunk)
 
@@ -1718,40 +1718,38 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             qintermediate_cache2 = intermediate_cache2
             a2q_scale = a2_scale
 
-        invoke_fused_moe_kernel(
-            qintermediate_cache2,
-            w2,
-            intermediate_cache3,
-            a2q_scale,
-            w2_scale,
-            w2_zp,
-            None,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            False,
-            1,
-            config,
-            compute_type=compute_type,
-            use_fp8_w8a8=self.use_fp8_w8a8,
-            use_int8_w8a16=self.use_int8_w8a16,
-            use_int4_w4a16=self.use_int4_w4a16,
-            block_shape=self.block_shape)
+        invoke_fused_moe_kernel(qintermediate_cache2,
+                                w2,
+                                intermediate_cache3,
+                                a2q_scale,
+                                w2_scale,
+                                w2_zp,
+                                None,
+                                sorted_token_ids,
+                                expert_ids,
+                                num_tokens_post_padded,
+                                False,
+                                1,
+                                config,
+                                compute_type=compute_type,
+                                use_fp8_w8a8=self.use_fp8_w8a8,
+                                use_int8_w8a16=self.use_int8_w8a16,
+                                use_int4_w4a16=self.use_int4_w4a16,
+                                block_shape=self.block_shape)
 
         return intermediate_cache3
 
 
 def modular_triton_fused_moe(
-        use_fp8_w8a8: bool,
-        use_int8_w8a16: bool,
-        use_int4_w4a16: bool,
-        block_shape: Optional[List[int]] = None,
+    use_fp8_w8a8: bool,
+    use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
+    block_shape: Optional[List[int]] = None,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         StandardDispatchCombine(
             quant_dtype=torch.float8_e4m3fn if use_fp8_w8a8 else None,
-            block_shape=block_shape
-        ),
+            block_shape=block_shape),
         TritonExperts(
             use_fp8_w8a8,
             use_int8_w8a16,
