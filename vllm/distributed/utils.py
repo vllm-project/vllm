@@ -124,7 +124,7 @@ class StatelessProcessGroup:
     world_size: int
     store: torch._C._distributed_c10d.Store
 
-    # stores a reference to the socket so that the file descriptor remains available
+    # stores a reference to the socket so that the file descriptor stays alive
     socket: Optional[socket.socket]
 
     data_expiration_seconds: int = 3600  # 1 hour
