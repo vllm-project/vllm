@@ -191,40 +191,9 @@ def make_list_of_images(images):
         return images
     else:
         raise ValueError(f"images must be PIL image, numpy array, torch tensor, or list of such, got {type(images)}")
-
-class MiniMaxVL01ImageProcessor(ImageProcessor):
-    """
-    Image processor for MiniMaxVL01.
-    """
-    model_input_names = ["pixel_values"]
-
-    def __init__(
-        self,
-        size: Optional[Union[int, Tuple[int, int], Dict[str, int]]] = None,
-        image_mean: Optional[Union[float, List[float]]] = None,
-        image_std: Optional[Union[float, List[float]]] = None,
-        process_image_mode: Optional[str] = 'resize',
-        patch_size: Optional[int] = 14,
-        image_grid_pinpoints: List = None,
-        **kwargs,
-    ) -> None:
-        super().__init__(
-            size=size,
-            image_mean=image_mean,
-            image_std=image_std,
-            process_image_mode=process_image_mode,
-            patch_size=patch_size,
-            image_grid_pinpoints=image_grid_pinpoints,
-            **kwargs
-        )
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
-        return cls(**kwargs)
-
 # Register the processors
-AutoImageProcessor.register("minimax_vl_01", MiniMaxVL01ImageProcessor)
-AutoProcessor.register("minimax_vl_01", MiniMaxVL01Processor)
+AutoImageProcessor.register("minimax_vl_01", ImageProcessor)
+AutoProcessor.register("minimax_vl_01", ImageProcessor)
 
 class MiniMaxVL01ProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = {
@@ -237,12 +206,12 @@ class MiniMaxVL01ProcessorKwargs(ProcessingKwargs, total=False):
 class MiniMaxVL01Processor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
     valid_kwargs = ["chat_template", "patch_size", "vision_feature_select_strategy", "image_token"]
-    image_processor_class = "MiniMaxVL01ImageProcessor"
+    image_processor_class = "ImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
     def __init__(
         self,
-        image_processor: Optional[MiniMaxVL01ImageProcessor] = None,
+        image_processor: Optional[ImageProcessor] = None,
         tokenizer = None,
         patch_size: Optional[int] = None,
         vision_feature_select_strategy: Optional[str] = None,
@@ -251,7 +220,7 @@ class MiniMaxVL01Processor(ProcessorMixin):
         **kwargs,
     ):
         if image_processor is None:
-            image_processor = MiniMaxVL01ImageProcessor(patch_size=patch_size)
+            image_processor = ImageProcessor(patch_size=patch_size)
         
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
         
