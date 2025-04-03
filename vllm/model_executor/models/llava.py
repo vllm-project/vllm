@@ -45,6 +45,9 @@ from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
 from .vision import (get_vision_encoder_info, scatter_patch_features,
                      select_patch_features)
 
+from PIL import Image
+import numpy as np
+
 
 class LlavaImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
@@ -224,6 +227,11 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             prompt_text=image_token * num_images,
             mm_data=mm_data,
         )
+
+    def _get_dummy_images(self, width: int, height: int, num_images: int) -> list[Image.Image]:
+        """Get dummy images for profiling."""
+        dummy_image = np.full((height, width, 3), 255, dtype=np.uint8)
+        return [Image.fromarray(dummy_image) for _ in range(num_images)]
 
 
 class LlavaProcessingInfo(BaseLlavaProcessingInfo):
