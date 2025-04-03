@@ -33,7 +33,11 @@ def test_topk_equivalence_to_native_impl():
         result_tpu = apply_top_k_top_p_tpu(logits=logits.clone(), k=k, p=None)
 
         result_native = apply_top_k_top_p(logits=logits.clone(), k=k, p=None)
-        assert torch.allclose(result_native, result_tpu)
+
+        xm.mark_step()
+
+    # Perform assertion on CPU.
+    assert torch.allclose(result_native.cpu(), result_tpu.cpu())
 
 
 def test_topp_result_sums_past_p():
