@@ -111,7 +111,7 @@ def _moe_unpermute_and_reduce(
     reduction on the hidden states.
     """
     M, topk = topk_weight.shape
-    K = curr_hidden.shape[1]
+    K = curr_hidden.shape[-1]
     if inv_perm is not None:
         curr_hidden = curr_hidden[inv_perm, ...]
     curr_hidden = curr_hidden.view(-1, topk, K)
@@ -336,16 +336,22 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(self):
         super().__init__()
         self.block_shape = deep_gemm_block_shape()
-        self.out_dtype = torch.bfloat16
 
-    def workspace_shapes(self, M: int, N: int, K: int, topk: int,
-                         num_experts: int) -> Tuple[int, int, torch.dtype]:
+    def workspace_shapes(
+        self,
+        a_dtype: torch.dtype,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        num_experts: int
+    ) -> Tuple[int, int, torch.dtype]:
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
         workspace1 = M_sum * max(N * 2, K)
         workspace2 = M_sum * N
-        return (workspace1, workspace2, self.out_dtype)
+        return (workspace1, workspace2, a_dtype)
 
     def apply(
         self,
@@ -354,9 +360,12 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str,
+        global_num_experts: int,
         expert_map: Optional[torch.Tensor],
         w1_scale: Optional[torch.Tensor],
         w2_scale: Optional[torch.Tensor],
+        w1_zp: Optional[torch.Tensor],
+        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
@@ -365,18 +374,16 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         import deep_gemm as dg
 
         # TODO: chunking in here or in FusedMoEModularKernel? ignore for now
-        #E, N, _ = w1.shape
-        #_, K, _ = w2.shape
-        E, N, K = w1.shape
+        _, N, K = w1.shape
 
+        assert global_num_experts != -1
         assert w2.shape[1] == K
-        assert w2.shape[0] == E
 
         a1q, a1q_scale, _, expert_ids, inv_perm = _moe_permute(
             a1q,
             a1q_scale,
             topk_ids,
-            E,
+            global_num_experts,
             expert_map,
             self.block_shape[0],
         )

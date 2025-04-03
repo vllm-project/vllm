@@ -45,8 +45,15 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     #        pass
 
     @abstractmethod
-    def workspace_shapes(self, M: int, N: int, K: int, topk: int,
-                         num_experts: int) -> Tuple[int, int, torch.dtype]:
+    def workspace_shapes(
+        self,
+        a_dtype: torch.dtype,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        num_experts: int
+    ) -> Tuple[int, int, torch.dtype]:
         raise NotImplementedError
 
     @abstractmethod
@@ -57,9 +64,12 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str,
+        global_num_experts: int,
         expert_map: Optional[torch.Tensor],
         w1_scale: Optional[torch.Tensor],
         w2_scale: Optional[torch.Tensor],
+        w1_zp: Optional[torch.Tensor],
+        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
@@ -100,7 +110,9 @@ class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
         a2_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         M, _ = a1.shape
-        E, K, N = w2.shape
+        E, N, _ = w1.shape
+        K = w2.shape[1]
+        #E, K, N = w2.shape
         if global_num_experts == -1:
             global_num_experts = E
         top_k = topk_ids.shape[1]
@@ -108,8 +120,15 @@ class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
         output = a1 if inplace else torch.empty_like(a1)
 
         workspace13_shape, workspace2_shape, workspace_dtype = (
-            self.fused_experts.workspace_shapes(M, N, K, top_k,
-                                                global_num_experts))
+            self.fused_experts.workspace_shapes(
+                a1.dtype,
+                M,
+                N,
+                K,
+                top_k,
+                global_num_experts
+            )
+        )
 
         # We can reuse the memory between cache1 and cache3 because by the time
         # we need cache3, we're done with cache1
@@ -135,9 +154,12 @@ class FusedMoEModularKernel(torch.nn.Module):  # should this be a module?
             w2,
             dispatched_topk_ids,
             activation,
+            global_num_experts,
             expert_map,
             w1_scale,
             w2_scale,
+            w1_zp,
+            w2_zp,
             a1q_scale,
             a2_scale,
             workspace13=workspace13,
