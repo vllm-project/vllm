@@ -404,6 +404,7 @@ class InputPreprocessor:
     async def _prompt_to_llm_inputs_async(
         self,
         prompt: SingletonPrompt,
+        request_id: str,
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> SingletonInputs:
@@ -563,6 +564,7 @@ class InputPreprocessor:
     def _process_encoder_decoder_prompt(
         self,
         prompt: PromptType,
+        request_id: str,
     ) -> EncoderDecoderInputs:
         """
         For encoder/decoder models only:
@@ -599,11 +601,16 @@ class InputPreprocessor:
 
         if is_explicit_encoder_decoder_prompt(prompt):
             encoder_inputs = self._prompt_to_llm_inputs(
-                prompt["encoder_prompt"])
+                prompt["encoder_prompt"],
+                request_id=request_id,
+            )
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
-                decoder_inputs = self._prompt_to_llm_inputs(decoder_input)
+                decoder_inputs = self._prompt_to_llm_inputs(
+                    decoder_input,
+                    request_id=request_id,
+                )
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model and (
@@ -612,7 +619,10 @@ class InputPreprocessor:
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
                         encoder_inputs, decoder_inputs))
         else:
-            inputs = self._prompt_to_llm_inputs(prompt)
+            inputs = self._prompt_to_llm_inputs(
+                prompt,
+                request_id=request_id,
+            )
             if self.model_config.is_multimodal_model and (
                     self._can_process_multimodal()):
                 # Encoder-Decoder Multimodal model
@@ -629,6 +639,7 @@ class InputPreprocessor:
     async def _process_encoder_decoder_prompt_async(
         self,
         prompt: PromptType,
+        request_id: str,
     ) -> EncoderDecoderInputs:
         """Async version of :meth:`_process_encoder_decoder_prompt`."""
         encoder_inputs: SingletonInputs
@@ -636,13 +647,18 @@ class InputPreprocessor:
 
         if is_explicit_encoder_decoder_prompt(prompt):
             encoder_task = self._prompt_to_llm_inputs_async(
-                prompt["encoder_prompt"])
+                prompt["encoder_prompt"],
+                request_id=request_id,
+            )
 
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 encoder_inputs = await encoder_task
                 decoder_inputs = None
             else:
-                decoder_task = self._prompt_to_llm_inputs_async(decoder_input)
+                decoder_task = self._prompt_to_llm_inputs_async(
+                    decoder_input,
+                    request_id=request_id,
+                )
 
                 encoder_inputs, decoder_inputs = await asyncio.gather(
                     encoder_task, decoder_task)
@@ -655,7 +671,10 @@ class InputPreprocessor:
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
                         encoder_inputs, decoder_inputs))
         else:
-            inputs = await self._prompt_to_llm_inputs_async(prompt)
+            inputs = await self._prompt_to_llm_inputs_async(
+                prompt,
+                request_id=request_id,
+            )
             if self.model_config.is_multimodal_model and (
                     self._can_process_multimodal()):
                 # Encoder-Decoder Multimodal model
@@ -726,6 +745,7 @@ class InputPreprocessor:
     async def _process_decoder_only_prompt_async(
         self,
         prompt: SingletonPrompt,
+        request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
@@ -733,6 +753,7 @@ class InputPreprocessor:
         """Async version of :meth:`_process_decoder_only_prompt`."""
         prompt_comps = await self._prompt_to_llm_inputs_async(
             prompt,
+            request_id=request_id,
             lora_request=lora_request,
             return_mm_hashes=return_mm_hashes,
         )
