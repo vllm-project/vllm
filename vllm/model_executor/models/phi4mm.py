@@ -814,7 +814,6 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             image_sizes=MultiModalFieldConfig.batched("image"),
             num_img_tokens=MultiModalFieldConfig.batched("image"),
             input_audio_embeds=MultiModalFieldConfig.batched("audio"),
-            audio_embed_sizes=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
@@ -982,23 +981,13 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             Optional[Phi4MMAudioInputs]: Parsed and validated audio inputs.
         """
         audio_features = kwargs.pop("input_audio_embeds", None)
-        audio_embed_sizes = kwargs.pop("audio_embed_sizes", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
 
         if audio_features is None and audio_embeds is None:
             return None
 
         if audio_features is not None:
-            assert isinstance(audio_embed_sizes, torch.Tensor)
-            if isinstance(audio_features, torch.Tensor):
-                assert audio_features.size(0) == len(audio_embed_sizes), (
-                    "audio_features and audio_embed_sizes "
-                    "must have the same length")
-            elif is_list_of(audio_features, (torch.Tensor, list)):
-                assert len(audio_features) == len(audio_embed_sizes), (
-                    "audio_features and audio_embed_sizes "
-                    "must have the same length")
-            else:
+            if not isinstance(audio_features, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of audio features. "
                                  f"Got type: {type(audio_features)}")
 
