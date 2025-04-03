@@ -499,7 +499,7 @@ class LlavaNextMultiModalProcessor(
 class MiniMaxVL01Processor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
     valid_kwargs = ["chat_template", "patch_size", "vision_feature_select_strategy", "image_token"]
-    image_processor_class = ImageProcessor
+    image_processor_class = "ImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
     def __init__(
@@ -516,10 +516,10 @@ class MiniMaxVL01Processor(ProcessorMixin):
         self.vision_feature_select_strategy = vision_feature_select_strategy
         self.image_token = image_token
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
-        self.patch_size = image_processor.patch_size
-        self.grid_pinpoints = image_processor.image_grid_pinpoints
-        self.max_size = image_processor.size
-        self.process_image_mode = image_processor.process_image_mode
+        self.patch_size = image_processor.patch_size if image_processor is not None else patch_size
+        self.grid_pinpoints = image_processor.image_grid_pinpoints if image_processor is not None else None
+        self.max_size = image_processor.size if image_processor is not None else None
+        self.process_image_mode = image_processor.process_image_mode if image_processor is not None else 'resize'
 
     def __call__(
         self,
