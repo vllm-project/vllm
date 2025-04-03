@@ -123,7 +123,10 @@ class StatelessProcessGroup:
     rank: int
     world_size: int
     store: torch._C._distributed_c10d.Store
-    socket: socket.socket # so that file descriptor remains available
+
+    # stores a reference to the socket so that the file descriptor remains available
+    socket: Optional[socket.socket]
+
     data_expiration_seconds: int = 3600  # 1 hour
 
     # dst rank -> counter
