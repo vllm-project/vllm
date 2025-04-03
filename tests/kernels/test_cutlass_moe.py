@@ -12,6 +12,21 @@ from vllm.platforms import current_platform
 NUM_EXPERTS = [40, 64]
 TOP_KS = [6, 8]
 
+MNK_FACTORS = [
+    (2, 1024, 1024),
+    (2, 1024, 1536),
+    (2, 3072, 1024),
+    (2, 3072, 1536),
+    (64, 1024, 1024),
+    (64, 1024, 1536),
+    (64, 3072, 1024),
+    (64, 3072, 1536),
+    (224, 1024, 1024),
+    (224, 1024, 1536),
+    (224, 3072, 1024),
+    (224, 3072, 1536),
+]
+
 
 def run_8_bit(a: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
               w2_q: torch.Tensor, w1_scale: torch.Tensor,
@@ -47,9 +62,7 @@ def run_16_bit(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
                            c_strides1, ab_strides2, c_strides2)
 
 
-@pytest.mark.parametrize("m", [2, 64, 224])
-@pytest.mark.parametrize("n", [1024, 3072])
-@pytest.mark.parametrize("k", [1024, 1536])
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("per_act_token", [True, False])
@@ -153,9 +166,7 @@ def test_cutlass_moe_8_bit_no_graph(
                                    rtol=1e-2)
 
 
-@pytest.mark.parametrize("m", [2, 64, 224])
-@pytest.mark.parametrize("n", [1024, 3072])
-@pytest.mark.parametrize("k", [1024, 1536])
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("per_act_token", [True, False])
@@ -257,9 +268,7 @@ def test_cutlass_moe_8_bit_cuda_graph(
                                    rtol=1e-2)
 
 
-@pytest.mark.parametrize("m", [2, 64, 224])
-@pytest.mark.parametrize("n", [1024, 3072])
-@pytest.mark.parametrize("k", [1024, 1536])
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])
@@ -311,9 +320,7 @@ def test_cutlass_moe_16_bit_no_graph(
                                    rtol=1e-2)
 
 
-@pytest.mark.parametrize("m", [2, 64, 224])
-@pytest.mark.parametrize("n", [1024, 3072])
-@pytest.mark.parametrize("k", [1024, 1536])
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])
