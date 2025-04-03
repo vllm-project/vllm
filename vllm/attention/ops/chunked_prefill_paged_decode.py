@@ -322,6 +322,7 @@ def chunked_prefill_paged_decode(
             kv_cache_dtype=kv_cache_dtype,
             k_scale=k_scale,
             v_scale=v_scale,
+            fp8_out_scale=None,
         )
     else:
         kernel_paged_attention_2d[(
