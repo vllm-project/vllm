@@ -309,16 +309,29 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            if not isinstance(image_sizes, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image sizes. "
-                                 f"Got type: {type(image_sizes)}")
+            # 确保pixel_values具有正确的维度
+            def _ensure_3d(img):
+                if len(img.shape) == 2:
+                    # 如果是2维的,添加通道维度
+                    return img.unsqueeze(0)
+                elif len(img.shape) == 3:
+                    # 如果已经是3维的,检查通道维度
+                    if img.shape[0] != 3:
+                        return img.permute(2, 0, 1)
+                return img
+
+            if isinstance(pixel_values, torch.Tensor):
+                if len(pixel_values.shape) == 4:  # (batch, channels, height, width)
+                    pixel_values = [_ensure_3d(img) for img in pixel_values]
+                else:
+                    pixel_values = _ensure_3d(pixel_values)
+            elif isinstance(pixel_values, list):
+                pixel_values = [_ensure_3d(img) for img in pixel_values]
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(
-                    flatten_bn(pixel_values)),
-                image_sizes=self._validate_image_sizes(
-                    flatten_bn(image_sizes, concat=True)),
+                pixel_values=self._validate_pixel_values(flatten_bn(pixel_values)),
+                image_sizes=self._validate_image_sizes(flatten_bn(image_sizes, concat=True)),
             )
 
         if image_embeds is not None:
