@@ -56,6 +56,9 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
+    def get_language_model(self) -> torch.nn.Module:
+        ...
+
     # Only for models that support v0 chunked prefill
     # TODO(ywang96): Remove this overload once v0 is deprecated
     @overload
