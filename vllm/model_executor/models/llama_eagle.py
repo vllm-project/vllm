@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -34,10 +33,9 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427
         if layer_id == 0:
             del self.input_layernorm
-            self.input_layernorm = lambda x: x
+            self.input_layernorm = nn.Identity()
 
 
-@support_torch_compile
 class LlamaModel(nn.Module):
 
     def __init__(
@@ -90,7 +88,8 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         self.config = config
-        self.model = LlamaModel(vllm_config=vllm_config, prefix="")
+        self.model = LlamaModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
 
         self.truncated_vocab_size = config.truncated_vocab_size
         self.unpadded_vocab_size = self.truncated_vocab_size
