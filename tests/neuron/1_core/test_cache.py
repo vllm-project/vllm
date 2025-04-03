@@ -71,8 +71,8 @@ def test_reshape_and_cache(num_tokens, n_kv_head, d_head, num_blocks,
     key_cache, value_cache = torch.unbind(kv_cache, dim=0)
 
     # Move results back to CPU for comparison
-    key_cache_result = key_cache.cpu()
-    value_cache_result = value_cache.cpu()
+    key_cache_result = key_cache.cpu().squeeze(0)
+    value_cache_result = value_cache.cpu().squeeze(0)
 
     # Assert results match
     torch.testing.assert_close(key_cache_result,
