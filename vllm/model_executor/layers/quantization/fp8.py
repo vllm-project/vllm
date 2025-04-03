@@ -583,8 +583,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            expand_weights, is_rocm_aiter_block_scaled_moe_enabled,
-            is_rocm_aiter_moe_enabled, shuffle_weights)
+            expand_weights, is_rocm_aiter_2stage_moe_enabled,
+            is_rocm_aiter_block_scaled_moe_enabled, is_rocm_aiter_moe_enabled,
+            shuffle_weights)
 
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
@@ -614,7 +615,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if is_rocm_aiter_block_scaled_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = shuffle_weights(
-                    layer.w13_weight.data, layer.w2_weight.data)
+                    layer.w13_weight.data,
+                    layer.w2_weight.data,
+                    layout=(16, 16))
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -672,9 +675,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     w13_scales.contiguous(), requires_grad=False)
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales.contiguous(), requires_grad=False)
-
-                shuffled_w13, shuffled_w2 = shuffle_weights(
-                    layer.w13_weight, layer.w2_weight)
+                layout = (32,
+                          32) if is_rocm_aiter_2stage_moe_enabled() else (16,
+                                                                          16)
+                shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
+                                                            layer.w2_weight,
+                                                            layout=layout)
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -759,8 +765,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales.contiguous(), requires_grad=False)
 
-                shuffled_w13, shuffled_w2 = shuffle_weights(
-                    layer.w13_weight, layer.w2_weight)
+                layout = (32,
+                          32) if is_rocm_aiter_2stage_moe_enabled() else (16,
+                                                                          16)
+                shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
+                                                            layer.w2_weight,
+                                                            layout=layout)
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)

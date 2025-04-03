@@ -13,6 +13,12 @@ def is_rocm_aiter_moe_enabled() -> bool:
         and envs.VLLM_ROCM_USE_AITER \
 
 
+def is_rocm_aiter_2stage_moe_enabled() -> bool:
+    return current_platform.is_rocm() \
+        and envs.VLLM_ROCM_USE_AITER_2STAGE_MOE \
+        and envs.VLLM_ROCM_USE_AITER
+
+
 def is_rocm_aiter_block_scaled_moe_enabled() -> bool:
     return is_rocm_aiter_moe_enabled() and \
         envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
@@ -30,6 +36,8 @@ def rocm_aiter_fused_experts(
         w2_scale: Optional[torch.Tensor] = None,
         block_shape: Optional[List[int]] = None,
         expert_mask: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
         **kwagrs  # Ignore additional keyword arguments
 ) -> torch.Tensor:
 
@@ -90,6 +98,17 @@ def rocm_aiter_fused_experts(
         return out_asm
 
     elif use_fp8_w8a8:
+        if is_rocm_aiter_2stage_moe_enabled():
+            from aiter.fused_moe_bf16_asm import ck_moe_2stages
+            return ck_moe_2stages(a1=hidden_states,
+                                  w1=w1,
+                                  w2=w2,
+                                  topk_weight=topk_weights,
+                                  topk_ids=topk_ids,
+                                  fc1_scale=w1_scale,
+                                  fc2_scale=w2_scale,
+                                  a1_scale=a1_scale,
+                                  a2_scale=a2_scale)
         return rocm_aiter_asm_fmoe.asm_moe(hidden_states=hidden_states,
                                            w1=w1,
                                            w2=w2,
@@ -100,6 +119,14 @@ def rocm_aiter_fused_experts(
                                            fc1_smooth_scale=None,
                                            fc2_smooth_scale=None,
                                            a16=False)
+
+    if is_rocm_aiter_2stage_moe_enabled():
+        from aiter.fused_moe_bf16_asm import ck_moe_2stages
+        return ck_moe_2stages(a1=hidden_states,
+                              w1=w1,
+                              w2=w2,
+                              topk_weight=topk_weights,
+                              topk_ids=topk_ids)
 
     return rocm_aiter.ck_moe(hidden_states=hidden_states,
                              w1=w1,
@@ -120,7 +147,8 @@ def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
     return topk_weights, topk_indices
 
 
-def shuffle_weights(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+def shuffle_weights(*tensors: torch.Tensor,
+                    layout: tuple[int, int]) -> tuple[torch.Tensor, ...]:
     """
     Applies shuffle_weight function from AITER to each 
     input tensor and returns them.
@@ -133,7 +161,7 @@ def shuffle_weights(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
     """
     from aiter.ops.shuffle import shuffle_weight
 
-    return tuple(shuffle_weight(tensor) for tensor in tensors)
+    return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
 
 
 def expand_weights(*tensors: torch.Tensor,

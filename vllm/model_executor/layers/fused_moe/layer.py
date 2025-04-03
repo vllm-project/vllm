@@ -119,11 +119,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                              requires_grad=False)
         # Lazy import to avoid importing triton.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            is_rocm_aiter_moe_enabled, shuffle_weights)
+            is_rocm_aiter_2stage_moe_enabled, is_rocm_aiter_moe_enabled,
+            shuffle_weights)
         if is_rocm_aiter_moe_enabled():
+            layout = (32, 32) if is_rocm_aiter_2stage_moe_enabled() else (16,
+                                                                          16)
             # reshaping weights is required for aiter moe kernel.
-            shuffled_w13, shuffled_w2 = shuffle_weights(
-                layer.w13_weight.data, layer.w2_weight.data)
+            shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
+                                                        layer.w2_weight.data,
+                                                        layout=layout)
 
             layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                   requires_grad=False)

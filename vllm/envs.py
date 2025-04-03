@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_USE_AITER_2STAGE_MOE: bool = True
     VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_FA: bool = True
@@ -589,6 +590,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
+             ("true", "1")),
+
+    # use aiter ck fused moe op if ater ops are enabled
+    "VLLM_ROCM_USE_AITER_2STAGE_MOE":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_2STAGE_MOE", "True").lower() in
              ("true", "1")),
 
     # Whether to use aiter block scaled moe kernel.
