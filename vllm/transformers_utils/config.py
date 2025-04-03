@@ -262,6 +262,11 @@ def get_config(
                                      MISTRAL_CONFIG_NAME,
                                      revision=revision):
                 config_format = ConfigFormat.MISTRAL
+            else:
+                raise ValueError(
+                    "Could not detect config format for no config file found. "
+                    "Ensure your model has either config.json (HF format) "
+                    "or params.json (Mistral format).")
 
         except Exception as e:
             error_message = (
@@ -324,21 +329,14 @@ def get_config(
     elif config_format == ConfigFormat.MISTRAL:
         config = load_params_config(model, revision, token=HF_TOKEN, **kwargs)
     else:
-        if config_format != ConfigFormat.AUTO:
-            supported_formats = [
-                fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
-            ]
-            raise ValueError(
-                f"Unsupported config format: {config_format}. "
-                f"Supported are: {', '.join(supported_formats)}. "
-                f"Ensure your model uses one of these configuration formats "
-                f"or specify the correct format explicitly.")
-        else:
-            raise ValueError(
-                "Could not detect config format for no config file found. "
-                "Please ensure your model has either config.json (HF format) "
-                "or params.json (Mistral format), or specify format explicitly."
-            )
+        supported_formats = [
+            fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
+        ]
+        raise ValueError(
+            f"Unsupported config format: {config_format}. "
+            f"Supported are: {', '.join(supported_formats)}. "
+            f"Ensure your model uses one of these configuration formats "
+            f"or specify the correct format explicitly.")
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
