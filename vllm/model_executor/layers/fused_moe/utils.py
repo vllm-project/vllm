@@ -31,10 +31,7 @@ def _fp8_quantize(
     """
     if block_shape is None:
         A, A_scale = ops.scaled_fp8_quant(
-            A,
-            A_scale,
-            use_per_token_if_dynamic=per_act_token
-        )
+            A, A_scale, use_per_token_if_dynamic=per_act_token)
     else:
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]

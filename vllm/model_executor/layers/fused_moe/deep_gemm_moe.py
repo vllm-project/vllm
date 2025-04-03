@@ -7,15 +7,12 @@ import torch
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.dispatch_combine import (
+    StandardDispatchCombine)
+from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    _moe_permute, _moe_unpermute_and_reduce)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
                                                         _resize_cache)
-from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
-    _moe_permute,
-    _moe_unpermute_and_reduce
-)
-from vllm.model_executor.layers.fused_moe.dispatch_combine import (
-    StandardDispatchCombine
-)
 from vllm.utils import round_up
 
 logger = init_logger(__name__)
@@ -32,7 +29,7 @@ def deep_gemm_block_shape() -> list[int]:
 
 def _valid_deep_gemm_shape(M: int, N: int, K: int):
     align = deep_gemm_block_shape()[0]
-    return M >= align and N % align == 0 and K % align == 0
+    return align <= M and N % align == 0 and K % align == 0
 
 
 # TODO: check types?
@@ -247,15 +244,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         super().__init__()
         self.block_shape = deep_gemm_block_shape()
 
-    def workspace_shapes(
-        self,
-        a_dtype: torch.dtype,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        num_experts: int
-    ) -> Tuple[int, int, torch.dtype]:
+    def workspace_shapes(self, a_dtype: torch.dtype, M: int, N: int, K: int,
+                         topk: int,
+                         num_experts: int) -> Tuple[int, int, torch.dtype]:
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
