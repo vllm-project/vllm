@@ -575,7 +575,7 @@ def flash_paged_attention(
         head_id=head_id,
     )
 
-    # Flatten KV cache to be 2D for loading into SBUF
+    # Flatten KV cache to be 3D for loading into SBUF
     new_cache_shape = (
         2,
         num_blocks * k_h * block_size_tiling_factor,
