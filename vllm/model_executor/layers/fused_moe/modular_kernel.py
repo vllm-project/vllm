@@ -23,6 +23,7 @@ import torch
 # communication mechanisms that need to be consistent.
 #
 
+
 def moe_problem_size(
     a1: torch.Tensor,
     w1: torch.Tensor,
@@ -43,7 +44,8 @@ def moe_problem_size(
     of w1 or w2.  Similarly, some kernels transpose the weights, so this needs
     to be kept in mind.
     """
-    # Make sure we are using the correct a1 (pre-permute)
+
+    # Make sure we are using the correct a1 (pre-permute).
     assert topk_ids.shape[0] == a1.shape[0]
     M, _ = a1.shape
     E, N, _ = w1.shape
@@ -198,6 +200,7 @@ class FusedMoEModularKernel(torch.nn.Module):
     layer due to any layer specific state that may be used by the component
     objects.
     """
+
     def __init__(
         self,
         dispatch_combine: FusedMoEQuantizeDispatchCombine,
