@@ -332,14 +332,9 @@ class CutlassExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.c_strides2 = c_strides2
         self.out_dtype = out_dtype
 
-    def workspace_shapes(
-            self,
-            a_dtype: torch.dtype,
-            M: int,
-            N: int,
-            K: int,
-            topk: int,
-            num_experts: int) -> Tuple[int, int, torch.dtype]:
+    def workspace_shapes(self, a_dtype: torch.dtype, M: int, N: int, K: int,
+                         topk: int,
+                         num_experts: int) -> Tuple[int, int, torch.dtype]:
         # Note that K, N are transposed
         N, K = K, N
         workspace1 = M * topk * max(2 * N, K)

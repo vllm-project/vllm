@@ -66,7 +66,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             device=device,
         )
 
-        expert_x_scale: torch.Tensor | None = None
+        expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
             float32_size = torch.float32.itemsize
             block_size = (self.block_shape[0] if self.block_shape is not None
