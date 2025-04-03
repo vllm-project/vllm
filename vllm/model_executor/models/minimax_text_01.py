@@ -1110,7 +1110,12 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
             for param_name, weight_name, expert_id in expert_params_mapping:
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
+                # 修改参数名称替换逻辑
+                if isinstance(self.config.num_local_experts, list):
+                    name = name.replace(f"experts.{expert_id}.{weight_name}", param_name)
+                else:
+                    name = name.replace(f"{expert_id}.{weight_name}", param_name)
+                
                 if is_pp_missing_parameter(name, self):
                     return
                 param = params_dict[name]
