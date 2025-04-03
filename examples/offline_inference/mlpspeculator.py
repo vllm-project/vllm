@@ -2,12 +2,11 @@
 
 import gc
 import time
-from typing import List
 
 from vllm import LLM, SamplingParams
 
 
-def time_generation(llm: LLM, prompts: List[str],
+def time_generation(llm: LLM, prompts: list[str],
                     sampling_params: SamplingParams):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
@@ -51,7 +50,9 @@ if __name__ == "__main__":
     # Create an LLM with spec decoding
     llm = LLM(
         model="meta-llama/Llama-2-13b-chat-hf",
-        speculative_model="ibm-ai-platform/llama-13b-accelerator",
+        speculative_config={
+            "model": "ibm-ai-platform/llama-13b-accelerator",
+        },
     )
 
     print("With speculation")

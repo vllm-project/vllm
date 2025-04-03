@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Iterable
 from functools import lru_cache
-from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 
@@ -14,10 +15,10 @@ class AllowedTokenIdsLogitsProcessor:
     specific set of token ids."""
 
     def __init__(self, allowed_ids: Iterable[int]):
-        self.allowed_ids: Optional[List[int]] = list(allowed_ids)
+        self.allowed_ids: Optional[list[int]] = list(allowed_ids)
         self.mask: Optional[torch.Tensor] = None
 
-    def __call__(self, token_ids: List[int],
+    def __call__(self, token_ids: list[int],
                  logits: torch.Tensor) -> torch.Tensor:
         if self.mask is None:
             self.mask = torch.ones((logits.shape[-1], ),
@@ -31,7 +32,7 @@ class AllowedTokenIdsLogitsProcessor:
 
 @lru_cache(maxsize=32)
 def _get_allowed_token_ids_logits_processor(
-    allowed_token_ids: FrozenSet[int],
+    allowed_token_ids: frozenset[int],
     vocab_size: int,
 ) -> LogitsProcessor:
     if not allowed_token_ids:
@@ -48,8 +49,8 @@ class LogitBiasLogitsProcessor:
     generate a specific token.
     """
 
-    def __init__(self, logit_bias_index: List[int],
-                 logit_bias_value: List[float], dtype: Union[str,
+    def __init__(self, logit_bias_index: list[int],
+                 logit_bias_value: list[float], dtype: Union[str,
                                                              torch.dtype]):
         self.logit_bias_index: torch.Tensor = torch.tensor(logit_bias_index)
         self.logit_bias_value: torch.Tensor = torch.tensor(logit_bias_value,
@@ -57,7 +58,7 @@ class LogitBiasLogitsProcessor:
 
     def __call__(
         self,
-        token_ids: List[int],
+        token_ids: list[int],
         logits: torch.Tensor,
     ) -> torch.Tensor:
         if self.logit_bias_value.device != logits.device:
@@ -69,18 +70,18 @@ class LogitBiasLogitsProcessor:
 
 @lru_cache(maxsize=32)
 def _get_logit_bias_logits_processor(
-    logit_bias_index: Union[Tuple[int], Tuple[str]],
-    logit_bias_value: Tuple[float],
+    logit_bias_index: Union[tuple[int], tuple[str]],
+    logit_bias_value: tuple[float],
     vocab_size: int,
     dtype: Union[str, torch.dtype],
 ) -> LogitsProcessor:
     try:
         # Convert token_id to integer
         # Clamp the bias between -100 and 100 per OpenAI API spec
-        clamped_logit_bias_index: List[int] = [
+        clamped_logit_bias_index: list[int] = [
             int(token_id) for token_id in logit_bias_index
         ]
-        clamped_logit_bias_value: List[float] = [
+        clamped_logit_bias_value: list[float] = [
             min(100.0, max(-100.0, bias)) for bias in logit_bias_value
         ]
     except ValueError as exc:
@@ -100,12 +101,12 @@ def _get_logit_bias_logits_processor(
 
 
 def get_logits_processors(
-    logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]],
-    allowed_token_ids: Optional[List[int]],
+    logit_bias: Optional[Union[dict[int, float], dict[str, float]]],
+    allowed_token_ids: Optional[list[int]],
     tokenizer: AnyTokenizer,
     dtype: Union[str, torch.dtype],
-) -> List[LogitsProcessor]:
-    logits_processors: List[LogitsProcessor] = []
+) -> list[LogitsProcessor]:
+    logits_processors: list[LogitsProcessor] = []
     if logit_bias:
         logits_processors.append(
             _get_logit_bias_logits_processor(tuple(logit_bias.keys()),

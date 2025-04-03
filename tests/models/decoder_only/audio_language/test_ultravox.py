@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional, Tuple, Type
+from typing import Optional
 
 import numpy as np
 import pytest
 import pytest_asyncio
-from transformers import AutoModel, AutoTokenizer, BatchEncoding
+from transformers import AutoModel, AutoTokenizer
 
 from vllm.multimodal.audio import resample_audio
 from vllm.sequence import SampleLogprobs
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import HfRunner, VllmRunner
 from ....utils import RemoteOpenAIServer
@@ -17,7 +16,7 @@ from ...utils import check_logprobs_close
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 
-AudioTuple = Tuple[np.ndarray, int]
+AudioTuple = tuple[np.ndarray, int]
 
 VLLM_PLACEHOLDER = "<|audio|>"
 HF_PLACEHOLDER = "<|audio|>"
@@ -78,7 +77,7 @@ def _get_prompt(audio_count, question, placeholder):
                                          add_generation_prompt=True)
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+def vllm_to_hf_output(vllm_output: tuple[list[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
@@ -96,9 +95,9 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
 
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    prompts_and_audios: List[Tuple[str, str, AudioTuple]],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    prompts_and_audios: list[tuple[str, str, AudioTuple]],
     model: str,
     *,
     dtype: str,
@@ -107,8 +106,6 @@ def run_test(
     **kwargs,
 ):
     """Inference result should be the same between hf and vllm."""
-    torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
-
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
@@ -124,15 +121,7 @@ def run_test(
             for vllm_prompt, _, audio in prompts_and_audios
         ]
 
-    def process(hf_inputs: BatchEncoding, **kwargs):
-        hf_inputs["audio_values"] = hf_inputs["audio_values"] \
-            .to(torch_dtype)  # type: ignore
-        return hf_inputs
-
-    with hf_runner(model,
-                   dtype=dtype,
-                   postprocess_inputs=process,
-                   auto_cls=AutoModel) as hf_model:
+    with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
         hf_outputs_per_audio = [
             hf_model.generate_greedy_logprobs_limit(
                 [hf_prompt],
@@ -158,8 +147,8 @@ def run_test(
 
 
 def run_multi_audio_test(
-    vllm_runner: Type[VllmRunner],
-    prompts_and_audios: List[Tuple[str, List[AudioTuple]]],
+    vllm_runner: type[VllmRunner],
+    prompts_and_audios: list[tuple[str, list[AudioTuple]]],
     model: str,
     *,
     dtype: str,
@@ -187,7 +176,7 @@ def run_multi_audio_test(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("vllm_kwargs", [

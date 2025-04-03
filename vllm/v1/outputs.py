@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 import torch
 
@@ -9,11 +9,11 @@ import torch
 class LogprobsLists(NamedTuple):
 
     # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids: List[List[int]]
+    logprob_token_ids: list[list[int]]
     # [num_reqs, max_num_logprobs + 1]
-    logprobs: List[List[float]]
+    logprobs: list[list[float]]
     # [num_reqs]
-    sampled_token_ranks: List[int]
+    sampled_token_ranks: list[int]
 
     def slice(self, start: int, end: int):
         return LogprobsLists(
@@ -39,27 +39,55 @@ class LogprobsTensors(NamedTuple):
             self.selected_token_ranks.tolist(),
         )
 
+    @staticmethod
+    def empty_cpu(num_positions: int,
+                  num_tokens_per_position: int) -> "LogprobsTensors":
+        """Create empty LogprobsTensors on CPU."""
+
+        logprob_token_ids = torch.empty(
+            (num_positions, num_tokens_per_position),
+            dtype=torch.int32,
+            device="cpu")
+        logprobs = torch.empty_like(logprob_token_ids, dtype=torch.float32)
+        selected_token_ranks = torch.empty(num_positions,
+                                           dtype=torch.int32,
+                                           device="cpu")
+        return LogprobsTensors(
+            logprob_token_ids=logprob_token_ids,
+            logprobs=logprobs,
+            selected_token_ranks=selected_token_ranks,
+        )
+
 
 @dataclass
 class SamplerOutput:
 
-    # [num_reqs]
+    # [num_reqs, max_num_generated_tokens]
+    # Different requests can have different number of generated tokens.
+    # All requests are padded to max_num_generated_tokens.
+    # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: Optional[LogprobsTensors]
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
-# This is expensive for torch.Tensor so prefer to use List instead.
+# This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
 class ModelRunnerOutput:
 
     # [num_reqs]
-    req_ids: List[str]
+    req_ids: list[str]
     # req_id -> index
-    req_id_to_index: Dict[str, int]
+    req_id_to_index: dict[str, int]
 
-    # [num_reqs]
-    sampled_token_ids: List[int]
+    # num_reqs x num_generated_tokens
+    # num_generated_tokens is the number of tokens
+    # generated in the current step. It can be different for
+    # each request due to speculative/jump decoding.
+    sampled_token_ids: list[list[int]]
+
+    # num_reqs x num_spec_tokens
+    spec_token_ids: Optional[list[list[int]]]
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
@@ -70,4 +98,14 @@ class ModelRunnerOutput:
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
-    prompt_logprobs_dict: Dict[str, LogprobsTensors]
+    prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
+
+
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+    req_ids=[],
+    req_id_to_index={},
+    sampled_token_ids=[],
+    spec_token_ids=None,
+    logprobs=None,
+    prompt_logprobs_dict={},
+)

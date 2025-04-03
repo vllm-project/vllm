@@ -124,13 +124,15 @@ def find_tokenizer_file(files: List[str]):
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
-        raise OSError(f"Found {len(matched_files)} files matching the "
-                      f"pattern: {file_pattern}. Make sure only one Mistral "
-                      f"tokenizer is present in {files}.")
+        raise OSError(
+            f"Found {len(matched_files)} files matching the "
+            f"pattern: `{file_pattern.pattern}`. Make sure only one Mistral "
+            f"tokenizer is present in {files}.")
     elif len(matched_files) == 0:
-        raise OSError(f"Found {len(matched_files)} files matching the "
-                      f"pattern: {file_pattern}. Make sure that a Mistral "
-                      f"tokenizer is present in {files}.")
+        raise OSError(
+            f"Found {len(matched_files)} files matching the "
+            f"pattern: `{file_pattern.pattern}`. Make sure that a Mistral "
+            f"tokenizer is present in {files}.")
 
     return matched_files[0]
 
@@ -142,10 +144,6 @@ def make_mistral_chat_completion_request(
     last_message = cast(Dict[str, Any], messages[-1])
     if last_message["role"] == "assistant":
         last_message["prefix"] = True
-
-        last_message = cast(Dict[str, Any], messages[-1])
-        if last_message["role"] == "assistant":
-            last_message["prefix"] = True
 
     # mistral-common requires AssistantMessage content to be string [1].
     #
@@ -164,7 +162,8 @@ def make_mistral_chat_completion_request(
                 tool["function"] for tool in tools
                 if tool["type"] == "function"
         ]:
-            function.setdefault("parameters", {})
+            if function.get("parameters") is None:
+                function["parameters"] = {}
 
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     return ChatCompletionRequest(messages=messages,
@@ -248,7 +247,7 @@ class MistralTokenizer(TokenizerBase):
                                          revision=revision)
         return tokenizer_file
 
-    # the following attributes are set to fit VLLM's design and are used
+    # the following attributes are set to fit vLLM's design and are used
     # by the guided structured output backends.
     @property
     def all_special_tokens_extended(self) -> List[str]:

@@ -13,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.utils import deprecate_kwargs
+from vllm.utils import Device, deprecate_kwargs
 
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
 
@@ -123,8 +123,31 @@ class RPCUProfileRequest(Enum):
     STOP_PROFILE = 2
 
 
-class RPCResetPrefixCacheRequest(Enum):
-    RESET_PREFIX_CACHE = 1
+@dataclass
+class RPCResetPrefixCacheRequest:
+    device: Device
+
+
+class RPCSleepRequest(Enum):
+    SLEEP_LEVEL_1 = 1
+    SLEEP_LEVEL_2 = 2
+
+
+@dataclass
+class RPCWakeUpRequest:
+    tags: Optional[list[str]] = None
+
+
+@dataclass
+class RPCIsSleepingRequest:
+    # Set the default value of request_id to a new UUID
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class RPCIsSleepingResponse:
+    request_id: str
+    is_sleeping: bool
 
 
 @dataclass
@@ -141,10 +164,11 @@ class RPCAdapterLoadedResponse:
 
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
-                      RPCResetPrefixCacheRequest]
+                      RPCResetPrefixCacheRequest, RPCSleepRequest,
+                      RPCWakeUpRequest, RPCIsSleepingRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
-                          RPCError]
+                          RPCIsSleepingResponse, RPCError]
 
 
 def ENGINE_DEAD_ERROR(

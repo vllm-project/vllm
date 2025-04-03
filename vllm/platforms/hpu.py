@@ -88,3 +88,7 @@ class HpuPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.hpu_communicator.HpuCommunicator"  # noqa

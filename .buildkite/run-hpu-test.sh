@@ -5,7 +5,7 @@
 set -ex
 
 # Try building the docker image
-docker build -t hpu-test-env -f Dockerfile.hpu .
+docker build -t hpu-test-env -f docker/Dockerfile.hpu .
 
 # Setup cleanup
 # certain versions of HPU software stack have a bug that can
@@ -20,5 +20,5 @@ trap remove_docker_container_and_exit EXIT
 remove_docker_container
 
 # Run the image and launch offline inference
-docker run --runtime=habana --name=hpu-test --network=host -e HABANA_VISIBLE_DEVICES=all -e VLLM_SKIP_WARMUP=true --entrypoint="" hpu-test-env python3 examples/offline_inference/basic.py
+docker run --runtime=habana --name=hpu-test --network=host -e HABANA_VISIBLE_DEVICES=all -e VLLM_SKIP_WARMUP=true --entrypoint="" hpu-test-env python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m
 EXITCODE=$?

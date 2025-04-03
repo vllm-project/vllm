@@ -17,7 +17,7 @@ from vllm.model_executor.models.registry import (_MULTIMODAL_MODELS,
                                                  ModelRegistry)
 from vllm.platforms import current_platform
 
-from ..utils import fork_new_process_for_each_test
+from ..utils import create_new_process_for_each_test
 from .registry import HF_EXAMPLE_MODELS
 
 
@@ -45,7 +45,7 @@ def test_registry_imports(model_arch):
         assert supports_multimodal(model_cls)
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("model_arch,is_mm,init_cuda,is_ce", [
     ("LlamaForCausalLM", False, False, False),
     ("MllamaForConditionalGeneration", True, False, False),
@@ -70,7 +70,7 @@ def test_registry_model_property(model_arch, is_mm, init_cuda, is_ce):
                 stacklevel=2)
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("model_arch,is_pp,init_cuda", [
     ("MLPSpeculatorPreTrainedModel", False, False),
     ("DeepseekV2ForCausalLM", True, False),

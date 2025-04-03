@@ -26,7 +26,7 @@ from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_kv_transfer_group, get_pp_group
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              graph_capture)
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -53,8 +53,8 @@ from vllm.utils import (DeviceMemoryProfiler, GiB_bytes, PyObjectCache,
                         is_pin_memory_available, supports_dynamo,
                         weak_ref_tensor)
 from vllm.worker.model_runner_base import (
-    ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
-    _add_attn_metadata_broadcastable_dict,
+    InputProcessingError, ModelRunnerBase, ModelRunnerInputBase,
+    ModelRunnerInputBuilderBase, _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
@@ -99,6 +99,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
+    previous_hidden_states: Optional[torch.Tensor] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -1107,41 +1108,44 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
-        with DeviceMemoryProfiler() as m:
+        with DeviceMemoryProfiler(self.device) as m:
+            time_before_load = time.perf_counter()
             self.model = get_model(vllm_config=self.vllm_config)
+            if self.lora_config:
+                assert supports_lora(
+                    self.model
+                ), f"{self.model.__class__.__name__} does not support LoRA yet."
+
+                if supports_multimodal(self.model):
+                    logger.warning(
+                        "Regarding multimodal models, vLLM currently "
+                        "only supports adding LoRA to language model.")
+                # It's necessary to distinguish between the
+                # max_position_embeddings of VLMs and LLMs.
+                if hasattr(self.model.config, "max_position_embeddings"):
+                    max_pos_embeddings = (
+                        self.model.config.max_position_embeddings)
+                else:
+                    max_pos_embeddings = (
+                        self.model.config.text_config.max_position_embeddings)
+
+                self.lora_manager = LRUCacheWorkerLoRAManager(
+                    self.scheduler_config.max_num_seqs,
+                    self.scheduler_config.max_num_batched_tokens,
+                    self.vocab_size,
+                    self.lora_config,
+                    self.device,
+                    self.model.embedding_modules,
+                    self.model.embedding_padding_modules,
+                    max_position_embeddings=max_pos_embeddings,
+                )
+                self.model = self.lora_manager.create_lora_manager(self.model)
+            time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
-                    self.model_memory_usage / float(2**30))
-
-        if self.lora_config:
-            assert supports_lora(
-                self.model
-            ), f"{self.model.__class__.__name__} does not support LoRA yet."
-
-            if supports_multimodal(self.model):
-                logger.warning("Regarding multimodal models, vLLM currently "
-                               "only supports adding LoRA to language model.")
-            # It's necessary to distinguish between the max_position_embeddings
-            # of VLMs and LLMs.
-            if hasattr(self.model.config, "max_position_embeddings"):
-                max_pos_embeddings = self.model.config.max_position_embeddings
-            else:
-                max_pos_embeddings = (
-                    self.model.config.text_config.max_position_embeddings)
-
-            self.lora_manager = LRUCacheWorkerLoRAManager(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens,
-                self.vocab_size,
-                self.lora_config,
-                self.device,
-                self.model.embedding_modules,
-                self.model.embedding_padding_modules,
-                max_position_embeddings=max_pos_embeddings,
-            )
-            self.model = self.lora_manager.create_lora_manager(self.model)
-
+        logger.info("Model loading took %.4f GiB and %.6f seconds",
+                    self.model_memory_usage / GiB_bytes,
+                    time_after_load - time_before_load)
         if self.prompt_adapter_config:
             self.prompt_adapter_manager = LRUCacheWorkerPromptAdapterManager(
                 self.scheduler_config.max_num_seqs,
@@ -1212,7 +1216,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         """
         self.builder.prepare(finished_requests_ids)
         for seq_group_metadata in seq_group_metadata_list:
-            self.builder.add_seq_group(seq_group_metadata)
+            try:
+                self.builder.add_seq_group(seq_group_metadata)
+            except Exception as e:
+                # Raise an exception that tracks the ID of the bad request
+                raise InputProcessingError(seq_group_metadata.request_id,
+                                           str(e)) from e
 
         self.builder.reset_cached_inter_data()
 
@@ -1233,6 +1242,29 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_num_seqs = self.scheduler_config.max_num_seqs
         self._dummy_run(max_num_batched_tokens, max_num_seqs)
 
+    def _add_dummy_loras(self, num_loras: int) -> list[LoRARequest]:
+        assert num_loras > 0
+        assert self.lora_manager is not None
+
+        dummy_lora_requests: list[LoRARequest] = []
+        with self.lora_manager.dummy_lora_cache():
+            for idx in range(num_loras):
+                lora_id = idx + 1
+                dummy_lora_request = LoRARequest(
+                    lora_name=f"warmup_{lora_id}",
+                    lora_int_id=lora_id,
+                    lora_path="/not/a/real/path",
+                )
+                self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                 rank=LORA_WARMUP_RANK)
+                dummy_lora_requests.append(dummy_lora_request)
+        return dummy_lora_requests
+
+    def _remove_dummy_loras(self):
+        # Remove dummy loras.
+        assert self.lora_manager is not None
+        self.remove_all_loras()
+
     def _dummy_run(self,
                    max_num_batched_tokens: int,
                    max_num_seqs: int = 1) -> None:
@@ -1242,28 +1274,20 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
 
             # This represents the maximum number of different requests
-            # that will have unique loras, an therefore the max amount of memory
-            # consumption create dummy lora request copies from the lora request
-            # passed in, which contains a lora from the lora warmup path.
+            # that will have unique loras, and therefore the max amount of
+            # memory consumption. Create dummy lora request copies from the
+            # lora request passed in, which contains a lora from the lora
+            # warmup path.
             dummy_lora_requests: List[LoRARequest] = []
             dummy_lora_requests_per_seq: List[LoRARequest] = []
             if self.lora_config:
-                assert self.lora_manager is not None
-                with self.lora_manager.dummy_lora_cache():
-                    for idx in range(self.lora_config.max_loras):
-                        lora_id = idx + 1
-                        dummy_lora_request = LoRARequest(
-                            lora_name=f"warmup_{lora_id}",
-                            lora_int_id=lora_id,
-                            lora_path="/not/a/real/path",
-                        )
-                        self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                         rank=LORA_WARMUP_RANK)
-                        dummy_lora_requests.append(dummy_lora_request)
-                    dummy_lora_requests_per_seq = [
-                        dummy_lora_requests[idx % len(dummy_lora_requests)]
-                        for idx in range(max_num_seqs)
-                    ]
+                dummy_lora_requests = self._add_dummy_loras(
+                    self.lora_config.max_loras)
+                assert len(dummy_lora_requests) == self.lora_config.max_loras
+                dummy_lora_requests_per_seq = [
+                    dummy_lora_requests[idx % len(dummy_lora_requests)]
+                    for idx in range(max_num_seqs)
+                ]
 
             # Profile memory usage with max_num_sequences sequences and the
             # total number of tokens equal to max_num_batched_tokens.
@@ -1345,9 +1369,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.execute_model(model_input, kv_caches, intermediate_tensors)
             torch.cuda.synchronize()
             if self.lora_config:
-                # Remove dummy loras.
-                assert self.lora_manager is not None
-                self.remove_all_loras()
+                self._remove_dummy_loras()
+
             return
 
     def remove_all_loras(self):
@@ -1470,6 +1493,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
 
+        dummy_lora_id: Optional[int] = None
+        dummy_lora_request: LoRARequest = []
+        if self.lora_config:
+            # The goal is to capture the LoRA kernels in cuda graphs.
+            # for this purpose, as single dummy lora is sufficient.
+            dummy_lora_requests = self._add_dummy_loras(num_loras=1)
+            assert len(dummy_lora_requests) == 1
+            dummy_lora_request = dummy_lora_requests[0]
+            dummy_lora_id = dummy_lora_request.lora_int_id
+
         with self.attn_state.graph_capture(max_batch_size), graph_capture(
                 self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
@@ -1494,10 +1527,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     attn_metadata.enable_kv_scales_calculation = False
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
-                            **dict(index_mapping=[0] * batch_size,
-                                   prompt_mapping=[0] * batch_size,
+                            **dict(index_mapping=[dummy_lora_id] * batch_size,
+                                   prompt_mapping=[dummy_lora_id] * batch_size,
                                    is_prefill=False))
-                        self.set_active_loras(set(), lora_mapping)
+                        self.set_active_loras(set([dummy_lora_request]),
+                                              lora_mapping)
 
                     if self.prompt_adapter_config:
                         prompt_adapter_mapping = PromptAdapterMapping(
@@ -1552,6 +1586,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
+
+        if self.lora_config:
+            self._remove_dummy_loras()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -1649,6 +1686,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
@@ -1675,11 +1713,22 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
+        previous_hidden_states = kwargs.get("previous_hidden_states")
         if prefill_meta is None and decode_meta.use_cuda_graph:
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
+            if previous_hidden_states is not None:
+                previous_hidden_states = torch.cat([
+                    previous_hidden_states,
+                    torch.empty([
+                        graph_batch_size - previous_hidden_states.shape[0],
+                        *previous_hidden_states.shape[1:]
+                    ],
+                                dtype=previous_hidden_states.dtype,
+                                device=previous_hidden_states.device)
+                ])
         else:
             model_executable = self.model
 
@@ -1706,6 +1755,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
+        model_kwargs = {}
+        if previous_hidden_states is not None:
+            model_kwargs["previous_hidden_states"] = previous_hidden_states
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start = torch.cuda.Event(enable_timing=True)
@@ -1718,12 +1770,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
-                    kv_caches=kv_caches,
-                    attn_metadata=model_input.attn_metadata,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
-                    **seqlen_agnostic_kwargs)
+                    **seqlen_agnostic_kwargs,
+                    **model_kwargs,
+                )
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
@@ -1815,7 +1867,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             1. current vLLM instance is KV cache consumer/decode vLLM instance
             2. this batch is not a profiling run
             3. this batch is a prefill run
-            
+
         Args:
             model_input: input to the model executable
             kv_caches: vLLM's paged memory
@@ -1840,7 +1892,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             1. current vLLM instance is KV cache producer/prefill vLLM instance
             2. this batch is not a profiling run
             3. this batch is a prefill run
-            
+
         Args:
             model_input: input to the model executable
             kv_caches: vLLM's paged memory
@@ -1902,8 +1954,6 @@ class CUDAGraphRunner(nn.Module):
             self.model(
                 input_ids=input_ids,
                 positions=positions,
-                kv_caches=kv_caches,
-                attn_metadata=attn_metadata,
                 intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
@@ -1916,8 +1966,6 @@ class CUDAGraphRunner(nn.Module):
             output_hidden_or_intermediate_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
-                kv_caches=kv_caches,
-                attn_metadata=attn_metadata,
                 intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
@@ -1965,18 +2013,19 @@ class CUDAGraphRunner(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         **kwargs,
     ) -> torch.Tensor:
-        # KV caches are fixed tensors, so we don't need to copy them.
-        del kv_caches
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         if positions is not None:
-            self.input_buffers["positions"].copy_(positions, non_blocking=True)
+            # in some case like MLA, it will reuse positions in metadata
+            # but truncate them to the original size
+            # so the shape is not padded, we need to copy partial only
+            self.input_buffers["positions"][:positions.shape[0]].copy_(
+                positions, non_blocking=True)
 
         if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(

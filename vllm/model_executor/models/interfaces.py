@@ -4,21 +4,30 @@ from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
                     Protocol, Type, Union, overload, runtime_checkable)
 
 import torch
-from typing_extensions import TypeIs, TypeVar
+from torch import Tensor
+from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.utils import supports_kw
 
 from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
-    from vllm.multimodal.inputs import NestedTensors  # noqa: F401
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
 
-T = TypeVar("T", default="NestedTensors")
+MultiModalEmbeddings = Union[list[Tensor], Tensor, tuple[Tensor, ...]]
+"""
+The output embeddings must be one of the following formats:
+
+- A list or tuple of 2D tensors, where each tensor corresponds to
+    each input multimodal data item (e.g, image).
+- A single 3D tensor, with the batch dimension grouping the 2D tensors.
+"""
 
 
 @runtime_checkable
@@ -34,16 +43,11 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[T]:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
-
-        The output embeddings must be one of the following formats:
-    
-        - A list or tuple of 2D tensors, where each tensor corresponds to
-          each input multimodal data item (e.g, image).
-        - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 
         Note:
             The returned multimodal embeddings must be in the same order as
@@ -57,18 +61,18 @@ class SupportsMultiModal(Protocol):
     @overload
     def get_input_embeddings(
         self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[T] = None,
+        input_ids: Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         attn_metadata: Optional["AttentionMetadata"] = None,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         ...
 
     @overload
     def get_input_embeddings(
         self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[T] = None,
-    ) -> torch.Tensor:
+        input_ids: Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 
         input_ids and the multimodal embeddings generated from multimodal 
@@ -116,11 +120,11 @@ class SupportsLoRA(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
-
-    packed_modules_mapping: ClassVar[Dict[str, List[str]]]
-    supported_lora_modules: ClassVar[List[str]]
-    embedding_modules: ClassVar[Dict[str, str]]
-    embedding_padding_modules: ClassVar[List[str]]
+    # The `embedding_module` and `embedding_padding_modules`
+    # are empty by default.
+    embedding_modules: ClassVar[Dict[str, str]] = {}
+    embedding_padding_modules: ClassVar[List[str]] = []
+    packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -130,7 +134,6 @@ class _SupportsLoRAType(Protocol):
     supports_lora: Literal[True]
 
     packed_modules_mapping: Dict[str, List[str]]
-    supported_lora_modules: List[str]
     embedding_modules: Dict[str, str]
     embedding_padding_modules: List[str]
 
@@ -153,7 +156,6 @@ def supports_lora(
     if not result:
         lora_attrs = (
             "packed_modules_mapping",
-            "supported_lora_modules",
             "embedding_modules",
             "embedding_padding_modules",
         )
@@ -210,7 +212,7 @@ class SupportsPP(Protocol):
         self,
         *,
         intermediate_tensors: Optional["IntermediateTensors"],
-    ) -> Union[torch.Tensor, "IntermediateTensors"]:
+    ) -> Union[Tensor, "IntermediateTensors"]:
         """
         Accept :class:`IntermediateTensors` when PP rank > 0.
 
@@ -237,7 +239,7 @@ class _SupportsPPType(Protocol):
         self,
         *,
         intermediate_tensors: Optional["IntermediateTensors"],
-    ) -> Union[torch.Tensor, "IntermediateTensors"]:
+    ) -> Union[Tensor, "IntermediateTensors"]:
         ...
 
 
@@ -410,6 +412,35 @@ def is_hybrid(
 
 
 @runtime_checkable
+class HasNoOps(Protocol):
+    has_noops: ClassVar[Literal[True]] = True
+
+
+@runtime_checkable
+class _HasNoOpsType(Protocol):
+    has_noops: ClassVar[Literal[True]]
+
+
+@overload
+def has_noops(model: object) -> TypeIs[HasNoOps]:
+    ...
+
+
+@overload
+def has_noops(model: Type[object]) -> TypeIs[Type[HasNoOps]]:
+    ...
+
+
+def has_noops(
+    model: Union[Type[object], object]
+) -> Union[TypeIs[Type[HasNoOps]], TypeIs[HasNoOps]]:
+    if isinstance(model, type):
+        return isinstance(model, _HasNoOpsType)
+
+    return isinstance(model, HasNoOps)
+
+
+@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 
@@ -443,6 +474,36 @@ def supports_cross_encoding(
     return is_pooling_model(model) and _supports_cross_encoding(model)
 
 
+class SupportsQuant:
+    """The interface required for all models that support quantization."""
+
+    packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
+    quant_config: Optional[QuantizationConfig] = None
+
+    def __new__(cls, *args, **kwargs) -> Self:
+        instance = super().__new__(cls)
+        quant_config = cls._find_quant_config(*args, **kwargs)
+        if quant_config is not None:
+            instance.quant_config = quant_config
+            instance.quant_config.packed_modules_mapping.update(
+                cls.packed_modules_mapping)
+        return instance
+
+    @staticmethod
+    def _find_quant_config(*args, **kwargs) -> Optional[QuantizationConfig]:
+        from vllm.config import VllmConfig  # avoid circular import
+
+        args_values = list(args) + list(kwargs.values())
+        for arg in args_values:
+            if isinstance(arg, VllmConfig):
+                return arg.quant_config
+
+            if isinstance(arg, QuantizationConfig):
+                return arg
+
+        return None
+
+
 @runtime_checkable
 class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
@@ -468,3 +529,29 @@ def supports_transcription(
         return isinstance(model, SupportsTranscription)
 
     return isinstance(model, SupportsTranscription)
+
+
+@runtime_checkable
+class SupportsV0Only(Protocol):
+    """Models with this interface are not compatible with V1 vLLM."""
+
+    supports_v0_only: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_v0_only(model: Type[object]) -> TypeIs[Type[SupportsV0Only]]:
+    ...
+
+
+@overload
+def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]:
+    ...
+
+
+def supports_v0_only(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsV0Only]], TypeIs[SupportsV0Only]]:
+    if isinstance(model, type):
+        return isinstance(model, SupportsV0Only)
+
+    return isinstance(model, SupportsV0Only)

@@ -348,10 +348,7 @@ void scaled_fp4_quant_sm100a(torch::Tensor const& output,
   auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
   auto output_ptr = static_cast<int64_t*>(output.data_ptr());
   at::cuda::CUDAGuard device_guard{(char)input.get_device()};
-  auto stream = at::cuda::getStreamFromPool(false, input.get_device());
-  if (stream == nullptr) {
-    std::cerr << "Warning: Null CUDA stream" << std::endl;
-  }
+  auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
 
   // We don't support e8m0 scales at this moment.
   bool useUE8M0 = false;
