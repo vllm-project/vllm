@@ -3,7 +3,7 @@
 from abc import abstractmethod
 from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, TypedDict, TypeVar, Union, Dict)
+                    Protocol, Set, Tuple, TypedDict, TypeVar, Union, Dict, Any)
 
 import torch
 import torch.nn as nn
