@@ -24,7 +24,8 @@ from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda_alike():
-    from .fused_moe import cutlass_moe, fused_experts
+    from .cutlass_moe import cutlass_moe
+    from .fused_moe import fused_experts
 else:
     fused_experts = None  # type: ignore
     cutlass_moe = None  # type: ignore
