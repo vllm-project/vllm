@@ -14,7 +14,7 @@ from transformers.models.gpt2.tokenization_gpt2 import bytes_to_unicode
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.model_executor.guided_decoding.outlines_logits_processors import _reduced_vocabulary
 from vllm.utils import LazyLoader
 from vllm.sampling_params import SamplingParams
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -32,66 +32,6 @@ logger = init_logger(__name__)
 @lru_cache
 def _compile_index(regex_string: str, vocabulary: oc.Vocabulary) -> oc.Index:
     return oc.Index(regex_string, vocabulary)
-
-def _reduced_vocabulary(tokenizer: AnyTokenizer, eos_token_id: int) -> Dict[str | bytes, List[int]]:
-    """Create a map from decoded vocabulary tokens to lists of equivalent token ids.
-    
-    Returns:
-        A Dict of token string -> equivalent token ids
-    """
-    unicode_to_bytes = {v: k for k, v in bytes_to_unicode().items()}
-
-    re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
-    re_replacement_seq = re.compile(r"^▁* +\.*$")
-
-    def byte_symbol(byte: int) -> str:
-        return f"\x00{byte:02X}" if byte >= 0x80 else chr(byte)
-    
-    def convert_token_to_string(token: str) -> str:
-        from transformers.file_utils import SPIECE_UNDERLINE
-
-        string = tokenizer.convert_tokens_to_string([token])
-
-        # A hack to handle missing spaces to HF's Llama tokenizers
-        if (type(token) is str and token.startswith(SPIECE_UNDERLINE)
-                or token == "<0x20>"):
-            return " " + string
-
-        return string
-
-    vocabulary: dict[str | bytes, list[int]] = {}
-    empty_token_ids: list[int] = []
-    for token, token_idx in tokenizer.get_vocab().items():
-        if token in tokenizer.special_tokens:
-            continue
-
-        token_str = convert_token_to_string(token)
-
-        if token_str:
-            if isinstance(token, bytes):
-                # For BPE tokenizers where tokens are stored as bytes.
-                token_str = "".join(byte_symbol(b) for b in token)
-            elif "\ufffd" in token_str and not re_replacement_seq.match(token):
-                # Handle tokens with invalid UTF-8 sequences.
-                if re_llama_byte_token.match(token):
-                    # Llama-like tokenizers use <0xXX> for incomplete sequences.
-                    token_bytes = [int(token[3:5], 16)]
-                else:
-                    # GPT2-like tokenizers: map each byte back using unicode_to_bytes.
-                    token_bytes = [unicode_to_bytes.get(c) for c in token]
-                    if None in token_bytes:
-                        raise RuntimeError(
-                            f"Cannot convert token `{token}` ({token_idx}) to bytes: {token_str}"
-                        )
-                token_str = "".join(byte_symbol(b) for b in token_bytes)
-
-            if token_idx != eos_token_id:
-                vocabulary.setdefault(token_str, []).append(token_idx)
-        else:
-            empty_token_ids.append(token_idx)
-
-    return vocabulary
-
 
 class OutlinesBackend(StructuredOutputBackend):
 
@@ -116,7 +56,11 @@ class OutlinesBackend(StructuredOutputBackend):
                         "eos_token_id",
                 ) and tokenizer.eos_token_id is not None:
                     eos_token_id = tokenizer.eos_token_id
-            
+            else:
+                raise ValueError(
+                    f"Error during guided decoding setup: Tokenizer ({type(tokenizer)}) has no `eos_token_id`" 
+                    " property, but `eos_token_id` is required for guided decoding to work properly.")
+
             reduced_vocab = _reduced_vocabulary(
                 tokenizer,
                 eos_token_id # type: ignore
