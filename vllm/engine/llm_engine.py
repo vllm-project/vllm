@@ -2,10 +2,14 @@
 
 import copy
 import time
+import pickle
+import uuid
 from collections import Counter as collectionsCounter
 from collections import deque
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Literal, Mapping, NamedTuple, Optional)
@@ -62,6 +66,9 @@ from vllm.utils import (Counter, Device, deprecate_kwargs,
                         resolve_obj_by_qualname, weak_bind)
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.model_runner_base import InputProcessingError
+from vllm.remote_prefill import RemotePrefillRequest, RemotePrefillParams, MemoryTransferRequest, MemoryOpType
+from vllm.distributed.device_communicators.nixl import NixlMetadata
+
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -93,7 +100,7 @@ class OutputData(NamedTuple):
     # outputs from multiple steps.
     is_first_step_output: Optional[bool]
     skip: List[int]
-
+    remote_prefill_requests: Optional[List[RemotePrefillRequest]]
 
 class SchedulerContext:
 
@@ -107,11 +114,14 @@ class SchedulerContext:
 
         self.multi_step_stream_outputs: bool = multi_step_stream_outputs
 
+        self.remote_prefill_requests: List[RemotePrefillRequest] = []
+
     def append_output(self, outputs: List[SamplerOutput],
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       scheduler_outputs: SchedulerOutputs, is_async: bool,
                       is_last_step: bool,
-                      is_first_step_output: Optional[bool]):
+                      is_first_step_output: Optional[bool],
+                      remote_prefill_requests: Optional[List[RemotePrefillRequest]] = None):
         self.output_queue.append(
             OutputData(outputs=outputs,
                        seq_group_metadata_list=seq_group_metadata_list,
@@ -119,7 +129,9 @@ class SchedulerContext:
                        is_async=is_async,
                        is_last_step=is_last_step,
                        is_first_step_output=is_first_step_output,
-                       skip=[]))
+                       skip=[],
+                       remote_prefill_requests=remote_prefill_requests))
+
 
 
 class LLMEngine:
@@ -362,7 +374,7 @@ class LLMEngine:
             Scheduler = self.vllm_config.scheduler_config.scheduler_cls
         self.scheduler = [
             Scheduler(
-                self.scheduler_config, self.cache_config, self.lora_config,
+                self.model_config, self.scheduler_config, self.cache_config, self.lora_config,
                 self.parallel_config.pipeline_parallel_size,
                 self.async_callbacks[v_id]
                 if self.model_config.use_async_output_proc else None)
@@ -422,6 +434,39 @@ class LLMEngine:
         # Flag to set when an input fails to process and the engine should run
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
+        self.engine_id = str(uuid.uuid4())
+        self._nixl_agents_names: Optional[List[str]] = None
+        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynamoNixlConnector":
+            self._nixl_agents_names = self._initialize_nixl()
+
+        self._request_notif_counter = defaultdict(lambda: -self.parallel_config.tensor_parallel_size)
+        self._request_done_counter = defaultdict(lambda: -self.parallel_config.tensor_parallel_size)
+        self._finished_prefills = set()
+        self._finished_transfers = set()
+
+    @property
+    def is_nixl_initialized(self) -> bool:
+        return getattr(self, "_nixl_agents_names", None) is not None
+
+    def get_nixl_metadata(self) -> NixlMetadata:
+        if not self.is_nixl_initialized:
+            raise RuntimeError("Nixl is not initialized")
+        agent_metadata = self.model_executor.collective_rpc("get_nixl_agent_metadata")
+        kv_caches_base_addr = self.model_executor.collective_rpc("get_nixl_kv_caches_base_addr")
+        return NixlMetadata(engine_id=self.engine_id, agent_metadata=agent_metadata, kv_caches_base_addr=kv_caches_base_addr, num_blocks=self.cache_config.num_gpu_blocks)
+    
+    def add_remote_nixl_metadata(self, nixl_metadata: NixlMetadata) -> List[str]:
+        if not self.is_nixl_initialized:
+            raise RuntimeError("Nixl is not initialized")
+        engine_id = nixl_metadata.engine_id
+        agents_metadata = nixl_metadata.agent_metadata
+        kv_caches_base_addr = nixl_metadata.kv_caches_base_addr
+        num_blocks = nixl_metadata.num_blocks
+        return self.model_executor.collective_rpc("add_remote_nixl_metadata", args=(engine_id, agents_metadata, kv_caches_base_addr, num_blocks))
+
+    def _initialize_nixl(self) -> List[bytes]:
+        agents_names = self.model_executor.collective_rpc("initialize_nixl", args=(self.engine_id,))
+        return agents_names
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -535,6 +580,8 @@ class LLMEngine:
         # Shutdown model executor when engine is garbage collected
         # Use getattr since __init__ can fail before the field is set
         if model_executor := getattr(self, "model_executor", None):
+            if self.is_nixl_initialized:
+                model_executor.collective_rpc("shutdown_nixl")
             model_executor.shutdown()
 
     def get_tokenizer_group(
@@ -587,11 +634,14 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        remote_prefill_params: Optional[RemotePrefillParams] = None,
     ) -> Optional[SequenceGroup]:
         """Add a processed request to the engine's request pool.
         return the created sequence group.
         """
         if isinstance(params, SamplingParams) and params.n > 1:
+            if remote_prefill_params is not None:
+                raise ValueError("Remote prefill params are not supported for multi-step sampling")
             ParallelSampleSequenceGroup.add_request(
                 request_id,
                 self,
@@ -609,12 +659,14 @@ class LLMEngine:
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
+        if remote_prefill_params is not None and remote_prefill_params.is_remote_decode:
+            next(self.seq_counter) # empty sequence for staging
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
         seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
-                       lora_request, prompt_adapter_request)
+                       lora_request, prompt_adapter_request, remote_prefill_params)
 
         encoder_seq = (None if encoder_inputs is None else Sequence(
             seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
@@ -631,8 +683,12 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
-                priority=priority)
+                priority=priority,
+                remote_prefill_params=remote_prefill_params,
+            )
         elif isinstance(params, PoolingParams):
+            if remote_prefill_params is not None:
+                raise ValueError("Remote prefill params are not supported for pooling")
             seq_group = self._create_sequence_group_with_pooling(
                 request_id,
                 seq,
@@ -703,6 +759,7 @@ class LLMEngine:
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            remote_prefill_params: Optional[RemotePrefillParams] = None,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
@@ -794,6 +851,7 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
             priority=priority,
+            remote_prefill_params=remote_prefill_params,
         )
 
     def _validate_token_prompt(self, prompt: PromptType,
@@ -828,6 +886,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
         priority: int = 0,
+        remote_prefill_params: Optional[RemotePrefillParams] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -863,7 +922,9 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
             priority=priority,
-            draft_size=draft_size)
+            draft_size=draft_size,
+            remote_prefill_params=remote_prefill_params,
+        )
 
         return seq_group
 
@@ -1030,11 +1091,11 @@ class LLMEngine:
             # When we process only one request, no pop is required
             # (since later we will process all of the rest)
             (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
-             is_last_step, is_first_step_output, skip) = ctx.output_queue[0]
+             is_last_step, is_first_step_output, skip, remote_prefill_requests) = ctx.output_queue[0]
         else:
             (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
              is_last_step, is_first_step_output,
-             skip) = ctx.output_queue.popleft()
+             skip, remote_prefill_requests) = ctx.output_queue.popleft()
 
         # Sanity check
         assert len(seq_group_metadata_list) == len(
@@ -1360,6 +1421,12 @@ class LLMEngine:
 
         # Clear outputs for each new scheduler iteration
         ctx.request_outputs.clear()
+        ctx.remote_prefill_requests.clear()
+
+        remote_prefill_seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        running_seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        remote_prefill_scheduled_seq_groups: List[ScheduledSequenceGroup] = []
+        running_scheduled_seq_groups: List[ScheduledSequenceGroup] = []
 
         # Skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
@@ -1372,7 +1439,41 @@ class LLMEngine:
             # Schedule iteration
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
-             ) = self.scheduler[virtual_engine].schedule()
+             ) = self.scheduler[virtual_engine].schedule(self._finished_prefills, self._finished_transfers)
+            
+
+            # Separate remote prefill and running seq groups
+            for seq_group_metadata, scheduled_seq_group in zip(seq_group_metadata_list, scheduler_outputs.scheduled_seq_groups):
+                if seq_group_metadata.do_remote_prefill:
+                    remote_prefill_seq_group_metadata_list.append(seq_group_metadata)
+                    remote_prefill_scheduled_seq_groups.append(scheduled_seq_group)
+                else:
+                    running_seq_group_metadata_list.append(seq_group_metadata)
+                    running_scheduled_seq_groups.append(scheduled_seq_group)
+
+            seq_group_metadata_list = running_seq_group_metadata_list
+            scheduler_outputs.scheduled_seq_groups = running_scheduled_seq_groups
+            
+            # Send remote prefill requests before model execution
+            for seq_group_metadata, scheduled_seq_group in zip(remote_prefill_seq_group_metadata_list, remote_prefill_scheduled_seq_groups):
+                assert len(scheduled_seq_group.seq_group.seqs) == 1
+                assert self._nixl_agents_names
+                seq_id = scheduled_seq_group.seq_group.seqs[0].seq_id
+                block_table = seq_group_metadata.block_tables[seq_id]
+                if len(block_table) == len(seq_group_metadata.computed_block_nums):
+                    logger.debug("No blocks to prefill")
+                    self._finished_prefills.add(seq_group_metadata.request_id)
+                    continue
+                remote_prefill_request = RemotePrefillRequest(
+                    request_id=seq_group_metadata.request_id,
+                    # prompt_token_ids=scheduled_seq_group.seq_group.seqs[0].inputs.prompt_token_ids[:-1], # last one will be decoded on decode for sampling anyway
+                    prompt_token_ids=scheduled_seq_group.seq_group.seqs[0].inputs.prompt_token_ids, # TODO ptarasiewicz do not send the last token when NIXL fixes send notif (needed for writing 0 blocks)
+                    sampling_params=scheduled_seq_group.seq_group.sampling_params,
+                    block_ids=block_table,
+                    engine_id=self.engine_id,
+                    computed_block_ids=seq_group_metadata.computed_block_nums,
+                )
+                scheduled_seq_group.seq_group.remote_prefill_params.remote_prefill_request_callback(remote_prefill_request)
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
@@ -1427,8 +1528,45 @@ class LLMEngine:
                 execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
 
+            # After model execution, we need to transfer the memory from the prefill to the decode
+            memory_transfer_reqs = []
+            for scheduled_seq_group, seq_group_metadata in zip(scheduler_outputs.scheduled_seq_groups, seq_group_metadata_list):
+                remote_prefill_params = scheduled_seq_group.seq_group.remote_prefill_params
+                if remote_prefill_params is not None and remote_prefill_params.is_remote_decode:
+                    assert len(scheduled_seq_group.seq_group.seqs) == 1
+                    req_id = scheduled_seq_group.seq_group.request_id
+                    seq_id = scheduled_seq_group.seq_group.seqs[0].seq_id
+                    block_table = seq_group_metadata.block_tables[seq_id]
+                    staging_block_ids = seq_group_metadata.block_tables[seq_id + 1]
+                    num_computed_blocks = len(seq_group_metadata.computed_block_nums)
+                    computed_decode_block_ids = remote_prefill_params.decode_block_ids[:num_computed_blocks]
+                    if computed_decode_block_ids:
+                        kv_recv_req = MemoryTransferRequest(
+                            request_id=req_id,
+                            local_block_ids=block_table[:num_computed_blocks],
+                            staging_block_ids=staging_block_ids[:num_computed_blocks],
+                            remote_block_ids=computed_decode_block_ids,
+                            remote_engine_id=remote_prefill_params.decode_engine_id,
+                            notify_msg=req_id,
+                            op_type=MemoryOpType.READ
+                        )
+                        memory_transfer_reqs.append(kv_recv_req)
+
+                    kv_send_req = MemoryTransferRequest(
+                        request_id=req_id,
+                        local_block_ids=block_table[num_computed_blocks:],
+                        staging_block_ids=staging_block_ids[num_computed_blocks:],
+                        remote_block_ids=remote_prefill_params.decode_block_ids[num_computed_blocks:],
+                        remote_engine_id=remote_prefill_params.decode_engine_id,
+                        notify_msg=req_id,
+                        op_type=MemoryOpType.WRITE
+                    )
+                    memory_transfer_reqs.append(kv_send_req)
+
+            execute_model_req.memory_transfer_requests = memory_transfer_reqs
+            
             try:
-                outputs = self.model_executor.execute_model(
+                outputs, request_notif_counter, request_done_counter = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
                 self._skip_scheduling_next_step = False
             except InputProcessingError as e:
@@ -1455,7 +1593,26 @@ class LLMEngine:
             if len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
             # No outputs in this case
-            outputs = []
+            execute_model_req = ExecuteModelRequest(
+                seq_group_metadata_list=[],
+                blocks_to_swap_in=[],
+                blocks_to_swap_out=[],
+                blocks_to_copy=[])
+
+            outputs, request_notif_counter, request_done_counter = self.model_executor.execute_model(
+                execute_model_req=execute_model_req)
+            
+        for req_id, notif_count in request_notif_counter.items():
+            self._request_notif_counter[req_id] += notif_count
+            if self._request_notif_counter[req_id] > -1:
+                self._finished_prefills.add(req_id)
+                del self._request_notif_counter[req_id]
+
+        for req_id, done_count in request_done_counter.items():
+            self._request_done_counter[req_id] += done_count
+            if self._request_done_counter[req_id] > -1:
+                self._finished_transfers.add(req_id)
+                del self._request_done_counter[req_id]
 
         # Finish the current step for all the sequence groups.
         if self.scheduler_config.is_multi_step:
@@ -1515,7 +1672,7 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
-
+            
         return ctx.request_outputs
 
     def _abort_and_cache_schedule(

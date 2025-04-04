@@ -41,6 +41,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
                                                 truncate_tool_call_ids,
                                                 validate_request_params)
+from vllm.remote_prefill import RemotePrefillParams
 
 logger = init_logger(__name__)
 
@@ -122,6 +123,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         request: ChatCompletionRequest,
         raw_request: Optional[Request] = None,
+        remote_prefill_params: Optional[RemotePrefillParams] = None,
     ) -> Union[AsyncGenerator[str, None], ChatCompletionResponse,
                ErrorResponse]:
         """
@@ -247,6 +249,7 @@ class OpenAIServingChat(OpenAIServing):
                         trace_headers=trace_headers,
                         prompt_adapter_request=prompt_adapter_request,
                         priority=request.priority,
+                        remote_prefill_params=remote_prefill_params,
                     )
 
                 generators.append(generator)
