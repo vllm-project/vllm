@@ -421,7 +421,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 f"computed_block_nums={self.computed_block_nums}, "
                 f"n_seqs={self.n_seqs}, "
                 f"input_tokens={self.input_tokens}, "
-                f"inputs_embeds={getattr(self.inputs_embeds, 'shape', None)}, "
+                f"inputs_embeds.shape={getattr(self.inputs_embeds, 'shape', None)}, "
                 f"input_positions={self.input_positions}, "
                 f"token_types={self.token_types}, "
                 f"mrope_input_positions={self.mrope_input_positions}, "
