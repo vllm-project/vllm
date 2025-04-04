@@ -442,7 +442,7 @@ def _chunk_scan_fwd_kernel(
              (offs_out_n[None, :] < hdim))
 
 
-def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
+def seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
 
     # convert seq_idx to chunk indices and offsets
     # - derive the cu_seqlens
@@ -486,6 +486,8 @@ def _chunk_scan_fwd(
     D=None,
     z=None,
     seq_idx=None,
+    chunk_indices=None,
+    chunk_offsets=None,
     initial_states=None,
 ):
     batch, seqlen, nheads, headdim = x.shape
@@ -502,7 +504,6 @@ def _chunk_scan_fwd(
     assert dA_cumsum.shape == (batch, nheads, nchunks, chunk_size)
     assert states.shape == (batch, nchunks, nheads, headdim, dstate)
 
-    chunk_indices, chunk_offsets = None, None
     if seq_idx is not None:
         assert seq_idx.shape == (batch, seqlen)
 
@@ -510,15 +511,25 @@ def _chunk_scan_fwd(
             # with initial states, we need to take care of how
             # seq_idx crosses the boundaries
             assert batch == 1, "chunk scan only supports initial states with batch 1"
-            assert initial_states.shape == (seq_idx[0].max() + 1, nheads,
-                                            headdim, dstate)
 
             if initial_states.shape[0] == 1:
                 # no in this case no point to use initial states
                 initial_states = None
-            else:
-                chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
+            elif chunk_indices is None and chunk_offsets is None:
+                # if chunk_indices and chunk_offsets both unset, then derive
+                # from seq_idx
+                chunk_indices, chunk_offsets = seq_idx_to_chunk_indices_offsets(
                     seq_idx, chunk_size)
+            else:
+                assert chunk_indices is not None and chunk_offsets is not None, \
+                    (
+                        "chunk_indices and chunk_offsets should either "
+                        "be left unset, or else both should be set."
+                    )
+        else:
+            chunk_indices, chunk_offsets = None, None
+    else:
+        chunk_indices, chunk_offsets = None, None
 
     # Allocates output.
     out = torch.empty(batch,
