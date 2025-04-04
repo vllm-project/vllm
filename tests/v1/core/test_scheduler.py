@@ -671,10 +671,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert running_req.num_tokens_with_spec == 2 + len(spec_tokens[i])
 
     # No draft or accepted tokens counted yet
-    assert engine_core_outputs.scheduler_stats.spec_decoding_stats is not None
-    stats = engine_core_outputs.scheduler_stats.spec_decoding_stats
-    assert stats.num_draft_tokens == 0
-    assert stats.num_accepted_tokens == 0
+    assert engine_core_outputs.scheduler_stats.spec_decoding_stats is None
 
     # Schedule the speculated tokens for validation
     output = scheduler.schedule()
@@ -702,7 +699,11 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     engine_core_outputs = scheduler.update_from_output(output,
                                                        model_runner_output)
 
-    assert engine_core_outputs.scheduler_stats.spec_decoding_stats is not None
-    stats = engine_core_outputs.scheduler_stats.spec_decoding_stats
-    assert stats.num_draft_tokens == expected[0]
-    assert stats.num_accepted_tokens == expected[1]
+    scheduler_stats = engine_core_outputs.scheduler_stats
+    if expected[0] == 0:
+        assert scheduler_stats.spec_decoding_stats is None
+    else:
+        assert scheduler_stats.spec_decoding_stats is not None
+        stats = scheduler_stats.spec_decoding_stats
+        assert stats.num_draft_tokens == expected[0]
+        assert stats.num_accepted_tokens == expected[1]
