@@ -668,6 +668,66 @@ __global__ void paged_attention_v2_reduce_kernel(
   }
 }
 
+template <typename scalar_t, int HEAD_SIZE,
+          bool SHOULD_OUTPUT_LSE>
+__global__ void merge_attn_states_kernel(
+    scalar_t* __restrict__ output,   // [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+    float* __restrict__ output_lse,  // [NUM_HEADS, NUM_TOKENS]
+    const scalar_t* __restrict__ prefix_output,  // [NUM_TOKENS, NUM_HEADS,
+                                                 // HEAD_SIZE]
+    const float* __restrict__ prefix_lse,        // [NUM_HEADS, NUM_TOKENS]
+    const scalar_t* __restrict__ suffix_output,  // [NUM_TOKENS, NUM_HEADS,
+                                                 // HEAD_SIZE]
+    const float* __restrict__ suffix_lse         // [NUM_HEADS, NUM_TOKENS]
+) {
+  const int token_idx = blockIdx.x;
+  const int head_idx = blockIdx.y;
+  const int num_tokens = gridDim.x;
+  const int num_heads = gridDim.y;
+
+  // Thread count of a block is HEAD_SIZE
+  const int tid = threadIdx.x;
+
+  // Load p_lse and s_lse, the both lse is same for each thread in a block.
+  const int lse_offset = head_idx * num_tokens + token_idx;
+  float p_lse = prefix_lse[lse_offset];
+  p_lse = p_lse == FLT_MAX ? -FLT_MAX : p_lse;
+  float s_lse = suffix_lse[lse_offset];
+  s_lse = s_lse == FLT_MAX ? -FLT_MAX : s_lse;
+
+  // Get the maximum for safe exp.
+  float max_lse = fmaxf(p_lse, s_lse);
+  p_lse -= max_lse;
+  s_lse -= max_lse;
+
+  // Get the output sum of exp.
+  float p_exp_lse = __expf(p_lse);
+  float s_exp_lse = __expf(s_lse);
+  float out_se = p_exp_lse + s_exp_lse;
+
+  if (SHOULD_OUTPUT_LSE) {
+    // Write lse back if necessary.
+    float out_lse = __logf(out_se) + max_lse;
+    output_lse[lse_offset] = out_lse;
+  }
+
+  const int output_offset =
+      token_idx * HEAD_SIZE * num_heads + head_idx * HEAD_SIZE;
+  const scalar_t* p_out_ptr = prefix_output + output_offset;
+  const scalar_t* s_out_ptr = suffix_output + output_offset;
+
+  // Compute scale firstly in case of overflow.
+  float p_scale = p_exp_lse / out_se;
+  float s_scale = s_exp_lse / out_se;
+
+  // Each thread write back an scalar in a head.
+  scalar_t* output_ptr = output + output_offset;
+  float p_out_f = to_float(p_out_ptr[tid]);
+  float s_out_f = to_float(s_out_ptr[tid]);
+  float res = p_out_f * p_scale + s_out_f * s_scale;
+  from_float(output_ptr[tid], res);
+}
+
 }  // namespace vllm
 
 #undef WARP_SIZE

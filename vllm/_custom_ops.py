@@ -98,6 +98,18 @@ def paged_attention_v2(
         blocksparse_block_size, blocksparse_head_sliding_step)
 
 
+def merge_attn_states(
+    output: torch.Tensor,
+    prefix_output: torch.Tensor,
+    prefix_lse: torch.Tensor,
+    suffix_output: torch.Tensor,
+    suffix_lse: torch.Tensor,
+    output_lse: Optional[torch.Tensor] = None,
+) -> None:
+    torch.ops._C.merge_attn_states(output, output_lse, prefix_output,
+                                   prefix_lse, suffix_output, suffix_lse)
+
+
 def paged_attention_rocm(
     out: torch.Tensor,
     exp_sum: torch.Tensor,
