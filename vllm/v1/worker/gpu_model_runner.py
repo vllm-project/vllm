@@ -102,6 +102,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
+        
+        # REMOVE
+        print(f"self.block_size: {self.block_size}, self.max_model_len: {self.max_model_len}, self.max_num_blocks_per_req: {self.max_num_blocks_per_req}")
+        
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -1197,7 +1201,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
-            draft_token_ids, draft_probs = self.drafter.propose(
+            self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
