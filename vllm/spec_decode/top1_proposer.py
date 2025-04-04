@@ -144,7 +144,7 @@ class Top1Proposer(SpeculativeProposer):
             # quota for nonzero_proposal
             new_k = 0
             if (self.max_proposal_len is None
-                    or seq_len + proposal_len < self.max_proposal_len):
+                    or (seq_len < self.max_proposal_len and proposal_len > 0)):
                 new_k = proposal_len
                 nonzero_proposal_len_seqs.append(seq_group_metadata)
                 nonzero_proposal_len_indices.append(i)
@@ -254,12 +254,15 @@ class Top1Proposer(SpeculativeProposer):
             size=(batch_size, *proposal_tokens.shape[1:]),
             fill_value=-1,
         )
-        entire_proposal_tokens[nonzero_proposal_len_indices] = proposal_tokens
+        valid_batch_size = min(proposal_tokens.shape[0], batch_size)
+        valid_proposal_len_indices = nonzero_proposal_len_indices[
+            0:valid_batch_size]
+        entire_proposal_tokens[valid_proposal_len_indices] = proposal_tokens
         entire_proposal_probs = proposal_probs.new_zeros(
             batch_size,
             *proposal_probs.shape[1:],
         )
-        entire_proposal_probs[nonzero_proposal_len_indices] = proposal_probs
+        entire_proposal_probs[valid_proposal_len_indices] = proposal_probs
 
         proposal_tokens, proposal_probs = (
             entire_proposal_tokens,
@@ -269,6 +272,6 @@ class Top1Proposer(SpeculativeProposer):
         proposal_lens_tensor = torch.zeros(batch_size,
                                            dtype=torch.long,
                                            device=self._device)
-        proposal_lens_tensor[nonzero_proposal_len_indices] = proposal_len
+        proposal_lens_tensor[valid_proposal_len_indices] = proposal_len
 
         return proposal_tokens, proposal_probs, proposal_lens_tensor

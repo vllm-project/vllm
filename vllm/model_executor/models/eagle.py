@@ -35,7 +35,7 @@ class DummyInputLayerNorm(nn.Module):
 
 class DummyOutputNorm(nn.Module):
 
-    def forward(self, x, residual):
+    def forward(self, x, residual=None):
         if residual is None:
             return x
         else:
