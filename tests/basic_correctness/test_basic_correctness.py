@@ -5,11 +5,15 @@ Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
 import os
 import weakref
+from unittest.mock import Mock
 
 import pytest
 
 from vllm import LLM
 from vllm.platforms import current_platform
+from vllm.v1.engine.core import ModelExecutionError
+from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
+from vllm.worker.worker_base import ModelExecutionV0Error
 
 from ..conftest import VllmRunner
 from ..models.utils import check_outputs_equal
@@ -152,9 +156,60 @@ def test_models_distributed(
         with hf_runner(model, dtype=dtype) as hf_model:
             hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-        check_outputs_equal(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=vllm_outputs,
-            name_0="hf",
-            name_1="vllm",
-        )
+    check_outputs_equal(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
+
+
+def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
+
+    monkeypatch.setenv('VLLM_ENABLE_V1_MULTIPROCESSING', '0')
+    # Create model
+    with vllm_runner('facebook/opt-125m', enforce_eager=True) as vllm_model:
+        if isinstance(vllm_model.model.llm_engine, LLMEngineV1):
+            v1_test_failed_model_execution(vllm_model)
+        else:  # V0
+            v0_test_failed_model_execution(vllm_model)
+
+
+def v0_test_failed_model_execution(vllm_model):
+    engine = vllm_model.model.llm_engine
+    mocked_execute_model = Mock(
+        side_effect=RuntimeError("Mocked Critical Error"))
+    engine.model_executor.driver_worker.model_runner.execute_model = \
+                mocked_execute_model
+    with pytest.raises(RuntimeError) as exc_info:
+        prompts = [
+            "Hello, my name is",
+            "The president of the United States is",
+            "The capital of France is",
+            "The future of AI is",
+        ]
+        vllm_model.generate_greedy(prompts, 200, use_tqdm=False)
+    assert isinstance(exc_info.value, ModelExecutionV0Error)
+    assert exc_info.value.model_input is not None
+    assert "Mocked Critical Error" in str(exc_info.value)
+
+
+def v1_test_failed_model_execution(vllm_model):
+
+    engine = vllm_model.model.llm_engine
+    mocked_execute_model = Mock(
+        side_effect=RuntimeError("Mocked Critical Error"))
+    engine.engine_core.engine_core.model_executor.execute_model =\
+                mocked_execute_model
+
+    with pytest.raises(RuntimeError) as exc_info:
+        prompts = [
+            "Hello, my name is",
+            "The president of the United States is",
+            "The capital of France is",
+            "The future of AI is",
+        ]
+        vllm_model.generate_greedy(prompts, 200, use_tqdm=False)
+    assert isinstance(exc_info.value, ModelExecutionError)
+    assert exc_info.value.scheduler_output is not None
+    assert "Mocked Critical Error" in str(exc_info.value)
