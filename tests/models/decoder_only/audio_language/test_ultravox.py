@@ -55,7 +55,10 @@ def server(request, audio_assets):
         for key, value in request.param.items()
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME,
+                            args,
+                            env={"VLLM_AUDIO_FETCH_TIMEOUT":
+                                 "30"}) as remote_server:
         yield remote_server
 
 
