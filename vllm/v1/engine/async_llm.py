@@ -52,6 +52,8 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        client_addresses: Optional[dict[str, str]] = None,
+        client_index: int = 0,
     ) -> None:
         """
         Create an AsyncLLM.
@@ -119,6 +121,8 @@ class AsyncLLM(EngineClient):
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=self.log_stats,
+            client_addresses=client_addresses,
+            client_index=client_index,
         )
         for stat_logger in self.stat_loggers[0]:
             stat_logger.log_engine_initialized()
@@ -139,6 +143,8 @@ class AsyncLLM(EngineClient):
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
         disable_log_requests: bool = False,
         disable_log_stats: bool = False,
+        client_addresses: Optional[dict[str, str]] = None,
+        client_index: int = 0,
     ) -> "AsyncLLM":
         if not envs.VLLM_USE_V1:
             raise ValueError(
@@ -156,6 +162,8 @@ class AsyncLLM(EngineClient):
             log_requests=not disable_log_requests,
             log_stats=not disable_log_stats,
             usage_context=usage_context,
+            client_addresses=client_addresses,
+            client_index=client_index,
         )
 
     @classmethod
@@ -392,7 +400,6 @@ class AsyncLLM(EngineClient):
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
                     if stat_loggers:
-                        assert outputs.scheduler_stats is not None
                         AsyncLLM._record_stats(
                             stat_loggers[outputs.engine_index],
                             scheduler_stats=outputs.scheduler_stats,
@@ -416,7 +423,7 @@ class AsyncLLM(EngineClient):
     @staticmethod
     def _record_stats(
         stat_loggers: list[StatLoggerBase],
-        scheduler_stats: SchedulerStats,
+        scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
     ):
         """static so that it can be used from the output_handler task

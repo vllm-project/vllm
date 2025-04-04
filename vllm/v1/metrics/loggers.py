@@ -35,7 +35,7 @@ class StatLoggerBase(ABC):
         ...
 
     @abstractmethod
-    def record(self, scheduler_stats: SchedulerStats,
+    def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
         ...
 
@@ -78,20 +78,22 @@ class LoggingStatLogger(StatLoggerBase):
         # Compute summary metrics for tracked stats
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
-    def record(self, scheduler_stats: SchedulerStats,
+    def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
         """Log Stats to standard output."""
 
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
 
-        self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
+        if scheduler_stats is not None:
+            self.prefix_caching_metrics.observe(
+                scheduler_stats.prefix_cache_stats)
 
-        if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_logging.observe(
-                scheduler_stats.spec_decoding_stats)
+            if scheduler_stats.spec_decoding_stats is not None:
+                self.spec_decoding_logging.observe(
+                    scheduler_stats.spec_decoding_stats)
 
-        self.last_scheduler_stats = scheduler_stats
+            self.last_scheduler_stats = scheduler_stats
 
     def log(self):
         now = time.monotonic()
@@ -373,22 +375,23 @@ class PrometheusStatLogger(StatLoggerBase):
             labelnames=metrics_info.keys()).labels(**metrics_info)
         info_gauge.set(1)
 
-    def record(self, scheduler_stats: SchedulerStats,
+    def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
         """Log to prometheus."""
-        self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
-        self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
+        if scheduler_stats is not None:
+            self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
+            self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
-        self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
+            self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
 
-        self.counter_gpu_prefix_cache_queries.inc(
-            scheduler_stats.prefix_cache_stats.queries)
-        self.counter_gpu_prefix_cache_hits.inc(
-            scheduler_stats.prefix_cache_stats.hits)
+            self.counter_gpu_prefix_cache_queries.inc(
+                scheduler_stats.prefix_cache_stats.queries)
+            self.counter_gpu_prefix_cache_hits.inc(
+                scheduler_stats.prefix_cache_stats.hits)
 
-        if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_prom.observe(
-                scheduler_stats.spec_decoding_stats)
+            if scheduler_stats.spec_decoding_stats is not None:
+                self.spec_decoding_prom.observe(
+                    scheduler_stats.spec_decoding_stats)
 
         if iteration_stats is None:
             return

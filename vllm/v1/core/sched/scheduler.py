@@ -57,7 +57,8 @@ class Scheduler(SchedulerInterface):
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
         # case to track request lifetimes efficiently.
-        self.include_finished_set = include_finished_set
+        self.finished_req_ids_dict: Optional[dict[int, set[str]]] = (
+            defaultdict(set) if include_finished_set else None)
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -641,7 +642,7 @@ class Scheduler(SchedulerInterface):
         self,
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
-    ) -> EngineCoreOutputs:
+    ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
@@ -649,7 +650,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         new_running: list[Request] = []
-        outputs: list[EngineCoreOutput] = []
+        outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
@@ -743,7 +744,7 @@ class Scheduler(SchedulerInterface):
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids:
                 # Add EngineCoreOutput for this Request.
-                outputs.append(
+                outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
                         new_token_ids=new_token_ids,
@@ -764,16 +765,34 @@ class Scheduler(SchedulerInterface):
             self._cached_reqs_data[req_data.req_id].append(req_data)
 
         self.running = new_running
-        engine_core_outputs = EngineCoreOutputs(
-            outputs=outputs,
-            scheduler_stats=self.make_stats(spec_decoding_stats),
-        )
-        if self.include_finished_set:
-            #TODO currently sending duplicates here, improve this
-            engine_core_outputs.finished_requests = (
-                scheduler_output.finished_req_ids | self.finished_req_ids)
+
+        engine_core_outputs = {
+            client_index: EngineCoreOutputs(outputs=outs)
+            for client_index, outs in outputs.items()
+        }
+
+        finished_req_ids = self.finished_req_ids_dict
+        if finished_req_ids is not None:
+            # Include ids of requests that finished since last outputs
+            # were sent.
+            for client_index, finished_set in finished_req_ids.items():
+                if (eco := engine_core_outputs.get(client_index)) is not None:
+                    eco.finished_requests = finished_set
+                else:
+                    engine_core_outputs[client_index] = EngineCoreOutputs(
+                        finished_requests=finished_set)
+            finished_req_ids.clear()
+
+        if engine_core_outputs:
+            # Return stats to only one of the front-ends.
+            next(iter(engine_core_outputs.values())).scheduler_stats = (
+                self.make_stats(spec_decoding_stats))
 
         return engine_core_outputs
+
+    def get_request_counts(self) -> tuple[int, int]:
+        """Returns (num_running_reqs, num_waiting_reqs)."""
+        return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
@@ -815,9 +834,12 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.free(request)
         self.kv_cache_manager.free_block_hashes(request)
         self.encoder_cache_manager.free(request)
-        self._cached_reqs_data.pop(request.request_id, None)
-        del self.requests[request.request_id]
-        self.finished_req_ids.add(request.request_id)
+        request_id = request.request_id
+        self._cached_reqs_data.pop(request_id, None)
+        del self.requests[request_id]
+        self.finished_req_ids.add(request_id)
+        if self.finished_req_ids_dict is not None:
+            self.finished_req_ids_dict[request.client_index].add(request_id)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)

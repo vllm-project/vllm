@@ -1,22 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import time
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
+from enum import Enum, auto
 from multiprocessing import Process, connection
-from typing import (TYPE_CHECKING, Callable, Generic, Optional, TypeVar, Union,
-                    overload)
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
+                    Union, overload)
 
+import msgspec
 import torch
+import zmq
 
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import get_mp_context, kill_process_tree
+from vllm.utils import (get_mp_context, get_open_port, get_open_zmq_ipc_path,
+                        get_tcp_uri, kill_process_tree)
 from vllm.v1.executor.abstract import Executor
 
 if TYPE_CHECKING:
@@ -25,6 +28,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 T = TypeVar("T")
+
+STARTUP_POLL_PERIOD_MS = 10000
 
 
 class ConstantList(Generic[T], Sequence):
@@ -95,6 +100,13 @@ class ConstantList(Generic[T], Sequence):
         return f"ConstantList({self._x})"
 
 
+def get_engine_client_zmq_addr(local_only: bool,
+                               host: str,
+                               port: int = 0) -> str:
+    return get_open_zmq_ipc_path() if local_only else (get_tcp_uri(
+        host, port or get_open_port()))
+
+
 class CoreEngineProcManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -109,7 +121,7 @@ class CoreEngineProcManager:
         local_start_index: int,
         vllm_config: VllmConfig,
         on_head_node: bool,
-        input_address: str,
+        handshake_address: str,
         executor_class: type[Executor],
         log_stats: bool,
     ):
@@ -117,7 +129,7 @@ class CoreEngineProcManager:
         common_kwargs = {
             "vllm_config": vllm_config,
             "on_head_node": on_head_node,
-            "input_address": input_address,
+            "handshake_address": handshake_address,
             "executor_class": executor_class,
             "log_stats": log_stats,
         }
@@ -135,8 +147,7 @@ class CoreEngineProcManager:
                                     "local_dp_rank": local_index,
                                 }))
 
-        self._finalizer = weakref.finalize(self, shutdown, self.processes,
-                                           input_address)
+        self._finalizer = weakref.finalize(self, shutdown, self.processes)
         try:
             for proc in self.processes:
                 proc.start()
@@ -164,9 +175,125 @@ class CoreEngineProcManager:
         }
 
 
+class CoreEngineState(Enum):
+    NEW = auto()
+    CONNECTED = auto()
+    READY = auto()
+
+
+class CoreEngine:
+    """One per data parallel rank."""
+
+    def __init__(self, index: int = 0, local: bool = True):
+        self.local = local
+        self.index = index
+        self.identity = index.to_bytes(2, "little")
+
+        self.state = CoreEngineState.NEW
+
+
+def wait_for_engine_startup(
+    handshake_socket: zmq.Socket,
+    addresses: dict[str, Any],
+    core_engines: list[CoreEngine],
+    parallel_config: ParallelConfig,
+    cache_config: CacheConfig,
+    proc_manager: Optional[CoreEngineProcManager],
+    coord_process: Optional[Process],
+):
+
+    # Wait for engine core process(es) to send ready messages.
+    local_count = parallel_config.data_parallel_size_local
+    remote_count = len(core_engines) - local_count
+    # [local, remote] counts
+    conn_pending, start_pending = [local_count, remote_count], [0, 0]
+    poller = zmq.Poller()
+    poller.register(handshake_socket, zmq.POLLIN)
+
+    if proc_manager is not None:
+        for sentinel in proc_manager.sentinels():
+            poller.register(sentinel, zmq.POLLIN)
+    if coord_process is not None:
+        poller.register(coord_process.sentinel, zmq.POLLIN)
+    while any(conn_pending) or any(start_pending):
+        events = poller.poll(STARTUP_POLL_PERIOD_MS)
+        if not events:
+            if any(conn_pending):
+                logger.debug(
+                    "Waiting for %d local, %d remote core engine proc(s) "
+                    "to connect.", *conn_pending)
+            if any(start_pending):
+                logger.debug(
+                    "Waiting for %d local, %d remote core engine proc(s) "
+                    "to start.", *start_pending)
+            continue
+        if len(events) > 1 or events[0][0] != handshake_socket:
+            # One of the local core processes exited.
+            finished = proc_manager.finished_procs() if proc_manager else {}
+            if coord_process is not None and coord_process.exitcode is not None:
+                finished[coord_process.name] = coord_process.exitcode
+            raise RuntimeError("Engine core initialization failed. "
+                               "See root cause above. "
+                               f"Failed core proc(s): {finished}")
+
+        # Receive HELLO and READY messages from the input socket.
+        eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
+        eng_index = int.from_bytes(eng_identity, "little")
+        engine = next((e for e in core_engines if e.identity == eng_identity),
+                      None)
+        if engine is None:
+            raise RuntimeError(f"Message from engine with unexpected data "
+                               f"parallel rank: {eng_index}")
+        msg = msgspec.msgpack.decode(ready_msg_bytes)
+        status, local = msg["status"], msg["local"]
+        if local != engine.local:
+            raise RuntimeError(f"{status} message from "
+                               f"{'local' if local else 'remote'} "
+                               f"engine {eng_index}, expected it to be "
+                               f"{'local' if engine.local else 'remote'}")
+
+        if status == "HELLO" and engine.state == CoreEngineState.NEW:
+
+            # Send init message with DP config info.
+            init_message = msgspec.msgpack.encode({
+                "addresses": addresses,
+                "parallel_config": {
+                    "data_parallel_master_ip":
+                    parallel_config.data_parallel_master_ip,
+                    "data_parallel_master_port":
+                    parallel_config.data_parallel_master_port,
+                    "data_parallel_size": parallel_config.data_parallel_size,
+                },
+            })
+            handshake_socket.send_multipart((eng_identity, init_message),
+                                            copy=False)
+            conn_pending[0 if local else 1] -= 1
+            start_pending[0 if local else 1] += 1
+            engine.state = CoreEngineState.CONNECTED
+        elif status == "READY" and (engine.state == CoreEngineState.CONNECTED):
+            # Setup KV cache config with initialization state from
+            # engine core process.
+
+            # TODO we'll receive one of these per engine in DP case.
+            # How should we aggregate?
+            # Also in multi-API server case, this runs in the bootstrap process
+            # and won't currently make its way into the published metrics.
+            cache_config.num_gpu_blocks = msg["num_gpu_blocks"]
+
+            start_pending[0 if local else 1] -= 1
+            engine.state = CoreEngineState.READY
+        else:
+            raise RuntimeError(f"Unexpected {status} message for "
+                               f"{'local' if local else 'remote'} engine "
+                               f"{eng_index} in {engine.state} state.")
+
+        logger.debug("%s from %s core engine process %s.", status,
+                     "local" if local else "remote", eng_index)
+
+
 # Note(rob): shutdown function cannot be a bound method,
-# else the gc cannot collect the objedecoupct.
-def shutdown(procs: list[Process], input_address: str):
+# else the gc cannot collect the object.
+def shutdown(procs: list[Process]):
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
@@ -184,12 +311,6 @@ def shutdown(procs: list[Process], input_address: str):
     for proc in procs:
         if proc.is_alive() and (pid := proc.pid) is not None:
             kill_process_tree(pid)
-
-    # Remove zmq ipc socket files.
-    if input_address.startswith("ipc://"):
-        socket_file = input_address[len("ipc://"):]
-        if os and os.path.exists(socket_file):
-            os.remove(socket_file)
 
 
 def bind_kv_cache(

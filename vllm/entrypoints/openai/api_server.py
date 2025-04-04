@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Optional, Union
+from typing import Annotated, Any, Optional, Union
 
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
@@ -137,14 +137,17 @@ async def lifespan(app: FastAPI):
 
 @asynccontextmanager
 async def build_async_engine_client(
-        args: Namespace) -> AsyncIterator[EngineClient]:
+    args: Namespace,
+    client_config: Optional[dict[str, Any]] = None,
+) -> AsyncIterator[EngineClient]:
 
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     async with build_async_engine_client_from_engine_args(
-            engine_args, args.disable_frontend_multiprocessing) as engine:
+            engine_args, args.disable_frontend_multiprocessing,
+            client_config) as engine:
         yield engine
 
 
@@ -152,6 +155,7 @@ async def build_async_engine_client(
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
+    client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
     """
     Create EngineClient, either:
@@ -174,12 +178,16 @@ async def build_async_engine_client_from_engine_args(
 
         from vllm.v1.engine.async_llm import AsyncLLM
         async_llm: Optional[AsyncLLM] = None
+        client_index = client_config.pop(
+            "client_index") if client_config else 0
         try:
             async_llm = AsyncLLM.from_vllm_config(
                 vllm_config=vllm_config,
                 usage_context=usage_context,
                 disable_log_requests=engine_args.disable_log_requests,
-                disable_log_stats=engine_args.disable_log_stats)
+                disable_log_stats=engine_args.disable_log_stats,
+                client_addresses=client_config,
+                client_index=client_index)
             yield async_llm
         finally:
             if async_llm:
@@ -1038,16 +1046,10 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     return sock
 
 
-async def run_server(args, **uvicorn_kwargs) -> None:
-    logger.info("vLLM API server version %s", VLLM_VERSION)
-    logger.info("args: %s", args)
-
-    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
-        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
-
+def validate_api_server_args(args):
     valid_tool_parses = ToolParserManager.tool_parsers.keys()
     if args.enable_auto_tool_choice \
-        and args.tool_call_parser not in valid_tool_parses:
+            and args.tool_call_parser not in valid_tool_parses:
         raise KeyError(f"invalid tool call parser: {args.tool_call_parser} "
                        f"(chose from {{ {','.join(valid_tool_parses)} }})")
 
@@ -1057,6 +1059,16 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         raise KeyError(
             f"invalid reasoning parser: {args.reasoning_parser} "
             f"(chose from {{ {','.join(valid_reasoning_parses)} }})")
+
+
+def setup_server(args):
+    logger.info("vLLM API server version %s", VLLM_VERSION)
+    logger.info("args: %s", args)
+
+    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
+        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    validate_api_server_args(args)
 
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
@@ -1074,22 +1086,39 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, signal_handler)
 
-    async with build_async_engine_client(args) as engine_client:
+    addr, port = sock_addr
+    is_ssl = args.ssl_keyfile and args.ssl_certfile
+    host_part = f"[{addr}]" if is_valid_ipv6_address(
+        addr) else addr or "0.0.0.0"
+    listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
+
+    return listen_address, sock
+
+
+async def run_server(args, **uvicorn_kwargs) -> None:
+    listen_address, sock = setup_server(args)
+    await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+
+
+async def run_server_worker(listen_address,
+                            sock,
+                            args,
+                            client_config=None,
+                            **uvicorn_kwargs) -> None:
+
+    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
+        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    server_index = client_config.get("client_index", 0) if client_config else 0
+
+    async with build_async_engine_client(args, client_config) as engine_client:
         app = build_app(args)
 
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
-        def _listen_addr(a: str) -> str:
-            if is_valid_ipv6_address(a):
-                return '[' + a + ']'
-            return a or "0.0.0.0"
-
-        is_ssl = args.ssl_keyfile and args.ssl_certfile
-        logger.info("Starting vLLM API server on http%s://%s:%d",
-                    "s" if is_ssl else "", _listen_addr(sock_addr[0]),
-                    sock_addr[1])
-
+        logger.info("Starting vLLM API server %d on %s", server_index,
+                    listen_address)
         shutdown_task = await serve_http(
             app,
             sock=sock,
