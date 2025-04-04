@@ -52,6 +52,12 @@ become available.
       <td style="text-align: center;">✅</td>
       <td><code>likaixin/InstructCoder</code></td>
     </tr>
+      <tr>
+      <td><strong>HuggingFace-AIMO</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>AI-MO/aimo-validation-aime</code> , <code>AI-MO/NuminaMath-1.5</code>, <code>AI-MO/NuminaMath-CoT</code></td>
+    </tr>
     <tr>
       <td><strong>HuggingFace-Other</strong></td>
       <td style="text-align: center;">✅</td>
@@ -187,6 +193,17 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --num-prompts 10
 ```
 
+**`AI-MO/aimo-validation-aime`**
+
+``` bash
+python3 vllm/benchmarks/benchmark_serving.py \
+    --model Qwen/QwQ-32B \
+    --dataset-name hf \
+    --dataset-path AI-MO/aimo-validation-aime \
+    --num-prompts 10 \
+    --seed 42
+```
+
 ### Running With Sampling Parameters
 
 When using OpenAI-compatible backends such as `vllm`, optional sampling
@@ -292,6 +309,18 @@ python3 vllm/benchmarks/benchmark_throughput.py \
   --backend vllm-chat \
   --dataset-name hf \
   --dataset-path Aeala/ShareGPT_Vicuna_unfiltered \
+  --hf-split train \
+  --num-prompts 10
+```
+
+**`AI-MO/aimo-validation-aime`**
+
+```bash
+python3 benchmarks/benchmark_throughput.py \
+  --model Qwen/QwQ-32B \
+  --backend vllm \
+  --dataset-name hf \
+  --dataset-path AI-MO/aimo-validation-aime \
   --hf-split train \
   --num-prompts 10
 ```
