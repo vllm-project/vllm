@@ -51,13 +51,13 @@ If the build has error like the following snippet where standard C++ headers can
       1 error generated.
 ```
 
-If run with error like the following snippet you need to check clang version and install the applicable versions
+If run with error like the following snippet you need to check clang version and install a compatible version.
 
 ```text
 AttributeError: '_OpNamespace' '_C' object has no attribute 'silu_and_mul'
 ```
 
-more can check issue https://github.com/vllm-project/vllm/issues/15941
+More information can be found in <gh-issue:15941>.
 
 ## Set up using Docker
 
