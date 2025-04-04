@@ -302,3 +302,9 @@ class RocmPlatform(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on AMD gpus is experimental
         return True
+
+    @classmethod
+    @cache
+    def get_cu_count(cls, device_id: int = 0) -> int:
+        return torch.cuda.get_device_properties(
+            device_id).multi_processor_count

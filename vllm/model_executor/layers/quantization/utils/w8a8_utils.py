@@ -156,7 +156,8 @@ class Fp8LinearOp:
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
             pad_output = config.level < CompilationLevel.PIECEWISE
-        self.output_padding = 17 if pad_output else None
+        self.output_padding = 17 if (
+            pad_output and not current_platform.is_rocm()) else None
 
     def apply(
         self,
