@@ -102,8 +102,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     "scaling factors are available in the fp8 checkpoint.")
 
         if layer.q_scale > 0.0:
-            q_scale = layer.q_scale.to("cpu").tolist()
-            if current_platform.is_rocm():
+            q_scale = layer.q_scale.tolist()
+            if current_platform.is_fp8_fnuz():
                 q_scale *= 2
             layer.calculate_kv_scales = False
         else:
