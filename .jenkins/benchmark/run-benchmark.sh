@@ -81,7 +81,7 @@ if [[ -n "$TEST_RESULTS_DIR" ]]; then
 EOF
     if [[ "$throughput_fail" -eq 1 ]]; then
         cat <<EOF >> ${LOG_PATH}
-<failure message="Throughput did not meet the threshold  ($throughput < $throughput_threshold)"></failure>
+<failure message="Throughput did not meet the threshold  ($throughput &lt; $throughput_threshold)"></failure>
 EOF
     fi
  cat <<EOF >> ${LOG_PATH}
@@ -94,7 +94,7 @@ EOF
 EOF
     if [[ "$warmup_fail" -eq 1 ]]; then
         cat <<EOF >> ${LOG_PATH}
-<failure message="Warmup did not meet the threshold ($warmup > $warmup_threshold)"></failure>
+<failure message="Warmup did not meet the threshold ($warmup &gt; $warmup_threshold)"></failure>
 EOF
     fi
     cat <<EOF >> ${LOG_PATH}
