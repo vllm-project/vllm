@@ -1619,13 +1619,12 @@ class ParallelConfig:
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
-        device_capability = current_platform.get_device_capability()
-        if (current_platform.is_rocm() and device_capability is not None
-                and device_capability < (9, 4)):
+
+        if not current_platform.use_custom_allreduce():
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
-                "supported on AMD GPUs older than MI300X.")
+                "supported on current platform.")
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")

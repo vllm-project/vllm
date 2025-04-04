@@ -308,6 +308,10 @@ class CudaPlatformBase(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         return True
 
+    @classmethod
+    def use_custom_allreduce(cls) -> bool:
+        return True
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,

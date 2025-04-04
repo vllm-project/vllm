@@ -379,6 +379,13 @@ class Platform:
         """
         return False
 
+    @classmethod
+    def use_custom_allreduce(cls) -> bool:
+        """
+        Returns if custom allreduce is supported on the current platform
+        """
+        return False
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
