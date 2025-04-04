@@ -1562,9 +1562,12 @@ def get_allowed_kwarg_only_overrides(
 # In particular, the FakeScalarType is not supported for earlier versions of
 # PyTorch which breaks dynamo for any ops registered using ScalarType.
 def supports_dynamo() -> bool:
+    # VLLM_DISABLE_DYNAMO=1 doesn't seem to work
+    from vllm.platforms import current_platform
     base_torch_version = Version(Version(torch.__version__).base_version)
-    return base_torch_version >= Version("2.4.0")
-
+    if base_torch_version < Version("2.4.0") or current_platform.is_rocm():
+        return False
+    return True
 
 # Some backends use pytorch version < 2.4.0 which doesn't
 # support `torch.library.custom_op`.
