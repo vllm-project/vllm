@@ -19,7 +19,7 @@ from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+                                        KVCacheSpec, SlidingWindowSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
@@ -137,7 +137,7 @@ class TPUWorker:
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         for layer_name, layer_spec in kv_cache_spec.items():
-            if isinstance(layer_spec, FullAttentionSpec):
+            if isinstance(layer_spec, SlidingWindowSpec | FullAttentionSpec):
                 dtype = layer_spec.dtype
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
