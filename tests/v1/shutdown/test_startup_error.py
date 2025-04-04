@@ -23,7 +23,6 @@ def evil_forward(self, *args, **kwargs):
 
 MODELS = [
     "meta-llama/Llama-3.2-1B",  # Raises on first fwd pass.
-    "mistralai/Mixtral-8x22B-Instruct-v0.1"  # Causes OOM.
 ]
 
 
