@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Callable, Optional, List
+from dataclasses import dataclass, field
+from typing import Callable, Optional, List, Dict
 from enum import Enum
 
 import msgspec
@@ -64,3 +64,15 @@ class RemotePrefillParams:
     decode_computed_block_ids: Optional[List[int]] = None
     decode_engine_id: Optional[str] = None
     remote_prefill_request_callback: Optional[RemotePrefillRequestCallback] = None
+
+@dataclass
+class RemotePrefillResult:
+    """Remote prefill notifications and progress.
+    Args:
+        request_notif_counter: The recv kv cache notification consumed by decode worker.
+        request_done_counter: The send kv cache notification consumed by prefill worker.
+        is_pending_remote_prefill: Whether the current loop pending on kv cache transfer.
+    """
+    request_notif_counter: Dict[str, int] = field(default_factory=dict)
+    request_done_counter: Dict[str, int] = field(default_factory=dict)
+    is_pending_remote_prefill: bool = False

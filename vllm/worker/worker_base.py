@@ -26,7 +26,7 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
 from vllm.distributed.device_communicators.nixl import DynamoNixlConnector
-from vllm.remote_prefill import MemoryOpType
+from vllm.remote_prefill import MemoryOpType, RemotePrefillResult
 
 logger = init_logger(__name__)
 
@@ -429,12 +429,12 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
+        remote_prefill_result = RemotePrefillResult()
 
         # If there is no input, we don't need to execute the model.
         if worker_input.num_seq_groups > 0:
-
             self._read_blocks(worker_input)
-
+            remote_prefill_result.is_pending_remote_prefill = False
             intermediate_tensors = None
             orig_model_execute_time = 0.0
             if not get_pp_group().is_first_rank:
@@ -476,6 +476,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             self._write_blocks(worker_input)
 
         else:
+            remote_prefill_result.is_pending_remote_prefill = True
             output = []
 
         # collect kv transfer notifications from non driver workers
@@ -503,11 +504,11 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             for req_id in self.nixl_connector.get_done_tranfers():
                 request_done_counter[req_id] += 1
 
-        else:
-            request_notif_counter = {}
-            request_done_counter = {}
+            remote_prefill_result.request_notif_counter = request_notif_counter
+            remote_prefill_result.request_done_counter = request_done_counter
+
         # output is List[SamplerOutput]
-        return output, request_notif_counter, request_done_counter
+        return output, remote_prefill_result
     
     def _read_blocks(self, worker_input: WorkerInput) -> None:
         pass

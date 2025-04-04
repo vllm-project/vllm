@@ -729,6 +729,8 @@ class Scheduler:
                 finished_prefills.remove(seq_group.request_id)
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
+                # when there is one request complete remote prefill, we should run non_spec decode
+                ret.num_lookahead_slots = 0
                 # we computed all but the last token in prefill, we need to decode the first token on decode
                 seq_group.update_num_computed_tokens(seq.get_len() - 1)
                 seq.status = SequenceStatus.RUNNING

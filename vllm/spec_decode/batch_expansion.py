@@ -14,6 +14,7 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID, VLLM_TOKEN_ID_ARRAY_TYPE,
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.util import nvtx_range, split_batch_by_proposal_len
+from vllm.remote_prefill import RemotePrefillResult
 
 SeqId = int
 TargetSeqId = int
@@ -77,9 +78,14 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
              proposal_lens_list=proposal_lens_list,
          )
 
+        remote_prefill_result = RemotePrefillResult()
+
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
+        if isinstance(target_sampler_output, tuple) \
+            and len(target_sampler_output) == 2:
+            target_sampler_output, remote_prefill_result = target_sampler_output
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
 
@@ -88,7 +94,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             return self._contract_batch_all_spec(
                 target_sampler_output=target_sampler_output,
                 proposals=proposals,
-            )
+            ), remote_prefill_result
         else:
             # Batch has a mix of spec decode enabled and disabled seq groups
             return self._contract_batch(
@@ -99,7 +105,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 non_spec_indices=non_spec_indices,
                 spec_indices=spec_indices,
                 k=execute_model_req.num_lookahead_slots,
-            )
+            ), remote_prefill_result
 
     def _expand_batch(
         self,

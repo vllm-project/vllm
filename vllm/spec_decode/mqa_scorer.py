@@ -4,6 +4,7 @@ from vllm.sequence import (ExecuteModelRequest, SequenceData,
                            SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
+from vllm.remote_prefill import RemotePrefillResult
 
 SeqId = int
 TargetSeqId = int
@@ -63,9 +64,14 @@ class MQAScorer(SpeculativeScorer):
             )
             target_seq_group_metadata_list.append(new_seq_group_metadata)
 
+        remote_prefill_result = RemotePrefillResult()
+
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
+
+        if isinstance(target_sampler_output, tuple) and len(target_sampler_output) == 2:
+            target_sampler_output, remote_prefill_result = target_sampler_output
 
         target_sampler_output = target_sampler_output[0]
 
@@ -156,4 +162,4 @@ class MQAScorer(SpeculativeScorer):
                                  token_ids=all_tokens,
                                  logprobs=all_logprobs,
                                  hidden_states=hidden_states,
-                                 prompt_logprobs=prompt_logprobs)
+                                 prompt_logprobs=prompt_logprobs), remote_prefill_result
