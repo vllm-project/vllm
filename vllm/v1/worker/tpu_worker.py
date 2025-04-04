@@ -137,7 +137,7 @@ class TPUWorker:
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         for layer_name, layer_spec in kv_cache_spec.items():
-            if isinstance(layer_spec, SlidingWindowSpec | FullAttentionSpec):
+            if isinstance(layer_spec, (SlidingWindowSpec, FullAttentionSpec)):
                 dtype = layer_spec.dtype
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
