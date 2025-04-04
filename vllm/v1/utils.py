@@ -105,6 +105,7 @@ class CoreEngineProcManager:
         target_fn: Callable,
         local_engine_count: int,
         start_index: int,
+        local_start_index: int,
         vllm_config: VllmConfig,
         on_head_node: bool,
         input_address: str,
@@ -121,14 +122,15 @@ class CoreEngineProcManager:
         }
 
         self.processes = []
-        for local_index in range(local_engine_count):
-            index = local_index + start_index
+        for index in range(local_engine_count):
+            local_index = local_start_index + index
+            global_index = start_index + index
             # Start EngineCore in background process.
             self.processes.append(
                 context.Process(target=target_fn,
-                                name=f"EngineCore_{index}",
+                                name=f"EngineCore_{global_index}",
                                 kwargs=common_kwargs | {
-                                    "dp_rank": index,
+                                    "dp_rank": global_index,
                                     "local_dp_rank": local_index,
                                 }))
 
@@ -172,7 +174,8 @@ def shutdown(procs: list[multiprocessing.Process], input_address: str):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        proc.join(remaining)
+        if proc.is_alive():
+            proc.join(remaining)
 
     for proc in procs:
         if proc.is_alive():

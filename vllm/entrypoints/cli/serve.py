@@ -105,6 +105,7 @@ def run_headless(args: argparse.Namespace):
         target_fn=EngineCoreProc.run_engine_core,
         local_engine_count=local_engine_count,
         start_index=engine_args.data_parallel_start_rank,
+        local_start_index=0,
         vllm_config=vllm_config,
         on_head_node=False,
         input_address=input_address,

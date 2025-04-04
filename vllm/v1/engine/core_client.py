@@ -363,11 +363,28 @@ class MPClient(EngineCoreClient):
         self._finalizer = weakref.finalize(self, self.resources)
 
         parallel_config = vllm_config.parallel_config
-        dp_size = parallel_config.data_parallel_size
         local_engine_count = parallel_config.data_parallel_size_local
+        start_index = parallel_config.data_parallel_rank
+        local_start_index = parallel_config.data_parallel_rank_local
+
+        # SPMD mode is where there is an LLM instance per DP rank and one
+        # core engine per LLM, see examples/offline_inference/data_parallel.py.
+        spmd_mode = local_start_index is not None
+        if spmd_mode:
+            assert local_engine_count == 1
+            self.core_engines = [
+                CoreEngine(index=local_start_index, local=True)
+            ]
+        else:
+            assert start_index == 0
+            local_start_index = 0
+            self.core_engines = [
+                CoreEngine(index=i, local=(i < local_engine_count))
+                for i in range(parallel_config.data_parallel_size)
+            ]
 
         input_address, output_address = self._get_zmq_addresses(
-            parallel_config)
+            parallel_config, spmd_mode)
 
         # Create input and output sockets.
         self.input_socket = self.resources.input_socket = make_zmq_socket(
@@ -378,6 +395,7 @@ class MPClient(EngineCoreClient):
                                                        zmq.constants.PULL)
         # Start local engines.
         if local_engine_count:
+            # In server mode, start_index and local_start_index will both be 0.
             self.resources.local_engine_manager = CoreEngineProcManager(
                 EngineCoreProc.run_engine_core,
                 vllm_config=vllm_config,
@@ -386,12 +404,9 @@ class MPClient(EngineCoreClient):
                 input_address=input_address,
                 on_head_node=True,
                 local_engine_count=local_engine_count,
-                start_index=0)
+                start_index=start_index,
+                local_start_index=local_start_index)
 
-        self.core_engines = [
-            CoreEngine(index=i, local=(i < local_engine_count))
-            for i in range(dp_size)
-        ]
         self.core_engine = self.core_engines[0]
 
         # Wait for engine core process(es) to start.
@@ -400,12 +415,13 @@ class MPClient(EngineCoreClient):
         self.utility_results: dict[int, AnyFuture] = {}
 
     @staticmethod
-    def _get_zmq_addresses(parallel_config: ParallelConfig) -> tuple[str, str]:
+    def _get_zmq_addresses(parallel_config: ParallelConfig,
+                           spmd_mode: bool) -> tuple[str, str]:
         """Returns (input_address, output_address)."""
         dp_size = parallel_config.data_parallel_size
         local_engine_count = parallel_config.data_parallel_size_local
 
-        if local_engine_count == dp_size:
+        if local_engine_count == dp_size or spmd_mode:
             input_address = get_open_zmq_ipc_path()
             output_address = get_open_zmq_ipc_path()
         else:
@@ -421,8 +437,6 @@ class MPClient(EngineCoreClient):
                                  parallel_config: ParallelConfig):
         # Get a sync handle to the socket which can be sync or async.
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
-
-        # TODO offline case compatibility
 
         # Wait for engine core process(es) to send ready messages.
         local_count = parallel_config.data_parallel_size_local
@@ -444,18 +458,20 @@ class MPClient(EngineCoreClient):
             # Receive HELLO and READY messages from the input socket.
             eng_identity, ready_msg_bytes = sync_input_socket.recv_multipart()
             eng_index = int.from_bytes(eng_identity, byteorder="little")
-            if eng_index > len(self.core_engines):
-                raise RuntimeError(
-                    f"Message from engine rank larger than "
-                    f"configured data parallel size: {eng_index}")
-            engine = self.core_engines[eng_index]
+            engine = next(
+                (e for e in self.core_engines if e.identity == eng_identity),
+                None)
+            if engine is None:
+                raise RuntimeError(f"Message from engine with unexpected data "
+                                   f"parallel rank: {eng_index}")
             msg = msgspec.msgpack.decode(ready_msg_bytes)
             status, local = msg["status"], msg["local"]
             if local != engine.local:
                 raise RuntimeError(f"{status} message from "
                                    f"{'local' if local else 'remote'} "
-                                   f" engine {eng_index}, expected it to be "
+                                   f"engine {eng_index}, expected it to be "
                                    f"{'local' if engine.local else 'remote'}")
+
             if status == "HELLO" and engine.state == CoreEngineState.NEW:
 
                 # Send init message with DP config info.
