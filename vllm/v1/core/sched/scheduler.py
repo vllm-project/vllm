@@ -148,7 +148,6 @@ class Scheduler(SchedulerInterface):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
-
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -157,7 +156,6 @@ class Scheduler(SchedulerInterface):
                 # This request has already been scheduled.
                 req_index += 1
                 continue
-
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
             if (0 < self.scheduler_config.long_prefill_token_threshold <
@@ -386,6 +384,7 @@ class Scheduler(SchedulerInterface):
             num_common_prefix_blocks = (
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
+        
 
         grammar_bitmask = self.structured_output_manager.grammar_bitmask(
             self.requests,
@@ -416,6 +415,7 @@ class Scheduler(SchedulerInterface):
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
         ]
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,
@@ -445,6 +445,7 @@ class Scheduler(SchedulerInterface):
         #    computed tokens will be adjusted in update_from_output.
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             self.requests[req_id].num_computed_tokens += num_scheduled_token
+        
 
         self.finished_req_ids = set()
         return scheduler_output

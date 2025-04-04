@@ -16,7 +16,6 @@ from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
-
 class KVCacheManager:
 
     def __init__(
@@ -218,8 +217,14 @@ class KVCacheManager:
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it cannot be counted as a free block
         # when allocating this request.
-        num_evictable_computed_blocks = sum(1 for blk in new_computed_blocks
-                                            if blk.ref_cnt == 0)
+
+        # Gather computed blocks of a request for editing block prefix caching info
+        
+        num_evictable_computed_blocks = sum([1 for blk in new_computed_blocks if blk.ref_cnt == 0])
+
+        #TODO: Change by Jayanth
+        self.block_pool.merge(new_computed_blocks, request)
+
         if (num_new_blocks > self.block_pool.get_num_free_blocks() -
                 num_evictable_computed_blocks):
             # Cannot allocate new blocks

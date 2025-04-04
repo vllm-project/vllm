@@ -238,6 +238,13 @@ class BlockPool:
             if block.ref_cnt == 0 and block != self.null_block:
                 self.free_block_queue.append(block)
 
+    # TODO: Change by Jayanth
+    def merge(self, blocks: List[KVCacheBlock], req: Request):
+        req_id = request.req_id
+        for blk in blocks:
+            blk.append_req_with_prefix(req.request_id)
+        
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalid prefix caching after the weights are updated,
