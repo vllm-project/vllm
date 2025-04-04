@@ -977,6 +977,9 @@ class ModelWrapperV1(nn.Module):
         logits = self.model.compute_logits(hidden_states, None)
         return logits
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model.get_language_model()
+
     def get_multimodal_embeddings(self, *args, **kwargs):
         return self.model.get_multimodal_embeddings(*args, **kwargs)
 
