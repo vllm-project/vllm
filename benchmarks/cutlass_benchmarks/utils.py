@@ -91,8 +91,8 @@ def make_n_rand_sparse_tensors(num_tensors: int, dtype: torch.dtype,
                         tuple[Iterable[torch.Tensor], Iterable[torch.Tensor]]:
     ABs = []
     for _ in range(num_tensors):
-        b_comp, e, a, b = make_rand_sparse_tensors(dtype, m, n, k)
-        if b_comp is not None:
-            ABs.append(make_rand_sparse_tensors(dtype, m, n, k))
+        result = make_rand_sparse_tensors(dtype, m, n, k)
+        if result[0] is not None:
+            ABs.append(result)
     BComps, Es, As, Bs = zip(*ABs)
     return list(BComps), list(Es), list(As), list(Bs)
