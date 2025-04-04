@@ -56,7 +56,7 @@ from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
                                    VideoItem, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -67,6 +67,7 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
+from .vision import scatter_patch_features, select_patch_features
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -89,6 +90,14 @@ class MiniCPMVImagePixelInputs(TypedDict):
     This should be in `(height, width)` format.
     """
 
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
+    """
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
+
+    Shape: `(batch_size * num_images, num_embeds)`
+    """
+
     num_slices: torch.Tensor
     """Shape: `(batch_size * num_images)`"""
 
@@ -101,6 +110,14 @@ class MiniCPMVImageEmbeddingInputs(TypedDict):
 
     `hidden_size` must match the hidden size of language model backbone.
     instead of a batched tensor.
+    """
+
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
+    """
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
+
+    Shape: `(batch_size * num_images, num_embeds)`
     """
 
 
@@ -228,10 +245,12 @@ def _minicpmv_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         image_sizes=MultiModalFieldConfig.batched("image"),
         tgt_sizes=MultiModalFieldConfig.batched("image"),
         image_embeds=MultiModalFieldConfig.batched("image"),
+        embed_is_patch=MultiModalFieldConfig.batched("image"),
         video_pixel_values=MultiModalFieldConfig.batched("video"),
         video_image_sizes=MultiModalFieldConfig.batched("video"),
         video_tgt_sizes=MultiModalFieldConfig.batched("video"),
         video_embeds=MultiModalFieldConfig.batched("video"),
+        video_embed_is_patch=MultiModalFieldConfig.batched("video"),
         image_token_id=MultiModalFieldConfig.shared("image", num_images),
         video_token_id=MultiModalFieldConfig.shared("video", num_videos),
     )
@@ -379,43 +398,22 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             use_image_id=use_image_id,
         )
 
-    def get_sliced_grid(
-        self,
-        image_size: ImageSize,
-        # For MiniCPM V/O 2.6
-        max_slice_nums: Optional[int] = None,
-    ) -> Optional[tuple[int, int]]:
-        image_processor = self.get_image_processor()
-        version = self.get_model_version()
-
-        if version == (2, 0) or version == (2, 5):
-            return image_processor.get_sliced_grid(image_size)
-
-        if max_slice_nums is None:
-            max_slice_nums = image_processor.max_slice_nums
-
-        return image_processor.get_sliced_grid(
-            image_size,
-            max_slice_nums=max_slice_nums,
-        )
-
     def get_num_image_tokens(
         self,
         image_size: ImageSize,
         max_slice_nums: Optional[int] = None,
+        use_image_id: bool = True,
     ) -> int:
-        image_processor = self.get_image_processor()
-
-        grid = self.get_sliced_grid(
+        tokenizer = self.get_tokenizer()
+        image_placeholders = self.get_slice_image_placeholder(
             image_size,
             max_slice_nums=max_slice_nums,
+            use_image_id=use_image_id,
         )
-        if grid is None:
-            ncols = nrows = 0
-        else:
-            ncols, nrows = grid
+        image_token_ids = tokenizer.encode(image_placeholders,
+                                           add_special_tokens=False)
 
-        return (ncols * nrows + 1) * image_processor.image_feature_size
+        return len(image_token_ids)
 
     def get_max_image_tokens(self) -> int:
         image_size = self.get_image_size_with_most_features()
@@ -435,6 +433,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(
             frame_size,
             max_slice_nums=self.get_video_max_slice_num(),
+            use_image_id=False,
         )
 
     def get_max_video_tokens(
@@ -540,6 +539,14 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             use_image_id=False,
         ) * num_frames
 
+    def get_embed_is_patch(
+        self,
+        input_ids: list[int],
+    ) -> torch.Tensor:
+        tokenizer = self.info.get_tokenizer()
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        return torch.tensor(input_ids) == unk_token_id
+
     def process_images(
         self,
         mm_data: Mapping[str, object],
@@ -563,7 +570,26 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
             )
 
+        image_sizes = [
+            parsed_images.get_image_size(i) for i in range(len(parsed_images))
+        ]
+        image_repl_features = [
+            self.get_image_prompt_texts(size, idx)
+            for idx, size in enumerate(image_sizes)
+        ]
+
         tokenizer = self.info.get_tokenizer()
+        image_repls_feature_tokens = [
+            tokenizer.encode(image_repl, add_special_tokens=False)
+            for image_repl in image_repl_features
+        ]
+
+        embed_is_patch = [
+            self.get_embed_is_patch(image_repl_tokens)
+            for image_repl_tokens in image_repls_feature_tokens
+        ]
+        image_inputs["embed_is_patch"] = embed_is_patch
+
         unk_token_id = tokenizer.get_vocab()["<unk>"]
         image_inputs["image_token_id"] = torch.tensor(unk_token_id)
 
@@ -599,9 +625,31 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
             )
 
-        video_inputs = {f"video_{k}": v for k, v in video_inputs.items()}
+        frame_sizes = [
+            parsed_videos.get_frame_size(i) for i in range(len(parsed_videos))
+        ]
+        num_frames = [
+            parsed_videos.get_num_frames(i) for i in range(len(parsed_videos))
+        ]
+        video_repl_features = [
+            self.get_video_prompt_texts(size, nframes)
+            for size, nframes in zip(frame_sizes, num_frames)
+        ]
 
         tokenizer = self.info.get_tokenizer()
+        video_repls_feature_tokens = [
+            tokenizer.encode(video_repl, add_special_tokens=False)
+            for video_repl in video_repl_features
+        ]
+
+        embed_is_patch = [
+            self.get_embed_is_patch(video_repl_tokens)
+            for video_repl_tokens in video_repls_feature_tokens
+        ]
+        video_inputs["embed_is_patch"] = embed_is_patch
+
+        video_inputs = {f"video_{k}": v for k, v in video_inputs.items()}
+
         unk_token_id = tokenizer.get_vocab()["<unk>"]
         video_inputs["video_token_id"] = torch.tensor(unk_token_id)
 
@@ -692,10 +740,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             image_size = images.get_image_size(item_idx)
 
-            return PromptUpdateDetails.select_text(
-                self.get_image_prompt_texts(image_size, item_idx),
-                "<unk>",
-            )
+            return self.get_image_prompt_texts(image_size, item_idx)
 
         def get_video_replacement(item_idx: int):
             videos = mm_items.get_items(
@@ -704,10 +749,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             frame_size = videos.get_frame_size(item_idx)
             num_frames = videos.get_num_frames(item_idx)
 
-            return PromptUpdateDetails.select_text(
-                self.get_video_prompt_texts(frame_size, num_frames),
-                "<unk>",
-            )
+            return self.get_video_prompt_texts(frame_size, num_frames)
 
         get_replacement = {
             "image": get_image_replacement,
@@ -790,6 +832,14 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             assert isinstance(image_token_id, torch.Tensor)
             self.mm_token_ids.add(image_token_id.flatten().unique().item())
 
+        embed_is_patch = kwargs.pop("embed_is_patch")
+        if not isinstance(embed_is_patch, (torch.Tensor, list)):
+            raise ValueError(
+                f"Incorrect type of embed_is_patch for {modality=}. "
+                f"Got type: {type(embed_is_patch)}")
+
+        embed_is_patch = flatten_bn(embed_is_patch)
+
         if image_embeds is not None:
             if not isinstance(image_embeds, (torch.Tensor, list)):
                 raise ValueError(
@@ -801,6 +851,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             return MiniCPMVImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds_flat,
+                embed_is_patch=embed_is_patch,
             )
 
         if not isinstance(pixel_values, (torch.Tensor, list)):
@@ -828,6 +879,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             type="pixel_values",
             pixel_values=pixel_values_flat,
             tgt_sizes=tgt_sizes_flat,
+            embed_is_patch=embed_is_patch,
             num_slices=num_slices_flat,
         )
 
@@ -884,11 +936,19 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             if modality == "images":
                 image_input = modalities["images"]
                 image_features = self._process_vision_input(image_input)
-                multimodal_embeddings += tuple(image_features)
+                multimodal_embeddings += tuple(
+                    scatter_patch_features(
+                        image_features,
+                        image_input["embed_is_patch"],
+                    ))
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_features = self._process_vision_input(video_input)
-                multimodal_embeddings += tuple(video_features)
+                multimodal_embeddings += tuple(
+                    scatter_patch_features(
+                        video_features,
+                        video_input["embed_is_patch"],
+                    ))
 
         return multimodal_embeddings
 
@@ -911,7 +971,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                multimodal_embeddings,
+                select_patch_features(multimodal_embeddings),
                 list(self.mm_token_ids),
             )
         return inputs_embeds
