@@ -98,6 +98,7 @@ class TPUModelRunner:
         # InputBatch needs to work with sampling tensors greater than padding
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
+        self._disable_sampler = envs.VLLM_TPU_DISABLE_SAMPLER_DEBUG
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
@@ -684,7 +685,7 @@ class TPUModelRunner:
         num_reqs = self.input_batch.num_reqs
 
         # Temporary debug pathway.
-        if envs.VLLM_TPU_DISABLE_SAMPLER_DEBUG:
+        if self._disable_sampler:
             with set_forward_context(attn_metadata, self.vllm_config):
                 hidden_states = self.model(
                     input_ids=input_ids,
@@ -693,7 +694,7 @@ class TPUModelRunner:
                     inputs_embeds=inputs_embeds,
                 )
             selected_token_ids = self.model.compute_logits_no_sampler(
-                hidden_states, logits_indices, None)
+                hidden_states, logits_indices)
             selected_token_ids = selected_token_ids.cpu()[:num_reqs]
         else:
             # NOTE (NickLucche) here we sync with TPU: sampling params tensors
@@ -899,17 +900,23 @@ class TPUModelRunner:
                                        dtype=self._hidden_states_dtype)
             # Compile for [8, 16, .., 128,.., `self.max_num_reqs`]
             while True:
+                logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
+                            num_reqs_to_sample)
                 indices = torch.zeros(
                     num_reqs_to_sample,
                     dtype=torch.int32,
                     device=device,
                 )
                 xm.mark_step()
-                sampling_meta = TPUSupportedSamplingMetadata.\
-                    from_input_batch(self.input_batch, indices)
-                logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
-                            num_reqs_to_sample)
-                out = self.sample_from_hidden(dummy_hidden, sampling_meta)
+                if self._disable_sampler:
+                    # Compile no sampler path for debugging performance
+                    out = self.model.compute_logits_no_sampler(
+                        dummy_hidden, indices)
+                else:
+                    sampling_meta = TPUSupportedSamplingMetadata.\
+                        from_input_batch(self.input_batch, indices)
+                    out = self.model.sample_from_hidden(
+                        dummy_hidden, sampling_meta)
                 out = out.cpu()
                 # Requests can't be more than tokens. But do compile for the
                 # next bigger value in case num_tokens uses bucketed padding.
@@ -1004,6 +1011,16 @@ class TPUModelRunner:
             torch.argmax(logits, dim=-1, keepdim=True),
             sample(logits, sampling_metadata).sampled_token_ids)
         return out_tokens
+
+
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def compute_logits_no_sampler(
+            self, hidden_states: torch.Tensor,
+            logits_indices: torch.Tensor) -> Optional[torch.Tensor]:
+        hidden_states = hidden_states[logits_indices]
+        logits = self.model.compute_logits(hidden_states, None)
+        selected_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        return selected_token_ids
 
 
 def _get_padded_number(n: int, multiple: int) -> int:
