@@ -172,16 +172,18 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     ) -> None:
         exec_mode = ExecutionMode(exec_mode)
         if exec_mode.is_prefill():
-            seq_len = (seq_len + 15) // 16 * 16
+            seq_len = (seq_len + self.block_size -
+                       1) // self.block_size * self.block_size
             token_ids = torch.zeros((batch_size, seq_len),
                                     dtype=torch.int32,
                                     device=self.device)
             position_ids = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int32,
                                        device=self.device)
-            slot_mapping = torch.zeros((batch_size, seq_len),
-                                       dtype=torch.int64,
-                                       device=self.device)
+            slot_mapping = torch.zeros(
+                (batch_size, seq_len // self.block_size),
+                dtype=torch.int64,
+                device=self.device)
             input_lens = torch.ones((batch_size, ),
                                     dtype=torch.int32,
                                     device=self.device)
@@ -258,10 +260,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # be re-compiled for every different shapes. This overhead is inevitable
         # in the first run, but can be skipped afterwards as we cache the XLA
         # graphs in the disk (VLLM_XLA_CACHE_PATH).
+        # NOTE(chengjiyao): During prefill, seq_len cannot be marked as dynamic
+        # because it is used to calculate the output shape of a view op.
         if exec_mode.is_prefill():
             # Prefll
-            torch._dynamo.mark_dynamic(token_ids, 1)
-            torch._dynamo.mark_dynamic(position_ids, 1)
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
         else:
             # Decode
@@ -286,7 +288,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         logger.info("Compiling the model with different input shapes...")
         start = time.time()
         for batch_size in [1]:
-            seq_len = 16
+            seq_len = self.block_size
             while seq_len <= self.model_config.max_model_len:
                 self._dummy_run(batch_size,
                                 seq_len,
@@ -308,7 +310,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                         "prefix prefill...")
             start = time.time()
             for batch_size in [1]:
-                seq_len = 16
+                seq_len = self.block_size
                 while seq_len <= self.model_config.max_model_len:
                     self._dummy_run(batch_size,
                                     seq_len,
@@ -340,7 +342,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
             if batch_size >= self.scheduler_config.max_num_seqs:
                 break
-            batch_size = batch_size + 16 if batch_size >= 16 else batch_size * 2
+            batch_size = (batch_size + 16 if batch_size >= 16 else batch_size *
+                          2)
 
         end = time.time()
         logger.info("Compilation for decode done in %.2f s.", end - start)
@@ -384,11 +387,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
             assert seq_group_metadata.block_tables is not None
             block_table = seq_group_metadata.block_tables[seq_id]
-            for i in range(num_computed_tokens, seq_len):
+            assert num_computed_tokens % self.block_size == 0
+            for i in range(num_computed_tokens, seq_len, self.block_size):
                 block_number = block_table[i // self.block_size]
-                block_offset = i % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                slot_mapping.append(block_number)
             if num_computed_tokens > 0:
                 self.block_tables[batch_idx, :len(block_table)] = block_table
 
@@ -398,11 +400,12 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             # We execute each prompt individually (i.e., with batch_size 1)
             # because the FlashAttention kernel does not support ragged inputs.
             # TODO(woosuk): Use SplashAttention to support ragged inputs.
-            padded_prompt_len = _get_padded_prefill_len(prompt_len)
+            padded_prompt_len = _get_padded_prefill_len(
+                prompt_len, self.block_size)
             num_paddings = padded_prompt_len - prompt_len
             input_tokens += [0] * num_paddings
             input_positions += [0] * num_paddings
-            slot_mapping += [_PAD_SLOT_ID] * num_paddings
+            slot_mapping += [_PAD_SLOT_ID] * (num_paddings // self.block_size)
 
         assert len(prompt_lens) > 0
         num_prefills = len(prompt_lens)
@@ -645,13 +648,16 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 model_input.attn_metadata.effective_query_lens
             batch_size = model_input.input_lens.shape[0]
             start_idx = 0
+            start_slot_idx = 0
             next_token_ids = []
             for i in range(batch_size):
                 # Get the actual prefill_len.
                 prefill_len = model_input.input_lens[i:i + 1].item()
-                prefill_len = _get_padded_prefill_len(prefill_len)
+                prefill_len = _get_padded_prefill_len(prefill_len,
+                                                      self.block_size)
                 end_idx = start_idx + prefill_len
-
+                end_slot_idx = (start_slot_idx +
+                                prefill_len // self.block_size)
                 token_ids = model_input.token_ids[None, start_idx:end_idx].to(
                     self.device)
                 position_ids = model_input.position_ids[None,
@@ -660,7 +666,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 attn_metadata = model_input.attn_metadata
                 attn_metadata.num_prefills = 1
                 attn_metadata.slot_mapping = orig_slot_mapping[
-                    None, start_idx:end_idx].to(self.device)
+                    None, start_slot_idx:end_slot_idx].to(self.device)
                 if orig_context_lens[i].item() > 0:
                     attn_metadata.context_lens = orig_context_lens[i:i + 1].to(
                         self.device)
@@ -684,6 +690,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                                   kv_caches)
                 next_token_ids.append(output_token_ids[0])
                 start_idx = end_idx
+                start_slot_idx = end_slot_idx
 
             if model_input.async_callback is not None:
                 model_input.async_callback()
@@ -825,10 +832,17 @@ class ModelWrapper(nn.Module):
                                          num_kv_heads,
                                          device=slot_mapping.device,
                                          dtype=slot_mapping.dtype)
-            head_indicies *= block_size * num_blocks
-            slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
-                -1, num_kv_heads)
-            slot_mapping = slot_mapping + head_indicies.view(1, -1)
+            if seq_len > 1:
+                # prefill
+                head_indicies *= num_blocks
+                slot_mapping = slot_mapping.repeat(num_kv_heads, 1)
+                slot_mapping = slot_mapping + head_indicies.view(-1, 1)
+            else:
+                # decoding
+                head_indicies *= num_blocks * block_size
+                slot_mapping = slot_mapping.repeat_interleave(
+                    num_kv_heads).view(-1, num_kv_heads)
+                slot_mapping = slot_mapping + head_indicies.view(1, -1)
             slot_mapping = slot_mapping.flatten()
             attn_metadata.slot_mapping = slot_mapping
 
@@ -859,12 +873,13 @@ class ModelWrapper(nn.Module):
         return next_token_ids
 
 
-def _get_padded_prefill_len(x: int) -> int:
+def _get_padded_prefill_len(x: int, block_size) -> int:
     # NOTE(woosuk): The pallas FlashAttention kernel requires the sequence
-    # length to be a multiple of 16. We pad the prompt length to the nearest
-    # multiple of 16. This is also good for performance.
-    if x <= 16:
-        return 16
+    # length to be a multiple of block_size. We pad the prompt length
+    # to the nearest multiple of block_size. This is also good for
+    # performance.
+    if x <= block_size:
+        return block_size
     return 1 << (x - 1).bit_length()
 
 
