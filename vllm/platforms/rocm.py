@@ -302,3 +302,10 @@ class RocmPlatform(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on AMD gpus is experimental
         return True
+
+    @classmethod
+    def use_custom_allreduce(cls) -> bool:
+        # We only enable custom allreduce for MI300 series
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        supported_archs = ['gfx94']
+        return any(gfx in gcn_arch for gfx in supported_archs)
