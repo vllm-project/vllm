@@ -274,8 +274,25 @@ class RocmPlatform(Platform):
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
         torch.cuda.reset_peak_memory_stats(device)
-        return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(
-            device)[0]
+        # Convert the device to an index if it's a string or a device without index
+        device_idx = None
+        if device is None:
+            device_idx = torch.cuda.current_device()
+        elif isinstance(device, int):
+            device_idx = device
+        elif isinstance(device, torch.device) and device.index is not None:
+            device_idx = device.index
+        elif isinstance(device, torch.device) and device.index is None:
+            # If device is "cuda" without an index, use the current device
+            device_idx = torch.cuda.current_device()
+        elif isinstance(device, str) and device == "cuda":
+            device_idx = torch.cuda.current_device()
+        else:
+            raise ValueError(f"Unsupported device type: {device}")
+
+        torch.cuda.reset_peak_memory_stats(device_idx)
+        return torch.cuda.mem_get_info(device_idx)[1] - torch.cuda.mem_get_info(
+                device_idx)[0]
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
