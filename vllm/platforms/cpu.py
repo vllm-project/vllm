@@ -2,6 +2,7 @@
 
 import os
 import sys
+from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
 
 import psutil
@@ -68,8 +69,15 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
+        ipex_avaliable = find_spec("intel_extension_for_pytorch") is not None
+
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            cache_config.block_size = 128 if ipex_avaliable else 16
+
+        if not ipex_avaliable and cache_config.block_size != 16:
+            raise RuntimeError(
+                f"--block-size={cache_config.block_size} requires"
+                " intel_extension_for_pytorch")
 
         scheduler_config = vllm_config.scheduler_config
         if ((scheduler_config.chunked_prefill_enabled
