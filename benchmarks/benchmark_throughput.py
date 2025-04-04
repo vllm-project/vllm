@@ -334,7 +334,7 @@ def get_requests(args, tokenizer):
             sample_kwargs["enable_multimodal_chat"] = True
         elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = AIMODataset
-            common_kwargs['dataset_subset'] = args.hf_subset
+            common_kwargs['dataset_subset'] = None
             common_kwargs['dataset_split'] = "train"
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
