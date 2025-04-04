@@ -25,8 +25,8 @@ static inline __device__ int8_t float_to_int8_rn(float x) {
   // explicitly, either at runtime or compile time.
   float dst = std::nearbyint(x);
 
-  // saturate
-  dst = std::clamp(dst, i8_min, i8_max);
+  // saturate - custom implementation for gtx1100? to avoid std::clamp
+  dst = dst < i8_min ? i8_min : (dst > i8_max ? i8_max : dst);
   return static_cast<int8_t>(dst);
 #else
   // CUDA path
@@ -78,8 +78,8 @@ static inline __device__ int8_t int32_to_int8(int32_t x) {
   static constexpr auto i8_max =
       static_cast<int32_t>(std::numeric_limits<int8_t>::max());
 
-  // saturate
-  int32_t dst = std::clamp(x, i8_min, i8_max);
+  // saturate - custom implementation for gtx1100? to avoid std::clamp
+  int32_t dst = x < i8_min ? i8_min : (x > i8_max ? i8_max : x);
   return static_cast<int8_t>(dst);
 #else
   // CUDA path

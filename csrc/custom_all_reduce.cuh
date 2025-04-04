@@ -1,8 +1,11 @@
 #pragma once
 
 #include <cuda.h>
+#ifdef USE_ROCM
+#include <hip/hip_bf16.h>
+#else
 #include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#endif
 #include <cuda_runtime.h>
 
 #if defined(USE_ROCM)
