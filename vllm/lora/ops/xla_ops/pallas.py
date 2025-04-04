@@ -361,9 +361,9 @@ def _bgmv_expand_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref,
                     lora_ref[i, ...],
                     preferred_element_type=jnp.float32) * mask_ref[...]
 
-        @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
-        def _():
-            out_ref[...] = acc_ref[...].astype(out_ref.dtype)
+    @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
+    def _():
+        out_ref[...] = acc_ref[...].astype(out_ref.dtype)
 
 
 @functools.partial(jax.jit,
