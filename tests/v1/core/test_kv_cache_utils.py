@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils import sha256
 # disable yapf here as it formats differently than isort such that both fail
@@ -158,13 +158,10 @@ def test_generate_block_hash_extra_keys():
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(20)],
-        mm_positions=[{
-            "offset": 0,
-            "length": 5
-        }, {
-            "offset": 10,
-            "length": 5
-        }],
+        mm_positions=[
+            PlaceholderRange(offset=0, length=5),
+            PlaceholderRange(offset=10, length=5),
+        ],
         mm_hashes=["hash1", "hash2"],
     )
 
@@ -222,13 +219,10 @@ def test_hash_request_tokens(hash_fn):
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
-        mm_positions=[{
-            "offset": 0,
-            "length": 3
-        }, {
-            "offset": 3,
-            "length": 3
-        }],
+        mm_positions=[
+            PlaceholderRange(offset=0, length=3),
+            PlaceholderRange(offset=3, length=3),
+        ],
         mm_hashes=["hash1", "hash2"],
     )
 
@@ -253,25 +247,19 @@ def test_hash_tokens_different_mm_input(hash_fn):
     request1 = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
-        mm_positions=[{
-            "offset": 0,
-            "length": 3
-        }, {
-            "offset": 3,
-            "length": 3
-        }],
+        mm_positions=[
+            PlaceholderRange(offset=0, length=3),
+            PlaceholderRange(offset=3, length=3),
+        ],
         mm_hashes=["hash1", "hash2"],
     )
     request2 = make_request(
         request_id=1,
         prompt_token_ids=[_ for _ in range(6)],
-        mm_positions=[{
-            "offset": 0,
-            "length": 3
-        }, {
-            "offset": 3,
-            "length": 3
-        }],
+        mm_positions=[
+            PlaceholderRange(offset=0, length=3),
+            PlaceholderRange(offset=3, length=3),
+        ],
         mm_hashes=["hash3", "hash2"],
     )
     block_size = 3

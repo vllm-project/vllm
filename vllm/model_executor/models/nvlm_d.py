@@ -57,7 +57,7 @@ class NVLMProcessor(BaseInternVLProcessor):
         # when trying to find "<tile" as a subsequence of "<Image><tile"
         repl = "<Image>" + features + "</Image>"
 
-        return PromptUpdateDetails(full=repl, features=repl)
+        return PromptUpdateDetails.select_text(repl, IMG_PAD)
 
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
@@ -83,31 +83,6 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )
-
-    def get_max_image_tokens(self) -> int:
-        hf_processor = self.get_hf_processor()
-        tokenizer = hf_processor.tokenizer
-
-        max_num_patches = hf_processor.max_dynamic_patch
-        # we need +1 here because max_dynamic_patch in config doesn't
-        # include the thumbnail patch
-        tile_pos_identifiers = [
-            f"<tile_{i+1}>" for i in range(max_num_patches)
-        ]
-        if hf_processor.use_thumbnail and max_num_patches != 1:
-            tile_pos_identifiers += ["<tile_global_thumbnail>"]
-
-        # "<Image><tile" is tokenized as ["<Image", "><", "tile"]
-        # so we include <tile_1> in the start_str
-        start_str = "<Image>" + tile_pos_identifiers.pop(0)
-        end_str = "</Image>"
-        start_token_len = len(tokenizer.encode(start_str))
-        end_token_len = len(tokenizer.encode(end_str))
-        tile_token_len = sum(
-            len(tokenizer.encode(identifier))
-            for identifier in tile_pos_identifiers)
-        non_image_tokens_num = start_token_len + end_token_len + tile_token_len
-        return super().get_max_image_tokens() + non_image_tokens_num
 
 
 class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
@@ -177,10 +152,7 @@ class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
 
             repl = hf_processor.get_image_repl(feature_size, num_patches)
 
-            return PromptUpdateDetails(
-                full=repl.full + "\n",
-                features=repl.features + "\n",
-            )
+            return PromptUpdateDetails.select_text(repl.full + "\n", IMG_PAD)
 
         # See note in dummy data regarding why we have the extra newline
         return [
