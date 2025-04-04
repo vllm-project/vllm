@@ -310,8 +310,19 @@ class RandomDataset(BenchmarkDataset):
     ) -> list[SampleRequest]:
         vocab_size = tokenizer.vocab_size
 
-        prefix_token_ids = (np.random.randint(
-            0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
+        double_prefix_token_ids = (
+            np.random.randint(0, vocab_size, size=prefix_len * 2).tolist()
+            if prefix_len > 0 else []
+        )
+        if prefix_len > 0:
+            prefix_token_ids = tokenizer(
+                tokenizer.decode(double_prefix_token_ids)
+            ).input_ids
+            while len(prefix_token_ids) < prefix_len:
+                prefix_token_ids *= 2
+            prefix_token_ids = prefix_token_ids[:prefix_len]
+        else:
+            prefix_token_ids = []
 
         input_low = int(input_len * range_ratio)
         output_low = int(output_len * range_ratio)
@@ -326,11 +337,14 @@ class RandomDataset(BenchmarkDataset):
 
         requests = []
         for i in range(num_requests):
-            inner_seq = ((offsets[i] + i + np.arange(input_lens[i])) %
+            inner_seq = ((offsets[i] + i + np.arange(input_lens[i] * 2)) %
                          vocab_size).tolist()
             token_sequence = prefix_token_ids + inner_seq
-            prompt = tokenizer.decode(token_sequence)
             total_input_len = prefix_len + int(input_lens[i])
+            token_sequence = tokenizer(tokenizer.decode(token_sequence)).input_ids
+            while len(token_sequence) < total_input_len:
+                token_sequence *= 2
+            prompt = tokenizer.decode(token_sequence[:total_input_len])
             requests.append(
                 SampleRequest(
                     prompt=prompt,
