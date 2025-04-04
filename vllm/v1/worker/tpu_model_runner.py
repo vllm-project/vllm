@@ -509,31 +509,6 @@ class TPUModelRunner:
         logits_indices = logits_indices.to(self.device)
         return attn_metadata, logits_indices
 
-    def _scatter_placeholders(
-        self,
-        embeds: torch.Tensor,
-        is_embed: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if is_embed is None:
-            return embeds
-
-        placeholders = embeds.new_full(
-            (is_embed.shape[0], embeds.shape[-1]),
-            fill_value=torch.nan,
-        )
-        placeholders[is_embed] = embeds
-        return placeholders
-
-    def _gather_placeholders(
-        self,
-        placeholders: torch.Tensor,
-        is_embed: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if is_embed is None:
-            return placeholders
-
-        return placeholders[is_embed]
-
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
