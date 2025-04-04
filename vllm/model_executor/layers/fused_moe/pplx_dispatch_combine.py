@@ -69,14 +69,14 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         expert_num_tokens = torch.empty(
             num_local_experts,
             dtype=torch.int32,
-            device=device,
+            device=a1.device,
         )
 
         num_dp = self.world_size // self.dp_size
         expert_x = torch.empty(
             (num_local_experts, self.max_num_tokens * num_dp, a1q.shape[-1]),
             dtype=a1q.dtype,
-            device=device,
+            device=a1.device,
         )
 
         expert_x_scale: Optional[torch.Tensor] = None
@@ -91,7 +91,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                     (expert_x.size(2) + block_size - 1) // block_size,
                 ),
                 dtype=torch.float32,
-                device=device,
+                device=a1.device,
             )
 
         # This argument is optional, defaults to indices.shape[0]

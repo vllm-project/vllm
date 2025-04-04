@@ -8,6 +8,8 @@ from typing import Callable, List, Optional, Tuple
 import pplx_kernels as pplx
 import torch
 import torch.nn.functional as F
+from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
+                                  nvshmem_get_unique_id, nvshmem_init)
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
@@ -26,10 +28,13 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import direct_register_custom_op
+from vllm.utils import direct_register_custom_op, run_once
 
 if current_platform.is_cuda_alike():
-    from .fused_moe import fused_experts
+    #from .pplx_dispatch_combine import PplxDispatchCombine
+    from .dispatch_combine import StandardDispatchCombine
+    from .fused_moe import TritonExperts, fused_experts
+    from .modular_kernel import FusedMoEModularKernel
 else:
     fused_experts = None  # type: ignore
 if is_rocm_aiter_moe_enabled():
@@ -421,6 +426,14 @@ def determine_expert_map(
     return (local_num_experts, expert_map)
 
 
+@run_once
+def pplx_init(rank, world_size):
+    uid = nvshmem_get_unique_id(
+    ) if rank == 0 else nvshmem_alloc_empty_unique_id()
+    torch.distributed.broadcast(uid, src=0)
+    nvshmem_init(uid, rank, world_size)
+
+
 class FusedMoE(torch.nn.Module):
     """FusedMoE layer for MoE models.
 
@@ -545,8 +558,23 @@ class FusedMoE(torch.nn.Module):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         if quant_config is None:
+            pplx_init(self.dp_rank, self.dp_size)
+
+            moe = MoEConfig(
+                num_experts=self.global_num_experts,
+                experts_per_token=0,
+                hidden_dim=hidden_size,
+                num_local_experts=self.local_num_experts,
+                dp_size=self.dp_size,
+                dp_rank=self.dp_rank,
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                #in_dtype = 0,
+                #out_dtype = 0,
+            )
+
             self.quant_method: Optional[QuantizeMethodBase] = (
-                UnquantizedFusedMoEMethod())
+                UnquantizedFusedMoEMethod(moe))
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None
