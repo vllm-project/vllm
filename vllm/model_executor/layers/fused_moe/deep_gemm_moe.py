@@ -64,6 +64,8 @@ def _valid_deep_gemm(hidden_states: torch.Tensor,
             "DeepGemm disabled: weights or activations not contiguous.")
         return False
 
+    return True
+
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
