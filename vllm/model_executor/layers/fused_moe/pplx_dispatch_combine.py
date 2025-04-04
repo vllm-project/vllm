@@ -5,6 +5,7 @@ import pplx_kernels as pplx
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
 
 
@@ -83,9 +84,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             )
 
         # This argument is optional
-        bound_m = torch.tensor([a1q.shape[0]],
-                               dtype=torch.uint32,
-                               device=device)
+        bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -106,9 +105,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         topk_ids: torch.Tensor,
     ) -> None:
         # This argument is optional
-        bound_m = torch.tensor([output.shape[0]],
-                               dtype=torch.uint32,
-                               device=output.device)
+        bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
 
         assert output.shape[0] == self.max_num_tokens
         assert output.shape[1] == fused_expert_output.shape[-1]
