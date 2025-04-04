@@ -44,7 +44,7 @@ def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
     """
     A permutation routine that works on fp8 types.
     """
-    if torch.is_floating_point(m) and torch.finfo(m.dtype).bits == 8:
+    if torch.is_floating_point(m) and m.dtype.itemsize == 1:
         return m.view(dtype=torch.uint8)[idx, ...].view(dtype=m.dtype)
     else:
         return m[idx, ...]
