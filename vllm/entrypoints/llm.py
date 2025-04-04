@@ -1352,12 +1352,8 @@ class LLM:
             raise ValueError("Cannot set both guided_options_request and "
                              "params.guided_decoding.")
 
-        json = (guided_options.guided_json.model_dump_json() if
-                (guided_options.guided_json is not None
-                 and not isinstance(guided_options.guided_json, (dict, str)))
-                else guided_options.guided_json)
         params.guided_decoding = GuidedDecodingParams(
-            json=json,
+            json=guided_options.guided_json,
             regex=guided_options.guided_regex,
             choice=guided_options.guided_choice,
             grammar=guided_options.guided_grammar,
