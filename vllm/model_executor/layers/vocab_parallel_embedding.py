@@ -50,6 +50,8 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
 def pad_vocab_size(vocab_size: int,
                    pad_to: int = DEFAULT_VOCAB_PADDING_SIZE) -> int:
     """Pad the vocab size to the given value."""
+    if pad_to == 0:
+        return vocab_size
     return ((vocab_size + pad_to - 1) // pad_to) * pad_to
 
 
