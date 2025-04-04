@@ -31,7 +31,6 @@ def _valid_deep_gemm_shape(M: int, N: int, K: int):
     return align <= M and N % align == 0 and K % align == 0
 
 
-# TODO: check types?
 def _valid_deep_gemm(hidden_states: torch.Tensor,
                      w1: torch.Tensor,
                      w2: torch.Tensor,
@@ -42,19 +41,28 @@ def _valid_deep_gemm(hidden_states: torch.Tensor,
     aligned by `dg.get_m_alignment_for_contiguous_layout()`.
     """
     if not has_deep_gemm:
+        logger.debug("DeepGemm disabled: deep_gemm not available.")
         return False
 
-    # Expert maps not supported yet.
     if expert_map is not None:
+        logger.debug("DeepGemm disabled: expert map NYI.")
         return False
 
     M = hidden_states.shape[0]
     _, K, N = w2.shape
     if not _valid_deep_gemm_shape(M, N, K):
+        logger.debug("DeepGemm disabled: unalinged problem size.")
         return False
 
-    return (hidden_states.is_contiguous() and w1.is_contiguous()
-            and w2.is_contiguous())
+    if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
+        logger.debug("DeepGemm disabled: invalid weight dtype(s).")
+        return False
+
+    if (not hidden_states.is_contiguous() or not w1.is_contiguous()
+            or not w2.is_contiguous()):
+        logger.debug(
+            "DeepGemm disabled: weights or activations not contiguous.")
+        return False
 
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
