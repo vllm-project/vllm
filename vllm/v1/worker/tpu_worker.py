@@ -84,6 +84,12 @@ class TPUWorker:
 
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
+        # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
+        # ring, the xla tpu compiler flag
+        # `xla_tpu_force_1d_allreduce_at_chunk_count` is a temporary solution to
+        # fix this. It will be removed after the bug in XLA compiler is fixed.
+        os.environ["LIBTPU_INIT_ARGS"] = (
+            "--xla_tpu_force_1d_allreduce_at_chunk_count=1")
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
@@ -105,17 +111,24 @@ class TPUWorker:
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
-        # NOTE(woosuk): Usually, we compile 10-15 graphs for prefill and
-        # 30-40 graphs for decode. 128 is an arbitrary safe number.
+        # TODO (NickLucche) On gsm we compile 80+ graphs.
+        # Re-evaluate limit, with MM we may get close to this limit.
         torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): Set per-rank cache path since different ranks
         # can have slightly different XLA graphs.
         world_size = self.parallel_config.world_size
         rank = xr.global_ordinal()
-        per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                     f"tp{world_size}_rank{rank}")
-        xr.initialize_cache(per_rank_path, readonly=False)
+        # The PyTorch/XLA compilation cache uses the Torch IR to generate keys.
+        # Consequently, changes in optimization flags, which affect compilation
+        # results, don't change the cache key. This can result in the wrong
+        # compilation being used. To prevent this, disabling the XLA compilation
+        # cache during development is recommended.We can disable it by
+        # `export VLLM_XLA_CACHE_PATH=`
+        if envs.VLLM_XLA_CACHE_PATH:
+            per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
+                                         f"tp{world_size}_rank{rank}")
+            xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
@@ -129,10 +142,10 @@ class TPUWorker:
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                tpu_k_cache = torch.tensor([], dtype=dtype, device=self.device)
-                tpu_v_cache = torch.tensor([], dtype=dtype, device=self.device)
-
-                kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                tpu_kv_cache = torch.tensor([],
+                                            dtype=dtype,
+                                            device=self.device)
+                kv_caches[layer_name] = tpu_kv_cache
             else:
                 raise NotImplementedError
 
@@ -154,7 +167,13 @@ class TPUWorker:
         # intermediate activations.
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
-        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
+        current_mem = m["bytes_used"]
+        # Ideally we would use profiled = m["peak_bytes_used"] to
+        # get weights + activations. But there is memory used during
+        # compilation / weight loading that impacts the peak and
+        # there is no way to reset peak memory in XLA, So we
+        # use the heuristic of 2% of weights.
+        profiled = current_mem * 1.02
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
