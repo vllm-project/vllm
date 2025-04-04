@@ -174,14 +174,14 @@ def _is_neuron_on_device_sampling_disabled(model_config: ModelConfig) -> bool:
 
 def _get_neuron_config_after_override(default_neuron_config,
                                       overridden_neuron_config):
-    from transformers_neuronx.config import (ContinuousBatchingConfig, 
+    from transformers_neuronx.config import (ContinuousBatchingConfig,
                                              GenerationConfig,
                                              KVCacheQuantizationConfig,
                                              NeuronConfig, QuantizationConfig,
                                              SparseAttnConfig)
 
     overridden_neuron_config = overridden_neuron_config or {}
-    sparse_attn = overridden_neuron_config.pop("sparse_attn", {})   
+    sparse_attn = overridden_neuron_config.pop("sparse_attn", {})
     if sparse_attn:
         overridden_neuron_config["sparse_attn"] = SparseAttnConfig(
             **sparse_attn)
@@ -197,11 +197,11 @@ def _get_neuron_config_after_override(default_neuron_config,
         overridden_neuron_config[
             "continuous_batching"] = ContinuousBatchingConfig(
                 **continuous_batching)
-        
+
     quant = overridden_neuron_config.pop("quant", {})
     if quant:
         overridden_neuron_config["quant"] = QuantizationConfig(**quant)
-    
+
     on_device_generation = overridden_neuron_config.pop(
         "on_device_generation", {})
     if on_device_generation:
