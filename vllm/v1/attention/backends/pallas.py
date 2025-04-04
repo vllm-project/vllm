@@ -7,6 +7,7 @@ import torch
 # Required to register custom ops.
 import torch_xla.experimental.custom_kernel  # noqa: F401
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
@@ -146,6 +147,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             write_to_kv_cache(key, value, kv_cache, slot_mapping)
+
+        if envs.VLLM_TPU_VALIDATE_DYNAMIC_INPUTS:
+            torch.ops.xla.validate_dynamic_inputs(
+                query, kv_cache, attn_metadata.context_lens,
+                attn_metadata.block_tables, attn_metadata.query_start_loc,
+                attn_metadata.num_seqs, self.sliding_window,
+                self.logits_soft_cap)
 
         output = torch.ops.xla.ragged_paged_attention(
             query,
