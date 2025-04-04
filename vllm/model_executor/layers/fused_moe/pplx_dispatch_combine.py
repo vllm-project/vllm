@@ -24,6 +24,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         super().__init__()
         self.a2a = a2a
         self.block_shape = block_shape
+        self.max_num_tokens = max_num_tokens
         self.dp_num_tokens = max_num_tokens * (world_size // dp_size)
         self.quant_dtype = quant_dtype
 
@@ -109,7 +110,8 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                                dtype=torch.uint32,
                                device=output.device)
 
-        # TODO assert output is the proper size
+        assert output.shape[0] == self.max_num_tokens
+        assert output.shape[1] == fused_expert_output.shape[-1]
 
         self.a2a.combine(out_tokens=output,
                          indices=topk_ids,
