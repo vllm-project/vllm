@@ -32,6 +32,7 @@ class RequestOutputCollector:
         self.ready = asyncio.Event()
 
     def put(self, output: RequestOutput) -> None:
+        '''Non-blocking put operation'''
         if self.output is None:
             self.output = output
             self.ready.set()
@@ -43,6 +44,7 @@ class RequestOutputCollector:
             self.output = output
 
     async def get(self) -> RequestOutput:
+        '''Get operation blocks on put event'''
         while (output := self.output) is None:
             await self.ready.wait()
         self.output = None
@@ -50,6 +52,7 @@ class RequestOutputCollector:
         return output
 
     def get_nowait(self) -> Optional[RequestOutput]:
+        '''Non-blocking get operation'''
         output = self.output
         if output is not None:
             self.output = None
@@ -234,6 +237,13 @@ class OutputProcessor:
 
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
+
+    def propagate_error(self, e: Exception):
+        """Propagate error to all generate() tasks."""
+
+        for _, state in self.request_states.items():
+            assert state.queue is not None
+            state.queue.put(e)
 
     def abort_requests(
         self,

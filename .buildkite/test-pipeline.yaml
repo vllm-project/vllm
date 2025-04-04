@@ -206,6 +206,7 @@ steps:
     # split the test to avoid interference
     - pytest -v -s v1/core
     - pytest -v -s v1/engine
+    - pytest -v -s v1/shutdown
     - pytest -v -s v1/entrypoints
     - pytest -v -s v1/sample
     - pytest -v -s v1/worker

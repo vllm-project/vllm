@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import asyncio
-import os
 import queue
-import signal
-import threading
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -21,10 +17,11 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.utils import (get_open_zmq_inproc_path, get_open_zmq_ipc_path,
-                        kill_process_tree, make_zmq_socket)
+                        make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import BackgroundProcHandle
@@ -350,27 +347,6 @@ class MPClient(EngineCoreClient):
         executor_class: type[Executor],
         log_stats: bool,
     ):
-        # The child processes will send SIGUSR1 when unrecoverable
-        # errors happen. We kill the process tree here so that the
-        # stack trace is very evident.
-        # TODO(rob): rather than killing the main process, we should
-        # figure out how to raise an AsyncEngineDeadError and
-        # handle at the API server level so we can return a better
-        # error code to the clients calling vLLM.
-        def sigusr1_handler(signum, frame):
-            logger.fatal("Got fatal signal from worker processes, shutting "
-                         "down. See stack trace above for root cause issue.")
-            kill_process_tree(os.getpid())
-
-        if threading.current_thread() == threading.main_thread():
-            signal.signal(signal.SIGUSR1, sigusr1_handler)
-        else:
-            logger.warning("SIGUSR1 handler not installed because we are not "
-                           "running in the main thread. In this case the "
-                           "forked engine process may not be killed when "
-                           "an exception is raised, and you need to handle "
-                           "the engine process shutdown manually.")
-
         # Serialization setup.
         self.encoder = MsgpackEncoder()
         self.decoder = MsgpackDecoder(EngineCoreOutputs)
@@ -382,12 +358,14 @@ class MPClient(EngineCoreClient):
         # This will ensure resources created so far are closed
         # when the client is garbage collected,  even if an
         # exception is raised mid-construction.
-        self.resources = BackgroundResources(ctx=sync_ctx)
-        self._finalizer = weakref.finalize(self, self.resources)
+        resources = BackgroundResources(ctx=sync_ctx)
+        self.resources = resources
+        self._finalizer = weakref.finalize(self, resources)
 
         # Paths and sockets for IPC.
         self.output_path = get_open_zmq_ipc_path()
 
+        self.is_engine_dead = False
         new_core_engine = lambda index, local_dp_rank=None: CoreEngine(
             vllm_config, executor_class, log_stats, self.ctx, self.output_path,
             index, local_dp_rank)
@@ -398,7 +376,7 @@ class MPClient(EngineCoreClient):
 
         # Wait for engine core process(es) to start.
         for engine in self.resources.core_engines:
-            engine.proc_handle.wait_for_startup()
+            engine.proc_handle.wait_for_startup(self.shutdown)
 
         self.utility_results: dict[int, AnyFuture] = {}
 
@@ -418,7 +396,19 @@ class MPClient(EngineCoreClient):
         self.core_engine = core_engine
 
     def shutdown(self):
+        # Terminate background resources
         self._finalizer()
+
+    def _validate_alive(self, buffer: Any):
+        if buffer == EngineCoreProc.ENGINE_CORE_DEAD:
+            self.is_engine_dead = True
+            raise EngineDeadError()
+
+    def _format_exception(self, e: Exception) -> Exception:
+        """If errored, use EngineDeadError so root cause is clear."""
+
+        return (EngineDeadError(
+            suppress_context=True) if self.is_engine_dead else e)
 
 
 def _process_utility_output(output: UtilityOutput,
@@ -443,7 +433,8 @@ class SyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
+        self.outputs_queue: queue.Queue[Union[EngineCoreOutputs,
+                                              Exception]] = queue.Queue()
 
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
@@ -456,9 +447,12 @@ class SyncMPClient(MPClient):
         shutdown_path = get_open_zmq_inproc_path()
         self.resources.shutdown_path = shutdown_path
 
+        self_weakref = weakref.ref(self)
+
         def process_outputs_socket():
             shutdown_socket = ctx.socket(zmq.PAIR)
             out_socket = make_zmq_socket(ctx, output_path, zmq.constants.PULL)
+            local_self = None
             try:
                 shutdown_socket.bind(shutdown_path)
                 poller = zmq.Poller()
@@ -471,9 +465,16 @@ class SyncMPClient(MPClient):
                     if len(socks) == 2 or socks[0][0] == shutdown_socket:
                         # shutdown signal, exit thread.
                         break
-
-                    frame = out_socket.recv(copy=False)
-                    outputs = decoder.decode(frame.buffer)
+                    local_self = self_weakref()
+                    if local_self is None:
+                        # Instance is being gc'd, exit loop
+                        break
+                    try:
+                        frame = out_socket.recv(copy=False)
+                        local_self._validate_alive(frame.buffer)
+                        outputs = decoder.decode(frame.buffer)
+                    except Exception as e:
+                        local_self.outputs_queue.put_nowait(e)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
@@ -491,12 +492,21 @@ class SyncMPClient(MPClient):
         self.output_queue_thread.start()
 
     def get_output(self) -> EngineCoreOutputs:
-        return self.outputs_queue.get()
+        # If an exception arises in process_outputs_socket task,
+        # it is forwarded to the outputs_queue so we can raise it
+        # from this (run_output_handler) task to shut down the server.
+        outputs = self.outputs_queue.get()
+        if isinstance(outputs, Exception):
+            raise self._format_exception(outputs) from None
+        return outputs
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
-        # (RequestType, SerializedRequest)
-        msg = (request_type.value, self.encoder.encode(request))
-        self.core_engine.send_multipart(msg)
+        try:
+            # (RequestType, SerializedRequest)
+            msg = (request_type.value, self.encoder.encode(request))
+            self.core_engine.send_multipart(msg)
+        except Exception as e:
+            raise self._format_exception(e) from None
 
     def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
@@ -574,14 +584,15 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        self.outputs_queue: Optional[asyncio.Queue[EngineCoreOutputs]] = None
+        self.outputs_queue: asyncio.Queue[Union[EngineCoreOutputs,
+                                                Exception]] = asyncio.Queue()
         self.queue_task: Optional[asyncio.Task] = None
 
         self.outputs_handler: Optional[Callable[
             [AsyncMPClient, EngineCoreOutputs], Awaitable[None]]] = None
 
     def _ensure_output_queue_task(self):
-        if self.outputs_queue is not None:
+        if self.queue_task is not None:
             return
 
         # Perform IO in separate task to parallelize as much as possible.
@@ -598,39 +609,57 @@ class AsyncMPClient(MPClient):
         self.resources.output_socket = output_socket
 
         async def process_outputs_socket():
-            while True:
-                (frame, ) = await output_socket.recv_multipart(copy=False)
-                outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
-                if outputs.utility_output:
-                    _process_utility_output(outputs.utility_output,
-                                            utility_results)
-                    continue
+            try:
+                while True:
+                    (frame, ) = await output_socket.recv_multipart(copy=False)
+                    self._validate_alive(frame.buffer)
+                    outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
+                    if outputs.utility_output:
+                        _process_utility_output(outputs.utility_output,
+                                                utility_results)
+                        continue
 
-                if output_handler is not None:
-                    assert _self_ref is not None
-                    _self = _self_ref()
-                    if not _self:
-                        # Client has been garbage collected, abort.
-                        return
-                    await output_handler(_self, outputs)
+                    if output_handler is not None:
+                        assert _self_ref is not None
+                        _self = _self_ref()
+                        if not _self:
+                            # Client has been garbage collected, abort.
+                            return
+                        await output_handler(_self, outputs)
 
-                if outputs.outputs or outputs.scheduler_stats:
-                    outputs_queue.put_nowait(outputs)
+                    if outputs.outputs or outputs.scheduler_stats:
+                        outputs_queue.put_nowait(outputs)
+            except Exception as e:
+                self.outputs_queue.put_nowait(e)
 
         self.queue_task = asyncio.create_task(process_outputs_socket(),
                                               name="EngineCoreOutputQueueTask")
 
+    def shutdown(self):
+        super().shutdown()
+        if queue_task := getattr(self, "queue_task", None):
+            queue_task.cancel()
+
     async def get_output_async(self) -> EngineCoreOutputs:
         self._ensure_output_queue_task()
+        # If an exception arises in process_outputs_socket task,
+        # it is forwarded to the outputs_queue so we can raise it
+        # from this (run_output_handler) task to shut down the server.
         assert self.outputs_queue is not None
-        return await self.outputs_queue.get()
+        outputs = await self.outputs_queue.get()
+        if isinstance(outputs, Exception):
+            raise self._format_exception(outputs) from None
+        return outputs
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: Any) -> None:
-        await self.core_engine.send_multipart(
-            (request_type.value, self.encoder.encode(request)))
+        try:
+            await self.core_engine.send_multipart(
+                (request_type.value, self.encoder.encode(request)))
 
-        self._ensure_output_queue_task()
+            self._ensure_output_queue_task()
+        except Exception as e:
+            raise self._format_exception(e) from None
 
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method,

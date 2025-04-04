@@ -11,7 +11,6 @@ from logging import DEBUG
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
-import psutil
 import zmq
 import zmq.asyncio
 
@@ -22,8 +21,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
-                        zmq_socket_ctx)
+from vllm.utils import resolve_obj_by_qualname, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -253,7 +251,8 @@ class EngineCore:
         return engine_core_outputs
 
     def shutdown(self):
-        self.model_executor.shutdown()
+        if self.model_executor:
+            self.model_executor.shutdown()
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
@@ -307,6 +306,8 @@ class EngineCore:
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
+    ENGINE_CORE_DEAD = b'ENGINE_CORE_DEAD'
+
     def __init__(
         self,
         input_path: str,
@@ -316,27 +317,33 @@ class EngineCoreProc(EngineCore):
         log_stats: bool,
         engine_index: int = 0,
     ):
-        super().__init__(vllm_config, executor_class, log_stats)
+        try:
+            super().__init__(vllm_config, executor_class, log_stats)
+            # Background Threads and Queues for IO. These enable us to
+            # overlap ZMQ socket IO with GPU since they release the GIL,
+            # and to overlap some serialization/deserialization with the
+            # model forward pass.
+            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+            self.input_queue: queue.Queue[tuple[EngineCoreRequestType,
+                                                Any]] = queue.Queue()
+            self.output_queue: queue.Queue[Union[EngineCoreOutputs,
+                                                 bytes]] = queue.Queue()
+            self.errored_sent_event = threading.Event()
+            threading.Thread(target=self.process_input_socket,
+                             args=(input_path, ),
+                             daemon=True).start()
+            threading.Thread(target=self.process_output_socket,
+                             args=(output_path, engine_index),
+                             daemon=True).start()
 
-        # Background Threads and Queues for IO. These enable us to
-        # overlap ZMQ socket IO with GPU since they release the GIL,
-        # and to overlap some serialization/deserialization with the
-        # model forward pass.
-        # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue: queue.Queue[tuple[EngineCoreRequestType,
-                                            Any]] = queue.Queue()
-        self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
-        threading.Thread(target=self.process_input_socket,
-                         args=(input_path, ),
-                         daemon=True).start()
-        threading.Thread(target=self.process_output_socket,
-                         args=(output_path, engine_index),
-                         daemon=True).start()
+            self.global_unfinished_reqs = False
 
-        self.global_unfinished_reqs = False
+            self.step_fn = (self.step if self.batch_queue is None else
+                            self.step_with_batch_queue)
 
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
+        except Exception as e:
+            logger.exception("EngineCore got error in __init__:", exc_info=e)
+            raise e
 
     @staticmethod
     def run_engine_core(*args,
@@ -364,8 +371,8 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        parent_process = psutil.Process().parent()
         engine_core: Optional[EngineCoreProc] = None
+        startup_failed = True
         try:
             parallel_config: ParallelConfig = kwargs[
                 "vllm_config"].parallel_config
@@ -379,17 +386,20 @@ class EngineCoreProc(EngineCore):
 
             # Send Readiness signal to EngineClient.
             ready_pipe.send({"status": "READY"})
-
+            startup_failed = False
             engine_core.run_busy_loop()
-
         except SystemExit:
             logger.debug("EngineCore interrupted.")
-
-        except Exception:
-            traceback = get_exception_traceback()
-            logger.error("EngineCore hit an exception: %s", traceback)
-            parent_process.send_signal(signal.SIGUSR1)
-
+        except Exception as e:
+            if startup_failed:
+                logger.exception("EngineCore got error at startup:",
+                                 exc_info=e)
+                ready_pipe.send({"status": "FAILED"})
+                raise e
+            else:
+                assert engine_core is not None
+                logger.exception("EngineCore got an Exception:", exc_info=e)
+                engine_core._send_engine_dead()
         finally:
             if engine_core is not None:
                 engine_core.shutdown()
@@ -476,6 +486,17 @@ class EngineCoreProc(EngineCore):
             and not isinstance(v, p.annotation) else v
             for v, p in zip(args, arg_types))
 
+    def _send_engine_dead(self):
+        """Send EngineDead status to the EngineCoreClient."""
+
+        # Put ENGINE_CORE_DEAD to the front of the queue.
+        self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
+
+        # Wait until msg sent by the daemon before shutdown.
+        if not self.errored_sent_event.wait(timeout=10.):
+            logger.fatal("vLLM shutdown signal from EngineCore failed "
+                         "to send. Please report this issue.")
+
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
 
@@ -509,9 +530,16 @@ class EngineCoreProc(EngineCore):
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 outputs = self.output_queue.get()
+                if outputs == EngineCoreProc.ENGINE_CORE_DEAD:
+                    socket.send_multipart((outputs, ), copy=False)
+                    break
+                assert not isinstance(outputs, bytes)
                 outputs.engine_index = engine_index
                 encoder.encode_into(outputs, buffer)
                 socket.send(buffer, copy=False)
+
+        # Signal to main thread that ENGINE_CORE_DEAD was sent.
+        self.errored_sent_event.set()
 
 
 ENGINE_PAUSED_OUTPUTS = EngineCoreOutputs(engine_paused=True)
