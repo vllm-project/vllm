@@ -487,7 +487,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             self,
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
-        print("CompressedTensorsWNA16MarlinMoEMethod")
         self.quant_config = quant_config
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
@@ -826,7 +825,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             self,
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
-        print("CompressedTensorsWNA16MoEMethod")
         self.quant_config = quant_config
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
