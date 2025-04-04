@@ -399,13 +399,13 @@ class SequenceData(msgspec.Struct,
         return self._stage
 
     def __repr__(self) -> str:
-        return (
-            f"SequenceData("
-            f"prompt_token_ids={self._prompt_token_ids}, "
-            f"prompt_embeds.shape={getattr(self._prompt_embeds, 'shape', None)}, "
-            f"output_token_ids={self.output_token_ids}, "
-            f"cumulative_logprob={self.cumulative_logprob}, "
-            f"get_num_computed_tokens={self.get_num_computed_tokens()})")
+        return (f"SequenceData("
+                f"prompt_token_ids={self._prompt_token_ids}, "
+                f"prompt_embeds.shape="
+                f"{getattr(self._prompt_embeds, 'shape', None)}, "
+                f"output_token_ids={self.output_token_ids}, "
+                f"cumulative_logprob={self.cumulative_logprob}, "
+                f"get_num_computed_tokens={self.get_num_computed_tokens()})")
 
 
 class Sequence:
@@ -441,7 +441,8 @@ class Sequence:
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
 
-        self.data = SequenceData.from_seqs(self.prompt_token_ids, prompt_embeds=self.inputs.prompt_embeds
+        self.data = SequenceData.from_seqs(
+            self.prompt_token_ids, prompt_embeds=self.inputs.prompt_embeds)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
