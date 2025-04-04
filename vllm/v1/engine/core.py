@@ -284,6 +284,16 @@ class EngineCore:
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
 
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        self.model_executor.save_sharded_state(path=path,
+                                               pattern=pattern,
+                                               max_size=max_size)
+
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
