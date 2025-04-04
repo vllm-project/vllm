@@ -430,20 +430,20 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         # write the latent and rope to kv cache
         if kv_cache is not None and len(kv_cache) == 2:
             if not self.VLLM_USE_FP8_MATMUL:
-                k_cache = self.latent_cache_k(latent_vec_k, kv_cache[0],
-                                              block_indices, block_offsets)
+                self.latent_cache_k(latent_vec_k, kv_cache[0],
+                                    block_indices, block_offsets)
+                k_cache = kv_cache[0]
             else:
                 k_cache = self.latent_cache_k_nodeq(latent_vec_k, kv_cache[0],
                                                     block_indices,
                                                     block_offsets)
             v_cache = None
-            kv_cache = (k_cache, v_cache)
 
         if is_prefill:
             return self._forward_prefill(q, k_c_normed, k_pe, attn_metadata,
                                          batch_size)
         else:
-            return self._forward_decode(q_nope, q_pe, kv_cache, attn_metadata,
+            return self._forward_decode(q_nope, q_pe, (k_cache, v_cache), attn_metadata,
                                         batch_size)
 
     def _forward_prefill(self, q: torch.Tensor, k_c_normed: torch.Tensor,
