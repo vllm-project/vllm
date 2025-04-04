@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import random
+
 import pytest
 
 from vllm import LLM, envs
@@ -34,3 +36,18 @@ def test_sampler_different(model_name: str):
     sampling_params = SamplingParams(temperature=0.1, min_p=0.8, max_tokens=64)
     output2 = llm.generate(prompts, sampling_params)
     assert output[0].outputs[0].text != output2[0].outputs[0].text
+
+    # Batch-case with TopK
+    for B in [4, 16]:
+        p = prompts * B
+        sampling_params = [
+            SamplingParams(temperature=0.1,
+                           min_p=0.8,
+                           max_tokens=64,
+                           top_k=random.randint(4, 12))
+        ] * B
+        # disable on first prompt to check top k handles it
+        sampling_params[0].top_k = -1
+        sampling_params[0].min_p = 0
+        output = llm.generate(p, sampling_params)
+        assert output[0].outputs[0].text != output[-1].outputs[0].text
