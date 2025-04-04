@@ -57,16 +57,16 @@ class HPUAttentionBackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dsts: torch.Tensor,
     ) -> None:
-        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dsts)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dsts: torch.Tensor,
     ) -> None:
-        HPUPagedAttention.copy_blocks(kv_caches, src_to_dists)
+        HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
 
 
 @dataclass
@@ -77,6 +77,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     is_prompt: bool
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
+    context_lens_tensor: Optional[torch.Tensor]
 
 
 class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
@@ -209,36 +210,52 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
         if attn_metadata.is_prompt:
             # Prompt run.
-            if not self.prefill_usefusedsdpa:
-                # TODO: move this outside of model
-                assert attn_metadata.attn_bias is not None, \
-                        'attn_bias must be set before calling model.forward!'
-                attn_bias = attn_metadata.attn_bias
-                if self.alibi_slopes is not None:
-                    position_bias = _make_alibi_bias(self.alibi_slopes,
-                                                     self.num_kv_heads,
-                                                     attn_bias.dtype,
-                                                     attn_bias.shape[-1])
-                    attn_bias = attn_bias.tile((1, self.num_kv_heads, 1, 1))
-                    attn_bias.add_(position_bias)
-            else:
-                attn_bias = None
-
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
             kv_shape = (batch_size, seq_len_kv, self.num_kv_heads,
                         self.head_size)
-            out = ops.prompt_attention(
-                query.view(query_shape),
-                key.view(kv_shape),
-                value.view(kv_shape),
-                attn_bias=attn_bias,
-                p=0.0,
-                scale=self.scale,
-                matmul_qk_op=self.matmul_qk,
-                softmax_op=self.softmax,
-                matmul_av_op=self.matmul_av,
-                fsdpa_op=self.fused_scaled_dot_product_attention,
-            )
+            if attn_metadata is None or attn_metadata.block_list is None:
+                if not self.prefill_usefusedsdpa:
+                    # TODO: move this outside of model
+                    assert attn_metadata.attn_bias is not None, \
+                            'attn_bias must be set before calling model.forward'
+                    attn_bias = attn_metadata.attn_bias
+                    if self.alibi_slopes is not None:
+                        position_bias = _make_alibi_bias(
+                            self.alibi_slopes, self.num_kv_heads,
+                            attn_bias.dtype, attn_bias.shape[-1])
+                        attn_bias = attn_bias.tile(
+                            (1, self.num_kv_heads, 1, 1))
+                        attn_bias.add_(position_bias)
+                else:
+                    attn_bias = None
+
+                out = ops.prompt_attention(
+                    query.view(query_shape),
+                    key.view(kv_shape),
+                    value.view(kv_shape),
+                    attn_bias=attn_bias,
+                    p=0.0,
+                    scale=self.scale,
+                    matmul_qk_op=self.matmul_qk,
+                    softmax_op=self.softmax,
+                    matmul_av_op=self.matmul_av,
+                )
+            else:
+                # TODO: enable FusedSDPA
+                out = HPUPagedAttention.forward_prefix(
+                    query=query.view(query_shape),
+                    key=key.view(kv_shape),
+                    value=value.view(kv_shape),
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    block_list=attn_metadata.block_list,
+                    attn_bias=attn_metadata.attn_bias,
+                    scale=self.scale,
+                    matmul_qk_op=self.matmul_qk,
+                    matmul_av_op=self.matmul_av,
+                    softmax_op=self.softmax,
+                    keys_fetch_func=self.k_cache.fetch_from_cache,
+                    values_fetch_func=self.v_cache.fetch_from_cache)
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
