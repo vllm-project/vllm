@@ -2,6 +2,8 @@
 
 import json
 import pathlib
+from asyncio import Lock
+from collections import defaultdict
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Optional, Union
@@ -15,6 +17,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               UnloadLoRAAdapterRequest)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.utils import AtomicCounter
 
@@ -67,6 +70,13 @@ class OpenAIServingModels:
         self.static_lora_modules = lora_modules
         self.lora_requests: list[LoRARequest] = []
         self.lora_id_counter = AtomicCounter(0)
+
+        self.lora_resolvers: list[LoRAResolver] = []
+        for lora_resolver_name in LoRAResolverRegistry.get_supported_resolvers(
+        ):
+            self.lora_resolvers.append(
+                LoRAResolverRegistry.get_resolver(lora_resolver_name))
+        self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
         self.prompt_adapter_requests = []
         if prompt_adapters is not None:
@@ -233,6 +243,30 @@ class OpenAIServingModels:
                 status_code=HTTPStatus.NOT_FOUND)
 
         return None
+
+    async def resolve_lora(self, lora_name: str) -> Optional[LoRARequest]:
+        """Attempt to resolve a LoRA adapter using available resolvers.
+
+        Args:
+            lora_name: Name/identifier of the LoRA adapter
+
+        Returns:
+            Optional[LoRARequest]: LoRA request if found, None otherwise
+        """
+        async with self.lora_resolver_lock[lora_name]:
+            # First check if this LoRA is already loaded
+            for existing in self.lora_requests:
+                if existing.lora_name == lora_name:
+                    return existing
+
+            # Try to resolve using available resolvers
+            for resolver in self.lora_resolvers:
+                lora_request = await resolver.resolve_lora(lora_name)
+                if lora_request is not None:
+                    self.lora_requests.append(lora_request)
+                    return lora_request
+
+            return None
 
 
 def create_error_response(

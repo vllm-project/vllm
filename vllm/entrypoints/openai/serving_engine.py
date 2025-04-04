@@ -131,6 +131,9 @@ class OpenAIServing:
                 lora.lora_name for lora in self.models.lora_requests
         ]:
             return None
+        if request.model is not None and (await self.models.resolve_lora(
+                request.model)):
+            return None
         if request.model in [
                 prompt_adapter.prompt_adapter_name
                 for prompt_adapter in self.models.prompt_adapter_requests
