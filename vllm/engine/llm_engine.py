@@ -1941,6 +1941,12 @@ class LLMEngine:
     def list_prompt_adapters(self) -> List[int]:
         return self.model_executor.list_prompt_adapters()
 
+    def add_control_vector(self, cv_request: ControlVectorRequest) -> bool:
+        return self.model_executor.add_control_vector(cv_request)
+
+    def remove_control_vector(self, cv_id: int) -> bool:
+        return self.model_executor.remove_control_vector(cv_id)
+
     def start_profile(self) -> None:
         self.model_executor.start_profile()
 

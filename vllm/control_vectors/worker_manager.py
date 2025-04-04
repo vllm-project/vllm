@@ -82,7 +82,6 @@ class WorkerControlVectorManager(AbstractWorkerManager):
         return self._adapter_manager.pin_adapter(adapter_id)
 
     def set_active_adapters(self, requests: set[Any]) -> None:
-        assert len(requests) <= 1, "No more than 1 control vector at a time"
         mapping = next((request.adapter_id for request in requests), None)
         set_active_adapters_worker(requests, mapping, self._apply_adapters,
                                    self._adapter_manager.set_adapter_mapping)
