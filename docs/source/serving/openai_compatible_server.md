@@ -134,7 +134,7 @@ completion = client.chat.completions.create(
 
 ## Extra HTTP Headers
 
-Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
+Only `X-Request-Id` and `X-Amzn-SageMaker-Inference-Id` HTTP request headers are supported for now. It can be enabled
 with `--enable-request-id-headers`.
 
 > Note that enablement of the headers can impact performance significantly at high QPS
