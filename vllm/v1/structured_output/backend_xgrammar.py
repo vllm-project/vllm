@@ -42,12 +42,15 @@ class XgrammarBackend(StructuredOutputBackend):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
             try:
-                encoded_vocab = [
-                    token for token, _ in sorted(
-                        tokenizer.get_vocab().items(),
-                        key=lambda x: x[1],
-                    )
-                ]
+                if tokenizer.is_tekken:
+                    encoded_vocab = tokenizer._vocab
+                else:
+                    encoded_vocab = [
+                        token for token, _ in sorted(
+                            tokenizer.get_vocab().items(),
+                            key=lambda x: x[1],
+                        )
+                    ]
                 stop_token_ids = None
                 if hasattr(
                         tokenizer,
@@ -62,7 +65,8 @@ class XgrammarBackend(StructuredOutputBackend):
             tokenizer_info = xgr.TokenizerInfo(  # type: ignore
                 encoded_vocab=encoded_vocab,
                 # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
-                vocab_type=xgr.VocabType.BYTE_FALLBACK,
+                vocab_type=xgr.VocabType.RAW
+                if tokenizer.is_tekken else xgr.VocabType.BYTE_FALLBACK,
                 vocab_size=self.vocab_size,
                 stop_token_ids=stop_token_ids,
                 add_prefix_space=True,
@@ -80,7 +84,9 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_json_schema(
                 grammar_spec, any_whitespace=not self.disable_any_whitespace)
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
-            ctx = self.compiler.compile_builtin_json_grammar()
+            ctx = self.compiler.compile_json_schema(
+                '{"type": "object"}',
+                any_whitespace=not self.disable_any_whitespace)
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:

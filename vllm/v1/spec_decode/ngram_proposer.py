@@ -57,6 +57,10 @@ class NgramProposer:
                 return result
         return None
 
+    def load_model(self, *args, **kwargs):
+        # No model to load.
+        pass
+
 
 @jit(nopython=True)
 def _kmp_lps_array(pattern: np.ndarray) -> np.ndarray:
