@@ -331,8 +331,17 @@ class Platform:
 
     @classmethod
     def can_update_inplace(cls) -> bool:
-        """Checks if the platform allows inplace memory updates"""
+        """
+        Checks if the platform allows inplace memory updates
+        """
         return True
+
+    @classmethod
+    def get_lora_vocab_padding_size(cls) -> int:
+        """
+        Returns how much padding the LoRA logits need for kernels
+        """
+        return 256
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
