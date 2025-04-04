@@ -916,6 +916,10 @@ class SequenceGroup:
                 f"sampling_params={self.sampling_params}, "
                 f"num_seqs={len(self.seqs)})")
 
+    def uses_prompt_embeds(self) -> bool:
+        """Returns True if the sequence group uses input embeds."""
+        return any(seq.data.prompt_embeds is not None for seq in self.seqs)
+
 
 class SequenceGroupMetadataDelta(
         msgspec.Struct,
