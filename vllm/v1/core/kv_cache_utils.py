@@ -310,8 +310,7 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     # Note that we assume mm_positions is sorted by offset.
     # We do not need to check all mm inputs if the start token index is out of
     # range. This usually happens in the late prefill phase and decoding phase.
-    if mm_positions[-1]["offset"] + mm_positions[-1][
-            "length"] < start_token_idx:
+    if mm_positions[-1].offset + mm_positions[-1].length < start_token_idx:
         return extra_keys, start_mm_idx
 
     # Support start_mm_idx == -1 to indicate the last mm input.
@@ -322,8 +321,8 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     curr_mm_idx = start_mm_idx
     while mm_positions and curr_mm_idx < len(mm_positions):
         assert mm_hashes[curr_mm_idx] is not None
-        offset = mm_positions[curr_mm_idx]["offset"]
-        length = mm_positions[curr_mm_idx]["length"]
+        offset = mm_positions[curr_mm_idx].offset
+        length = mm_positions[curr_mm_idx].length
         if end_token_idx > offset:
             if start_token_idx > offset + length:
                 # This block has passed the current mm input.
