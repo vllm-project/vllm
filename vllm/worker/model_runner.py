@@ -412,24 +412,24 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.lora_prompt_mapping = []
 
         def __repr__(self) -> str:
-            return (
-                f"InterDataForSeqGroup("
-                f"request_id={self.request_id}, "
-                f"seq_ids={self.seq_ids}, "
-                f"is_prompt={self.is_prompt}, "
-                f"block_tables={self.block_tables}, "
-                f"computed_block_nums={self.computed_block_nums}, "
-                f"n_seqs={self.n_seqs}, "
-                f"input_tokens={self.input_tokens}, "
-                f"inputs_embeds.shape={getattr(self.inputs_embeds, 'shape', None)}, "
-                f"input_positions={self.input_positions}, "
-                f"token_types={self.token_types}, "
-                f"mrope_input_positions={self.mrope_input_positions}, "
-                f"seq_lens={self.seq_lens}, "
-                f"orig_seq_lens={self.orig_seq_lens}, "
-                f"query_lens={self.query_lens}, "
-                f"context_lens={self.context_lens}, "
-                f"multi_modal_kwargs={self.multi_modal_kwargs}")
+            return (f"InterDataForSeqGroup("
+                    f"request_id={self.request_id}, "
+                    f"seq_ids={self.seq_ids}, "
+                    f"is_prompt={self.is_prompt}, "
+                    f"block_tables={self.block_tables}, "
+                    f"computed_block_nums={self.computed_block_nums}, "
+                    f"n_seqs={self.n_seqs}, "
+                    f"input_tokens={self.input_tokens}, "
+                    f"inputs_embeds.shape="
+                    f"{getattr(self.inputs_embeds, 'shape', None)}, "
+                    f"input_positions={self.input_positions}, "
+                    f"token_types={self.token_types}, "
+                    f"mrope_input_positions={self.mrope_input_positions}, "
+                    f"seq_lens={self.seq_lens}, "
+                    f"orig_seq_lens={self.orig_seq_lens}, "
+                    f"query_lens={self.query_lens}, "
+                    f"context_lens={self.context_lens}, "
+                    f"multi_modal_kwargs={self.multi_modal_kwargs}")
 
     def gen_inter_data_builder(self, num_seqs: int):
         return lambda: ModelInputForGPUBuilder.InterDataForSeqGroup(
