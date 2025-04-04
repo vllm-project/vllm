@@ -1565,9 +1565,9 @@ def supports_dynamo() -> bool:
     # VLLM_DISABLE_DYNAMO=1 doesn't seem to work
     from vllm.platforms import current_platform
     base_torch_version = Version(Version(torch.__version__).base_version)
-    if base_torch_version < Version("2.4.0") or current_platform.is_rocm():
-        return False
-    return True
+    return not (base_torch_version < Version("2.4.0")
+                or current_platform.is_rocm())
+
 
 # Some backends use pytorch version < 2.4.0 which doesn't
 # support `torch.library.custom_op`.
