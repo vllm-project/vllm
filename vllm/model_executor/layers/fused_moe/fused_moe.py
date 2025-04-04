@@ -1574,8 +1574,8 @@ def fused_moe(
         Defaults to False.
     - global_num_experts (int): The total number of experts in the global
         expert space.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
-        from the global expert space to the local expert space of the expert 
+    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+        from the global expert space to the local expert space of the expert
         parallel shard.
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.
@@ -1682,41 +1682,46 @@ def cutlass_moe(
     assert a.shape[1] == w1.shape[1], "Hidden size mismatch w1"
     assert w1.shape[2] == w2.shape[1] * 2, "Hidden size mismatch w2"
     assert w1.shape[0] == w2.shape[0], "Expert number mismatch"
-    assert ab_strides1.shape[0] == w1.shape[
-        0], "AB Strides 1 expert number mismatch"
-    assert c_strides1.shape[0] == w1.shape[
-        0], "C Strides 1 expert number mismatch"
-    assert ab_strides2.shape[0] == w2.shape[
-        0], "AB Strides 2 expert number  mismatch"
-    assert c_strides2.shape[0] == w2.shape[
-        0], "C Strides 2 expert number mismatch"
+    assert ab_strides1.shape[0] == w1.shape[0], \
+            "AB Strides 1 expert number mismatch"
+    assert c_strides1.shape[0] == w1.shape[0], \
+           "C Strides 1 expert number mismatch"
+    assert ab_strides2.shape[0] == w2.shape[0], \
+           "AB Strides 2 expert number  mismatch"
+    assert c_strides2.shape[0] == w2.shape[0], \
+           "C Strides 2 expert number mismatch"
 
     assert a.dtype in [torch.half, torch.bfloat16], "Invalid input dtype"
-    assert w1.dtype in [torch.float8_e4m3fn, torch.half,
-                        torch.bfloat16], "Invalid weight type"
+    assert w1.dtype in [torch.float8_e4m3fn, torch.half,torch.bfloat16], \
+           "Invalid weight type"
     assert w1.dtype == w2.dtype, "Weights type mismatch"
 
     if w1.dtype in [torch.half, torch.bfloat16]:
-        assert w1.dtype == a.dtype, "Unquantized input and weights type mismatch"  # noqa: E501
-        assert w1_scale is None and w2_scale is None and a1_scale is None and a2_scale is None, "Received scales for unquantized input type"  # noqa: E501
+        assert w1.dtype == a.dtype, \
+               "Unquantized input and weights type mismatch"
+        assert w1_scale is None and w2_scale is None \
+               and a1_scale is None and a2_scale is None, \
+               "Received scales for unquantized input type"
     elif w1.dtype == torch.float8_e4m3fn:
-        assert w1_scale is not None and w2_scale is not None, "Missing scales for quantized input type"  # noqa: E501
+        assert w1_scale is not None and w2_scale is not None, \
+               "Missing scales for quantized input type"
 
     if w1_scale is not None:
-        assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 or w1_scale.shape[
-            1] == w1.shape[2], "W1 scale shape mismatch"
-        assert w1.shape[0] == w1_scale.shape[
-            0], "w1 scales expert number mismatch"
+        assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 \
+               or w1_scale.shape[1] == w1.shape[2], "W1 scale shape mismatch"
+        assert w1.shape[0] == w1_scale.shape[0], \
+               "w1 scales expert number mismatch"
     if w2_scale is not None:
-        assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 or w2_scale.shape[
-            1] == w2.shape[2], "W2 scale shape mismatch"
-        assert w2.shape[0] == w2_scale.shape[
-            0], "w2 scales expert number mismatch"
+        assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 \
+               or w2_scale.shape[1] == w2.shape[2], "W2 scale shape mismatch"
+        assert w2.shape[0] == w2_scale.shape[0], \
+               "w2 scales expert number mismatch"
     if a1_scale is not None:
-        assert a1_scale.dim() == 0 or a1_scale.shape[0] == 1 or a1_scale.shape[
-            0] == a.shape[0], "Input scale shape mismatch"
+        assert a1_scale.dim() == 0 or a1_scale.shape[0] == 1 \
+               or a1_scale.shape[0] == a.shape[0], "Input scale shape mismatch"
     if a2_scale is not None:
-        assert a1_scale is None or a2_scale.shape == a1_scale.shape, "Intermediate scale shape mismatch"  # noqa: E501
+        assert a1_scale is None or a2_scale.shape == a1_scale.shape, \
+               "Intermediate scale shape mismatch"
 
     is_quantized = w1.dtype == torch.float8_e4m3fn
 
