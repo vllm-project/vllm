@@ -48,7 +48,7 @@
 // TODO(woosuk): Tune NUM_THREADS.
 template <typename T, typename CACHE_T, int BLOCK_SIZE,
           vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
-          int NUM_THREADS = 128>
+          int NUM_THREADS>
 void paged_attention_v1_launcher(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int num_kv_heads, float scale,
@@ -133,19 +133,38 @@ void paged_attention_v1_launcher(
   }
 }
 
-#define CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, IS_BLOCK_SPARSE)  \
+#define CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, IS_BLOCK_SPARSE,  \
+                         NUM_THREADS)                                        \
   paged_attention_v1_launcher<T, CACHE_T, BLOCK_SIZE, KV_DTYPE,              \
-                              IS_BLOCK_SPARSE>(                              \
+                              IS_BLOCK_SPARSE, NUM_THREADS>(                 \
       out, query, key_cache, value_cache, num_kv_heads, scale, block_tables, \
       seq_lens, max_seq_len, alibi_slopes, k_scale, v_scale, tp_rank,        \
       blocksparse_local_blocks, blocksparse_vert_stride,                     \
       blocksparse_block_size, blocksparse_head_sliding_step);
 
-#define CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE) \
-  if (is_block_sparse) {                                                   \
-    CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
-  } else {                                                                 \
-    CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
+#define CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE,           \
+                                       IS_FP8_KV_CACHE, IS_BLOCK_SPARSE) \
+  switch (num_threads) {                                                 \
+    case 128:                                                            \
+      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE,          \
+                       IS_BLOCK_SPARSE, 128);                            \
+      break;                                                             \
+    case 1024:                                                           \
+      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE,          \
+                       IS_BLOCK_SPARSE, 1024);                           \
+      break;                                                             \
+    default:                                                             \
+      TORCH_CHECK(false, "Unsupported num threads: ", num_threads);      \
+      break;                                                             \
+  }
+
+#define CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)  \
+  if (is_block_sparse) {                                                    \
+    CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, \
+                                   true);                                   \
+  } else {                                                                  \
+    CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, \
+                                   false);                                  \
   }
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
@@ -183,7 +202,7 @@ void paged_attention_v1(
     torch::Tensor& v_scale, const int64_t tp_rank,
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step) {
+    const int64_t blocksparse_head_sliding_step, const int64_t num_threads) {
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
 
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,

@@ -191,6 +191,9 @@ def test_paged_attention(
     # Using default kv_scale
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
+    # additional argument for v1/v2 pa kernel
+    num_threads = current_platform.attention_threads()
+
     # Call the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v1":
@@ -211,12 +214,12 @@ def test_paged_attention(
             v_scale,
         )
 
-        opcheck(torch.ops._C.paged_attention_v1,
-                (output, query, key_cache, value_cache, num_kv_heads, scale,
-                 block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
-                 kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
-                cond=(head_size == HEAD_SIZES[0]
-                      and block_size == BLOCK_SIZES[0]))
+        opcheck(
+            torch.ops._C.paged_attention_v1,
+            (output, query, key_cache, value_cache, num_kv_heads, scale,
+             block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
+             kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0, num_threads),
+            cond=(head_size == HEAD_SIZES[0] and block_size == BLOCK_SIZES[0]))
 
     elif version in ("v2", "rocm"):
         if current_platform.is_rocm() and version == "rocm":
@@ -234,6 +237,7 @@ def test_paged_attention(
             dtype=torch.float32,
         )
         max_logits = torch.empty_like(exp_sums)
+
         if version == "v2":
             ops.paged_attention_v2(
                 output,
@@ -255,13 +259,14 @@ def test_paged_attention(
                 v_scale,
             )
 
-            opcheck(torch.ops._C.paged_attention_v2,
-                    (output, exp_sums, max_logits, tmp_output, query,
-                     key_cache, value_cache, num_kv_heads, scale, block_tables,
-                     seq_lens, block_size, max_seq_len, alibi_slopes,
-                     kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
-                    cond=(head_size == HEAD_SIZES[0]
-                          and block_size == BLOCK_SIZES[0]))
+            opcheck(
+                torch.ops._C.paged_attention_v2,
+                (output, exp_sums, max_logits, tmp_output, query, key_cache,
+                 value_cache, num_kv_heads, scale, block_tables, seq_lens,
+                 block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
+                 k_scale, v_scale, 0, 0, 0, 64, 0, num_threads),
+                cond=(head_size == HEAD_SIZES[0]
+                      and block_size == BLOCK_SIZES[0]))
 
         else:
             ops.paged_attention_rocm(
