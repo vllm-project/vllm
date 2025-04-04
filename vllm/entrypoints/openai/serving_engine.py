@@ -489,6 +489,7 @@ class OpenAIServing:
             params=params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            control_vector_request=None,
         )
 
     async def _get_trace_headers(

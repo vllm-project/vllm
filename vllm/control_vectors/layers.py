@@ -21,8 +21,8 @@ class MLPWithControlVector(BaseLayerWithControlVector):
         super().__init__()
         self.base_layer = base_layer
         self.normalize = True
-        self.control_vectors = {}
-        self.active_vector: torch.Tensor = None
+        self.control_vectors: dict[int, torch.Tensor | int] = {}
+        self.active_vector: Optional[torch.Tensor] = None
 
     def set_normalization(self, normalize: bool) -> None:
         self.normalize = normalize
