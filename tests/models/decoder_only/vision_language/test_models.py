@@ -167,7 +167,7 @@ VLM_TEST_SETTINGS = {
             "cherry_blossom": "<image>What is the season?",  # noqa: E501
         }),
         multi_image_prompt="<image><image>Describe the two images in detail.",  # noqa: E501
-        max_model_len=8192,
+        max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}}

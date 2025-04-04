@@ -176,6 +176,8 @@ def test_chat(
             model,
             dtype=dtype,
             tokenizer_mode="mistral",
+            load_format="mistral",
+            config_format="mistral",
             max_model_len=max_model_len,
             limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
     ) as vllm_model:
@@ -198,22 +200,14 @@ def test_chat(
 
 
 @large_gpu_test(min_gb=48)
-@pytest.mark.parametrize(
-    "prompt,expected_ranges",
-    [(_create_engine_inputs_hf(IMG_URLS[:1]), [{
-        "offset": 11,
-        "length": 494
-    }]),
-     (_create_engine_inputs_hf(IMG_URLS[1:4]), [{
-         "offset": 11,
-         "length": 266
-     }, {
-         "offset": 277,
-         "length": 1056
-     }, {
-         "offset": 1333,
-         "length": 418
-     }])])
+@pytest.mark.parametrize("prompt,expected_ranges",
+                         [(_create_engine_inputs_hf(IMG_URLS[:1]),
+                           [PlaceholderRange(offset=11, length=494)]),
+                          (_create_engine_inputs_hf(IMG_URLS[1:4]), [
+                              PlaceholderRange(offset=11, length=266),
+                              PlaceholderRange(offset=277, length=1056),
+                              PlaceholderRange(offset=1333, length=418)
+                          ])])
 def test_multi_modal_placeholders(vllm_runner, prompt,
                                   expected_ranges: list[PlaceholderRange],
                                   monkeypatch) -> None:
