@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
@@ -60,6 +61,14 @@ class UniProcExecutor(ExecutorBase):
         # UniProcExecutor will always be healthy as long as
         # it's running.
         return
+
+    def add_control_vector(
+            self, control_vector_request: ControlVectorRequest) -> bool:
+        assert control_vector_request.adapter_id > 0
+        return self.driver_worker.add_control_vector(control_vector_request)
+
+    def remove_control_vector(self, cv_id: int) -> bool:
+        return self.driver_worker.remove_control_vector(cv_id)
 
 
 UniProcExecutorAsync = UniProcExecutor

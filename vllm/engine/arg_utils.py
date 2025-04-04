@@ -12,13 +12,17 @@ import torch
 
 import vllm.envs as envs
 from vllm import version
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
-                         DecodingConfig, DeviceConfig, HfOverrides,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelImpl, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
-                         SchedulerConfig, SpeculativeConfig, TaskOption,
-                         TokenizerPoolConfig, VllmConfig)
+                         ControlVectorConfig, DecodingConfig, DeviceConfig,
+                         HfOverrides, KVTransferConfig, LoadConfig, LoadFormat,
+                         LoRAConfig, ModelConfig, ModelImpl,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
+                         VllmConfig)
+# yapf: enable
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -160,6 +164,10 @@ class EngineArgs:
     enable_prompt_adapter: bool = False
     max_prompt_adapters: int = 1
     max_prompt_adapter_token: int = 0
+    enable_control_vector: bool = False
+    max_control_vectors: int = 1
+    normalize_control_vector: bool = False
+
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
@@ -736,6 +744,19 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_prompt_adapter_token,
                             help='Max number of PromptAdapters tokens')
+
+        parser.add_argument('--enable-control-vector',
+                            action='store_true',
+                            help='If True, enable handling of ControlVectors.')
+        parser.add_argument('--max-control-vectors',
+                            type=int,
+                            default=EngineArgs.max_control_vectors,
+                            help='Max number of Control Vectors in a batch.')
+        parser.add_argument('--normalize-control-vector',
+                            type=bool,
+                            default=EngineArgs.normalize_control_vector,
+                            help='Enable normalization of control vector')
+
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
@@ -1282,6 +1303,11 @@ class EngineArgs:
             max_prompt_adapter_token=self.max_prompt_adapter_token) \
                                         if self.enable_prompt_adapter else None
 
+        control_vector_config = ControlVectorConfig(
+            max_control_vectors=self.max_control_vectors,
+            normalize=self.normalize_control_vector,
+        ) if self.enable_control_vector else None
+
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend,
             reasoning_backend=self.reasoning_parser
@@ -1322,6 +1348,7 @@ class EngineArgs:
             decoding_config=decoding_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
+            control_vector_config=control_vector_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             additional_config=self.additional_config,

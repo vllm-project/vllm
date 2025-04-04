@@ -2506,6 +2506,17 @@ class PromptAdapterConfig:
 
 
 @dataclass
+class ControlVectorConfig:
+    max_control_vectors: int
+    adapter_dtype: Optional[torch.dtype] = torch.float16
+    normalize: bool = False
+
+    def __post_init__(self):
+        if self.max_control_vectors < 1:
+            raise ValueError("max_control_vectors must be >= 1")
+
+
+@dataclass
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
@@ -3392,6 +3403,7 @@ class VllmConfig:
     decoding_config: Optional[DecodingConfig] = None
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
+    control_vector_config: Optional[ControlVectorConfig] = None
     quant_config: Optional[QuantizationConfig] = None
     compilation_config: CompilationConfig = field(default=None,
                                                   init=True)  # type: ignore

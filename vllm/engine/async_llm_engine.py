@@ -14,6 +14,7 @@ from typing_extensions import deprecated
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VllmConfig)
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
@@ -471,6 +472,7 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request: Optional[LoRARequest] = None,
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            control_vector_request: Optional[ControlVectorRequest] = None,
             priority: int = 0,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
@@ -521,6 +523,7 @@ class _AsyncLLMEngine(LLMEngine):
             arrival_time=arrival_time,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            control_vector_request=control_vector_request,
             trace_headers=trace_headers,
             priority=priority,
         )
