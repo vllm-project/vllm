@@ -110,6 +110,7 @@ def paged_attention_rocm(
     scale: float,
     block_tables: torch.Tensor,
     seq_lens: torch.Tensor,
+    query_start_loc: Optional[torch.Tensor],
     block_size: int,
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
@@ -120,8 +121,9 @@ def paged_attention_rocm(
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
-                                      block_size, max_seq_len, alibi_slopes,
-                                      kv_cache_dtype, k_scale, v_scale)
+                                      query_start_loc, block_size, max_seq_len,
+                                      alibi_slopes, kv_cache_dtype, k_scale,
+                                      v_scale)
 
 
 def mla_decode_kvcache_cpu(
@@ -436,9 +438,12 @@ if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
 if hasattr(torch.ops._C, "ggml_dequantize"):
 
     @register_fake("_C::ggml_dequantize")
-    def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int,
-                              m: torch.SymInt,
-                              n: torch.SymInt) -> torch.Tensor:
+    def _ggml_dequantize_fake(
+            W: torch.Tensor,
+            quant_type: int,
+            m: torch.SymInt,
+            n: torch.SymInt,
+            dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         return torch.empty((m, n), dtype=torch.float16, device=W.device)
 
     @register_fake("_C::ggml_mul_mat_vec_a8")
@@ -1098,9 +1103,9 @@ def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # gguf
-def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int,
-                    n: int) -> torch.Tensor:
-    return torch.ops._C.ggml_dequantize(W, quant_type, m, n)
+def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int, n: int,
+                    dtype: Optional[torch.dtype]) -> torch.Tensor:
+    return torch.ops._C.ggml_dequantize(W, quant_type, m, n, dtype)
 
 
 def ggml_mul_mat_vec_a8(
@@ -1225,7 +1230,7 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indicies: torch.Tensor,
-                 gating_output: float) -> None:
+                 gating_output: torch.Tensor) -> None:
     torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
                                   token_expert_indicies, gating_output)
 
@@ -1338,9 +1343,9 @@ def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
 
 # custom ar
 def init_custom_ar(ipc_tensors: list[torch.Tensor], rank_data: torch.Tensor,
-                   rank: int, full_nvlink: bool) -> int:
+                   rank: int, fully_connected: bool) -> int:
     return torch.ops._C_custom_ar.init_custom_ar(ipc_tensors, rank_data, rank,
-                                                 full_nvlink)
+                                                 fully_connected)
 
 
 def all_reduce(fa: int, inp: torch.Tensor, out: torch.Tensor, reg_buffer: int,
@@ -1368,6 +1373,18 @@ def get_graph_buffer_ipc_meta(fa: int) -> tuple[list[int], list[int]]:
 def register_graph_buffers(fa: int, handles: list[list[int]],
                            offsets: list[list[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
+
+
+def allocate_shared_buffer_and_handle(size: int) -> tuple[int, torch.Tensor]:
+    return torch.ops._C_custom_ar.allocate_shared_buffer_and_handle(size)
+
+
+def open_mem_handle(mem_handle: torch.Tensor):
+    return torch.ops._C_custom_ar.open_mem_handle(mem_handle)
+
+
+def free_shared_buffer(ptr: int) -> None:
+    torch.ops._C_custom_ar.free_shared_buffer(ptr)
 
 
 def get_flash_mla_metadata(
