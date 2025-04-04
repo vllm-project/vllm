@@ -1218,17 +1218,24 @@ class EngineArgs:
             self.data_parallel_size_local
             is None) else self.data_parallel_size_local
 
+        # DP address, used in multi-node case for torch distributed group
+        # and ZMQ sockets.
+        data_parallel_address = self.data_parallel_address if (
+            self.data_parallel_address
+            is not None) else ParallelConfig.data_parallel_master_ip
+
         # This port is only used when there are remote data parallel engines,
         # otherwise the local IPC transport is used.
         data_parallel_rpc_port = self.data_parallel_rpc_port if (
             self.data_parallel_rpc_port
-            is not None) else (ParallelConfig.data_parallel_rpc_port)
+            is not None) else ParallelConfig.data_parallel_rpc_port
 
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_size_local=data_parallel_size_local,
+            data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
