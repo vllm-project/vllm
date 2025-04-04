@@ -75,6 +75,10 @@ class TpuPlatform(Platform):
         return False
 
     @classmethod
+    def get_lora_vocab_padding_size(cls) -> int:
+        return 0
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
