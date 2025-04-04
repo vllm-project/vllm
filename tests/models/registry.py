@@ -277,9 +277,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
-                                      extras={"2b": "h2oai/h2ovl-mississippi-2b"},  # noqa: E501
-                                      max_transformers_version="4.48",  # noqa: E501
-                                      transformers_version_reason="HF model is not compatible."),  # noqa: E501
+                                      extras={"2b": "h2oai/h2ovl-mississippi-2b"}),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
                                          extras={"2B": "OpenGVLab/InternVL2-2B"},  # noqa: E501
                                          trust_remote_code=True),

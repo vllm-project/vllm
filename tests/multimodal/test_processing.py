@@ -785,7 +785,6 @@ def test_find_update_tokens(
                         item_idx=0,
                         start_idx=6,
                         tokens=[32000, 32000],
-                        is_embed=None,
                     ),
                 ],
                 "pattern_4": [
@@ -794,7 +793,6 @@ def test_find_update_tokens(
                         item_idx=0,
                         start_idx=3,
                         tokens=[32000],
-                        is_embed=None,
                     ),
                 ],
             }
@@ -809,14 +807,12 @@ def test_find_update_tokens(
                         item_idx=0,
                         start_idx=1,
                         tokens=[32000, 32000],
-                        is_embed=None,
                     ),
                     PlaceholderFeaturesInfo(
                         modality="pattern_1",
                         item_idx=1,
                         start_idx=5,
                         tokens=[32000, 32000],
-                        is_embed=None,
                     ),
                 ],
                 "pattern_3": [
@@ -825,7 +821,6 @@ def test_find_update_tokens(
                         item_idx=0,
                         start_idx=7,
                         tokens=[1550, 918, 1550],
-                        is_embed=None,
                     ),
                 ],
                 # No match for pattern_4 as it has lower priority than pattern_1
@@ -840,14 +835,12 @@ def test_find_update_tokens(
                         item_idx=0,
                         start_idx=1,
                         tokens=[32000, 32000],
-                        is_embed=None,
                     ),
                     PlaceholderFeaturesInfo(
                         modality="pattern_1",
                         item_idx=1,
                         start_idx=3,
                         tokens=[32000, 32000],
-                        is_embed=None,
                     ),
                 ],
                 "pattern_4": [
@@ -856,7 +849,6 @@ def test_find_update_tokens(
                         item_idx=0,
                         start_idx=5,
                         tokens=[32000],
-                        is_embed=None,
                     ),
                 ],
                 "pattern_3": [
@@ -865,7 +857,6 @@ def test_find_update_tokens(
                         item_idx=0,
                         start_idx=6,
                         tokens=[1550, 918, 1550],
-                        is_embed=None,
                     ),
                 ],
             }
