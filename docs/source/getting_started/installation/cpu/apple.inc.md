@@ -12,7 +12,7 @@ There are no pre-built wheels or images for this device, so you must build vLLM 
 
 - OS: `macOS Sonoma` or later
 - SDK: `XCode 15.4` or later with Command Line Tools
-- Compiler: `Apple Clang >= 15.0.0`
+- Compiler: `Apple Clang >= 15.0.0` and `Apple Clang < 17.0.0`
 
 ## Set up using Python
 
@@ -50,6 +50,14 @@ If the build has error like the following snippet where standard C++ headers can
             |          ^~~~~~~~~
       1 error generated.
 ```
+
+If run with error like the following snippet you need to check clang version and install a compatible version.
+
+```text
+AttributeError: '_OpNamespace' '_C' object has no attribute 'silu_and_mul'
+```
+
+More information can be found in <gh-issue:15941>.
 
 ## Set up using Docker
 
