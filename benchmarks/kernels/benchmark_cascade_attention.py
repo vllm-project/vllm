@@ -92,7 +92,7 @@ if __name__ == '__main__':
                         type=str,
                         choices=["cuda", "triton"],
                         default="cuda")
-    parser.add_argument("--num-tokens", type=int, default=8)
+    parser.add_argument("--num-tokens", type=int, default=1000)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
     parser.add_argument("--head-size",

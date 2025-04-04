@@ -691,11 +691,22 @@ __global__ void merge_attn_states_kernel(
   // Load p_lse and s_lse, the both lse is same for each thread in a block.
   const int lse_offset = head_idx * num_tokens + token_idx;
   float p_lse = prefix_lse[lse_offset];
-  p_lse = p_lse == FLT_MAX ? -FLT_MAX : p_lse;
   float s_lse = suffix_lse[lse_offset];
-  s_lse = s_lse == FLT_MAX ? -FLT_MAX : s_lse;
+
+  const int output_offset =
+      token_idx * HEAD_SIZE * num_heads + head_idx * HEAD_SIZE;
+  const scalar_t* p_out_ptr = prefix_output + output_offset;
+  const scalar_t* s_out_ptr = suffix_output + output_offset;
+
+  // Each thread write back an scalar in a head.
+  scalar_t* output_ptr = output + output_offset;
+
+  float p_out_f = to_float(p_out_ptr[tid]);
+  float s_out_f = to_float(s_out_ptr[tid]);
 
   // Get the maximum for safe exp.
+  p_lse = p_lse == FLT_MAX ? -FLT_MAX : p_lse;
+  s_lse = s_lse == FLT_MAX ? -FLT_MAX : s_lse;
   float max_lse = fmaxf(p_lse, s_lse);
   p_lse -= max_lse;
   s_lse -= max_lse;
@@ -711,19 +722,10 @@ __global__ void merge_attn_states_kernel(
     output_lse[lse_offset] = out_lse;
   }
 
-  const int output_offset =
-      token_idx * HEAD_SIZE * num_heads + head_idx * HEAD_SIZE;
-  const scalar_t* p_out_ptr = prefix_output + output_offset;
-  const scalar_t* s_out_ptr = suffix_output + output_offset;
-
   // Compute scale firstly in case of overflow.
   float p_scale = p_exp_lse / out_se;
   float s_scale = s_exp_lse / out_se;
 
-  // Each thread write back an scalar in a head.
-  scalar_t* output_ptr = output + output_offset;
-  float p_out_f = to_float(p_out_ptr[tid]);
-  float s_out_f = to_float(s_out_ptr[tid]);
   float res = p_out_f * p_scale + s_out_f * s_scale;
   from_float(output_ptr[tid], res);
 }
