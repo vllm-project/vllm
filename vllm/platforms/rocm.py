@@ -291,8 +291,8 @@ class RocmPlatform(Platform):
             raise ValueError(f"Unsupported device type: {device}")
 
         torch.cuda.reset_peak_memory_stats(device_idx)
-        return torch.cuda.mem_get_info(device_idx)[1] - torch.cuda.mem_get_info(
-                device_idx)[0]
+        return torch.cuda.mem_get_info(
+            device_idx)[1] - torch.cuda.mem_get_info(device_idx)[0]
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
