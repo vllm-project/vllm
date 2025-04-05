@@ -385,7 +385,9 @@ def init_kv_cache_manager(
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
     enable_caching: bool = True,
-    num_preallocate_tokens: int = 64
+    caching_hash_algo: str = "builtin",
+    num_preallocate_tokens: int = 64,
+    log_stats: bool = False,
 ) -> Union[KVCacheManager, "HybridKVCacheManager"]:
     from vllm.v1.core.hybrid_kv_cache_manager import HybridKVCacheManager
     if len(kv_cache_config.kv_cache_groups) > 1:
@@ -393,12 +395,16 @@ def init_kv_cache_manager(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,
             enable_caching=enable_caching,
+            caching_hash_algo=caching_hash_algo,
             num_preallocate_tokens=num_preallocate_tokens,
+            log_stats=log_stats,
         )
     else:
         return KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,
             enable_caching=enable_caching,
+            caching_hash_algo=caching_hash_algo,
             num_preallocate_tokens=num_preallocate_tokens,
+            log_stats=log_stats,
         )

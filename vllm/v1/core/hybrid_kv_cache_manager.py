@@ -315,9 +315,9 @@ class HybridKVCacheManager:
 
             self.block_pool.cache_full_blocks(
                 request=request,
-                blocks=req_blocks,
-                block_hashes=self.req_to_block_hashes[request.request_id],
-                num_cached_blocks=num_cached_blocks,
+                blocks=req_blocks[i],
+                block_hashes=self.req_to_block_hashes[request.request_id][i],
+                num_cached_blocks=num_cached_blocks[i],
                 num_full_blocks=num_full_blocks_after_append,
                 block_size=self.specialized_managers[i].block_size,
                 hash_fn=self.caching_hash_fn,

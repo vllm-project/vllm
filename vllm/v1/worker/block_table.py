@@ -140,8 +140,9 @@ class MultiLayerBlockTable:
         def broadcast_func(block_ids: "MayMultiLayerBlockIDs", *args: P.args,
                            **kwargs: P.kwargs) -> None:
             for i, block_table in enumerate(self.block_tables):
-                getattr(block_table, f_name)(block_ids.get_virtual_layer(i),
-                                             *args, **kwargs)
+                getattr(block_table,
+                        f_name)(block_ids.get_block_id_of_group(i), *args,
+                                **kwargs)
 
         return broadcast_func
 

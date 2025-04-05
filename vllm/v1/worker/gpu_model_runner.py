@@ -31,7 +31,8 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
-                                        SlidingWindowSpec)
+                                        SlidingWindowSpec, KVCacheNewTensor,
+                                        KVCacheReuseTensor)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -437,7 +438,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends (namely MLA) may want to separate requests
         # based on if the attention computation will be compute-bound or
         # memory-bound. This gives them a hook to do that.
-        modified_batch = self.attn_metadata_builder.reorder_batch(
+        # NOTE: only same builder is supported now
+        modified_batch = self.attn_metadata_builders[0].reorder_batch(
             self.input_batch, scheduler_output)
         if modified_batch:
             self.input_batch.refresh_sampling_metadata()
@@ -521,7 +523,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): We use torch.index_select instead of np.take here
             # because torch.index_select is much faster than np.take for large
             # tensors.
-            block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
+            block_table_cpu = block_table.get_cpu_tensor()
             block_numbers = (
                 block_table_cpu.flatten()[block_table_indices].numpy())
             block_offsets = positions_np % block_size
@@ -560,15 +562,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.cascade_attn_enabled:
                 common_prefix_len = self._compute_cascade_attn_prefix_len(
                     num_scheduled_tokens,
-                    scheduler_output.num_common_prefix_blocks,
+                    scheduler_output.
+                    num_common_prefix_blocks[kv_cache_group_id],
                     kv_cache_group_spec.kv_cache_spec,
+                    self.attn_backends[kv_cache_group_id],
                 )
 
-            attn_metadata = self.attn_metadata_builder.build(
+            block_table = may_multi_layer_unwrapper(
+                self.input_batch.block_table, kv_cache_group_id)
+            attn_metadata = self.attn_metadata_builders[0].build(
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
                 common_prefix_len=common_prefix_len,
+                block_table=block_table,
             )
 
         use_spec_decode = len(
@@ -606,6 +613,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens: np.ndarray,
         num_common_prefix_blocks: int,
         kv_cache_spec: KVCacheSpec,
+        attn_backend: AttentionBackend,
     ) -> int:
         """Compute the length of the common prefix for cascade attention.
 
@@ -678,7 +686,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         use_sliding_window = (isinstance(kv_cache_spec, SlidingWindowSpec)
                               or (isinstance(kv_cache_spec, FullAttentionSpec)
                                   and kv_cache_spec.compute_as_sliding_window))
-        use_cascade = self.attn_backend.use_cascade_attention(
+        use_cascade = attn_backend.use_cascade_attention(
             common_prefix_len=common_prefix_len,
             query_lens=num_scheduled_tokens,
             num_query_heads=kv_cache_spec.num_query_heads,
@@ -1530,57 +1538,77 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def _initialize_kv_cache_buffer(
+            self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
-        Initialize KV cache based on `kv_cache_config`.
+        Initializes the KV cache buffer with the correct size. The buffer needs
+        to be reshaped to the desired shape before being used by the models.
         Args:
-            kv_cache_config: Configuration for the KV cache, including the KV
-            cache size of each layer
+            kv_cache_config: The KV cache config 
+        Returns:
+            dict[str, torch.Tensor]: A map between layer names to their 
+            corresponding memory buffer for KV cache.
+         """
+        kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        for layer_name, tensor_config in kv_cache_config.tensors.items():
+            if isinstance(tensor_config, KVCacheNewTensor):
+                # A new tensor with `tensor_config.size` bytes
+                kv_cache_raw_tensors[layer_name] = torch.zeros(
+                    tensor_config.size, dtype=torch.int8, device=self.device)
+        for layer_name, tensor_config in kv_cache_config.tensors.items():
+            if isinstance(tensor_config, KVCacheReuseTensor):
+                # Reuse a tensor from `kv_cache_raw_tensors`
+                kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[
+                    tensor_config.reused_layer_name]
+        assert len(kv_cache_raw_tensors) == len(
+            kv_cache_config.tensors), "Some layers are not initialized"
+        return kv_cache_raw_tensors
+
+    def _setup_kv_cache_shapes(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_raw_tensors: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
         """
-        self.kv_cache_config = kv_cache_config
-        self.initialize_attn_backend(kv_cache_config)
-        self.initialize_kv_cache_tensors(kv_cache_config)
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_tokens=self.max_num_tokens,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            vocab_size=self.model_config.get_vocab_size(),
-            kv_cache_config=kv_cache_config,
-        )
-
-    def initialize_kv_cache_tensors(self,
-                                    kv_cache_config: KVCacheConfig) -> None:
+        Reshape the KV cache tensors to the desired shape.
+        Args:
+            kv_cache_config: The KV cache config 
+            kv_cache_raw_tensors: The KV cache buffer of each layer, with 
+            correct size but uninitialized shape.
+        Returns:
+            Dict[str, torch.Tensor]: A map between layer names to their 
+            corresponding memory buffer for KV cache.
+        """
         kv_caches: dict[str, torch.Tensor] = {}
-
-        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            for layer_name in kv_cache_group.layer_names:
-                tensor_config = kv_cache_config.tensors[layer_name]
-                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
-                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
-                # `num_blocks` is the number of blocks the model runner can use.
-                # `kv_cache_config.num_blocks` is the number of blocks that
-                # KVCacheManager may allocate.
-                # Since different GPUs may have different number of layers and
-                # different memory capacities, `num_blocks` can be different on
-                # different GPUs, and `kv_cache_config.num_blocks` is set to
-                # the min of all `num_blocks`. Verify it here.
-                assert num_blocks >= kv_cache_config.num_blocks
-                if isinstance(kv_cache_spec, AttentionSpec):
+        for i, kv_cache_group_spec in enumerate(
+                kv_cache_config.kv_cache_groups):
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            for layer_name in kv_cache_group_spec.layer_names:
+                raw_tensor = kv_cache_raw_tensors[layer_name]
+                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                num_blocks = (raw_tensor.numel() //
+                              kv_cache_spec.page_size_bytes)
+                if isinstance(kv_cache_spec,
+                              (FullAttentionSpec, SlidingWindowSpec)):
                     kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
-                    kv_caches[layer_name] = torch.zeros(kv_cache_shape,
-                                                        dtype=dtype,
-                                                        device=self.device)
+                    kv_caches[layer_name] = kv_cache_raw_tensors[
+                        layer_name].view(dtype).view(kv_cache_shape)
                 else:
-                    # TODO: add new branches when introducing more types of
-                    # KV cache specs.
-                    raise ValueError("Unknown KV cache spec type.")
+                    raise NotImplementedError
+        return kv_caches
 
+    def initialize_kv_cache_tensors(self,
+                                    kv_cache_config: KVCacheConfig) -> None:
+        # TODO: docstring
+        # Initialize the memory buffer for KV cache
+        kv_cache_raw_tensors = self._initialize_kv_cache_buffer(
+            kv_cache_config)
+        # Change the memory buffer to the desired shape
+        kv_caches = self._setup_kv_cache_shapes(kv_cache_config,
+                                                kv_cache_raw_tensors)
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
@@ -1588,9 +1616,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         # TODO: docstring
-        assert (len(self.attn_backends) == 0
-                and len(self.attn_metadata_builders) == 0,
-                "already initialized")
+        assert len(self.attn_backends) == 0 and len(
+            self.attn_metadata_builders) == 0, "already initialized"
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if not isinstance(kv_cache_spec, AttentionSpec):
@@ -1619,6 +1646,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 weakref.proxy(self))
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
+
+        print("reorder_batch", [
+            id(builder.reorder_batch.__func__)
+            for builder in self.attn_metadata_builders
+        ])
+        print("is check", [
+            builder.reorder_batch.__func__
+            is self.attn_metadata_builders[0].reorder_batch.__func__
+            for builder in self.attn_metadata_builders
+        ])
+        assert all(builder.reorder_batch.__func__ is
+                   self.attn_metadata_builders[0].reorder_batch.__func__
+                   for builder in self.attn_metadata_builders), "TODO"
+
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize KV cache based on `kv_cache_config`.
+        Args:
+            kv_cache_config: Configuration for the KV cache, including the KV
+            cache size of each layer
+        """
+        self.kv_cache_config = kv_cache_config
+        self.initialize_attn_backend(kv_cache_config)
+        self.initialize_kv_cache_tensors(kv_cache_config)
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+            kv_cache_config=kv_cache_config,
+        )
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
