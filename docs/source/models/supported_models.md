@@ -24,7 +24,7 @@ vLLM also supports model implementations that are available in Transformers. Thi
 
 To check if the modeling backend is Transformers, you can simply do this:
 
-```python 
+```python
 from vllm import LLM
 llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
@@ -55,7 +55,7 @@ If your model is neither supported natively by vLLM or Transformers, you can sti
 Simply set `trust_remote_code=True` and vLLM will run any model on the Model Hub that is compatible with Transformers.
 Provided that the model writer implements their model in a compatible way, this means that you can run new models before they are officially supported in Transformers or vLLM!
 
-```python 
+```python
 from vllm import LLM
 llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of your model
 llm.apply_model(lambda model: print(model.__class__))
@@ -840,6 +840,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `Llama4ForConditionalGeneration`
+  * Llama-4-17B-Omni-Instruct
+  * T + I<sup>+</sup>
+  * `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc.
+  *
+  *
+  * ✅︎
 - * `LlavaForConditionalGeneration`
   * LLaVA-1.5
   * T + I<sup>E+</sup>
@@ -982,10 +989,10 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 :::
 
-<sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.  
-&nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:  
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`--hf-overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'`  
-<sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
+<sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.
+&nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`--hf-overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'`
+<sup>E</sup> Pre-computed embeddings can be inputted for this modality.
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{important}
