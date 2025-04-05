@@ -44,7 +44,6 @@ class UniformKVCacheBlocks(KVCacheBlocksInterface):
 
     def __add__(self,
                 other: "KVCacheBlocksInterface") -> "KVCacheBlocksInterface":
-        print(f"other: {other} type: {type(other)}")
         assert isinstance(other, UniformKVCacheBlocks)
         return UniformKVCacheBlocks(self.blocks + other.blocks)
 

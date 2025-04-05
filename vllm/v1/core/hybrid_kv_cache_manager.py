@@ -29,7 +29,10 @@ class HybridKVCacheBlocks(KVCacheBlocksInterface):
     def __add__(self,
                 other: "KVCacheBlocksInterface") -> "KVCacheBlocksInterface":
         assert isinstance(other, HybridKVCacheBlocks)
-        return HybridKVCacheBlocks(self.blocks + other.blocks)
+        return HybridKVCacheBlocks([
+            self_blocks_i + other_blocks_i
+            for self_blocks_i, other_blocks_i in zip(self.blocks, other.blocks)
+        ])
 
 
 class HybridKVCacheManager:

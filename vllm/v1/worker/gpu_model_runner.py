@@ -1684,8 +1684,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cache size of each layer
         """
         self.kv_cache_config = kv_cache_config
-        self.initialize_attn_backend(kv_cache_config)
-        self.initialize_kv_cache_tensors(kv_cache_config)
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -1695,6 +1693,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             kv_cache_config=kv_cache_config,
         )
+        self.initialize_attn_backend(kv_cache_config)
+        self.initialize_kv_cache_tensors(kv_cache_config)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

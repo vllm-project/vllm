@@ -206,8 +206,8 @@ class Attention(nn.Module):
             if self.use_direct_call:
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
-                # if isinstance(attn_metadata, dict):
-                #     attn_metadata = attn_metadata[self.layer_name]
+                if isinstance(attn_metadata, dict):
+                    attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 self.impl.forward(self,
                                   query,

@@ -101,7 +101,8 @@ class FlashAttentionMetadata:
 
 class FlashAttentionMetadataBuilder:
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: KVCacheSpec):
+    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: KVCacheSpec,
+                 persistent_block_table: BlockTable):
         self.runner = runner
 
     def reorder_batch(self, input_batch: "InputBatch",
