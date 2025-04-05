@@ -104,7 +104,7 @@ steps:
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
@@ -155,6 +155,7 @@ steps:
   - popd
 
 - label: Metrics, Tracing Test # 10min
+  mirror_hardwares: [amd]
   num_gpus: 2
   source_file_dependencies:
   - vllm/
@@ -173,7 +174,7 @@ steps:
 #####  1 GPU test  #####
 
 - label: Regression Test # 5min
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -284,7 +285,7 @@ steps:
     - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -310,7 +311,7 @@ steps:
   - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 1h each
-  mirror_hardwares: [amd]
+  # mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - vllm/attention
@@ -320,7 +321,7 @@ steps:
   parallelism: 4
 
 - label: Tensorizer Test # 11min
-  mirror_hardwares: [amd]
+  # mirror_hardwares: [amd]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
@@ -336,7 +337,7 @@ steps:
   source_file_dependencies:
   - benchmarks/
   commands:
-  - bash run-benchmarks.sh
+  - bash scripts/run-benchmarks.sh
 
 - label: Quantization Test # 33min
   source_file_dependencies:
@@ -371,7 +372,7 @@ steps:
 
 - label: OpenAI-Compatible Tool Use # 20 min
   fast_check: false
-  mirror_hardwares: [ amd ]
+  #mirror_hardwares: [ amd ]
   source_file_dependencies:
     - vllm/
     - tests/tool_use
@@ -463,6 +464,7 @@ steps:
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
+  mirror_hardwares: [amd]
   optional: true
   commands:
     - echo 'Testing custom models...'
@@ -474,6 +476,7 @@ steps:
 #####  multi gpus test  #####
 
 - label: Distributed Comm Ops Test # 7min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:

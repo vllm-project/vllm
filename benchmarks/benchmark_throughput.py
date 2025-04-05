@@ -11,10 +11,10 @@ from typing import Any, Optional, Union
 
 import torch
 import uvloop
-from benchmark_dataset import (BurstGPTDataset, ConversationDataset,
-                               InstructCoderDataset, RandomDataset,
-                               SampleRequest, ShareGPTDataset, SonnetDataset,
-                               VisionArenaDataset)
+from benchmark_dataset import (AIMODataset, BurstGPTDataset,
+                               ConversationDataset, InstructCoderDataset,
+                               RandomDataset, SampleRequest, ShareGPTDataset,
+                               SonnetDataset, VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -332,7 +332,10 @@ def get_requests(args, tokenizer):
             common_kwargs['dataset_subset'] = args.hf_subset
             common_kwargs['dataset_split'] = args.hf_split
             sample_kwargs["enable_multimodal_chat"] = True
-
+        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = AIMODataset
+            common_kwargs['dataset_subset'] = None
+            common_kwargs['dataset_split'] = "train"
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
@@ -467,12 +470,13 @@ def validate_args(args):
                 since --dataset-name is not 'hf'.",
                       stacklevel=2)
     elif args.dataset_name == "hf":
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm-chat", "VisionArenaDataset needs to use vllm-chat as the backend."  #noqa: E501
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm", "InstructCoder dataset needs to use vllm as the backend."  #noqa: E501
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
-            assert args.backend == "vllm-chat", "ConversationDataset needs to use vllm-chat as the backend."  #noqa: E501
+        if args.dataset_path in (
+                VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+                | ConversationDataset.SUPPORTED_DATASET_PATHS):
+            assert args.backend == "vllm-chat", f"{args.dataset_path} needs to use vllm-chat as the backend."  #noqa: E501
+        elif args.dataset_path in (InstructCoderDataset.SUPPORTED_DATASET_PATHS
+                                   | AIMODataset.SUPPORTED_DATASET_PATHS):
+            assert args.backend == "vllm", f"{args.dataset_path} needs to use vllm as the backend."  #noqa: E501
         else:
             raise ValueError(
                 f"{args.dataset_path} is not supported by hf dataset.")

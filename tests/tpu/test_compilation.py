@@ -30,7 +30,7 @@ def test_tpu_compilation():
                                          n=N,
                                          max_tokens=16)
 
-        llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
+        llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
                   max_num_batched_tokens=256,
                   max_model_len=256,
                   max_num_seqs=32,

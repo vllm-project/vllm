@@ -1275,6 +1275,10 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
+        # bitsandbytes pre-quantized model need a specific model loader
+        if model_config.quantization == "bitsandbytes":
+            self.quantization = self.load_format = "bitsandbytes"
+
         load_config = self.create_load_config()
 
         prompt_adapter_config = PromptAdapterConfig(
@@ -1521,8 +1525,9 @@ class EngineArgs:
         # PP is supported on V1 with Ray distributed executor,
         # but off for MP distributed executor for now.
         if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend == "mp"
-                and _warn_or_fallback("PP (MP distributed executor)")):
+                and self.distributed_executor_backend != "ray"):
+            name = "Pipeline Parallelism without Ray distributed executor"
+            _raise_or_fallback(feature_name=name, recommend_to_remove=False)
             return False
 
         # ngram is supported on V1, but off by default for now.
