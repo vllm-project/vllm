@@ -56,8 +56,11 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             # 1. Many experts (MarlinMoE gives poor performance when >= 16)
             # 2. Non-FP16 dtype (MarlinMoE only supports FP16)
             # 3. Actorder is not dynamic (g_idx is unsupported)
-            if (layer.local_num_experts >= 16 or layer.params_dtype
-                    != torch.float16) and weight_quant.actorder != "group":
+            # 4. Scaled are grouped (channelwise is unsupported)
+            if ((layer.local_num_experts >= 16
+                 or layer.params_dtype != torch.float16)
+                    and weight_quant.actorder != "group"
+                    and weight_quant.strategy == "group"):
                 return CompressedTensorsWNA16MoEMethod(quant_config)
             else:
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
@@ -837,6 +840,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self.num_bits = config.num_bits
         self.packed_factor = 32 // config.num_bits
         self.strategy = config.strategy
+        # channelwise is not supported by this kernel
+        assert config.strategy == "group"
         self.group_size = config.group_size
         # grouped actorder isn't supported by this kernel
         assert config.actorder != "group"
