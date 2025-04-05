@@ -671,9 +671,13 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         )
 
         if image_grid_thw is not None:
-            json_mapped["image_grid_thw"] = image_grid_thw # type: ignore[call-overload]
+            # type: ignore[call-overload]
+            # type: ignore[index]
+            json_mapped["image_grid_thw"] = image_grid_thw
         if video_grid_thw is not None:
-            json_mapped["video_grid_thw"] = video_grid_thw # type: ignore[call-overload]
+            # type: ignore[call-overload]
+            # type: ignore[index]
+            json_mapped["video_grid_thw"] = video_grid_thw
 
         return cast(BatchedTensorInputs, json_mapped)
 
