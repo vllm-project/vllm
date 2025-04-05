@@ -325,7 +325,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
-            if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+            pooling_params = new_req_data.pooling_params
+            if sampling_params and \
+                sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
@@ -338,6 +340,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
+                pooling_params=pooling_params,
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
@@ -1057,6 +1060,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]
+
+        if self.input_batch.pooling_reqs:
+            assert self.input_batch.num_reqs ==\
+                 len(self.input_batch.pooling_reqs), \
+            "Either all or none of the requests in" \
+            " a batch must be pooling request"
+
+            pooler_output = self.model.pooler(
+                hidden_states=hidden_states,
+                pooling_metadata=self.input_batch.pooling_metadata)
+
+            return ModelRunnerOutput(
+                req_ids=self.input_batch.req_ids,
+                req_id_to_index=self.input_batch.req_id_to_index,
+                sampled_token_ids=[],
+                spec_token_ids=[],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=pooler_output,
+            )
+
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Apply structured output bitmasks if present
@@ -1219,7 +1243,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
-        )
+            pooler_output=[])
 
     def generate_draft_token_ids(
         self,

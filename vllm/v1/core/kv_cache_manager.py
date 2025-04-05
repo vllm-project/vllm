@@ -126,7 +126,8 @@ class KVCacheManager:
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         self.prefix_cache_stats.requests += 1
-        if request.sampling_params.prompt_logprobs is None:
+        if request.sampling_params and \
+            request.sampling_params.prompt_logprobs is None:
             if len(block_hashes) * self.block_size == request.num_tokens:
                 # When prompt length is divisible by the block size and all
                 # blocks are cached, we need to recompute the last token. This

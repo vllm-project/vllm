@@ -10,11 +10,15 @@ from transformers import PretrainedConfig
 from typing_extensions import assert_never
 
 from vllm.config import PoolerConfig
-from vllm.model_executor.pooling_metadata import (PoolingMetadata,
-                                                  PoolingTensors)
+from vllm.model_executor.pooling_metadata import (  # noqa: E501
+    PoolingMetadata as V0PoolingMetadata)
+from vllm.model_executor.pooling_metadata import PoolingTensors
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
+from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
+
+PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 
 
 class PoolingType(IntEnum):
@@ -78,6 +82,8 @@ class SimplePooler(nn.Module):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> torch.Tensor:
+        if isinstance(pooling_metadata, V1PoolingMetadata):
+            return pooling_metadata.prompt_lens
         return PoolingTensors.from_pooling_metadata(
             pooling_metadata, hidden_states.device).prompt_lens
 
@@ -181,12 +187,27 @@ class StepPool(SimplePooler):
         self.step_tag_id = step_tag_id
         self.returned_token_ids = returned_token_ids
 
+    def get_prompt_token_ids(
+        self,
+        pooling_metadata: PoolingMetadata,
+    ) -> List[torch.Tensor]:
+        if isinstance(pooling_metadata, V1PoolingMetadata):
+            return [
+                pooling_metadata.prompt_token_ids[i, :num]
+                for i, num in enumerate(pooling_metadata.prompt_lens)
+            ]
+        return [
+            seq_data_i.prompt_token_ids
+            for seq_data_i in pooling_metadata.seq_data.values()
+        ]
+
     def extract_states(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
+        prompt_token_ids = self.get_prompt_token_ids(pooling_metadata)
 
         returned_token_ids = self.returned_token_ids
         if returned_token_ids is not None and len(returned_token_ids) > 0:
@@ -196,12 +217,11 @@ class StepPool(SimplePooler):
 
         offset = 0
         pooled_data = list[torch.Tensor]()
-        for prompt_len, seq_data_i in zip(prompt_lens,
-                                          pooling_metadata.seq_data.values()):
+        for i, prompt_len in enumerate(prompt_lens):
             pooled_data_i = hidden_states[offset:offset + prompt_len]
             if step_tag_id is not None:
-                token_ids = torch.tensor(seq_data_i.prompt_token_ids)
-                pooled_data_i = pooled_data_i[token_ids == step_tag_id]
+                pooled_data_i = pooled_data_i[prompt_token_ids[i] ==
+                                              step_tag_id]
 
             offset += prompt_len
             pooled_data.append(pooled_data_i)
@@ -287,6 +307,16 @@ class CrossEncodingPooler(nn.Module):
         self.default_activation_function = \
             get_cross_encoder_activation_function(config)
 
+    def get_prompt_lens(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> torch.Tensor:
+        if isinstance(pooling_metadata, V1PoolingMetadata):
+            return pooling_metadata.prompt_lens
+        return PoolingTensors.from_pooling_metadata(
+            pooling_metadata, hidden_states.device).prompt_lens
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -294,8 +324,7 @@ class CrossEncodingPooler(nn.Module):
     ) -> PoolerOutput:
         """Pools sentence pair scores from the hidden_states."""
 
-        prompt_lens = PoolingTensors.from_pooling_metadata(
-            pooling_metadata, hidden_states.device).prompt_lens
+        prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
 
         offset = 0
         pooled_data_lst = []

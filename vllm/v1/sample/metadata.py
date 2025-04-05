@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -41,3 +41,8 @@ class SamplingMetadata:
 
     # req_index -> bad_words_token_ids
     bad_words_token_ids: dict[int, list[list[int]]]
+
+
+@dataclass
+class PoolingMetadata:
+    additional_data: Optional[Any] = None

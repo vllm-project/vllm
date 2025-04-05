@@ -3,10 +3,13 @@
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Union, cast
 
-from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.sampling_params import RequestOutputKind
+import torch
+
+from vllm.outputs import (CompletionOutput, PoolingOutput,
+                          PoolingRequestOutput, RequestOutput)
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -28,28 +31,30 @@ class RequestOutputCollector:
 
     def __init__(self, output_kind: RequestOutputKind):
         self.aggregate = output_kind == RequestOutputKind.DELTA
-        self.output: Optional[RequestOutput] = None
+        self.output: Optional[Union[RequestOutput,
+                                    PoolingRequestOutput]] = None
         self.ready = asyncio.Event()
 
-    def put(self, output: RequestOutput) -> None:
+    def put(self, output: Union[RequestOutput, PoolingRequestOutput]) -> None:
         if self.output is None:
             self.output = output
             self.ready.set()
         elif self.aggregate:
             # Coalesce the outputs in delta case.
-            self.output.add(output)
+            cast(RequestOutput, self.output).add(cast(RequestOutput, output))
         else:
             # Just replace latest in non-delta case.
             self.output = output
 
-    async def get(self) -> RequestOutput:
+    async def get(self) -> Union[RequestOutput, PoolingRequestOutput]:
         while (output := self.output) is None:
             await self.ready.wait()
         self.output = None
         self.ready.clear()
         return output
 
-    def get_nowait(self) -> Optional[RequestOutput]:
+    def get_nowait(
+            self) -> Optional[Union[RequestOutput, PoolingRequestOutput]]:
         output = self.output
         if output is not None:
             self.output = None
@@ -60,7 +65,7 @@ class RequestOutputCollector:
 @dataclass
 class OutputProcessorOutput:
 
-    request_outputs: list[RequestOutput]
+    request_outputs: list[Union[RequestOutput, PoolingRequestOutput]]
     reqs_to_abort: list[str]
 
 
@@ -109,15 +114,20 @@ class RequestState:
         queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ) -> "RequestState":
-        if not request.sampling_params.detokenize:
+
+        sampling_params = request.sampling_params \
+            if request.sampling_params \
+                else SamplingParams.from_optional()
+        if not sampling_params.detokenize:
             tokenizer = None
+
         return cls(
             request_id=request.request_id,
             parent_req=parent_req,
             request_index=request_index,
             lora_name=(request.lora_request.name
                        if request.lora_request is not None else None),
-            output_kind=request.sampling_params.output_kind,
+            output_kind=sampling_params.output_kind,
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
             logprobs_processor=LogprobsProcessor.from_new_request(
@@ -128,8 +138,8 @@ class RequestState:
                 tokenizer=tokenizer,
                 request=request,
             ),
-            max_tokens_param=(request.sampling_params.max_tokens if
-                              request.sampling_params is not None else None),
+            max_tokens_param=(sampling_params.max_tokens
+                              if sampling_params is not None else None),
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
@@ -138,9 +148,10 @@ class RequestState:
     def make_request_output(
         self,
         new_token_ids: list[int],
+        pooling_output: Optional[torch.Tensor],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
-    ) -> Optional[RequestOutput]:
+    ) -> Optional[Union[RequestOutput | PoolingRequestOutput]]:
 
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -149,15 +160,20 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
-        completion_output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason)
-
         request_id = self.request_id
+        if pooling_output:
+            return self._new_request_output(
+                request_id, [self._new_pooling_output(pooling_output)],
+                finished)
+
+        output = self._new_completion_output(new_token_ids, finish_reason,
+                                             stop_reason)
+
         if self.parent_req is None:
-            outputs = [completion_output]
+            outputs = [output]
         else:
             request_id, outputs, finished = self.parent_req.get_outputs(
-                request_id, completion_output)
+                request_id, output)
             if not outputs:
                 return None
 
@@ -166,10 +182,19 @@ class RequestState:
     def _new_request_output(
         self,
         request_id: str,
-        outputs: list[CompletionOutput],
+        outputs: Union[list[CompletionOutput], list[PoolingOutput]],
         finished: bool,
-    ) -> RequestOutput:
+    ) -> RequestOutput | PoolingRequestOutput:
 
+        if isinstance(outputs[0], PoolingOutput):
+            assert len(outputs) == 1
+            return PoolingRequestOutput(
+                request_id=request_id,
+                outputs=outputs[0],
+                prompt=self.prompt,
+                prompt_token_ids=self.prompt_token_ids,
+                finished=finished,
+            )
         if self.output_kind == RequestOutputKind.DELTA:
             # Side effect: logprobs processor forgets prompt logprobs
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
@@ -181,7 +206,7 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=self.prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
-            outputs=outputs,
+            outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
         )
 
@@ -213,6 +238,13 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None)
+
+    def _new_pooling_output(
+        self,
+        pooling_output: torch.Tensor,
+    ) -> PoolingOutput:
+
+        return PoolingOutput(data=pooling_output)
 
 
 class OutputProcessor:
@@ -305,7 +337,7 @@ class OutputProcessor:
         **********************************************************
         """
 
-        request_outputs: list[RequestOutput] = []
+        request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
@@ -320,24 +352,28 @@ class OutputProcessor:
                                            iteration_stats)
 
             new_token_ids = engine_core_output.new_token_ids
+            pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
 
             req_state.is_prefilling = False
 
-            # 2) Detokenize the token ids into text and perform stop checks.
-            stop_string = req_state.detokenizer.update(
-                new_token_ids, finish_reason == FinishReason.STOP)
-            if stop_string:
-                finish_reason = FinishReason.STOP
-                stop_reason = stop_string
+            if not pooling_output:
+                # 2) Detokenize the token ids into text and perform stop checks.
+                stop_string = req_state.detokenizer.update(
+                    new_token_ids, finish_reason == FinishReason.STOP)
+                if stop_string:
+                    finish_reason = FinishReason.STOP
+                    stop_reason = stop_string
 
-            # 3) Compute sample and prompt logprobs for request, if required.
-            req_state.logprobs_processor.update_from_output(engine_core_output)
+                # 3) Compute sample and prompt logprobs for request,
+                # if required.
+                req_state.logprobs_processor.update_from_output(
+                    engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
-                    new_token_ids, finish_reason, stop_reason):
+                    new_token_ids, pooling_output, finish_reason, stop_reason):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)

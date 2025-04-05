@@ -344,10 +344,11 @@ class PoolingRequestOutput(Generic[_O]):
         finished (bool): A flag indicating whether the pooling is completed.
     """
 
-    def __init__(self, request_id: str, outputs: _O,
+    def __init__(self, request_id: str, outputs: _O, prompt: Optional[str],
                  prompt_token_ids: list[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
+        self.prompt = prompt
         self.finished = finished
         self.outputs = outputs
 
@@ -359,9 +360,10 @@ class PoolingRequestOutput(Generic[_O]):
         data = pooled_data.to(dtype=torch.float32, device="cpu")
         output = PoolingOutput(data)
         prompt_token_ids = seq_group.prompt_token_ids
+        prompt = seq_group.prompt
         finished = seq_group.is_finished()
 
-        return PoolingRequestOutput(seq_group.request_id, output,
+        return PoolingRequestOutput(seq_group.request_id, output, prompt,
                                     prompt_token_ids, finished)
 
     def __repr__(self):
@@ -426,6 +428,7 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
         return EmbeddingRequestOutput(
             request_id=request_output.request_id,
             outputs=EmbeddingOutput.from_base(request_output.outputs),
+            prompt=request_output.prompt,
             prompt_token_ids=request_output.prompt_token_ids,
             finished=request_output.finished,
         )
@@ -464,6 +467,7 @@ class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
         return ClassificationRequestOutput(
             request_id=request_output.request_id,
             outputs=ClassificationOutput.from_base(request_output.outputs),
+            prompt=request_output.prompt,
             prompt_token_ids=request_output.prompt_token_ids,
             finished=request_output.finished,
         )
@@ -503,6 +507,7 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
         return ScoringRequestOutput(
             request_id=request_output.request_id,
             outputs=ScoringOutput.from_base(request_output.outputs),
+            prompt=request_output.prompt,
             prompt_token_ids=request_output.prompt_token_ids,
             finished=request_output.finished,
         )

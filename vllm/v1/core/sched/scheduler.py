@@ -628,7 +628,8 @@ class Scheduler(SchedulerInterface):
                     break
 
             # Extract sample logprobs if needed.
-            if request.sampling_params.logprobs is not None and logprobs:
+            if request.sampling_params \
+                and request.sampling_params.logprobs is not None and logprobs:
                 # NOTE: once we support N tokens per step (spec decode),
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)

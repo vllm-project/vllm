@@ -3,6 +3,7 @@
 import enum
 from typing import TYPE_CHECKING, Optional, Union
 
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
@@ -26,7 +27,8 @@ class Request:
         multi_modal_inputs: Optional[list["MultiModalKwargs"]],
         multi_modal_hashes: Optional[list[str]],
         multi_modal_placeholders: Optional[list["PlaceholderRange"]],
-        sampling_params: SamplingParams,
+        sampling_params: Optional[SamplingParams],
+        pooling_params: Optional[PoolingParams],
         eos_token_id: Optional[int],
         arrival_time: float,
         lora_request: Optional["LoRARequest"] = None,
@@ -34,18 +36,25 @@ class Request:
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
+        self.pooling_params = pooling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
 
-        self.status = (RequestStatus.WAITING_FOR_FSM
-                       if sampling_params.guided_decoding is not None else
-                       RequestStatus.WAITING)
+        self.status = RequestStatus.WAITING
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
-        assert sampling_params.max_tokens is not None
-        self.max_tokens = sampling_params.max_tokens
+        if pooling_params is not None:
+            self.max_tokens = 1
+        elif sampling_params is not None:
+            assert sampling_params.max_tokens is not None
+            self.max_tokens = sampling_params.max_tokens
+            if sampling_params.guided_decoding is not None:
+                self.status = RequestStatus.WAITING_FOR_FSM
+        else:
+            raise ValueError(
+                "sampling_params and pooling_params can't both be set")
 
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
@@ -83,11 +92,13 @@ class Request:
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
             sampling_params=request.sampling_params,
+            pooling_params=request.pooling_params,
             eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
-                sampling_params=request.sampling_params),
+                sampling_params=request.sampling_params) \
+                    if request.sampling_params else None,
         )
 
     def append_output_token_ids(
@@ -126,7 +137,8 @@ class Request:
 
     @property
     def use_structured_output(self) -> bool:
-        return self.sampling_params.guided_decoding is not None
+        return self.sampling_params is not None and \
+            self.sampling_params.guided_decoding is not None
 
     def record_event(
         self,

@@ -5,10 +5,12 @@ import time
 from typing import Any, Optional, Union
 
 import msgspec
+import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
@@ -55,7 +57,8 @@ class EngineCoreRequest(
     mm_inputs: Optional[list[MultiModalKwargs]]
     mm_hashes: Optional[list[str]]
     mm_placeholders: Optional[list[PlaceholderRange]]
-    sampling_params: SamplingParams
+    sampling_params: Optional[SamplingParams]
+    pooling_params: Optional[PoolingParams]
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
@@ -97,6 +100,8 @@ class EngineCoreOutput(
 
     new_logprobs: Optional[LogprobsLists] = None
     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
+
+    pooling_output: Optional[torch.Tensor] = None
 
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None

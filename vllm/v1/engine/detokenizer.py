@@ -53,6 +53,8 @@ class IncrementalDetokenizer:
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
 
+        assert request.sampling_params is not None
+
         if tokenizer is None:
             return cls(token_ids=[])
 
