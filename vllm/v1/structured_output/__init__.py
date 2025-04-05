@@ -53,6 +53,11 @@ class StructuredOutputManager:
                 self.backend = XgrammarBackend(self.vllm_config)
             elif backend_name == "guidance":
                 self.backend = GuidanceBackend(self.vllm_config)
+            elif backend_name == "outlines":
+                from vllm.v1.structured_output.backend_outlines import (
+                    OutlinesBackend)
+                
+                self.backend = OutlinesBackend(self.vllm_config)
             else:
                 raise ValueError(
                     f"Unsupported structured output backend: {backend_name}")
