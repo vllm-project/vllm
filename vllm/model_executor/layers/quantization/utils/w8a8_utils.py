@@ -6,6 +6,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.model_executor.layers.quantization.kernels.fp8_inplace_scale import (
+    triton_fp8_inplace_scale)
 from vllm.platforms import current_platform
 
 # Input scaling factors are no longer optional in _scaled_mm starting
@@ -216,7 +218,11 @@ class Fp8LinearOp:
                     num_token_padding=self.output_padding,
                     use_per_token_if_dynamic=use_per_token_if_dynamic)
             else:
-                qinput, x_scale = input_2d, input_scale
+                assert (
+                    input_scale is not None and input_scale.shape.numel() == 1
+                ), "Only static per-tensor scaling implemented in this case."
+                qinput = triton_fp8_inplace_scale(input_2d, input_scale.item())
+                x_scale = input_scale
 
             per_tensor_weights = (weight_scale.numel() == 1)
             per_tensor_activations = (x_scale.numel() == 1)

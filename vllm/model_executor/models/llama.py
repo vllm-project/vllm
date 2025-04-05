@@ -39,8 +39,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -48,7 +46,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -185,11 +182,6 @@ class LlamaAttention(nn.Module):
         else:
             sliding_window = None
 
-        use_fp8 = isinstance(
-            quant_config, Fp8Config) or (isinstance(quant_config, QuarkConfig)
-                                         and quant_config.is_fp8_w8a8())
-        self.attn_fp8_out = current_platform.is_fp8_fnuz() and use_fp8
-
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -209,8 +201,6 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        self.attn._out_scale = (self.o_proj.input_scale
-                                if self.attn_fp8_out else None)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
