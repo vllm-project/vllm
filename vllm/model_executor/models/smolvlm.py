@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Dict, Literal, Optional, Set, Tuple, TypedDict, Union
 
@@ -18,15 +17,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize
+from vllm.multimodal.parse import ImageProcessorItems
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo,
                                         MultiModalDataItems,
                                         MultiModalFieldConfig,
-                                        PromptReplacement, PromptUpdate,
-                                        encode_tokens)
+                                        PromptReplacement, PromptUpdate)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -96,7 +93,6 @@ class SmolVLMProcessingInfo(Idefics3ProcessingInfo):
             kwargs["size"] = size
 
         return self.ctx.get_hf_processor(SmolVLMProcessor, **kwargs)
-
 
     def get_image_repl(
         self,
