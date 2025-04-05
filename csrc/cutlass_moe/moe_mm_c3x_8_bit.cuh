@@ -8,70 +8,14 @@
 
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 #include "cutlass_extensions/common.hpp"
-#include "get_group_starts.cuh"
+#include "moe_mm_c3x_common.cuh"
 
 using namespace cute;
 
 namespace {
 
-using ProblemShape =
-    cutlass::gemm::GroupProblemShape<cute::Shape<int, int, int>>;
-
-using ElementAccumulator = float;
-using ArchTag = cutlass::arch::Sm90;
-using OperatorClass = cutlass::arch::OpClassTensorOp;
-
-using LayoutA = cutlass::layout::RowMajor;
-using LayoutB = cutlass::layout::ColumnMajor;
-using LayoutC = cutlass::layout::RowMajor;
-
-template <typename ElementAB_, typename ElementC_,
-          template <typename, typename, typename> typename Epilogue_,
-          typename TileShape, typename ClusterShape, typename KernelSchedule,
-          typename EpilogueSchedule>
-struct cutlass_3x_group_gemm {
-  using ElementAB = ElementAB_;
-  using ElementC = void;
-  using ElementD = ElementC_;
-  using ElementAccumulator = float;
-
-  using Epilogue = Epilogue_<ElementAccumulator, ElementD, TileShape>;
-
-  using StrideC =
-      cute::remove_pointer_t<cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>>;
-
-  static constexpr int AlignmentAB =
-      128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementD>::value;
-
-  using EVTCompute = typename Epilogue::EVTCompute;
-
-  using CollectiveEpilogue =
-      typename cutlass::epilogue::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, TileShape, ClusterShape,
-          cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
-          ElementAccumulator, ElementC, LayoutC*, AlignmentC, ElementD,
-          LayoutC*, AlignmentC, EpilogueSchedule, EVTCompute>::CollectiveOp;
-
-  static constexpr size_t CEStorageSize =
-      sizeof(typename CollectiveEpilogue::SharedStorage);
-  using Stages = typename cutlass::gemm::collective::StageCountAutoCarveout<
-      static_cast<int>(CEStorageSize)>;
-
-  using CollectiveMainloop =
-      typename cutlass::gemm::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, ElementAB, LayoutA*, AlignmentAB, ElementAB,
-          LayoutB*, AlignmentAB, ElementAccumulator, TileShape, ClusterShape,
-          Stages, KernelSchedule>::CollectiveOp;
-
-  using KernelType = enable_sm90_only<cutlass::gemm::kernel::GemmUniversal<
-      ProblemShape, CollectiveMainloop, CollectiveEpilogue>>;
-
-  struct GemmKernel : public KernelType {};
-};
-
 template <typename Gemm>
-void cutlass_group_gemm_caller(
+void cutlass_moe_gemm_caller_8_bit(
     torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
@@ -98,9 +42,9 @@ void cutlass_group_gemm_caller(
   torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
 
-  run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
-                            a_scales_ptrs, b_scales_ptrs, a_tensors, b_tensors,
-                            out_tensors, a_scales, b_scales);
+  run_get_moe_gemm_starts_8_bit(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
+                                a_scales_ptrs, b_scales_ptrs, a_tensors,
+                                b_tensors, out_tensors, a_scales, b_scales);
 
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;

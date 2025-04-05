@@ -7,7 +7,7 @@
 
 constexpr uint64_t THREADS_PER_EXPERT = 512;
 
-__global__ void compute_problem_sizes(const int* __restrict__ topk_ids,
+__global__ void compute_problem_sizes(const int32_t* __restrict__ topk_ids,
                                       int32_t* problem_sizes1,
                                       int32_t* problem_sizes2,
                                       int32_t* atomic_buffer,
@@ -45,7 +45,7 @@ __global__ void compute_expert_offsets(
   }
 }
 
-__global__ void compute_arg_sorts(const int* __restrict__ topk_ids,
+__global__ void compute_arg_sorts(const int32_t* __restrict__ topk_ids,
                                   int32_t* input_permutation,
                                   int32_t* output_permutation,
                                   int32_t* atomic_buffer, const int topk_length,
