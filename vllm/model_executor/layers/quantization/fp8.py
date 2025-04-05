@@ -429,8 +429,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
-    supports_apply_router_weight_on_input: bool = True
-
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
@@ -775,6 +773,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
@@ -802,7 +801,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             activation=activation,
             use_fp8_w8a8=True,
             global_num_experts=global_num_experts,
-            apply_router_weight_on_input=self.apply_router_weight_on_input,
+            apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
             w1_scale=(layer.w13_weight_scale_inv
                       if self.block_quant else layer.w13_weight_scale),

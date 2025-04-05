@@ -97,12 +97,12 @@ def cutlass_moe_fp8(
     n = w2_q.size(1)
 
     topk = topk_ids.size(1)
-    assert topk == 1, \
-        "apply_router_weight_on_input is currently only implemented for topk=1"
 
     per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
         a2_scale.numel() != 1 if a2_scale is not None else False)
     if apply_router_weight_on_input:
+        assert topk == 1, \
+            "apply_router_weight_on_input is only implemented for topk=1"
         # TODO: this only works for topK=1, will need to update for topK>1
         a = a * topk_weights.to(out_dtype)
 
