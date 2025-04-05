@@ -1102,10 +1102,26 @@ class LLMEngine:
                 continue
 
             output: List[SequenceGroupOutput]
+
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
+                if self.model_config.task == "generate" and \
+                        output[0].hidden_states is not None:
+                    hidden_states = []
+                    for k in range(len(output)):
+                        hidden_states.append(
+                            outputs_by_sequence_group[i][k].hidden_states)
+                else:
+                    hidden_states = None
             else:
                 output = [outputs_by_sequence_group[0][i]]
+                if self.model_config.task == "generate" and \
+                        hasattr(outputs_by_sequence_group[0], "hidden_states") \
+                        and outputs_by_sequence_group[0].hidden_states \
+                        is not None:
+                    hidden_states = outputs_by_sequence_group[0].hidden_states
+                else:
+                    hidden_states = None
 
             if not is_async:
                 if self.scheduler_config.is_multi_step:
@@ -1152,10 +1168,12 @@ class LLMEngine:
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)
+
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
-                use_cache=self.use_cached_outputs)
+                use_cache=self.use_cached_outputs,
+                hidden_states=hidden_states)
             if request_output:
                 ctx.request_outputs.append(request_output)
 
