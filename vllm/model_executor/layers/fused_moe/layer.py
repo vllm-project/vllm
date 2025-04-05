@@ -44,6 +44,7 @@ class FusedMoeWeightScaleSupported(Enum):
 
 class FusedMoEMethodBase(QuantizeMethodBase):
     supports_apply_router_weight_on_input: bool = False
+    
 
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -495,16 +496,16 @@ class FusedMoE(torch.nn.Module):
         assert self.quant_method is not None
 
         # This is hacky, we should really refactor FusedMoEMethodBase
+        assert isinstance(self.quant_method, FusedMoEMethodBase)
         if apply_router_weight_on_input:
-            assert type(
-                self.quant_method).supports_apply_router_weight_on_input, (
+            quant_method_class = type(self.quant_method)
+            assert issubclass(quant_method_class, FusedMoEMethodBase)
+            assert quant_method_class.supports_apply_router_weight_on_input, (
                     f"apply_router_weight_on_input is not supported by "
-                    f"{type(self.quant_method)}")
-
-            self.quant_method.apply_router_weight_on_input = True
+                    f"{type(self.quant_method)}")   
+            setattr(self.quant_method, "apply_router_weight_on_input", True)
         else:
-            self.quant_method.apply_router_weight_on_input = False
-
+            setattr(self.quant_method, "apply_router_weight_on_input", False)
         moe_quant_params = {
             "num_experts": self.local_num_experts,
             "hidden_size": hidden_size,
