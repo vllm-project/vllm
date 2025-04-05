@@ -304,7 +304,7 @@ class Processor:
             raise ValueError(
                 "Token id {} is out of vocabulary".format(max_input_id))
 
-        if len(prompt_ids) >= self.model_config.max_model_len:
+        if len(prompt_ids) > self.model_config.max_model_len:
             raise ValueError(
                 f"Prompt length of {len(prompt_ids)} is longer than the "
                 f"maximum model length of {self.model_config.max_model_len}.")
