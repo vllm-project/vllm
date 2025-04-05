@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import logging
 import os
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
@@ -34,8 +33,7 @@ from vllm.v1.engine.output_processor import (OutputProcessor,
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
-                                     StatLoggerBase)
+from vllm.v1.metrics.loggers import StatLoggerBase, setup_default_loggers
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -53,7 +51,28 @@ class AsyncLLM(EngineClient):
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
+        stat_loggers: Optional[list[StatLoggerBase]] = None,
     ) -> None:
+        """
+        Create an AsyncLLM.
+
+        Args:
+            vllm_config (VllmConfig)
+            executor_class (Executor)
+            log_stats (bool): Whether to log stats.
+            usage_context (UsageContext): Usage context of the LLM.
+            mm_registry (MultiModalRegistry): Multi-modal registry.
+            use_cached_outputs (bool): Whether to use cached outputs.
+            log_requests (bool): Whether to log requests.
+            start_engine_loop (bool): Whether to start the engine loop.
+            stat_loggers (dict[str, StatLoggerBase]): customized stat loggers
+                for the LLM. PLEASE BE AWARE THAT STAT LOGGER IS NOT STABLE
+                IN V1, AND ITS BASE CLASS INTERFACE MIGHT CHANGE.
+                If not provided, default stat loggers will be used.
+
+        Returns:
+            None
+        """
         if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
@@ -69,15 +88,12 @@ class AsyncLLM(EngineClient):
         self.log_stats = log_stats
 
         # Set up stat loggers; independent set for each DP rank.
-        self.stat_loggers: list[list[StatLoggerBase]] = []
-        if self.log_stats:
-            for i in range(vllm_config.parallel_config.data_parallel_size):
-                loggers: list[StatLoggerBase] = []
-                if logger.isEnabledFor(logging.INFO):
-                    loggers.append(LoggingStatLogger(engine_index=i))
-                loggers.append(
-                    PrometheusStatLogger(vllm_config, engine_index=i))
-                self.stat_loggers.append(loggers)
+        self.stat_loggers: list[list[StatLoggerBase]] = setup_default_loggers(
+            vllm_config=vllm_config,
+            log_stats=self.log_stats,
+            engine_num=vllm_config.parallel_config.data_parallel_size,
+            custom_stat_loggers=stat_loggers,
+        )
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -148,6 +164,7 @@ class AsyncLLM(EngineClient):
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[list[StatLoggerBase]] = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
@@ -163,6 +180,7 @@ class AsyncLLM(EngineClient):
             log_stats=not engine_args.disable_log_stats,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
+            stat_loggers=stat_loggers,
         )
 
     def shutdown(self):
