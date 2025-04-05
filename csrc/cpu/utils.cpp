@@ -4,6 +4,9 @@
   #include <string>
   #include <sched.h>
 #endif
+#include <unistd.h>
+#include <sys/syscall.h>
+#define gettid() syscall(SYS_gettid)
 
 #include "cpu_types.hpp"
 
