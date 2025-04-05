@@ -20,8 +20,8 @@ static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
       static_cast<float>(std::numeric_limits<int8_t>::max());
   // round
   float dst = std::nearbyint(x);
-  // saturate
-  dst = std::clamp(dst, i8_min, i8_max);
+  // saturate - custom implementation for gtx1100? to avoid std::clamp
+  dst = dst < i8_min ? i8_min : (dst > i8_max ? i8_max : dst);
   return static_cast<int8_t>(dst);
 #else
   // CUDA path
