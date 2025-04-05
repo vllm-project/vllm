@@ -43,6 +43,7 @@ class FusedMoeWeightScaleSupported(Enum):
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
+    supports_apply_router_weight_on_input: bool = False
 
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -73,6 +74,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
+    supports_apply_router_weight_on_input: bool = True
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -202,15 +204,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        return fused_experts(hidden_states=x,
-                             w1=layer.w13_weight,
-                             w2=layer.w2_weight,
-                             topk_weights=topk_weights,
-                             topk_ids=topk_ids,
-                             inplace=True,
-                             activation=activation,
-                             global_num_experts=global_num_experts,
-                             expert_map=expert_map)
+        return fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=True,
+            activation=activation,
+            apply_router_weight_on_input=self.apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map)
 
     def forward_cpu(
         self,
@@ -231,6 +235,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         **kwargs,
     ):
         assert activation == "silu", f"{activation} is not supported."
+        assert self.apply_router_weight_on_input is False
         return layer.ipex_fusion(
             x,
             use_grouped_topk,
@@ -266,6 +271,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert topk_group is None
         assert custom_routing_function is None
         assert layer is not None
+        assert self.apply_router_weight_on_input is False
         if scoring_func != "softmax":
             raise NotImplementedError(
                 "Only softmax scoring function is supported for HPU.")
@@ -296,6 +302,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert num_expert_group is None
         assert topk_group is None
         assert custom_routing_function is None
+        assert self.apply_router_weight_on_input is False
         if scoring_func != "softmax":
             raise NotImplementedError(
                 "Only softmax scoring function is supported for TPU.")
@@ -402,6 +409,7 @@ class FusedMoE(torch.nn.Module):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
     ):
         super().__init__()
 
@@ -485,6 +493,17 @@ class FusedMoE(torch.nn.Module):
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None
+
+        # This is hacky, we should really refactor FusedMoEMethodBase
+        if apply_router_weight_on_input:
+            assert type(
+                self.quant_method).supports_apply_router_weight_on_input, (
+                    f"apply_router_weight_on_input is not supported by "
+                    f"{type(self.quant_method)}")
+
+            self.quant_method.apply_router_weight_on_input = True
+        else:
+            self.quant_method.apply_router_weight_on_input = False
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,

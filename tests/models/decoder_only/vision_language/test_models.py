@@ -536,6 +536,22 @@ VLM_TEST_SETTINGS = {
             limit_mm_per_prompt={"image": 1},
         )],
     ),
+    "llama4": VLMTestInfo(
+        # FIXME: meta-llama/Llama-4-Scout-17B-16E-Instruct
+        models=["ll-re/Llama-4-Scout-17B-16E-Instruct"],
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{img_prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n", # noqa: E501
+        img_idx_to_prompt=lambda _: "<|image|>",
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        distributed_executor_backend="mp",
+        image_size_factors=[(.25, 0.5, 1.0)],
+        hf_model_kwargs={"device_map": "auto"},
+        max_model_len=8192,
+        max_num_seqs=4,
+        dtype="bfloat16",
+        auto_cls=AutoModelForImageTextToText,
+        tensor_parallel_size=8,
+        vllm_runner_kwargs={"gpu_memory_utilization": 0.8},
+    ),
 }
 # yapf: enable
 

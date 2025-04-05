@@ -13,7 +13,7 @@ VLM_IMAGES_DIR = "vision_model_images"
 
 @dataclass(frozen=True)
 class ImageAsset:
-    name: Literal["stop_sign", "cherry_blossom"]
+    name: Literal["stop_sign", "cherry_blossom", "bird", "blue_flowers"]
 
     @property
     def pil_image(self) -> Image.Image:
