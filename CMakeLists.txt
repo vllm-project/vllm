@@ -608,21 +608,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
-    set(MARLIN_MOE_SRC
-        "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.cu"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.cu"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4.h"
-        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4.cu"
-        "csrc/moe/marlin_moe_ops.cu")
-
+    file(GLOB MOE_WNAA16_MARLIN_SRC "csrc/moe/marlin_moe_wna16/*.cu")
     set_gencode_flags_for_srcs(
-      SRCS "${MARLIN_MOE_SRC}"
+      SRCS "${MOE_WNAA16_MARLIN_SRC}"
       CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
 
-    list(APPEND VLLM_MOE_EXT_SRC "${MARLIN_MOE_SRC}")
+    list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
+
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
