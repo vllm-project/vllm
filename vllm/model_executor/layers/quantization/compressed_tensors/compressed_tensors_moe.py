@@ -52,7 +52,12 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             "input_activations")
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
-            if layer.local_num_experts > 32:
+            # Prefer to use the non-marlin kernel when:
+            # 1. Many experts (MarlinMoE gives poor performance when >= 16)
+            # 2. Non-FP16 dtype (MarlinMoE only supports FP16)
+            # 3. Actorder is not dynamic (g_idx is unsupported)
+            if (layer.local_num_experts >= 16 or layer.params_dtype
+                    != torch.float16) and weight_quant.actorder != "group":
                 return CompressedTensorsWNA16MoEMethod(quant_config)
             else:
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
@@ -833,7 +838,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self.packed_factor = 32 // config.num_bits
         self.strategy = config.strategy
         self.group_size = config.group_size
-        self.actorder = config.actorder
+        # grouped actorder isn't supported by this kernel
+        assert config.actorder != "group"
         assert config.symmetric, (
             "Only symmetric quantization is supported for MoE")
 
@@ -873,9 +879,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                                        requires_grad=False)
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        # grouped actorder isn't supported by this kernel
-        assert self.actorder != "group"
 
         w2_scales_size = intermediate_size_per_partition
 
