@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_TPU_VALIDATE_DYNAMIC_INPUTS = False
 
 
 def get_default_cache_root():
@@ -692,6 +693,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+
+    # Will slow down performance so only enable during tests and debugging.
+    "VLLM_TPU_VALIDATE_DYNAMIC_INPUTS":
+    lambda: int(os.environ["VLLM_TPU_VALIDATE_DYNAMIC_INPUTS"])
+    if "VLLM_TPU_VALIDATE_DYNAMIC_INPUTS" in os.environ else 0,
 }
 
 # end-env-vars-definition
