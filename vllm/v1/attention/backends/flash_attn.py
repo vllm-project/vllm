@@ -11,10 +11,10 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
-from vllm.core.block.block_table import BlockTable
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
+from vllm.v1.worker.block_table import BlockTable
 from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version)
 
@@ -115,7 +115,7 @@ class FlashAttentionMetadataBuilder:
         seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
                                                           non_blocking=True)
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
+        slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(
             self.runner.device, non_blocking=True).long()
 
         use_cascade = common_prefix_len > 0

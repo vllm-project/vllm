@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections import defaultdict
-from collections.abc import Iterable
 from typing import Optional
 
 from vllm.logger import init_logger
@@ -208,9 +207,9 @@ class HybridKVCacheManager:
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
         removed_blocks = [
-            manager.remove_skipped_blocks(req_blocks,
+            manager.remove_skipped_blocks(req_blocks[i],
                                           request.num_computed_tokens)
-            for manager in self.specialized_managers
+            for i, manager in enumerate(self.specialized_managers)
         ]
         self._free_blocks(removed_blocks)
 
@@ -225,8 +224,8 @@ class HybridKVCacheManager:
             num_required_blocks_i = cdiv(
                 num_computed_tokens + num_tokens,
                 self.specialized_managers[i].block_size)
-            num_new_blocks.append((num_required_blocks_i - len(req_blocks[i]) -
-                                   len(new_computed_blocks[i])))
+            num_new_blocks.append(num_required_blocks_i - len(req_blocks[i]) -
+                                  len(new_computed_blocks[i]))
         total_num_new_blocks = sum(max(x, 0) for x in num_new_blocks)
 
         # If a computed block of a request is an eviction candidate (in the
@@ -244,12 +243,8 @@ class HybridKVCacheManager:
         if self.enable_caching:
             for blocks in new_computed_blocks:
                 self.block_pool.touch(blocks)
-            else:
-                assert all(len(blks) == 0 for blks in new_computed_blocks), (
-                    "Computed blocks should be empty when "
-                    "prefix caching is disabled")
         else:
-            assert not new_computed_blocks, (
+            assert all(len(blks) == 0 for blks in new_computed_blocks), (
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 

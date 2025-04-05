@@ -11,7 +11,8 @@ import torch.distributed
 import torch.nn as nn
 
 from vllm.attention import AttentionType, get_attn_backend
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadataBuilder
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadataBuilder)
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
@@ -25,14 +26,14 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LayerBlockType, LazyLoader, cdiv,
-                        check_use_alibi, is_pin_memory_available)
+                        GiB_bytes, LazyLoader, cdiv, check_use_alibi,
+                        is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheSpec,
-                                        SlidingWindowSpec, KVCacheNewTensor,
-                                        KVCacheReuseTensor)
+                                        KVCacheConfig, KVCacheNewTensor,
+                                        KVCacheReuseTensor, KVCacheSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -220,11 +221,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                          device="cpu",
                                          pin_memory=self.pin_memory)
         self.positions_np = self.positions_cpu.numpy()
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int32,
-                                            device="cpu",
-                                            pin_memory=self.pin_memory)
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                                dtype=torch.int32,
                                                device="cpu",
@@ -428,7 +424,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[FlashAttentionMetadata, torch.Tensor,
+    ) -> tuple[dict[str, FlashAttentionMetadata], torch.Tensor,
                Optional[SpecDecodeMetadata]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -527,9 +523,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_numbers = (
                 block_table_cpu.flatten()[block_table_indices].numpy())
             block_offsets = positions_np % block_size
-            np.add(block_numbers * block_size,
-                   block_offsets,
-                   out=self.slot_mapping_np[:total_num_scheduled_tokens])
+            np.add(
+                block_numbers * block_size,
+                block_offsets,
+                out=block_table.slot_mapping_np[:total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -562,21 +559,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.cascade_attn_enabled:
                 common_prefix_len = self._compute_cascade_attn_prefix_len(
                     num_scheduled_tokens,
-                    scheduler_output.
-                    num_common_prefix_blocks[kv_cache_group_id],
+                    may_multi_layer_unwrapper(
+                        scheduler_output.num_common_prefix_blocks,
+                        kv_cache_group_id),
                     kv_cache_group_spec.kv_cache_spec,
                     self.attn_backends[kv_cache_group_id],
                 )
 
             block_table = may_multi_layer_unwrapper(
                 self.input_batch.block_table, kv_cache_group_id)
-            attn_metadata = self.attn_metadata_builders[0].build(
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                common_prefix_len=common_prefix_len,
-                block_table=block_table,
-            )
+            attn_metadata_i = (
+                self.attn_metadata_builders[kv_cache_group_id].build(
+                    num_reqs=num_reqs,
+                    num_actual_tokens=total_num_scheduled_tokens,
+                    max_query_len=max_num_scheduled_tokens,
+                    common_prefix_len=common_prefix_len,
+                    block_table=block_table,
+                ))
+            for layer_name in kv_cache_group_spec.layer_names:
+                attn_metadata[layer_name] = attn_metadata_i
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -586,7 +587,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            logits_indices = attn_metadata.query_start_loc[1:] - 1
+            # TODO: add note for attn_metadata_i
+            logits_indices = attn_metadata_i.query_start_loc[1:] - 1
             spec_decode_metadata = None
         else:
             # Get the number of draft tokens for each request.
@@ -996,7 +998,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
-        attn_metadata.num_input_tokens = num_input_tokens
+
+        for kv_cache_group_spec in self.kv_cache_config.kv_cache_groups:
+            # TODO: notes for use layer_names[0]
+            layer_name = kv_cache_group_spec.layer_names[0]
+            attn_metadata[layer_name].num_input_tokens = num_input_tokens
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -1647,15 +1653,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
 
-        print("reorder_batch", [
-            id(builder.reorder_batch.__func__)
-            for builder in self.attn_metadata_builders
-        ])
-        print("is check", [
-            builder.reorder_batch.__func__
-            is self.attn_metadata_builders[0].reorder_batch.__func__
-            for builder in self.attn_metadata_builders
-        ])
         assert all(builder.reorder_batch.__func__ is
                    self.attn_metadata_builders[0].reorder_batch.__func__
                    for builder in self.attn_metadata_builders), "TODO"

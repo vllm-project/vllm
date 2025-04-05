@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import Callable, Concatenate, ParamSpec, Union
+
 import numpy as np
 import torch
 
@@ -106,8 +107,8 @@ class MultiLayerBlockTable:
     commit: Callable[P, None]
     clear: Callable[P, None]
 
-    append_row: Callable[Concatenate["MayMultiLayerBlockIDs", P], None]
-    add_row: Callable[Concatenate["MayMultiLayerBlockIDs", P], None]
+    append_row: Callable[Concatenate[list[int], P], None]
+    add_row: Callable[Concatenate[list[int], P], None]
 
     def __init__(self, max_num_reqs: int, max_num_blocks_per_req: list[int],
                  max_num_tokens: int, pin_memory: bool, device: torch.device,
@@ -134,15 +135,12 @@ class MultiLayerBlockTable:
         return broadcast_func
 
     def _make_broadcast_func_with_block_ids(
-        self, f_name: str
-    ) -> Callable[Concatenate["MayMultiLayerBlockIDs", P], None]:
+            self, f_name: str) -> Callable[Concatenate[list[int], P], None]:
 
-        def broadcast_func(block_ids: "MayMultiLayerBlockIDs", *args: P.args,
+        def broadcast_func(block_ids: list[int], *args: P.args,
                            **kwargs: P.kwargs) -> None:
             for i, block_table in enumerate(self.block_tables):
-                getattr(block_table,
-                        f_name)(block_ids.get_block_id_of_group(i), *args,
-                                **kwargs)
+                getattr(block_table, f_name)(block_ids[i], *args, **kwargs)
 
         return broadcast_func
 
