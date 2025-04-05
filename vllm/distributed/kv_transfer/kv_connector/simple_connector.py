@@ -8,13 +8,15 @@ MooncakePipe.
 
 But the logic can be extended to support other pipe and lookup buffer.
 """
+import re
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
     SimpleBuffer)
 from vllm.logger import init_logger
@@ -33,6 +35,7 @@ class SimpleConnector(KVConnectorBase):
         rank: int,
         local_rank: int,
         config: VllmConfig,
+        world_group,
     ):
 
         self.config = config.kv_transfer_config
@@ -71,20 +74,31 @@ class SimpleConnector(KVConnectorBase):
         self.producer_signal_pipe: Union[PyNcclPipe, MooncakePipe]
         self.consumer_signal_pipe: Union[PyNcclPipe, MooncakePipe]
 
-        # 2 pipes for every rank in the world
-        port_offset_base = 2 * rank
+        self._broadcast_and_enhance_kv_config(rank, config, world_group)
 
+        self.kv_group_rank = self._get_kv_group_rank(self.config.kv_rank, rank, self.config)
+        self.tp_size = config.parallel_config.tensor_parallel_size
+
+        # 2 pipes for every rank in the world
+        if self.config.is_kv_producer:
+            port_offset_base = 2 * rank + 1
+        else:
+            port_offset_base = 2 * (rank // self.config.tensor_parallel_multiplier) + 1
+
+        self.local_kv_rank = rank % self.config.tensor_parallel_multiplier
         # In disaggregated prefill, the prefill vLLM only uses send pipe
         # and the decode vLLM only uses recv pipe
         if self.config.is_kv_producer:
 
             if self.config.kv_connector == "PyNcclConnector":
                 self.producer_data_pipe = PyNcclPipe(
+                    kv_group_rank=self.kv_group_rank,
                     local_rank=local_rank,
                     config=self.config,
                     port_offset=port_offset_base,
                 )
                 self.producer_signal_pipe = PyNcclPipe(
+                    kv_group_rank=self.kv_group_rank,
                     local_rank=local_rank,
                     config=self.config,
                     port_offset=port_offset_base + 1,
@@ -108,11 +122,13 @@ class SimpleConnector(KVConnectorBase):
             # its recv pipe to the send pipe of KV producder
             if self.config.kv_connector == "PyNcclConnector":
                 self.consumer_data_pipe = PyNcclPipe(
+                    kv_group_rank=self.kv_group_rank,
                     local_rank=local_rank,
                     config=self.config,
                     port_offset=port_offset_base,
                 )
                 self.consumer_signal_pipe = PyNcclPipe(
+                    kv_group_rank=self.kv_group_rank,
                     local_rank=local_rank,
                     config=self.config,
                     port_offset=port_offset_base + 1,
@@ -131,21 +147,25 @@ class SimpleConnector(KVConnectorBase):
                 self.config.kv_buffer_size,
             )
 
-    def select(self, input_tokens: Optional[torch.Tensor],
+    def select(self, source_rank: int, input_tokens: Optional[torch.Tensor],
                roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+
+        logger.info("Selecting KV caches and hidden states for source rank %d", source_rank)
 
         assert self.consumer_buffer is not None, "Please initialize the "\
             "consumer buffer before calling select."
-        return self.consumer_buffer.drop_select(input_tokens, roi)
+        return self.consumer_buffer.drop_select(source_rank, self.local_kv_rank, input_tokens, roi)
 
-    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
+    def insert(self, kv_group_rank: int, target_rank: int, input_tokens: torch.Tensor, roi: torch.Tensor,
                key: torch.Tensor, value: torch.Tensor,
                hidden: torch.Tensor) -> None:
+
+        logger.info("Inserting KV caches and hidden states for kv_group_rank %d, target rank %d", kv_group_rank, target_rank)
 
         assert self.producer_buffer is not None, "Please initialize the "\
             "producer buffer before calling insert."
 
-        self.producer_buffer.insert(input_tokens, roi, key, value, hidden)
+        self.producer_buffer.insert(kv_group_rank, target_rank, input_tokens, roi, key, value, hidden)
 
     def send_kv_caches_and_hidden_states(
         self,
@@ -161,12 +181,20 @@ class SimpleConnector(KVConnectorBase):
         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
+        request_ids = list(model_input.request_ids_to_seq_ids.keys())
 
         model_config = model_executable.model.config
-        num_heads = int(model_config.num_key_value_heads / self.tp_size)
-        hidden_size = model_config.hidden_size
-        num_attention_heads = model_config.num_attention_heads
-        head_size = int(hidden_size / num_attention_heads)
+        is_deepseek = "deepseek" in model_config.architectures[0].lower()
+        if not is_deepseek:
+            num_heads = int(model_config.num_key_value_heads / self.tp_size)
+            hidden_size = model_config.hidden_size
+            num_attention_heads = model_config.num_attention_heads
+            head_size = int(hidden_size / num_attention_heads)
+        else:
+            num_heads = int(model_config.num_key_value_heads / self.tp_size)
+            hidden_size = model_config.hidden_size
+            num_attention_heads = model_config.num_attention_heads
+            head_size = int(4.5 * hidden_size / num_attention_heads)
 
         # query_lens contains new KV caches that are added to vLLM.
         # so we will send them to decode instance
@@ -175,27 +203,40 @@ class SimpleConnector(KVConnectorBase):
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
             current_tokens = input_tokens_tensor[start_pos:end_pos]
+            current_request_id = request_ids[idx]
+            _, decode_kv_rank = self.parse_request_id(current_request_id)
+            starting_kv_group_rank = self._get_kv_group_rank(decode_kv_rank, 0, self.config)
 
-            keys, values = [], []
+            for target_rank in range(self.config.tensor_parallel_multiplier):
 
-            for layer_id in range(start_layer, end_layer):
-                kv_cache = kv_caches[layer_id - start_layer]
+                keys, values = [], []
 
-                key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
-                value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
+                for layer_id in range(start_layer, end_layer):
+                    kv_cache = kv_caches[layer_id - start_layer]
 
-                current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
+                    current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
-                keys.append(key_cache[current_slot_mapping].unsqueeze(0))
-                values.append(value_cache[current_slot_mapping].unsqueeze(0))
+                    num_heads_per_rank = num_heads // self.config.tensor_parallel_multiplier
+                    head_start = target_rank * num_heads_per_rank
+                    head_end = head_start + num_heads_per_rank
 
-            keys = torch.cat(keys, dim=0)
-            values = torch.cat(values, dim=0)
+                    if not is_deepseek:
+                        key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
+                        value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
+                        keys.append(key_cache[current_slot_mapping, head_start:head_end].unsqueeze(0))
+                        values.append(value_cache[current_slot_mapping, head_start:head_end].unsqueeze(0))
+                    else:
+                        key_cache = kv_cache
+                        keys.append(key_cache[current_slot_mapping].unsqueeze(0))
+                        values.append(torch.empty(0))
 
-            self.insert(current_tokens,
-                        torch.ones_like(current_tokens,
-                                        dtype=bool), keys, values,
-                        hidden_or_intermediate_states[start_pos:end_pos])
+                keys = torch.cat(keys, dim=0)
+                values = torch.cat(values, dim=0)
+
+                self.insert(starting_kv_group_rank, target_rank, current_tokens,
+                            torch.ones_like(current_tokens,
+                                            dtype=bool), keys, values,
+                            hidden_or_intermediate_states[start_pos:end_pos])
 
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
@@ -215,12 +256,16 @@ class SimpleConnector(KVConnectorBase):
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
+        request_ids = list(model_input.request_ids_to_seq_ids.keys())
 
         hidden_or_intermediate_states_for_one_req = []
 
         input_tokens_list = []
         num_computed_tokens_list = []
         start_pos_list = []
+
+        model_config = model_executable.model.config
+        is_deepseek = "deepseek" in model_config.architectures[0].lower()
 
         # enumerate different requests
         # FIXME(Kuntai): This impl assumes that all requests are prefill.
@@ -229,13 +274,15 @@ class SimpleConnector(KVConnectorBase):
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
             current_tokens = input_tokens_tensor[start_pos:end_pos]
+            current_request_id = request_ids[idx]
+            prefill_rank, _ = self.parse_request_id(current_request_id)
             num_tokens = slen
 
             # collecting data for rebuilding the input
             input_tokens_list.append(current_tokens)
             start_pos_list.append(start_pos)
 
-            ret = self.select(current_tokens,
+            ret = self.select(prefill_rank, current_tokens,
                               torch.ones_like(current_tokens, dtype=bool))
             if ret[0] is None:
                 # didn't find any match.
@@ -267,19 +314,25 @@ class SimpleConnector(KVConnectorBase):
                 kv_cache = kv_caches[i - model_executable.model.start_layer]
                 layer = model_executable.model.layers[i]
 
-                key_cache, value_cache = kv_cache[0], kv_cache[1]
-                ops.reshape_and_cache_flash(
-                    keys[i - model_executable.model.start_layer].to(
-                        key_cache.device),
-                    values[i - model_executable.model.start_layer].to(
-                        value_cache.device),
-                    key_cache,
-                    value_cache,
-                    slot_mapping[start_pos:end_pos],
-                    layer.self_attn.attn.kv_cache_dtype,
-                    layer.self_attn.attn._k_scale,
-                    layer.self_attn.attn._v_scale,
-                )
+                if not is_deepseek:
+                    key_cache, value_cache = kv_cache[0], kv_cache[1]
+                    ops.reshape_and_cache_flash(
+                        keys[i - model_executable.model.start_layer].to(
+                            key_cache.device),
+                        values[i - model_executable.model.start_layer].to(
+                            value_cache.device),
+                        key_cache,
+                        value_cache,
+                        slot_mapping[start_pos:end_pos],
+                        layer.self_attn.attn.kv_cache_dtype,
+                        layer.self_attn.attn._k_scale,
+                        layer.self_attn.attn._v_scale,
+                    )
+                else:
+                    key_cache = kv_cache
+                    copy_from =keys[i - model_executable.model.start_layer].to(
+                            key_cache.device)
+                    kv_cache[slot_mapping[start_pos:end_pos]] = copy_from
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
@@ -312,3 +365,77 @@ class SimpleConnector(KVConnectorBase):
             # MooncakePipe reuses data_pipe for signal_pipe, so we only have to
             # close the data_pipe.
             pass
+
+    @staticmethod
+    def parse_request_id(request_id):
+        # Regular expression to match the ranks
+        pattern = r"___prefill_kv_rank_(\d+)___decode_kv_rank_(\d+)"
+        
+        # Use re.search to find the pattern in the request_id
+        match = re.search(pattern, request_id)
+        
+        if match:
+            # Extract the ranks
+            prefill_rank = int(match.group(1))
+            decode_rank = int(match.group(2))
+            
+            return prefill_rank, decode_rank
+        else:
+            return None, None
+
+    
+
+    def _get_kv_group_rank(self, kv_rank: int, rank: int, config: KVTransferConfig) -> int:
+        if kv_rank < config.kv_producers_parallel_size:
+            return kv_rank
+        
+        kv_consumer_rank = kv_rank - config.kv_producers_parallel_size
+        return config.kv_producers_parallel_size + kv_consumer_rank * config.tensor_parallel_multiplier + rank % config.tensor_parallel_multiplier
+
+    def _broadcast_and_enhance_kv_config(self, rank: int, config: VllmConfig, world_group):
+        if rank == 0:
+            if self.config.kv_connector == "PyNcclConnector":
+                config_group = StatelessProcessGroup.create(
+                    host=self.config.kv_ip,
+                    port=self.config.kv_port,
+                    rank=self.config.kv_rank,
+                    world_size=self.config.kv_parallel_size,
+                )
+                parallel_configs = config_group.all_gather_obj({
+                    "kv_role": self.config.kv_role,
+                    "tensor_parallel_size": config.parallel_config.tensor_parallel_size,
+                    "pipeline_parallel_size": config.parallel_config.pipeline_parallel_size,
+                })
+                logger.debug("parallel_configs: %s", parallel_configs)
+                kv_config_enhanced = {
+                    "kv_producers_tensor_parallel_size": None,
+                    "kv_consumers_tensor_parallel_size": None,
+                    "kv_producers_pipeline_parallel_size": None,
+                    "kv_consumers_pipeline_parallel_size": None,
+                    "kv_producers_parallel_size": 0,
+                }
+                for parallel_config in parallel_configs:
+                    kv_role = parallel_config["kv_role"]
+                    assert parallel_config["pipeline_parallel_size"] == 1, f"Only pipeline parallel size 1 is supported for kv transfer instances"
+                    
+                    if kv_role == "kv_producer":
+                        kv_config_enhanced["kv_producers_parallel_size"] += 1
+                    if kv_config_enhanced[f"{kv_role}s_tensor_parallel_size"] is None:
+                        kv_config_enhanced[f"{kv_role}s_tensor_parallel_size"] = parallel_config["tensor_parallel_size"]
+                        kv_config_enhanced[f"{kv_role}s_pipeline_parallel_size"] = parallel_config["pipeline_parallel_size"]
+                    else:
+                        assert kv_config_enhanced[f"{kv_role}s_tensor_parallel_size"] == parallel_config["tensor_parallel_size"], f"All kv {kv_role}s should have the same tensor parallel size"
+                        assert kv_config_enhanced[f"{kv_role}s_pipeline_parallel_size"] == parallel_config["pipeline_parallel_size"], f"All kv {kv_role}s should have the same pipeline parallel size"
+                world_group.broadcast_object(kv_config_enhanced)
+
+            else:
+                raise NotImplementedError("MooncakeConnector is not supported in Dynamo patch")
+        else:
+            kv_config_enhanced = world_group.broadcast_object()
+        logger.info("kv_config_enhanced: %s", kv_config_enhanced)
+
+        self.config.kv_producers_tensor_parallel_size = kv_config_enhanced["kv_producers_tensor_parallel_size"]
+        self.config.kv_consumers_tensor_parallel_size = kv_config_enhanced["kv_consumers_tensor_parallel_size"]
+        self.config.kv_producers_pipeline_parallel_size = kv_config_enhanced["kv_producers_pipeline_parallel_size"]
+        self.config.kv_consumers_pipeline_parallel_size = kv_config_enhanced["kv_consumers_pipeline_parallel_size"]
+        self.config.kv_producers_parallel_size = kv_config_enhanced["kv_producers_parallel_size"]

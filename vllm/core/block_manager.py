@@ -10,7 +10,10 @@ from vllm.core.block.interfaces import Block
 from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   LastAccessBlocksTracker)
 from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
+from vllm.core.event_manager import KVCacheEventManager
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
+from vllm.envs import (VLLM_KV_CAPI_PATH, VLLM_KV_COMPONENT, VLLM_KV_NAMESPACE,
+                       VLLM_WORKER_ID)
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
@@ -60,6 +63,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
     def __init__(
         self,
+        model_name: str,
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
@@ -91,11 +95,29 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
+        kv_event_manager_params = [
+            VLLM_WORKER_ID, VLLM_KV_CAPI_PATH, VLLM_KV_NAMESPACE,
+            VLLM_KV_COMPONENT
+        ]
+        set_kv_event_manager_params = len(
+            [param for param in kv_event_manager_params if param is not None])
+
+        if set_kv_event_manager_params == len(kv_event_manager_params):
+            self.event_manager = KVCacheEventManager(
+                namespace=VLLM_KV_NAMESPACE,
+                component=VLLM_KV_COMPONENT,
+                worker_id=VLLM_WORKER_ID,
+                lib_path=VLLM_KV_CAPI_PATH,
+                kv_block_size=block_size)
+        else:
+            self.event_manager = None
+
         self.block_allocator = CpuGpuBlockAllocator.create(
             allocator_type="prefix_caching" if enable_caching else "naive",
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
             block_size=block_size,
+            event_manager=self.event_manager,
         )
 
         self.block_tables: Dict[SeqId, BlockTable] = {}
@@ -108,7 +130,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
     def can_allocate(self,
                      seq_group: SequenceGroup,
-                     num_lookahead_slots: int = 0) -> AllocStatus:
+                     num_lookahead_slots: int = 0,
+                     is_remote_decode: bool = False) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
 
@@ -120,6 +143,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             block_size=self.block_size,
             num_lookahead_slots=num_lookahead_slots,
         )
+
+        # if remote decode, we need to allocate twice as many blocks for staging
+        if is_remote_decode: 
+            num_required_blocks *= 2
 
         if seq_group.is_encoder_decoder():
             encoder_seq = seq_group.get_encoder_seq()

@@ -14,13 +14,17 @@ from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.utils import deprecate_kwargs
-
+from vllm.remote_prefill import RemotePrefillParams
+from vllm.distributed.device_communicators.nixl import NixlMetadata
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
 
 IPC_INPUT_EXT = "_input_socket"
 IPC_OUTPUT_EXT = "_output_socket"
 IPC_HEALTH_EXT = "_health_socket"
 IPC_DATA_EXT = "_data_socket"
+IPC_REMOTE_PREFILL_REQUEST_EXT = "_remote_prefill_request_socket"
+IPC_REMOTE_NIXL_METADATA_EXT = "_remote_nixl_metadata_socket"
+IPC_METRICS_EXT = "_metrics_socket"
 
 
 class MQEngineDeadError(RuntimeError):
@@ -36,6 +40,7 @@ class RPCProcessRequest:
     trace_headers: Optional[Mapping[str, str]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     priority: int = 0
+    remote_prefill_params: Optional[RemotePrefillParams] = None
 
     @overload
     def __init__(
@@ -78,6 +83,7 @@ class RPCProcessRequest:
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            remote_prefill_params: Optional[RemotePrefillParams] = None,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
@@ -95,7 +101,7 @@ class RPCProcessRequest:
         self.trace_headers = trace_headers
         self.prompt_adapter_request = prompt_adapter_request
         self.priority = priority
-
+        self.remote_prefill_params = remote_prefill_params
 
 @dataclass
 class RPCError:
@@ -116,7 +122,7 @@ class RPCStartupRequest(Enum):
 @dataclass
 class RPCStartupResponse:
     tracing_enabled: bool
-
+    nixl_metadata: Optional[bytes] = None
 
 class RPCUProfileRequest(Enum):
     START_PROFILE = 1
@@ -157,3 +163,13 @@ def ENGINE_DEAD_ERROR(
     return MQEngineDeadError(
         "Engine loop is not running. Inspect the stacktrace to "
         f"find the original error: {repr(error)}.")
+
+@dataclass
+class KvMetrics:
+    request_active_slots: int
+    request_total_slots: int
+    kv_active_blocks: int
+    kv_total_blocks: int
+    num_requests_waiting: int
+    gpu_cache_usage_perc: float
+    gpu_prefix_cache_hit_rate: float

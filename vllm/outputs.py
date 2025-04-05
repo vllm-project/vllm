@@ -6,15 +6,15 @@ from typing import Dict, Generic, List, MutableSequence, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
+import msgspec
 import torch
 from typing_extensions import TypeVar, deprecated
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
-from vllm.sampling_params import RequestOutputKind
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceGroupBase, SequenceStatus)
-
 
 @dataclass
 class CompletionOutput:

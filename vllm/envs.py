@@ -87,6 +87,10 @@ if TYPE_CHECKING:
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
+    VLLM_KV_CAPI_PATH: Optional[str] = None
+    VLLM_KV_NAMESPACE: Optional[str] = None
+    VLLM_KV_COMPONENT: Optional[str] = None
+    VLLM_WORKER_ID: Optional[int] = None
 
 
 def get_default_cache_root():
@@ -572,6 +576,21 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # models the alignment is already naturally aligned to 256 bytes.
     "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
     lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
+
+    # Path to the C API Library
+    "VLLM_KV_CAPI_PATH":
+    lambda: os.environ.get("VLLM_KV_CAPI_PATH", None),
+
+    # Identifiers to publish KV related information
+    "VLLM_KV_NAMESPACE":
+    lambda: os.environ.get("VLLM_KV_NAMESPACE", None),
+    "VLLM_KV_COMPONENT":
+    lambda: os.environ.get("VLLM_KV_COMPONENT", None),
+
+    # Worker ID used for identifying workers in distributed settings
+    "VLLM_WORKER_ID":
+    lambda: int(os.getenv("VLLM_WORKER_ID", "0"))
+    if "VLLM_WORKER_ID" in os.environ else None,
 }
 
 # end-env-vars-definition

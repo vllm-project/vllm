@@ -6,6 +6,7 @@ from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
+from vllm.core.event_manager import KVCacheEventManager
 from vllm.platforms import current_platform
 from vllm.utils import Device
 
@@ -28,6 +29,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         block_size: int,
+        event_manager: Optional[KVCacheEventManager] = None,
     ) -> DeviceAwareBlockAllocator:
         """Creates a CpuGpuBlockAllocator instance with the specified
         configuration.
@@ -64,6 +66,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         cpu_block_ids = block_ids[num_gpu_blocks:]
 
         if allocator_type == "naive":
+            assert event_manager is None, "Event API not supported with naive allocator."
             gpu_allocator: BlockAllocator = NaiveBlockAllocator(
                 create_block=NaiveBlock,  # type: ignore
                 num_blocks=num_gpu_blocks,
@@ -82,12 +85,14 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
                 block_ids=gpu_block_ids,
+                event_manager=event_manager,
             )
 
             cpu_allocator = PrefixCachingBlockAllocator(
                 num_blocks=num_cpu_blocks,
                 block_size=block_size,
                 block_ids=cpu_block_ids,
+                event_manager=event_manager,
             )
         else:
             raise ValueError(f"Unknown allocator type {allocator_type=}")
@@ -95,10 +100,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return CpuGpuBlockAllocator(
             cpu_block_allocator=cpu_allocator,
             gpu_block_allocator=gpu_allocator,
+            event_manager=event_manager,
         )
 
     def __init__(self, cpu_block_allocator: BlockAllocator,
-                 gpu_block_allocator: BlockAllocator):
+                 gpu_block_allocator: BlockAllocator,
+                 event_manager: Optional[KVCacheEventManager] = None,):
         assert not (
             cpu_block_allocator.all_block_ids
             & gpu_block_allocator.all_block_ids
@@ -108,6 +115,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Device.CPU: cpu_block_allocator,
             Device.GPU: gpu_block_allocator,
         }
+        self.event_manager = event_manager
 
         self._swap_mapping: Dict[int, int] = {}
         self._null_block: Optional[Block] = None

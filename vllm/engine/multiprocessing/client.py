@@ -8,6 +8,7 @@ from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
                     Optional, Union, cast, overload)
 
 import cloudpickle
+import msgspec
 import psutil
 import zmq
 import zmq.asyncio
@@ -19,20 +20,23 @@ from vllm import PoolingParams
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.metrics import Stats
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.async_llm_engine import (
     build_guided_decoding_logits_processor_async)
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
-                                         IPC_OUTPUT_EXT, RPC_REQUEST_T,
-                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+                                         IPC_OUTPUT_EXT, IPC_REMOTE_PREFILL_REQUEST_EXT,
+                                         RPC_REQUEST_T,
+                                         VLLM_RPC_SUCCESS_STR, IPC_REMOTE_NIXL_METADATA_EXT, RPCAbortRequest,
+                                         IPC_METRICS_EXT,
                                          RPCAdapterLoadedResponse, RPCError,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
                                          RPCResetPrefixCacheRequest,
                                          RPCStartupRequest, RPCStartupResponse,
-                                         RPCUProfileRequest)
+                                         RPCUProfileRequest, KvMetrics)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
@@ -46,6 +50,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import deprecate_kwargs
+from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest, RemotePrefillRequestCallback
+from vllm.distributed.device_communicators.nixl import NixlMetadata
 
 logger = init_logger(__name__)
 
@@ -91,6 +97,7 @@ class MQLLMEngineClient(EngineClient):
         self._errored_with: Optional[BaseException] = None
 
         # Get the configs.
+        self.vllm_config = engine_config
         self.model_config = engine_config.model_config
         self.decoding_config = engine_config.decoding_config
 
@@ -115,6 +122,10 @@ class MQLLMEngineClient(EngineClient):
         self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
 
+        # Metrics.
+        self.metrics_socket: Socket = self.context.socket(zmq.constants.PULL)
+        self.metrics_socket.connect(f"{ipc_path}{IPC_METRICS_EXT}")
+
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
 
@@ -129,7 +140,26 @@ class MQLLMEngineClient(EngineClient):
         # Loop to check health of the LLMEngine periodically.
         # Started after the MQLLMEngine is ready.
         self.health_loop: Optional[asyncio.Task] = None
+
+        # Loop to check metrics of the LLMEngine periodically.
+        # Started after the MQLLMEngine is ready.
+        self.metrics_loop: Optional[asyncio.Task] = None
+        self.metrics_publisher = None
+
         self._engine_process = psutil.Process(engine_pid)
+
+        self.nixl_metadata: Optional[NixlMetadata] = None
+        self.remote_prefill_request_socket: Socket = self.context.socket(zmq.constants.PULL)
+        self.remote_nixl_metadata_socket: Socket = self.context.socket(zmq.constants.PUSH)
+        self.remote_prefill_requests_callback: Dict[str, RemotePrefillRequestCallback] = {}
+        if self.using_nixl_connector:
+            self.remote_prefill_request_socket.connect(f"{ipc_path}{IPC_REMOTE_PREFILL_REQUEST_EXT}")
+            self.remote_nixl_metadata_socket.connect(f"{ipc_path}{IPC_REMOTE_NIXL_METADATA_EXT}")
+
+    
+    @property
+    def using_nixl_connector(self) -> bool:
+        return self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynamoNixlConnector"
 
     @staticmethod
     def is_unsupported_config(engine_args: AsyncEngineArgs):
@@ -171,6 +201,61 @@ class MQLLMEngineClient(EngineClient):
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient check health loop.")
+
+        except psutil.NoSuchProcess:
+            self._set_errored(
+                RuntimeError(
+                    f"Engine process (pid {self._engine_process.pid}) died."))
+
+        except Exception as e:
+            self._set_errored(e)
+
+    async def run_remote_prefill_request_handler_loop(self):
+        try:
+            while True:
+                if await self.remote_prefill_request_socket.poll(timeout=VLLM_RPC_TIMEOUT):
+                    frames = await self.remote_prefill_request_socket.recv(copy=False)
+                    remote_prefill_request = msgspec.msgpack.decode(frames.buffer, type=RemotePrefillRequest)
+                    await self.remote_prefill_requests_callback[remote_prefill_request.request_id](remote_prefill_request)
+        except asyncio.CancelledError:
+            logger.debug("Shutting down MQLLMEngineClient remote prefill request handler loop.")
+            
+    async def run_metrics_loop(self, timeout: int):
+        """Background loop that continually checks to ensure the engine process
+        is still alive.
+        """
+        try:
+            while True:
+                # Check if the engine process is running:
+                if not self._engine_process.is_running() or (
+                        self._engine_process.status() == psutil.STATUS_ZOMBIE):
+                    # NB: is_running() returns True for zombies
+                    self._set_errored(
+                        RuntimeError(
+                            f"Engine process (pid {self._engine_process.pid}) "
+                            "died."))
+                    break
+
+                if await self.metrics_socket.poll(timeout=timeout):
+                    # Metrics received- check the message
+                    message: Frame = await self.metrics_socket.recv(copy=False)
+                    metrics = pickle.loads(message.buffer)
+                    if self.metrics_publisher is not None and isinstance(
+                        metrics, KvMetrics
+                    ):
+                        self.metrics_publisher.publish(metrics.request_active_slots,
+                                                    metrics.request_total_slots,
+                                                    metrics.kv_active_blocks,
+                                                    metrics.kv_total_blocks,
+                                                    metrics.num_requests_waiting, 
+                                                    metrics.gpu_cache_usage_perc, 
+                                                    metrics.gpu_prefix_cache_hit_rate)
+                        logger.debug("Metrics successful.")
+
+                    # TODO: Investigate sending whole stats object
+
+        except asyncio.CancelledError:
+            logger.debug("Shutting down MQLLMEngineClient check metrics loop.")
 
         except psutil.NoSuchProcess:
             self._set_errored(
@@ -278,12 +363,26 @@ class MQLLMEngineClient(EngineClient):
             # Wait until server is ready.
             response = await self._wait_for_server_rpc(socket)
 
+            if response.nixl_metadata is not None:
+                assert self.using_nixl_connector
+                self.nixl_metadata = msgspec.msgpack.decode(response.nixl_metadata, type=NixlMetadata)
+
             self.tracing_flag = response.tracing_enabled
 
             # Start health_loop.
             if self.health_loop is None:
                 self.health_loop = asyncio.create_task(
                     self.run_heartbeat_loop(timeout=VLLM_RPC_TIMEOUT))
+                
+            if self.using_nixl_connector:
+                self.remote_prefill_loop = asyncio.create_task(
+                    self.run_remote_prefill_request_handler_loop())
+                    
+            # Start metrics_loop.
+            if self.metrics_loop is None:
+                self.metrics_loop = asyncio.create_task(
+                    self.run_metrics_loop(timeout=VLLM_RPC_TIMEOUT))
+
 
     def close(self):
         """Destroy the ZeroMQ Context."""
@@ -293,6 +392,8 @@ class MQLLMEngineClient(EngineClient):
         # Cancel background tasks.
         if self.health_loop is not None:
             self.health_loop.cancel()
+        if self.metrics_loop is not None:
+            self.metrics_loop.cancel()
         if self.output_loop is not None:
             self.output_loop.cancel()
 
@@ -415,6 +516,9 @@ class MQLLMEngineClient(EngineClient):
         """
         if self._errored_with is not None:
             raise self._errored_with
+        
+    async def add_remote_nixl_metadata(self, nixl_metadata: NixlMetadata):
+        await self.remote_nixl_metadata_socket.send(msgspec.msgpack.encode(nixl_metadata), copy=False)
 
     @property
     def is_running(self) -> bool:
@@ -473,6 +577,7 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        remote_prefill_params: Optional[RemotePrefillParams] = None,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -502,7 +607,8 @@ class MQLLMEngineClient(EngineClient):
 
         return self._process_request(prompt, sampling_params, request_id,
                                      lora_request, trace_headers,
-                                     prompt_adapter_request, priority)
+                                     prompt_adapter_request, priority,
+                                     remote_prefill_params)
 
     @overload
     def encode(
@@ -586,6 +692,7 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        remote_prefill_params: Optional[RemotePrefillParams] = None,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
             PoolingRequestOutput, None]]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
@@ -630,6 +737,12 @@ class MQLLMEngineClient(EngineClient):
             else:
                 lp_bytes = None
 
+            if remote_prefill_params is not None:
+                self.remote_prefill_requests_callback[request_id] = remote_prefill_params.remote_prefill_request_callback
+                remote_prefill_params.remote_prefill_request_callback = None
+            else:
+                remote_prefill_request_callback = None
+
             request_bytes = pickle.dumps(
                 RPCProcessRequest(
                     prompt=prompt,
@@ -639,11 +752,11 @@ class MQLLMEngineClient(EngineClient):
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
+                    remote_prefill_params=remote_prefill_params,
                 ))
 
             # 3) Send the RPCGenerateRequest to the MQLLMEngine.
-            parts = (request_bytes,
-                     lp_bytes) if lp_bytes else (request_bytes, )
+            parts = (request_bytes, lp_bytes) if lp_bytes else (request_bytes,)
             await self.input_socket.send_multipart(parts, copy=False)
 
             # 4) Stream the RequestOutputs from the output queue. Note
@@ -705,3 +818,6 @@ class MQLLMEngineClient(EngineClient):
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
+
+    def set_metrics_publisher(self, metrics_publisher):
+        self.metrics_publisher = metrics_publisher

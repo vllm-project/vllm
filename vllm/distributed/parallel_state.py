@@ -1085,7 +1085,8 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
         _KV_TRANSFER = kv_transfer.KVTransferAgent(
             rank=get_world_group().rank,
             local_rank=get_world_group().local_rank,
-            config=vllm_config)
+            config=vllm_config,
+            world_group=get_world_group())
 
 
 def ensure_model_parallel_initialized(

@@ -35,6 +35,7 @@ class KVTransferAgent:
         rank: int,
         local_rank: int,
         config: "VllmConfig",
+        world_group,
     ):
 
         self.config = config
@@ -47,7 +48,7 @@ class KVTransferAgent:
             "TransferAgent should only be used when kv_connector is set."
 
         self.connector = KVConnectorFactory.create_connector(
-            rank, local_rank, config)
+            rank, local_rank, config, world_group)
 
     def send_kv_caches_and_hidden_states(
         self,

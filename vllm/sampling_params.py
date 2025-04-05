@@ -83,7 +83,7 @@ class RequestOutputKind(Enum):
     DELTA = 1
     # Do not return intermediate RequestOuputs
     FINAL_ONLY = 2
-
+    
 
 class SamplingParams(
         msgspec.Struct,
