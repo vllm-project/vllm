@@ -488,6 +488,8 @@ class TPUModelRunner:
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
+        self.validate_paged_attention_precondition(block_tables, num_reqs,
+                                                   query_start_loc, seq_lens)
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -535,7 +537,32 @@ class TPUModelRunner:
 
         return placeholders[is_embed]
 
-    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
+    def validate_paged_attention_precondition(self, block_tables, num_reqs,
+                                              query_start_loc, seq_lens):
+        max_num_reqs = block_tables.shape[0]
+        if num_reqs > max_num_reqs:
+            raise ValueError(
+                f"{num_reqs=} must be less or equal to {block_tables.shape[0]=}"
+            )
+        max_seq_len = max(seq_lens)
+        pages_per_seq = block_tables.shape[1]
+        if pages_per_seq < cdiv(max_seq_len, self.block_size):
+            raise ValueError(f"{pages_per_seq=} must be greater or equal to "
+                             "{cdiv(max_seq_len, self.block_size)=}")
+        num_tokens = self.input_ids.shape[0]
+        if query_start_loc[num_reqs] > num_tokens:
+            raise ValueError(
+                f"{query_start_loc[num_reqs]=} must be less or equal to "
+                "{num_tokens=}")
+        for i in range(num_reqs):
+            q_len = query_start_loc[i + 1] - query_start_loc[i]
+            kv_len = seq_lens[i]
+            if q_len > kv_len:
+                raise ValueError(
+                    f"{q_len=} must be less or equal to {kv_len=} for "
+                    "sequence {i}")
+
+    def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
