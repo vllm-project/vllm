@@ -18,4 +18,5 @@ int8
 fp8
 quark
 quantized_kvcache
+torchao
 :::
