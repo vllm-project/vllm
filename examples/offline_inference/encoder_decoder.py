@@ -17,7 +17,6 @@ llm = LLM(
 )
 
 # Get BART tokenizer
-print("\nLoading tokenizer...")
 tokenizer = llm.llm_engine.get_tokenizer_group()
 
 # Test prompts
@@ -75,9 +74,6 @@ prompts = [
     single_text_prompt_raw, single_text_prompt, single_tokens_prompt,
     enc_dec_prompt1, enc_dec_prompt2, enc_dec_prompt3
 ] + zipped_prompt_list
-
-print(f"\nPrepared {len(prompts)} prompts:")
-print(f"{prompts}\n")
 
 # Create a sampling params object.
 sampling_params = SamplingParams(
