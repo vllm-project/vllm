@@ -34,6 +34,7 @@ from vllm.sequence import IntermediateTensors
 # yapf: disable
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as SmolVLMVisionTransformer)
+from .idefics3 import Idefics3ProcessingInfo
 # yapf: enable
 from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
 from .llama import LlamaModel
@@ -83,7 +84,7 @@ class SmolVLMImageEmbeddingInputs(TypedDict):
 ImageInputs = Union[SmolVLMImagePixelInputs, SmolVLMImageEmbeddingInputs]
 
 
-class SmolVLMProcessingInfo(BaseProcessingInfo):
+class SmolVLMProcessingInfo(Idefics3ProcessingInfo):
 
     def get_hf_processor(
         self,
@@ -96,117 +97,6 @@ class SmolVLMProcessingInfo(BaseProcessingInfo):
 
         return self.ctx.get_hf_processor(SmolVLMProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
-    def _resize_output_size(self,
-                            *,
-                            height: int,
-                            width: int,
-                            max_len: Optional[int] = None,
-                            min_len: int = 1,
-                            max_size: Optional[int] = None) -> tuple[int, int]:
-        # Set default value for max_len if not provided
-        max_len = max(height, width) if max_len is None else max_len
-        aspect_ratio = width / height
-
-        # Handle the maximum size constraint
-        if max_size is not None:
-            max_len = min(max_len, max_size)
-
-        # Adjust dimensions according to the aspect ratio
-        if width >= height:
-            width = max_len
-            height = int(width / aspect_ratio)
-        else:
-            height = max_len
-            width = int(height * aspect_ratio)
-
-        # Ensure both width and height are even (if needed)
-        height += height % 2
-        width += width % 2
-
-        # Ensure dimensions are not smaller than the minimum length
-        height = max(height, min_len)
-        width = max(width, min_len)
-
-        return height, width
-
-    def _get_resize_output_image_size(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        resolution_max_side: int,
-    ) -> tuple[int, int]:
-        hf_processor = self.get_hf_processor()
-        image_processor: SmolVLMImageProcessor = hf_processor.image_processor
-        max_image_size = image_processor.size['longest_edge']
-        if resolution_max_side > max_image_size:
-            raise ValueError(
-                "`resolution_max_side` cannot be larger than `max_image_size`")
-
-        height, width = image_height, image_width
-
-        # Find the output size, when rescaling the longest edge to max_len and
-        # preserving the aspect ratio
-        height, width = self._resize_output_size(height=height,
-                                                 width=width,
-                                                 max_len=resolution_max_side)
-        return height, width
-
-    def _get_image_feature_grid_size(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: Optional[SmolVLMProcessor],
-    ) -> tuple[int, int]:
-        if processor is None:
-            processor = self.get_hf_processor()
-
-        image_processor: SmolVLMImageProcessor = processor.image_processor
-
-        max_image_size = image_processor.max_image_size['longest_edge']
-        size = image_processor.size['longest_edge']
-        assert size % max_image_size == 0, (
-            "`longest_edge` in image_processor's `size` must be divisible by "
-            "`longest_edge` in `max_image_size`, this may be caused by "
-            "incorrect mm_kwargs override.")
-
-        resized_height, resized_width = self._get_resize_output_image_size(
-            image_width=image_width,
-            image_height=image_height,
-            resolution_max_side=size,
-        )
-        if resized_height > max_image_size or resized_width > max_image_size:
-            grid_h = math.ceil(resized_height / max_image_size)
-            grid_w = math.ceil(resized_width / max_image_size)
-        else:
-            grid_h = grid_w = 0
-        return grid_w, grid_h
-
-    def get_num_patches(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: Optional[SmolVLMProcessor],
-    ) -> int:
-        grid_w, grid_h = self._get_image_feature_grid_size(
-            image_width=image_width,
-            image_height=image_height,
-            processor=processor,
-        )
-
-        return grid_w * grid_h + 1
 
     def get_image_repl(
         self,
@@ -250,44 +140,6 @@ class SmolVLMProcessingInfo(BaseProcessingInfo):
             global_img_placeholder,
             fake_image_token,
         ])
-
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: Optional[SmolVLMProcessor],
-    ) -> int:
-        tokenizer = self.get_tokenizer()
-        image_repl = self.get_image_repl(
-            image_width=image_width,
-            image_height=image_height,
-            processor=processor,
-        )
-
-        image_repl_tokens = encode_tokens(
-            tokenizer,
-            image_repl,
-            add_special_tokens=False,
-        )
-        return len(image_repl_tokens)
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        processor = self.get_hf_processor()
-        image_processor: SmolVLMImageProcessor = processor.image_processor
-
-        return ImageSize(
-            width=image_processor.size["longest_edge"],
-            height=image_processor.size["longest_edge"],
-        )
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
-        )
 
 
 class SmolVLMDummyInputsBuilder(BaseDummyInputsBuilder[SmolVLMProcessingInfo]):
