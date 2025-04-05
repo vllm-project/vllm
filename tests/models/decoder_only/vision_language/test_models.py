@@ -170,7 +170,8 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}}
+        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True},
+                            "max_num_batched_tokens": 4096},
     ),
     "blip2": VLMTestInfo(
         # TODO: Change back to 2.7b once head_dim = 80 is supported
