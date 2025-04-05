@@ -550,6 +550,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         tensor_parallel_size=8,
         vllm_runner_kwargs={"gpu_memory_utilization": 0.8},
+        marks=[large_gpu_mark(min_gb=80), multi_gpu_marks(num_gpus=8)],
     ),
 }
 # yapf: enable
