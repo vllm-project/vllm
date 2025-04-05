@@ -26,7 +26,7 @@ from transformers import BatchFeature, Llama4Config, Llama4VisionConfig
 from transformers.image_utils import SizeDict
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.llama4 import Llama4Processor
-from transformers.models.llama4.image_processing_llama4 import (
+from transformers.models.llama4.image_processing_llama4_fast import (
     find_supported_resolutions, get_best_fit)
 
 from vllm.attention.layer import MultiHeadAttention
