@@ -166,6 +166,8 @@ class SequenceData(msgspec.Struct,
     _output_token_ids: array = msgspec.field(
         default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
 
+    _prompt_embeds: Optional[torch.Tensor] = None
+
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
     _prompt_token_ids_tuple: tuple[int,
@@ -208,6 +210,8 @@ class SequenceData(msgspec.Struct,
     def from_seqs(
         prompt_token_ids: GenericSequence[int],
         output_token_ids: Optional[GenericSequence[int]] = None,
+        *,
+        prompt_embeds: Optional[torch.Tensor] = None,
     ) -> "SequenceData":
         """
         Construct a :class:`SequenceData` instance from prompt and output
@@ -217,13 +221,15 @@ class SequenceData(msgspec.Struct,
                                      prompt_token_ids)
 
         if output_token_ids is None:
-            return SequenceData(prompt_token_ids_arr)
+            return SequenceData(prompt_token_ids_arr,
+                                _prompt_embeds=prompt_embeds)
 
         output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                      output_token_ids)
 
         return SequenceData(prompt_token_ids_arr,
-                            _output_token_ids=output_token_ids_arr)
+                            _output_token_ids=output_token_ids_arr,
+                            _prompt_embeds=prompt_embeds)
 
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"
@@ -279,6 +285,14 @@ class SequenceData(msgspec.Struct,
         """
         assert isinstance(self._output_token_ids, array)
         return self._output_token_ids
+
+    @property
+    def prompt_embeds(self) -> Optional[torch.Tensor]:
+        return self._prompt_embeds
+
+    @prompt_embeds.setter
+    def prompt_embeds(self, prompt_embeds: torch.Tensor) -> None:
+        self._prompt_embeds = prompt_embeds
 
     @property
     def mrope_position_delta(self) -> Optional[int]:
@@ -387,6 +401,8 @@ class SequenceData(msgspec.Struct,
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self._prompt_token_ids}, "
+                f"prompt_embeds.shape="
+                f"{getattr(self._prompt_embeds, 'shape', None)}, "
                 f"output_token_ids={self.output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"get_num_computed_tokens={self.get_num_computed_tokens()})")
@@ -425,7 +441,8 @@ class Sequence:
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
 
-        self.data = SequenceData.from_seqs(self.prompt_token_ids)
+        self.data = SequenceData.from_seqs(
+            self.prompt_token_ids, prompt_embeds=self.inputs.prompt_embeds)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -898,6 +915,10 @@ class SequenceGroup:
         return (f"SequenceGroup(request_id={self.request_id}, "
                 f"sampling_params={self.sampling_params}, "
                 f"num_seqs={len(self.seqs)})")
+
+    def uses_prompt_embeds(self) -> bool:
+        """Returns True if the sequence group uses input embeds."""
+        return any(seq.data.prompt_embeds is not None for seq in self.seqs)
 
 
 class SequenceGroupMetadataDelta(

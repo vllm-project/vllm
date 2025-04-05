@@ -772,6 +772,14 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
+        if (isinstance(prompt, dict)
+                and prompt.get("prompt_embeds", None) is not None
+                and not prompt.get("prompt_token_ids", None)):
+            # We use the -2 dimension (instead of 0) in case a batched input
+            # of batch size 1 is passed in.
+            prompt["prompt_token_ids"] = [0
+                                          ] * prompt["prompt_embeds"].shape[-2]
+
         if self.tokenizer is not None:
             self._validate_token_prompt(
                 prompt,
