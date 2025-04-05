@@ -497,3 +497,9 @@ ASYNC_REQUEST_FUNCS = {
     "scalellm": async_request_openai_completions,
     "sglang": async_request_openai_completions,
 }
+
+OPENAI_COMPATIBLE_BACKENDS = [
+    k for k, v in ASYNC_REQUEST_FUNCS.items()
+    if v in (async_request_openai_completions,
+             async_request_openai_chat_completions)
+]
