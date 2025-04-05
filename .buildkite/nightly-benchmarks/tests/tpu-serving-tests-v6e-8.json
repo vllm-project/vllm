@@ -1,0 +1,27 @@
+[
+    {
+        "test_name": "serving_llama_3p1_70B_Instruct_tp8_sonnet",
+        "qps_list": ["inf"],
+        "server_parameters": {
+            "model": "meta-llama/Llama-3.1-70B-Instruct",
+            "gpu_memory_utilization": 0.98,
+            "max_num_batched_tokens": 2048,
+            "max_num_seqs": 128,
+            "max_model_len": 4096,
+            "tensor_parallel_size": 8,
+            "no_enable_prefix_caching": "",
+            "disable_log_stats": "",
+            "disable_log_requests": "",
+            "load_format": "dummy"
+        },
+        "client_parameters": {
+            "backend": "vllm",
+            "model": "meta-llama/Llama-3.1-70B-Instruct",
+            "dataset_name": "sonnet",
+            "dataset_path": "./sonnet_4x.txt",
+            "sonnet_input_len": 1800,
+            "sonnet_output_len": 128,
+            "ignore_eos": ""
+        }
+    }
+]

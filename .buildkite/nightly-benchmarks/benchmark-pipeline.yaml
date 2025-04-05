@@ -182,3 +182,75 @@ steps:
         environment:
         - VLLM_USAGE_SOURCE
         - HF_TOKEN
+  
+  - label: "v6e-1"
+    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
+    agents:
+      queue: tpu
+    depends_on: wait-for-container-image
+    if: build.branch == "main"
+    plugins:
+    - kubernetes:
+        podSpec:
+          priorityClassName: perf-benchmark
+          containers:
+          - image: gcr.io/cloud-tpu-v2-images/vllm-tpu-nightly:$BUILDKITE_COMMIT
+            command:
+            - bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks-tpu.sh
+            resources:
+              limits:
+                google.com/tpu: 1
+            volumeMounts:
+            - name: devshm
+              mountPath: /dev/shm
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            cloud.google.com/gke-tpu-topology: 2x4
+            cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+  
+  - label: "v6e-8"
+    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
+    agents:
+      queue: tpu
+    depends_on: wait-for-container-image
+    if: build.branch == "main"
+    plugins:
+    - kubernetes:
+        podSpec:
+          priorityClassName: perf-benchmark
+          containers:
+          - image: gcr.io/cloud-tpu-v2-images/vllm-tpu-nightly:$BUILDKITE_COMMIT
+            command:
+            - bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks-tpu.sh
+            resources:
+              limits:
+                google.com/tpu: 1
+            volumeMounts:
+            - name: devshm
+              mountPath: /dev/shm
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            cloud.google.com/gke-tpu-topology: 2x4
+            cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
