@@ -3,8 +3,8 @@
 from abc import ABC, abstractmethod
 from collections import UserDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import (TYPE_CHECKING, Any, Generic, NamedTuple, Optional, TypeVar,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Generic, Literal, NamedTuple, Optional,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
@@ -14,7 +14,7 @@ from typing_extensions import TypeAlias, TypeGuard, assert_never
 
 from vllm.utils import is_list_of
 
-from .audio import resample_audio
+from .audio import AudioResampler
 from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
                      ImageItem, ModalityData, MultiModalDataDict,
                      MultiModalFieldConfig, MultiModalKwargs, VideoItem)
@@ -308,10 +308,18 @@ class MultiModalDataParser:
             items to the model's expected sampling rate.
     """
 
-    def __init__(self, *, target_sr: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        *,
+        target_sr: Optional[float] = None,
+        audio_resample_method: Literal["librosa", "scipy"] = "librosa",
+    ) -> None:
         super().__init__()
 
-        self.target_sr = target_sr
+        self.audio_resampler = AudioResampler(
+            target_sr=target_sr,
+            method=audio_resample_method,
+        )
 
     def _is_embeddings(
             self, data: object
@@ -374,15 +382,8 @@ class MultiModalDataParser:
             if orig_sr is None:
                 new_audio = audio
             else:
-                target_sr = self.target_sr
-                if target_sr is None:
-                    raise RuntimeError(
-                        "Audio resampling is not supported when "
-                        "`target_sr` is not provided")
-
-                new_audio = resample_audio(audio,
-                                           orig_sr=orig_sr,
-                                           target_sr=target_sr)
+                new_audio = self.audio_resampler.resample(audio,
+                                                          orig_sr=orig_sr)
 
             new_audios.append(new_audio)
 
