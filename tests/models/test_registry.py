@@ -91,8 +91,8 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
 
 
 def test_hf_registry_coverage():
-    untested_archs = set((ModelRegistry.get_supported_archs() -
-                      HF_EXAMPLE_MODELS.get_supported_archs()))
+    untested_archs = set(ModelRegistry.get_supported_archs() -
+                         HF_EXAMPLE_MODELS.get_supported_archs())
 
     # Llama4ForCausalLM does not have a standalone model
     untested_archs.discard("Llama4ForCausalLM")
