@@ -40,8 +40,7 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, BoundPromptUpdate,
                                         PlaceholderFeaturesInfo,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+                                        PromptReplacement, PromptUpdate)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -443,12 +442,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                     processor=hf_processor,
                 )
 
-            image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
-
-            return PromptUpdateDetails(
-                full=image_tokens,
-                features=image_tokens,
-            )
+            return [_IMAGE_TOKEN_ID] * num_image_tokens
 
         num_images = mm_items.get_count("image", strict=False)
 
@@ -517,6 +511,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                         item_idx=p.item_idx,
                         start_idx=p.start_idx - 1,
                         tokens=p.tokens,
+                        is_embed=p.is_embed,
                     ) for p in ps
                 ]
                 for modality, ps in placeholders.items()
