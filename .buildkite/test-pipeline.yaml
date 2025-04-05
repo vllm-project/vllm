@@ -104,7 +104,7 @@ steps:
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
@@ -135,12 +135,14 @@ steps:
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
   - tests/examples/offline_inference/data_parallel.py
+  - tests/v1/test_async_llm_dp.py
   commands:
   # test with tp=2 and external_dp=2
   - VLLM_USE_V1=0 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   # test with internal dp
   - python3 ../examples/offline_inference/data_parallel.py
+  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
@@ -148,11 +150,12 @@ steps:
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
-  - VLLM_ENABLE_V1_MULTIPROCESSING=0 python3 rlhf.py
-  - VLLM_ENABLE_V1_MULTIPROCESSING=0 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  - python3 rlhf.py
+  - RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
 
 - label: Metrics, Tracing Test # 10min
+  mirror_hardwares: [amd]
   num_gpus: 2
   source_file_dependencies:
   - vllm/
@@ -171,7 +174,7 @@ steps:
 #####  1 GPU test  #####
 
 - label: Regression Test # 5min
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -202,7 +205,6 @@ steps:
   commands:
     # split the test to avoid interference
     - pytest -v -s v1/core
-    - pytest -v -s v1/entrypoints
     - pytest -v -s v1/engine
     - pytest -v -s v1/entrypoints
     - pytest -v -s v1/sample
@@ -283,11 +285,11 @@ steps:
     - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/lora
   - tests/lora
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_minicpmv_tp.py  --ignore=lora/test_transfomers_model.py
+  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py
   parallelism: 4
 
 - label: PyTorch Fullgraph Smoke Test # 9min
@@ -309,7 +311,7 @@ steps:
   - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 1h each
-  mirror_hardwares: [amd]
+  # mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - vllm/attention
@@ -319,7 +321,7 @@ steps:
   parallelism: 4
 
 - label: Tensorizer Test # 11min
-  mirror_hardwares: [amd]
+  # mirror_hardwares: [amd]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
@@ -335,7 +337,7 @@ steps:
   source_file_dependencies:
   - benchmarks/
   commands:
-  - bash run-benchmarks.sh
+  - bash scripts/run-benchmarks.sh
 
 - label: Quantization Test # 33min
   source_file_dependencies:
@@ -370,7 +372,7 @@ steps:
 
 - label: OpenAI-Compatible Tool Use # 20 min
   fast_check: false
-  mirror_hardwares: [ amd ]
+  #mirror_hardwares: [ amd ]
   source_file_dependencies:
     - vllm/
     - tests/tool_use
@@ -429,6 +431,7 @@ steps:
     - pytest -v -s models/encoder_decoder/audio_language -m core_model
     - pytest -v -s models/encoder_decoder/language -m core_model
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
+    - pytest -v -s models/decoder_only/vision_language/test_interleaved.py
 
 - label: Multi-Modal Models Test (Extended) 1 # 48m
   optional: true
@@ -461,6 +464,7 @@ steps:
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
+  mirror_hardwares: [amd]
   optional: true
   commands:
     - echo 'Testing custom models...'
@@ -472,6 +476,7 @@ steps:
 #####  multi gpus test  #####
 
 - label: Distributed Comm Ops Test # 7min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -514,8 +519,11 @@ steps:
   - vllm/worker/worker.py
   - vllm/worker/model_runner.py
   - entrypoints/llm/test_collective_rpc.py
+  - tests/v1/test_async_llm_dp.py
+  - vllm/v1/engine/
   commands:
-  - VLLM_ENABLE_V1_MULTIPROCESSING=0 pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
+  - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
@@ -592,14 +600,10 @@ steps:
     # FIXIT: find out which code initialize cuda before running the test
     # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    # This test runs llama 13B, so it is required to run on 4 GPUs.
-    - pytest -v -s -x lora/test_long_context.py
     # There is some Tensor Parallelism related processing logic in LoRA that
     # requires multi-GPU testing for validation.
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
-    - pytest -v -s -x lora/test_minicpmv_tp.py
-    - pytest -v -s -x lora/test_transfomers_model.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min

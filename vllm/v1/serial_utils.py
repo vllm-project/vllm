@@ -3,14 +3,17 @@
 import pickle
 from collections.abc import Sequence
 from inspect import isclass
+from types import FunctionType
 from typing import Any, Optional, Union
 
+import cloudpickle
 import numpy as np
 import torch
 import zmq
 from msgspec import msgpack
 
 CUSTOM_TYPE_PICKLE = 1
+CUSTOM_TYPE_CLOUDPICKLE = 2
 
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
@@ -46,6 +49,9 @@ class MsgpackEncoder:
         # Fall back to pickle for object or void kind ndarrays.
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
+
+        if isinstance(obj, FunctionType):
+            return msgpack.Ext(CUSTOM_TYPE_CLOUDPICKLE, cloudpickle.dumps(obj))
 
         return msgpack.Ext(CUSTOM_TYPE_PICKLE,
                            pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
@@ -96,6 +102,8 @@ class MsgpackDecoder:
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_PICKLE:
             return pickle.loads(data)
+        if code == CUSTOM_TYPE_CLOUDPICKLE:
+            return cloudpickle.loads(data)
 
         raise NotImplementedError(
             f"Extension type code {code} is not supported")
