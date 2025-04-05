@@ -856,3 +856,59 @@ def test_resolve_content_format_examples(template_path, expected_format):
     )
 
     assert resolved_format == expected_format
+
+
+@pytest.mark.parametrize("template_path", [
+    "tool_chat_template_granite_20b_fc.jinja",
+    "tool_chat_template_hermes.jinja",
+    "tool_chat_template_internlm2_tool.jinja",
+    "tool_chat_template_llama3.1_json.jinja",
+    "tool_chat_template_llama3.2_json.jinja",
+])
+def test_tool_calls_empty_does_not_throw(template_path):
+    chat_template = load_chat_template(EXAMPLES_DIR / template_path)
+    messages = [
+        {
+            "role": "user",
+            "content": "How's the weather?"
+        },
+        {
+            "role": "assistant",
+            "content": "Checking...",
+            "tool_calls": []
+        },
+    ]
+    model_config = ModelConfig(
+        PHI3V_MODEL_ID,
+        task="generate",
+        tokenizer=PHI3V_MODEL_ID,
+        tokenizer_mode="auto",
+        trust_remote_code=True,
+        dtype="bfloat16",
+        seed=0,
+        limit_mm_per_prompt={"image": 2},
+    )
+    tokenizer_group = TokenizerGroup(
+        PHI3V_MODEL_ID,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+
+    conversation, mm_data = parse_chat_messages(messages,
+                                                model_config,
+                                                tokenizer_group,
+                                                content_format="auto")
+
+    out = apply_hf_chat_template(
+        tokenizer_group.tokenizer,
+        conversation=conversation,
+        chat_template=chat_template,
+        add_generation_prompt=True,
+    )
+    assert isinstance(out, str) and len(out) > 0
+
+
+"""
+
+"""
