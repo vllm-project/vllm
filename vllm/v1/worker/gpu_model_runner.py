@@ -841,12 +841,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
-            for input_id, pos_info in zip(
-                    encoder_input_ids,
-                    req_state.mm_positions,
-            ):
-                mm_inputs.append(req_state.mm_inputs[input_id])
-                req_ids_pos.append((req_id, input_id, pos_info))
+
+            for mm_input_id in encoder_input_ids:
+                mm_inputs.append(req_state.mm_inputs[mm_input_id])
+                req_ids_pos.append(
+                    (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
