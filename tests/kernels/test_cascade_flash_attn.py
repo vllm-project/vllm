@@ -5,6 +5,7 @@ from typing import Optional
 import pytest
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import (cascade_attention,
                                                    merge_attn_states)
@@ -51,6 +52,56 @@ def test_merge_kernel(
     output = torch.empty(num_tokens, num_query_heads, head_size, dtype=dtype)
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
                       suffix_lse)
+
+    # Reference implementation.
+    max_lse = torch.maximum(prefix_lse, suffix_lse)
+    p_lse = torch.exp(prefix_lse - max_lse)
+    s_lse = torch.exp(suffix_lse - max_lse)
+    p_scale = p_lse / (p_lse + s_lse)
+    s_scale = s_lse / (p_lse + s_lse)
+    p_scale = p_scale.transpose(0, 1).unsqueeze(2)
+    s_scale = s_scale.transpose(0, 1).unsqueeze(2)
+    ref_output = p_scale * prefix_output + s_scale * suffix_output
+    ref_output = ref_output.to(dtype)
+
+    # Compare the results.
+    torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 39, 16912])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_merge_cuda_kernel(
+    num_tokens: int,
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+):
+    print("test_merge_cuda_kernel")
+    torch.set_default_device("cuda")
+    current_platform.seed_everything(0)
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+
+    # Prepare inputs.
+    prefix_output = torch.randn(num_tokens,
+                                num_query_heads,
+                                head_size,
+                                dtype=dtype)
+    suffix_output = torch.randn(num_tokens,
+                                num_query_heads,
+                                head_size,
+                                dtype=dtype)
+    prefix_lse = torch.randn(num_query_heads, num_tokens, dtype=torch.float32)
+    suffix_lse = torch.randn(num_query_heads, num_tokens, dtype=torch.float32)
+
+    # Run the kernel.
+    output = torch.empty(num_tokens, num_query_heads, head_size, dtype=dtype)
+    ops.merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
+                          suffix_lse)
 
     # Reference implementation.
     max_lse = torch.maximum(prefix_lse, suffix_lse)

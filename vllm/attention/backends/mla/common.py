@@ -216,8 +216,8 @@ from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
 from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 if HAS_TRITON:
+    from vllm.attention.ops.merge_attn_states import merge_attn_states
     from vllm.attention.ops.triton_flash_attention import triton_attention
-    from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 else:
     merge_attn_states = None
     triton_attention = None
