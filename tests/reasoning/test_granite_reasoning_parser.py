@@ -131,16 +131,16 @@ def test_reasoning(
     streaming: bool,
     param_dict: dict,
 ):
-    output = tokenizer.tokenize(param_dict["output"])
-    # decode everything to tokens
-    output_tokens: list[str] = [
-        tokenizer.convert_tokens_to_string([token]) for token in output
-    ]
+    model_output = param_dict["output"]
+    output_tokens = tokenizer.tokenize(model_output)
+    token_ids = tokenizer.convert_tokens_to_ids(output_tokens)
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
         parser_name)(tokenizer)
 
     reasoning, content = run_reasoning_extraction(parser,
+                                                  model_output,
                                                   output_tokens,
+                                                  token_ids,
                                                   streaming=streaming)
 
     assert reasoning == param_dict["reasoning_content"]

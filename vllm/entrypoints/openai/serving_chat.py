@@ -949,7 +949,7 @@ class OpenAIServingChat(OpenAIServing):
                 # tool calls are extracted exclusively from the content.
                 reasoning_content, content = (
                     reasoning_parser.extract_reasoning_content(
-                        output.text, request=request))
+                        list(output.token_ids), output.text, request=request))
             else:
                 reasoning_content = None
                 content = output.text
