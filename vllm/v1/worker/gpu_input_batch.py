@@ -11,10 +11,12 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
+from vllm.v1.core.sched.output import MayMultiGroupBlockIDs
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
-from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.worker.block_table import initialize_block_table
 
 _SAMPLING_EPS = 1e-5
 
@@ -30,7 +32,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: list[int]
+    block_ids: MayMultiGroupBlockIDs
     num_computed_tokens: int
     output_token_ids: list[int]
 
@@ -59,14 +61,14 @@ class InputBatch:
         self,
         max_num_reqs: int,
         max_model_len: int,
-        max_num_blocks_per_req: int,
+        max_num_tokens: int,
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
+        kv_cache_config: KVCacheConfig,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = max_num_blocks_per_req
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
@@ -98,11 +100,13 @@ class InputBatch:
             self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
-        self.block_table = BlockTable(
+        self.block_table = initialize_block_table(
             max_num_reqs=max_num_reqs,
-            max_num_blocks_per_req=max_num_blocks_per_req,
+            max_model_len=max_model_len,
+            max_num_tokens=max_num_tokens,
             pin_memory=pin_memory,
             device=device,
+            kv_cache_config=kv_cache_config,
         )
 
         # Sampling-related.
@@ -264,7 +268,7 @@ class InputBatch:
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
-        self.block_table.add_row(request.block_ids, req_index)
+        self.block_table.add_row(request.block_ids, req_index)  # type: ignore
 
         sampling_params = request.sampling_params
         if sampling_params.sampling_type == SamplingType.GREEDY:
