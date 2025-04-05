@@ -490,14 +490,14 @@ class EngineCoreProc(EngineCore):
 
             while True:
                 # (RequestType, RequestData)
-                type_frame, data_frame = socket.recv_multipart(copy=False)
+                type_frame, *data_frames = socket.recv_multipart(copy=False)
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                 # Deserialize the request data.
                 decoder = add_request_decoder if (
                     request_type
                     == EngineCoreRequestType.ADD) else generic_decoder
-                request = decoder.decode(data_frame.buffer)
+                request = decoder.decode(data_frames)
 
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait((request_type, request))
@@ -514,8 +514,8 @@ class EngineCoreProc(EngineCore):
             while True:
                 outputs = self.output_queue.get()
                 outputs.engine_index = engine_index
-                encoder.encode_into(outputs, buffer)
-                socket.send(buffer, copy=False)
+                buffers = encoder.encode_into(outputs, buffer)
+                socket.send_multipart(buffers, copy=False)
 
 
 ENGINE_PAUSED_OUTPUTS = EngineCoreOutputs(engine_paused=True)
