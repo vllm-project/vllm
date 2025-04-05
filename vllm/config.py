@@ -1437,6 +1437,7 @@ class ParallelConfig:
     data_parallel_master_ip: str = "127.0.0.1"
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
     enable_expert_parallel: bool = False  # Use EP instead of TP for MoE layers.
+    num_virtual_engine: int = 1  # Number of virtual engines.
 
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor
@@ -1948,6 +1949,9 @@ class SpeculativeConfig:
         - draft_tensor_parallel_size (Optional[int]): The degree of the tensor
             parallelism for the draft model. Can only be 1 or the same as the
             target model's tensor parallel size.
+        - draft_pipeline_parallel_size (Optional[int]): The degree of the
+            pipeline parallelism for the draft model. Can only be 1 or the
+            same as the target model's pipeline parallel size.
         - disable_logprobs (bool): If set to True, token log probabilities are
             not returned during speculative decoding. If set to False, token
             log probabilities are returned according to the log probability
@@ -2003,6 +2007,7 @@ class SpeculativeConfig:
     method: Optional[str] = None
     acceptance_method: str = "rejection_sampler"
     draft_tensor_parallel_size: Optional[int] = None
+    draft_pipeline_parallel_size: Optional[int] = None
     disable_logprobs: bool = True
 
     model: Optional[str] = None
@@ -2216,6 +2221,13 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config
                 )
 
+                self.draft_pipeline_parallel_size = \
+                    SpeculativeConfig._verify_and_get_draft_pp(
+                        self.target_parallel_config,
+                        self.draft_pipeline_parallel_size,
+                        self.draft_model_config.hf_config
+                    )
+
                 self.draft_model_config.max_model_len = (
                     SpeculativeConfig._maybe_override_draft_max_model_len(
                         self.max_model_len,
@@ -2226,7 +2238,8 @@ class SpeculativeConfig:
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
                         self.target_parallel_config,
-                        self.draft_tensor_parallel_size))
+                        self.draft_tensor_parallel_size,
+                        self.draft_pipeline_parallel_size))
 
         if self.acceptance_method == "typical_acceptance_sampler":
             if self.posterior_threshold is None:
@@ -2301,18 +2314,40 @@ class SpeculativeConfig:
         return speculative_draft_tensor_parallel_size
 
     @staticmethod
+    def _verify_and_get_draft_pp(
+            target_parallel_config: ParallelConfig,
+            speculative_draft_pipeline_parallel_size: Optional[int],
+            draft_hf_config: PretrainedConfig) -> int:
+        """
+        Verifies and adjusts the tensor parallel size for a draft model
+        specified using speculative_draft_pipeline_parallel_size.
+        """
+        # If speculative_draft_pipeline_parallel_size is unset then set it
+        # appropriately else verify that it is set correctly.
+        if speculative_draft_pipeline_parallel_size is None:
+            speculative_draft_pipeline_parallel_size = \
+                target_parallel_config.pipeline_parallel_size
+        elif speculative_draft_pipeline_parallel_size not in (
+                1, target_parallel_config.pipeline_parallel_size):
+            raise ValueError(
+                f"{speculative_draft_pipeline_parallel_size=} cannot be "
+                f"other value than 1 or target model pipeline_parallel_size")
+        return speculative_draft_pipeline_parallel_size
+
+    @staticmethod
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int,
+        speculative_draft_pipeline_parallel_size: int,
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
         This is mostly a copy of the target parallel config, except the tp_size.
         """
         draft_parallel_config = ParallelConfig(
-            pipeline_parallel_size=target_parallel_config.
-            pipeline_parallel_size,
+            pipeline_parallel_size=speculative_draft_pipeline_parallel_size,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
+            num_virtual_engine=target_parallel_config.num_virtual_engine,
             distributed_executor_backend=target_parallel_config.
             distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.

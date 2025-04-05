@@ -39,6 +39,7 @@ class TargetModelRunner(ModelRunnerWrapperBase):
         # CPU output. We directly serialize the GPU sampled_token_id tensors
         # as needed. If log probabilities is enabled then synchronize all the
         # sampling related tensors which includes the logprobs tensors.
-        model_input.sampling_metadata.skip_sampler_cpu_output = (
-            self.disable_logprobs)
+        if model_input.sampling_metadata is not None:
+            model_input.sampling_metadata.skip_sampler_cpu_output = (
+                self.disable_logprobs)
         return model_input
