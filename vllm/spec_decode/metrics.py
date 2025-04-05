@@ -8,7 +8,6 @@ import torch
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
-from vllm.utils import is_pin_memory_available
 
 
 class SpecDecodeWorkerMetrics(
@@ -69,11 +68,14 @@ class AsyncMetricsCollector:
 
         self._in_flight_copy: Optional[torch.cuda.Event] = None
 
-        pin_memory = is_pin_memory_available()
-        self._aggregate_num_accepted_tokens = torch.tensor(
-            0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
-        self._aggregate_num_emitted_tokens = torch.tensor(
-            0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
+        self._aggregate_num_accepted_tokens = torch.tensor(0,
+                                                           dtype=torch.long,
+                                                           device="cpu",
+                                                           pin_memory=False)
+        self._aggregate_num_emitted_tokens = torch.tensor(0,
+                                                          dtype=torch.long,
+                                                          device="cpu",
+                                                          pin_memory=False)
         self._aggregate_num_draft_tokens = 0
 
         self._rejsample_metrics_collect_interval_s = collect_interval_s
