@@ -1598,6 +1598,7 @@ class Scheduler:
                         if scheduler_outputs.num_prefill_groups > 0 else None),
                     mm_processor_kwargs=seq_group.mm_processor_kwargs,
                     prompt_adapter_request=seq_group.prompt_adapter_request,
+                    control_vector_request=seq_group.control_vector_request,
                 )
             else:
                 # When SPMD mode is enabled, we only send delta data except for
