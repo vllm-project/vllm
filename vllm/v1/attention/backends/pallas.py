@@ -6,8 +6,6 @@ from typing import Any, Optional
 import torch
 # Required to register custom ops.
 import torch_xla.experimental.custom_kernel  # noqa: F401
-from torch_xla.experimental.pallas_kernels.ragged_paged_attention_v2 import (
-    validate_dynamic_inputs)
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -207,3 +205,126 @@ def write_to_kv_cache(
 
     kv_cache = kv_cache.flatten(0, 1)
     kv_cache.index_copy_(0, slot_mapping, kv)
+
+
+def validate_static_inputs(
+    q: torch.Tensor,  # [max_num_batched_tokens, num_q_heads, head_dim]
+    kv_pages: torch.
+    Tensor,  # [total_num_pages, page_size, num_combined_kv_heads, head_dim]
+    kv_lens: torch.Tensor,  # i32[max_num_seqs]
+    page_indices: torch.Tensor,  # i32[max_num_seqs, pages_per_seq]
+    cu_q_lens: torch.Tensor,  # i32[max_num_seqs + 1]
+    num_seqs: torch.Tensor,  # i32[1]
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
+):
+    """Validates the static inputs for the attention mechanism.
+
+    Args:
+        q: Query tensor.
+        kv_pages: Key/value pages tensor.
+        kv_lens: Key/value lengths tensor.
+        page_indices: Page indices tensor.
+        cu_q_lens: Cumulative query lengths tensor.
+        num_seqs: Number of sequences tensor.
+        sliding_window: Sliding window size.
+        soft_cap: Soft cap value.
+
+    Raises:
+        ValueError: If any of the input constraints are violated.
+    """
+    _, num_q_heads, head_dim = q.shape
+    _, _, num_combined_kv_heads, head_dim_k = kv_pages.shape
+    assert num_combined_kv_heads % 2 == 0
+    num_kv_heads = num_combined_kv_heads // 2
+    max_num_seqs, _ = page_indices.shape
+
+    if num_seqs.shape != (1, ):
+        raise ValueError(f"{num_seqs.shape=} must be (1,)")
+    if head_dim_k != head_dim:
+        raise ValueError(f"Q head_dim {head_dim} must be the same as"
+                         " that of K/V {head_dim_k}.")
+    if kv_lens.shape != (max_num_seqs, ):
+        raise ValueError(
+            f"Expected {kv_lens.shape=} to be ({max_num_seqs},) where"
+            " `max_num_seqs` is `page_indices.shape[0]`.")
+    if cu_q_lens.shape != (max_num_seqs + 1, ):
+        raise ValueError(
+            f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},)  where"
+            " `max_num_seqs` is `page_indices.shape[0]`.")
+    if (kv_lens.dtype != torch.int32 or page_indices.dtype != torch.int32
+            or cu_q_lens.dtype != torch.int32):
+        raise ValueError(
+            "The dtype of `kv_lens`, `page_indices`, and `cu_q_lens` must be"
+            f" int32. Got {kv_lens.dtype=}, {page_indices.dtype=},"
+            f" {cu_q_lens.dtype=}.")
+    if num_q_heads % num_kv_heads != 0:
+        raise ValueError(
+            f"{num_q_heads=} must be divisible by {num_kv_heads=}")
+    if sliding_window is not None and sliding_window <= 0:
+        raise ValueError(f"{sliding_window=} must be positive.")
+    if soft_cap is not None and soft_cap == 0.0:
+        raise ValueError(f"{soft_cap=} must not be 0.0.")
+
+
+def cdiv(a: int, b: int) -> int:
+    """Ceiling division."""
+    return (a + b - 1) // b
+
+
+def validate_dynamic_inputs(
+    q: torch.Tensor,  # [max_num_batched_tokens, num_q_heads, head_dim]
+    kv_pages: torch.
+    Tensor,  # [total_num_pages, page_size, num_combined_kv_heads, head_dim]
+    kv_lens: torch.Tensor,  # i32[max_num_seqs]
+    page_indices: torch.Tensor,  # i32[max_num_seqs, pages_per_seq]
+    cu_q_lens: torch.Tensor,  # i32[max_num_seqs + 1]
+    num_seqs: torch.Tensor,  # i32[1]
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
+):
+    """Validates the dynamic inputs for the attention mechanism.
+
+    Args:
+        q: Query tensor.
+        kv_pages: Key/value pages tensor.
+        kv_lens: Key/value lengths tensor.
+        page_indices: Page indices tensor.
+        cu_q_lens: Cumulative query lengths tensor.
+        num_seqs: Number of sequences tensor.
+        sliding_window: Sliding window size.
+        soft_cap: Soft cap value.
+
+    Raises:
+        ValueError: If any of the input constraints are violated.
+    """
+    validate_static_inputs(q, kv_pages, kv_lens, page_indices, cu_q_lens,
+                           num_seqs, sliding_window, soft_cap)
+    max_num_batched_tokens = q.shape[0]
+    page_size = kv_pages.shape[1]
+    max_num_seqs, pages_per_seq = page_indices.shape
+
+    if num_seqs[0] > max_num_seqs:
+        raise ValueError(
+            f"{num_seqs[0]=} must be less or equal to {max_num_seqs=}")
+
+    max_kv_len = torch.max(kv_lens)
+    min_pages_per_seq = cdiv(max_kv_len, page_size)
+
+    if pages_per_seq < min_pages_per_seq:
+        raise ValueError(
+            f"{pages_per_seq=} must be greater or equal to"
+            f" {min_pages_per_seq=} given {max_kv_len=} and {page_size=}.")
+
+    if cu_q_lens[num_seqs[0]] > max_num_batched_tokens:
+        raise ValueError(
+            f"Total q tokens {cu_q_lens[num_seqs[0]]} must be less or equal to"
+            f" {max_num_batched_tokens=}.")
+
+    for i in range(num_seqs[0]):
+        q_len = cu_q_lens[i + 1] - cu_q_lens[i]
+        kv_len = kv_lens[i]
+        if q_len > kv_len:
+            raise ValueError(
+                f"{q_len=} must be less or equal to {kv_len=} at sequence {i}."
+            )
