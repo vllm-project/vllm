@@ -43,4 +43,4 @@ watchfiles # required for http server to monitor the updates of TLS files
 python-json-logger # Used by logging as per examples/other/logging_configuration.md
 scipy # Required for phi-4-multimodal-instruct
 ninja # Required for xgrammar, rocm, tpu, xpu
-ijson==3.3.0 # Required tool parsing
+ijson==3.3.0 # Required for hermes tool parsing

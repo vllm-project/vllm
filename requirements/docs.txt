@@ -23,3 +23,4 @@ fastapi # Required by docs/source/serving/openai_compatible_server.md's vllm.ent
 partial-json-parser # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
 requests
 zmq
+ijson==3.3.0 # Required for hermes tool parsing
