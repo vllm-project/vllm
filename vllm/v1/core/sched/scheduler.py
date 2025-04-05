@@ -14,13 +14,13 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import init_kv_cache_manager
 from vllm.v1.core.sched.interface import SchedulerInterface
-from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
+from vllm.v1.core.sched.output import (CachedRequestData,
+                                       MayMultiGroupBlockIDs, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
-from vllm.v1.kv_cache_interface import (BlockIDGenerator, KVCacheConfig,
-                                        MayMultiGroupBlockIDs)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -70,8 +70,6 @@ class Scheduler(SchedulerInterface):
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
-        BlockIDGenerator.num_kv_cache_groups = len(
-            self.kv_cache_config.kv_cache_groups)
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
@@ -225,9 +223,8 @@ class Scheduler(SchedulerInterface):
                 # Therefore, we might introduce some additional
                 # cycle to fill in the bitmask, which could be a big no-op.
                 structured_output_request_ids[request.request_id] = req_index
-            req_to_new_block_ids[
-                request.request_id] = BlockIDGenerator.from_kv_cache_blocks(
-                    new_blocks)
+            req_to_new_block_ids[request.request_id] = (
+                new_blocks.to_block_ids())
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
@@ -350,8 +347,7 @@ class Scheduler(SchedulerInterface):
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
                 req_to_new_block_ids[request.request_id] = (
-                    BlockIDGenerator.from_kv_cache_blocks(computed_blocks) +
-                    BlockIDGenerator.from_kv_cache_blocks(new_blocks))
+                    computed_blocks + new_blocks).to_block_ids()
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -384,7 +380,7 @@ class Scheduler(SchedulerInterface):
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         if len(self.kv_cache_config.kv_cache_groups) > 1:
-            num_common_prefix_blocks = [0] * len(
+            num_common_prefix_blocks: Union[int, list[int]] = [0] * len(
                 self.kv_cache_config.kv_cache_groups)
         else:
             num_common_prefix_blocks = 0

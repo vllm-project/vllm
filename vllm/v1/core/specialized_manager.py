@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
-from collections import namedtuple
-from typing import Optional, Union
+from typing import Optional
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -34,14 +33,13 @@ class SpecializedManager(ABC):
         self.block_pool = block_pool
         # for caching the intermediate states between multiple calls of
         # find_longest_cache_hit
-        self.req_cached_blocks: dict[int, list[KVCacheBlock]] = {}
+        self.req_cached_blocks: dict[str, list[KVCacheBlock]] = {}
 
     def find_longest_cache_hit(
         self,
-        request_id: int,
+        request_id: str,
         block_hashes: list[BlockHashType],
-        return_const_list: bool = False,
-    ) -> Union[list[KVCacheBlock], ConstantList[KVCacheBlock]]:
+    ) -> list[KVCacheBlock]:
         """
         Find the longest cache hit prefix of the blocks. If no cache hit is 
         found, return an empty list.
@@ -58,13 +56,17 @@ class SpecializedManager(ABC):
         req_cached_blocks = self._find_longest_cache_hit(
             block_hashes, req_cached_blocks)
 
-        if return_const_list:
-            # TODO: add comment
-            self.req_cached_blocks[request_id] = req_cached_blocks
-            return ConstantList(req_cached_blocks)
-        else:
-            # TODO: add comment
-            return req_cached_blocks
+        return req_cached_blocks
+
+    def find_longest_cache_hit_multiple_calls(
+        self,
+        request_id: str,
+        block_hashes: list[BlockHashType],
+    ) -> ConstantList[KVCacheBlock]:
+        req_cached_blocks = self.find_longest_cache_hit(
+            request_id, block_hashes)
+        self.req_cached_blocks[request_id] = req_cached_blocks
+        return ConstantList(req_cached_blocks)
 
     @abstractmethod
     def _find_longest_cache_hit(
@@ -116,11 +118,11 @@ class FullAttentionManager(SpecializedManager):
             computed_blocks: Optional[list[KVCacheBlock]]
     ) -> list[KVCacheBlock]:
         if computed_blocks is None:
-            computed_blocks: list[KVCacheBlock] = []
+            computed_blocks = []
             for block_hash in block_hashes:
-                # block_hashes is a chain of block hashes. If a block hash is not
-                # in the cached_block_hash_to_id, the following block hashes are
-                # not computed yet for sure.
+                # block_hashes is a chain of block hashes. If a block hash is
+                # not in the cached_block_hash_to_id, the following block hashes
+                # are not computed yet for sure.
                 if cached_block := self.block_pool.get_cached_block(
                         block_hash):
                     computed_blocks.append(cached_block)

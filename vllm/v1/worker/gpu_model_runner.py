@@ -3,7 +3,7 @@
 import gc
 import time
 import weakref
-from typing import TYPE_CHECKING, Optional, Type, Union, cast
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -83,7 +83,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
-        parallel_config = self.parallel_config
+
         self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
@@ -120,8 +120,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # init in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
         self.kv_cache_config = cast(KVCacheConfig, None)
-        self.attn_backends: list[Type[AttentionBackend]] = []
-        self.attn_metadata_builders: list[Type[AttentionMetadataBuilder]] = []
+        self.attn_backends: list[type[AttentionBackend]] = []
+        self.attn_metadata_builders: list[type[AttentionMetadataBuilder]] = []
         # Persistent batch
         self.input_batch = cast(InputBatch, None)
 
@@ -360,7 +360,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the block IDs.
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                req_state.block_ids.extend(req_data.new_block_ids)
+                if len(self.kv_cache_config.kv_cache_groups) == 1:
+                    block_ids = cast(list[int], req_state.block_ids)
+                    new_block_ids = cast(list[int], req_data.new_block_ids)
+                    block_ids.extend(new_block_ids)
+                else:
+                    hybrid_block_ids = cast(list[list[int]],
+                                            req_state.block_ids)
+                    new_hybrid_block_ids = cast(list[list[int]],
+                                                req_data.new_block_ids)
+                    for i in range(len(self.kv_cache_config.kv_cache_groups)):
+                        hybrid_block_ids[i].extend(new_hybrid_block_ids[i])
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
@@ -377,8 +387,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-            self.input_batch.block_table.append_row(req_data.new_block_ids,
-                                                    req_index)
+            self.input_batch.block_table.append_row(
+                req_data.new_block_ids,  # type: ignore
+                req_index)
             # Add new_token_ids to token_ids_cpu.
             start_token_index = num_computed_tokens
             end_token_index = num_computed_tokens + len(req_data.new_token_ids)
@@ -511,8 +522,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
             # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
             # where K is the max_num_blocks_per_req and the block size is 2.
-            # NOTE(woosuk): We can't simply use `token_indices // block_size` here
-            # because M (max_model_len) is not necessarily divisible by block_size.
+            # NOTE(woosuk): We can't simply use `token_indices // block_size`
+            # here because M (max_model_len) is not necessarily divisible by
+            # block_size.
             block_table_indices = (
                 req_indices * block_table.max_num_blocks_per_req +
                 positions_np // block_size)
@@ -688,6 +700,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         use_sliding_window = (isinstance(kv_cache_spec, SlidingWindowSpec)
                               or (isinstance(kv_cache_spec, FullAttentionSpec)
                                   and kv_cache_spec.compute_as_sliding_window))
+        assert isinstance(kv_cache_spec, AttentionSpec)
         use_cascade = attn_backend.use_cascade_attention(
             common_prefix_len=common_prefix_len,
             query_lens=num_scheduled_tokens,
@@ -1624,7 +1637,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # TODO: docstring
         assert len(self.attn_backends) == 0 and len(
             self.attn_metadata_builders) == 0, "already initialized"
-        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+        for i, kv_cache_group_spec in enumerate(
+                kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if not isinstance(kv_cache_spec, AttentionSpec):
                 raise NotImplementedError(
@@ -1641,15 +1655,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if attn_backend_i is None:
                 error_msg = (
                     f"Error with get_attn_backend: {kv_cache_spec.head_size=}, "
-                    f"{self.dtype=}, {kv_cache_spec.kv_cache_dtype=}, {kv_cache_spec.block_size=}, "
+                    f"{self.dtype=}, {kv_cache_spec.dtype=}, "
+                    f"{kv_cache_spec.block_size=}, "
                     f"{self.model_config.is_attention_free=}, "
                     f"{kv_cache_spec.use_mla=}")
                 logger.error(error_msg)
                 raise NotImplementedError(
-                    "Non-Attention backend is not supported by V1 GPUModelRunner."
-                )
+                    "Non-Attention backend is not supported by V1 "
+                    "GPUModelRunner.")
+            if isinstance(self.input_batch.block_table, BlockTable):
+                block_table = self.input_batch.block_table
+            else:
+                block_table = self.input_batch.block_table[i]
             attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-                weakref.proxy(self))
+                weakref.proxy(self), kv_cache_spec, block_table)
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
 

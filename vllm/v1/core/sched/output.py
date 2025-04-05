@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
-
-from vllm.v1.kv_cache_interface import MayMultiGroupBlockIDs
+from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
     import numpy as np
@@ -15,6 +13,9 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
+
+MayMultiGroupBlockIDs = Union[list[int], list[list[int]]]
+MayMultiGroupInt = Union[int, list[int]]
 
 
 @dataclass
@@ -108,7 +109,7 @@ class SchedulerOutput:
     scheduled_encoder_inputs: dict[str, list[int]]
     # Number of common prefix blocks for all requests.
     # This can be used for cascade attention.
-    num_common_prefix_blocks: int
+    num_common_prefix_blocks: MayMultiGroupInt
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests

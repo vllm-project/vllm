@@ -14,6 +14,7 @@ from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.block_table import BlockTable
 from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version)
@@ -100,7 +101,7 @@ class FlashAttentionMetadata:
 
 class FlashAttentionMetadataBuilder:
 
-    def __init__(self, runner: "GPUModelRunner"):
+    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: KVCacheSpec):
         self.runner = runner
 
     def reorder_batch(self, input_batch: "InputBatch",

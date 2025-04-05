@@ -104,6 +104,7 @@ P = ParamSpec("P")
 
 class MultiLayerBlockTable:
     move_row: Callable[P, None]
+    swap_row: Callable[P, None]
     commit: Callable[P, None]
     clear: Callable[P, None]
 

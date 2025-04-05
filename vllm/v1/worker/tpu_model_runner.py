@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# type: ignore
 import bisect
 import time
 from typing import TYPE_CHECKING, Optional, cast

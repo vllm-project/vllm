@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Union, cast, overload, Type
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, get_dtype_size
+
 if TYPE_CHECKING:
-    from vllm.v1.core.kv_cache_utils import KVCacheBlock
+    pass
 
 logger = init_logger(__name__)
 
@@ -185,63 +186,3 @@ class KVCacheConfig:
     there are 3 groups, each of which represents 10 layers in the model.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
-
-
-@dataclass
-class MultiGroupBlockIDs:
-    # A list of block IDs for each virtual layer
-    _block_ids: list[list[int]]
-
-    def __init__(self, block_ids: list[list[int]]):
-        self._block_ids = block_ids
-
-    @classmethod
-    def from_kv_cache_blocks(cls, kv_cache_blocks: list[list["KVCacheBlock"]]):
-        return cls(
-            block_ids=[[blk.block_id for blk in kv_cache_blocks_one_layer]
-                       for kv_cache_blocks_one_layer in kv_cache_blocks])
-
-    def extend(self, new_block_ids: "MultiGroupBlockIDs") -> None:
-        for i, block_ids in enumerate(new_block_ids._block_ids):
-            self._block_ids[i].extend(block_ids)
-
-    def __add__(self, other: "MultiGroupBlockIDs") -> "MultiGroupBlockIDs":
-        return MultiGroupBlockIDs(block_ids=[
-            a + b for a, b in zip(self._block_ids, other._block_ids)
-        ])
-
-    def get_block_id_of_group(self, group_id: int) -> list[int]:
-        return self._block_ids[group_id]
-
-
-MayMultiGroupBlockIDs = Union[MultiGroupBlockIDs, list[int]]
-MayMultiGroupInt = Union[int, list[int]]
-
-
-class BlockIDGenerator:
-    num_kv_cache_groups: int
-
-    @overload
-    @classmethod
-    def from_kv_cache_blocks(
-            cls, kv_cache_blocks: list["KVCacheBlock"]) -> list[int]:
-        ...
-
-    @overload
-    @classmethod
-    def from_kv_cache_blocks(
-            cls,
-            kv_cache_blocks: list[list["KVCacheBlock"]]) -> MultiGroupBlockIDs:
-        ...
-
-    @classmethod
-    def from_kv_cache_blocks(
-        cls, kv_cache_blocks: Union[list["KVCacheBlock"],
-                                    list[list["KVCacheBlock"]]]
-    ) -> MayMultiGroupBlockIDs:
-        if cls.num_kv_cache_groups == 1:
-            kv_cache_blocks = cast(list["KVCacheBlock"], kv_cache_blocks)
-            return [blk.block_id for blk in kv_cache_blocks]
-        else:
-            kv_cache_blocks = cast(list[list["KVCacheBlock"]], kv_cache_blocks)
-            return MultiGroupBlockIDs.from_kv_cache_blocks(kv_cache_blocks)
