@@ -11,6 +11,7 @@ import ssl
 from collections.abc import Sequence
 from typing import Optional, Union, get_args
 
+import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
@@ -124,6 +125,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "Example (new format): "
         "``{\"name\": \"name\", \"path\": \"lora_path\", "
         "\"base_model_name\": \"id\"}``")
+    parser.add_argument(
+        '--lora-cache-dir',
+        type=nullable_str,
+        default=None,
+        help=('Directory to look for LoRA adapters if an unknown adapter '
+              'is specified in a request. Requires '
+              'VLLM_ALLOW_RUNTIME_LORA_UPDATING to be enabled.'))
     parser.add_argument(
         "--prompt-adapters",
         type=nullable_str,
@@ -288,6 +296,15 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_reasoning and not args.reasoning_parser:
         raise TypeError("Error: --enable-reasoning requires "
                         "--reasoning-parser")
+
+
+def validate_lora_cache_args(args: argparse.Namespace):
+    """Check that dynamic lora is enabled if the lora cache dir is set"""
+    if args.lora_cache_dir is not None and \
+            not envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+        raise ValueError(
+            f"lora_cache_dir ({args.lora_cache_dir}) cannot be set if "
+            "VLLM_ALLOW_RUNTIME_LORA_UPDATING is not enabled")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
