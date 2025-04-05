@@ -111,10 +111,10 @@ class EagleProposer:
 
             # NOTE(woosuk): We should handle the case where the draft model
             # generates tokens beyond the max model length. Since it is complex
-            # to remove the request from the batch, we keep the request in the
-            # batch but adjust the position ids and slot mappings to avoid the
+            # to remove such requests from the batch, we keep them in the batch
+            # but adjust the position ids and slot mappings to avoid the
             # out-of-range access during the model execution. The draft tokens
-            # generated through this adjustment should be ignored.
+            # generated with this adjustment should be ignored.
             exceeds_max_model_len = positions >= self.max_model_len
             # Mask out the position ids that exceed the max model length.
             # Otherwise, we may get out-of-range error in RoPE.
@@ -128,7 +128,7 @@ class EagleProposer:
             attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
                                             self.max_model_len)
             # For the requests that exceed the max model length, we set the
-            # sequence length to 1 to minimize the overheads in attention.
+            # sequence length to 1 to minimize their overheads in attention.
             attn_metadata.seq_lens = torch.where(exceeds_max_model_len, 1,
                                                  attn_metadata.seq_lens)
 
@@ -140,7 +140,7 @@ class EagleProposer:
             attn_metadata.slot_mapping = (block_ids * self.block_size +
                                           clamped_positions % self.block_size)
             # Mask out the slot mappings that exceed the max model length.
-            # Otherwise, the KV cache will be inadverently updated with the
+            # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
             attn_metadata.slot_mapping = torch.where(
                 exceeds_max_model_len,
