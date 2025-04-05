@@ -3,8 +3,9 @@
 import asyncio
 import json
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Iterable
+from enum import Enum
 from functools import cache, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
@@ -41,6 +42,20 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
 logger = init_logger(__name__)
+
+
+class Modality(str, Enum):
+    IMAGE = "image"
+    IMAGE_EMBEDS = "image_embeds"
+    AUDIO = "audio"
+    VIDEO = "video"
+
+
+MODALITY_PLACEHOLDERS_MAP = {
+    Modality.IMAGE: "<##IMAGE##>",
+    Modality.AUDIO: "<##AUDIO##>",
+    Modality.VIDEO: "<##VIDEO##>",
+}
 
 
 class AudioURL(TypedDict, total=False):
@@ -436,7 +451,9 @@ def resolve_chat_template_content_format(
     return detected_format
 
 
-ModalityStr = Literal["image", "audio", "video", "image_embeds"]
+ModalityStr = Literal[
+    Modality.IMAGE, Modality.AUDIO, Modality.VIDEO, Modality.IMAGE_EMBEDS
+]
 _T = TypeVar("_T")
 
 
@@ -477,7 +494,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         hf_config = self._model_config.hf_config
         model_type = hf_config.model_type
 
-        if modality in ("image", "image_embeds"):
+        if modality in (Modality.IMAGE, Modality.IMAGE_EMBEDS):
             if model_type == "chatglm":
                 return "<|begin_of_image|><|endoftext|><|end_of_image|>"
             if model_type == "phi3_v":
@@ -514,7 +531,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<start_of_image>"
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
-        elif modality == "audio":
+        elif modality == Modality.AUDIO:
             if model_type == "ultravox":
                 return "<|audio|>"
             if model_type == "phi4mm":
@@ -524,8 +541,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
             if model_type == "minicpmo":
                 return "(<audio>./</audio>)"
-            raise TypeError(f"Unknown model type: {model_type}")
-        elif modality == "video":
+            raise TypeError(f"Unknown {modality} model type: {model_type}")
+        elif modality == Modality.VIDEO:
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             if model_type in ("minicpmo", "minicpmv"):
@@ -535,13 +552,15 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                                               hf_config.video_token_index)
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         else:
-            raise TypeError(f"Unknown modality: {modality}")
+            raise TypeError(f"Unknown {modality}")
 
     def add(self, modality: ModalityStr, item: _T) -> Optional[str]:
         """
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
+        modality = Modality(modality)
+
         allowed_count = self._allowed_items.get(modality, 1)
         current_count = len(self._items_by_modality[modality]) + 1
         if current_count > allowed_count:
@@ -625,15 +644,21 @@ class BaseMultiModalContentParser(ABC):
     def __init__(self) -> None:
         super().__init__()
 
-        # multimodal placeholder_string : count
-        self._placeholder_counts: dict[str, int] = defaultdict(lambda: 0)
+        # stores model placehodlers list with corresponding
+        # general MM placeholder:
+        # {
+        #   "<##IMAGE##>": ["<image>", "<image>", "<image>"],
+        #   "<##AUDIO##>": ["<audio>", "<audio>"]
+        # }
+        self._placeholder_storage: dict[str, list] = defaultdict(list)
 
-    def _add_placeholder(self, placeholder: Optional[str]):
+    def _add_placeholder(self, modality: Modality, placeholder: Optional[str]):
+        mod_placeholder = MODALITY_PLACEHOLDERS_MAP[modality]
         if placeholder:
-            self._placeholder_counts[placeholder] += 1
+            self._placeholder_storage[mod_placeholder].append(placeholder)
 
-    def mm_placeholder_counts(self) -> dict[str, int]:
-        return dict(self._placeholder_counts)
+    def mm_placeholder_storage(self) -> dict[str, list]:
+        return dict(self._placeholder_storage)
 
     @abstractmethod
     def parse_image(self, image_url: str) -> None:
@@ -671,8 +696,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def parse_image(self, image_url: str) -> None:
         image = self._connector.fetch_image(image_url)
 
-        placeholder = self._tracker.add("image", image)
-        self._add_placeholder(placeholder)
+        placeholder = self._tracker.add(Modality.IMAGE, image)
+        self._add_placeholder(Modality.IMAGE, placeholder)
 
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
@@ -681,19 +706,19 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                 k: self._connector.fetch_image_embedding(v)
                 for k, v in image_embeds.items()
             }
-            placeholder = self._tracker.add("image_embeds", embeds)
+            placeholder = self._tracker.add(Modality.IMAGE_EMBEDS, embeds)
 
         if isinstance(image_embeds, str):
             embedding = self._connector.fetch_image_embedding(image_embeds)
-            placeholder = self._tracker.add("image_embeds", embedding)
+            placeholder = self._tracker.add(Modality.IMAGE_EMBEDS, embedding)
 
-        self._add_placeholder(placeholder)
+        self._add_placeholder(Modality.IMAGE, placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
         audio = self._connector.fetch_audio(audio_url)
 
-        placeholder = self._tracker.add("audio", audio)
-        self._add_placeholder(placeholder)
+        placeholder = self._tracker.add(Modality.AUDIO, audio)
+        self._add_placeholder(Modality.AUDIO, placeholder)
 
     def parse_input_audio(self, input_audio: InputAudio) -> None:
         audio_data = input_audio.get("data", "")
@@ -705,8 +730,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def parse_video(self, video_url: str) -> None:
         video = self._connector.fetch_video(video_url)
 
-        placeholder = self._tracker.add("video", video)
-        self._add_placeholder(placeholder)
+        placeholder = self._tracker.add(Modality.VIDEO, video)
+        self._add_placeholder(Modality.VIDEO, placeholder)
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
@@ -722,8 +747,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def parse_image(self, image_url: str) -> None:
         image_coro = self._connector.fetch_image_async(image_url)
 
-        placeholder = self._tracker.add("image", image_coro)
-        self._add_placeholder(placeholder)
+        placeholder = self._tracker.add(Modality.IMAGE, image_coro)
+        self._add_placeholder(Modality.IMAGE, placeholder)
 
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
@@ -741,14 +766,14 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
                 fetch_image_embedding(image_embeds)
             future.set_result(embedding)
 
-        placeholder = self._tracker.add("image_embeds", future)
-        self._add_placeholder(placeholder)
+        placeholder = self._tracker.add(Modality.IMAGE_EMBEDS, future)
+        self._add_placeholder(Modality.IMAGE, placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
         audio_coro = self._connector.fetch_audio_async(audio_url)
 
-        placeholder = self._tracker.add("audio", audio_coro)
-        self._add_placeholder(placeholder)
+        placeholder = self._tracker.add(Modality.AUDIO, audio_coro)
+        self._add_placeholder(Modality.AUDIO, placeholder)
 
     def parse_input_audio(self, input_audio: InputAudio) -> None:
         audio_data = input_audio.get("data", "")
@@ -760,8 +785,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def parse_video(self, video_url: str) -> None:
         video = self._connector.fetch_video_async(video_url)
 
-        placeholder = self._tracker.add("video", video)
-        self._add_placeholder(placeholder)
+        placeholder = self._tracker.add(Modality.VIDEO, video)
+        self._add_placeholder(Modality.VIDEO, placeholder)
 
 
 def validate_chat_template(chat_template: Optional[Union[Path, str]]):
@@ -831,11 +856,39 @@ def load_chat_template(
     return _cached_load_chat_template(chat_template, is_literal=is_literal)
 
 
+def _get_interleaved_text_prompt(placeholder_storage: dict[str, list],
+                                 texts: list[str]) -> str:
+    for idx, elem in enumerate(texts):
+        if elem in placeholder_storage:
+            texts[idx] = placeholder_storage[elem].pop(0)
+
+    return "\n".join(texts)
+
+
 # TODO: Let user specify how to insert multimodal tokens into prompt
 # (similar to chat template)
-def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
-                                     text_prompt: str) -> str:
+def _get_full_multimodal_text_prompt(placeholder_storage: dict[str, list],
+                                     texts: list[str],
+                                     interleave_strings: bool
+                                     ) -> str:
     """Combine multimodal prompts for a multimodal language model."""
+
+    # flatten storage to make it looks like
+    # {
+    #   "<|image|>": 2,
+    #   "<|audio|>": 1
+    # }
+    placeholder_counts = Counter(
+        [v for elem in placeholder_storage.values() for v in elem]
+    )
+
+    if interleave_strings:
+        text_prompt = _get_interleaved_text_prompt(placeholder_storage, texts)
+    else:
+        text_prompt = "\n".join(texts)
+
+    # Pass interleaved text further in case the user used image placeholders
+    # himself, but forgot to disable the 'interleave_strings' flag
 
     # Look through the text prompt to check for missing placeholders
     missing_placeholders: list[str] = []
@@ -845,6 +898,13 @@ def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
         placeholder_counts[placeholder] -= text_prompt.count(placeholder)
 
         if placeholder_counts[placeholder] < 0:
+            logger.error(
+                "Placeholder count is negative! "
+                "Ensure that the 'interleave_strings' flag is disabled "
+                "(current value: %s) "
+                "when manually placing image placeholders.", interleave_strings
+            )
+            logger.debug(text_prompt)
             raise ValueError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
                 "actual multimodal data items.")
@@ -852,8 +912,8 @@ def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
         missing_placeholders.extend([placeholder] *
                                     placeholder_counts[placeholder])
 
-    # NOTE: For now we always add missing placeholders at the front of
-    # the prompt. This may change to be customizable in the future.
+    # NOTE: Default behaviour: we always add missing placeholders
+    # at the front of the prompt, if interleave_strings=False
     return "\n".join(missing_placeholders + [text_prompt])
 
 
@@ -958,6 +1018,7 @@ def _parse_chat_message_content_parts(
     mm_tracker: BaseMultiModalItemTracker,
     *,
     wrap_dicts: bool,
+    interleave_strings: bool,
 ) -> list[ConversationMessage]:
     content = list[_ContentPart]()
 
@@ -968,6 +1029,7 @@ def _parse_chat_message_content_parts(
             part,
             mm_parser,
             wrap_dicts=wrap_dicts,
+            interleave_strings=interleave_strings
         )
         if parse_res:
             content.append(parse_res)
@@ -977,11 +1039,14 @@ def _parse_chat_message_content_parts(
         return [ConversationMessage(role=role,
                                     content=content)]  # type: ignore
     texts = cast(list[str], content)
-    text_prompt = "\n".join(texts)
-    mm_placeholder_counts = mm_parser.mm_placeholder_counts()
-    if mm_placeholder_counts:
-        text_prompt = _get_full_multimodal_text_prompt(mm_placeholder_counts,
-                                                       text_prompt)
+    mm_placeholder_storage = mm_parser.mm_placeholder_storage()
+    if mm_placeholder_storage:
+        text_prompt = _get_full_multimodal_text_prompt(mm_placeholder_storage,
+                                                       texts,
+                                                       interleave_strings)
+    else:
+        text_prompt = "\n".join(texts)
+
     return [ConversationMessage(role=role, content=text_prompt)]
 
 
@@ -990,6 +1055,7 @@ def _parse_chat_message_content_part(
     mm_parser: BaseMultiModalContentParser,
     *,
     wrap_dicts: bool,
+    interleave_strings: bool,
 ) -> Optional[_ContentPart]:
     """Parses a single part of a conversation. If wrap_dicts is True,
     structured dictionary pieces for texts and images will be
@@ -1019,30 +1085,34 @@ def _parse_chat_message_content_part(
         else:
             return str_content
 
+    modality = None
+
     if part_type == "image_url":
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
-        return {'type': 'image'} if wrap_dicts else None
-    if part_type == "image_embeds":
+        modality = Modality.IMAGE
+    elif part_type == "image_embeds":
         content = cast(Union[str, dict[str, str]], content)
         mm_parser.parse_image_embeds(content)
-        return {'type': 'image'} if wrap_dicts else None
-    if part_type == "audio_url":
+        modality = Modality.IMAGE
+    elif part_type == "audio_url":
         str_content = cast(str, content)
         mm_parser.parse_audio(str_content)
-        return {'type': 'audio'} if wrap_dicts else None
-
-    if part_type == "input_audio":
+        modality = Modality.AUDIO
+    elif part_type == "input_audio":
         dict_content = cast(InputAudio, content)
         mm_parser.parse_input_audio(dict_content)
-        return {'type': 'audio'} if wrap_dicts else None
-
-    if part_type == "video_url":
+        modality = Modality.AUDIO
+    elif part_type == "video_url":
         str_content = cast(str, content)
         mm_parser.parse_video(str_content)
-        return {'type': 'video'} if wrap_dicts else None
+        modality = Modality.VIDEO
+    else:
+        raise NotImplementedError(f"Unknown part type: {part_type}")
 
-    raise NotImplementedError(f"Unknown part type: {part_type}")
+    return {'type': modality.value} if wrap_dicts else (
+        MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
+    )
 
 
 # No need to validate using Pydantic again
@@ -1054,6 +1124,7 @@ def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
     content_format: _ChatTemplateContentFormat,
+    interleave_strings: bool,
 ) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
@@ -1069,6 +1140,7 @@ def _parse_chat_message_content(
         content,  # type: ignore
         mm_tracker,
         wrap_dicts=(content_format == "openai"),
+        interleave_strings=interleave_strings,
     )
 
     for result_msg in result:
@@ -1117,6 +1189,10 @@ def parse_chat_messages(
             msg,
             mm_tracker,
             content_format,
+            interleave_strings=(
+                content_format == "string"
+                and model_config.interleave_mm_strings
+            )
         )
 
         conversation.extend(sub_messages)
@@ -1140,6 +1216,10 @@ def parse_chat_messages_futures(
             msg,
             mm_tracker,
             content_format,
+            interleave_strings=(
+                content_format == "string"
+                and model_config.interleave_mm_strings
+            )
         )
 
         conversation.extend(sub_messages)
