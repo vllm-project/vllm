@@ -6,6 +6,8 @@ from typing import Any, Optional
 import torch
 # Required to register custom ops.
 import torch_xla.experimental.custom_kernel  # noqa: F401
+from torch_xla.experimental.pallas_kernels.ragged_paged_attention_v2 import (
+    validate_dynamic_inputs)
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -149,11 +151,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
             write_to_kv_cache(key, value, kv_cache, slot_mapping)
 
         if envs.VLLM_TPU_VALIDATE_DYNAMIC_INPUTS:
-            torch.ops.xla.validate_dynamic_inputs(
-                query, kv_cache, attn_metadata.context_lens,
-                attn_metadata.block_tables, attn_metadata.query_start_loc,
-                attn_metadata.num_seqs, self.sliding_window,
-                self.logits_soft_cap)
+            validate_dynamic_inputs(query, kv_cache,
+                                    attn_metadata.context_lens,
+                                    attn_metadata.block_tables,
+                                    attn_metadata.query_start_loc,
+                                    attn_metadata.num_seqs,
+                                    self.sliding_window, self.logits_soft_cap)
 
         output = torch.ops.xla.ragged_paged_attention(
             query,
