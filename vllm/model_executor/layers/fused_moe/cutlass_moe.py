@@ -103,7 +103,7 @@ def cutlass_moe_fp8(
     per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
         a2_scale.numel() != 1 if a2_scale is not None else False)
     if apply_router_weight_on_input:
-        # FIXME: this only works for topK=1, will need to update for topK>1
+        # TODO: this only works for topK=1, will need to update for topK>1
         a = a * topk_weights.to(out_dtype)
 
     a_q, a1_scale = ops.scaled_fp8_quant(

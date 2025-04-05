@@ -10,8 +10,8 @@ from ....conftest import _ImageAssets
 from ...utils import build_model_context
 
 
-# FIXME: meta-llama/Llama-4-Scout-17B-16E-Instruct
-@pytest.mark.parametrize("model_id", ["ll-re/Llama-4-Scout-17B-16E-Instruct"])
+@pytest.mark.parametrize("model_id",
+                         ["meta-llama/Llama-4-Scout-17B-16E-Instruct"])
 @pytest.mark.parametrize("mm_processor_kwargs", [{}])
 @pytest.mark.parametrize("num_imgs", [1, 5])
 @pytest.mark.parametrize("disable_mm_preprocessor_cache", [True, False])

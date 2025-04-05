@@ -585,8 +585,7 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
 def run_llama4(questions: list[str], modality: str):
     assert modality == "image"
 
-    # FIXME: meta-llama/Llama-4-Scout-17B-16E-Instruct
-    model_name = "ll-re/Llama-4-Scout-17B-16E-Instruct"
+    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 
     engine_args = EngineArgs(
         model=model_name,

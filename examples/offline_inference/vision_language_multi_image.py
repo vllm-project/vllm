@@ -254,8 +254,7 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
-    # FIXME: meta-llama/Llama-4-Scout-17B-16E-Instruct
-    model_name = "ll-re/Llama-4-Scout-17B-16E-Instruct"
+    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 
     engine_args = EngineArgs(
         model=model_name,

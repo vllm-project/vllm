@@ -310,9 +310,7 @@ class Llama4VisionEncoderLayer(nn.Module):
     ):
         # Self Attention
         residual = hidden_state
-
         hidden_state = self.input_layernorm(hidden_state)
-
         hidden_state = self.self_attn(hidden_state)
         hidden_state = residual + hidden_state
 
@@ -463,15 +461,12 @@ class Llama4VisionModel(nn.Module):
         positional_embedding = self.positional_embedding_vlm.to(
             dtype=hidden_state.dtype, device=hidden_state.device)
         hidden_state = hidden_state + positional_embedding
-
         hidden_state = self.layernorm_pre(hidden_state)
-
         hidden_state = hidden_state.view(num_tiles, -1, hidden_dim)
 
         # Apply encoder
         output = self.model(hidden_state)
         hidden_state = output.last_hidden_state
-
         hidden_state = self.layernorm_post(hidden_state)
 
         # Remove CLS token output

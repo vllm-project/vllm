@@ -537,8 +537,7 @@ VLM_TEST_SETTINGS = {
         )],
     ),
     "llama4": VLMTestInfo(
-        # FIXME: meta-llama/Llama-4-Scout-17B-16E-Instruct
-        models=["ll-re/Llama-4-Scout-17B-16E-Instruct"],
+        models=["meta-llama/Llama-4-Scout-17B-16E-Instruct"],
         prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{img_prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n", # noqa: E501
         img_idx_to_prompt=lambda _: "<|image|>",
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
