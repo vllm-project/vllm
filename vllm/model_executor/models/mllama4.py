@@ -430,13 +430,6 @@ class Llama4VisionModel(nn.Module):
         self.vision_adapter = Llama4VisionPixelShuffleMLP(
             config, quant_config, prefix=f"{prefix}.vision_adapter")
 
-    def get_input_embeddings(self):
-        """
-        This function is used to fetch the first embedding layer to activate
-        grads on inputs.
-        """
-        return self.patch_embedding
-
     def forward(
         self,
         images_flattened: torch.Tensor,
