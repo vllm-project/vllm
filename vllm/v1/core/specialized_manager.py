@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
+from collections import namedtuple
+from typing import Optional, Union
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         SlidingWindowSpec)
+from vllm.v1.utils import ConstantList
 
 
 class SpecializedManager(ABC):
@@ -29,16 +32,56 @@ class SpecializedManager(ABC):
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
+        # for caching the intermediate states between multiple calls of
+        # find_longest_cache_hit
+        self.req_cached_blocks: dict[int, list[KVCacheBlock]] = {}
 
-    @abstractmethod
     def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+        self,
+        request_id: int,
+        block_hashes: list[BlockHashType],
+        return_const_list: bool = False,
+    ) -> Union[list[KVCacheBlock], ConstantList[KVCacheBlock]]:
         """
-        Get the longest cache hit prefix of the blocks. If no cache hit is 
+        Find the longest cache hit prefix of the blocks. If no cache hit is 
         found, return an empty list.
 
         Args:
+            request_id: The request id.
             block_hashes: The block hashes of the request.
+            return_const_list: Whether to return a ConstantList.
+        """
+
+        if req_cached_blocks := self.req_cached_blocks.pop(request_id, None):
+            assert len(req_cached_blocks) >= len(block_hashes)
+
+        req_cached_blocks = self._find_longest_cache_hit(
+            block_hashes, req_cached_blocks)
+
+        if return_const_list:
+            # TODO: add comment
+            self.req_cached_blocks[request_id] = req_cached_blocks
+            return ConstantList(req_cached_blocks)
+        else:
+            # TODO: add comment
+            return req_cached_blocks
+
+    @abstractmethod
+    def _find_longest_cache_hit(
+        self,
+        block_hashes: list[BlockHashType],
+        computed_blocks: Optional[list[KVCacheBlock]],
+    ) -> list[KVCacheBlock]:
+        """
+        # TODO: update comment for multiple calls
+        Get the longest cache hit prefix of the blocks. If no cache hit is 
+        found, return an empty list. # TODO: add notes for computed_blocks
+        will not be longer than block_hashes.
+
+        Args:
+            block_hashes: The block hashes of the request.
+            computed_blocks: The cached blocks for the request returned from
+                the previous call of this function.
         Returns:
             A list of cached blocks with skipped blocks replaced by null block.
             For example, sliding window manager should return a list like
@@ -68,17 +111,24 @@ class SpecializedManager(ABC):
 
 class FullAttentionManager(SpecializedManager):
 
-    def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
-        computed_blocks: list[KVCacheBlock] = []
-        for block_hash in block_hashes:
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
-            # not computed yet for sure.
-            if cached_block := self.block_pool.get_cached_block(block_hash):
-                computed_blocks.append(cached_block)
-            else:
-                break
+    def _find_longest_cache_hit(
+            self, block_hashes: list[BlockHashType],
+            computed_blocks: Optional[list[KVCacheBlock]]
+    ) -> list[KVCacheBlock]:
+        if computed_blocks is None:
+            computed_blocks: list[KVCacheBlock] = []
+            for block_hash in block_hashes:
+                # block_hashes is a chain of block hashes. If a block hash is not
+                # in the cached_block_hash_to_id, the following block hashes are
+                # not computed yet for sure.
+                if cached_block := self.block_pool.get_cached_block(
+                        block_hash):
+                    computed_blocks.append(cached_block)
+                else:
+                    break
+        else:
+            assert len(computed_blocks) >= len(block_hashes)
+            del computed_blocks[len(block_hashes):]
         return computed_blocks
 
     def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
@@ -99,18 +149,30 @@ class SlidingWindowManager(SpecializedManager):
             (kv_cache_spec.sliding_window - 1), self.block_size)
         self._null_block = block_pool.null_block
 
-    def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+    def _find_longest_cache_hit(
+            self, block_hashes: list[BlockHashType],
+            computed_blocks: Optional[list[KVCacheBlock]]
+    ) -> list[KVCacheBlock]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(len(block_hashes)) to
         # O(len(block_hashes) / sliding_window_contiguous_blocks +
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
-        computed_blocks = [self._null_block] * len(block_hashes)
-        num_contiguous_blocks = 0
+        if computed_blocks is None:
+            num_contiguous_blocks = 0
+            computed_blocks = [self._null_block] * len(block_hashes)
+        else:
+            if len(computed_blocks) == len(block_hashes):
+                return computed_blocks
+            # We are sure the last num_contiguous_blocks are not NULL and do
+            # not need to check again.
+            num_contiguous_blocks = max(
+                self.sliding_window_contiguous_blocks -
+                (len(computed_blocks) - len(block_hashes)), 0)
+            del computed_blocks[len(block_hashes):]
 
         # Search from right to left and early stop when a match is found.
-        for i in range(len(block_hashes) - 1, -1, -1):
+        for i in range(len(block_hashes) - num_contiguous_blocks - 1, -1, -1):
             if cached_block := self.block_pool.get_cached_block(
                     block_hashes[i]):
                 computed_blocks[i] = cached_block

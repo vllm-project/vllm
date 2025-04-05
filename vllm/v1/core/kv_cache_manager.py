@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
@@ -13,6 +13,8 @@ from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
+if TYPE_CHECKING:
+    from vllm.v1.core.hybrid_kv_cache_manager import HybridKVCacheManager
 
 logger = init_logger(__name__)
 
@@ -140,8 +142,8 @@ class KVCacheManager:
             else:
                 last_block_hash = None
 
-            computed_blocks = (
-                self.specialized_manager.find_longest_cache_hit(block_hashes))
+            computed_blocks = (self.specialized_manager.find_longest_cache_hit(
+                request.request_id, block_hashes))
 
             if last_block_hash is not None:
                 # Add back the last block hash if it was removed.
@@ -163,7 +165,8 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[list[KVCacheBlock]] = None
+        new_computed_blocks: Optional[list[KVCacheBlock]] = None,
+        num_new_computed_tokens: int = 0,
     ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -173,6 +176,8 @@ class KVCacheManager:
                 not include the tokens that have already been computed.
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
+            num_new_computed_tokens: The number of new computed tokens in the
+                new_computed_blocks.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -209,7 +214,7 @@ class KVCacheManager:
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
-                               len(new_computed_blocks) * self.block_size)
+                               num_new_computed_tokens)
         num_required_blocks = cdiv(num_computed_tokens + num_tokens,
                                    self.block_size)
         num_new_blocks = (num_required_blocks - len(req_blocks) -
@@ -374,3 +379,26 @@ class KVCacheManager:
         is finished, not when it is preempted.
         """
         self.req_to_block_hashes.pop(request.request_id, None)
+
+
+def init_kv_cache_manager(
+    kv_cache_config: KVCacheConfig,
+    max_model_len: int,
+    enable_caching: bool = True,
+    num_preallocate_tokens: int = 64
+) -> Union[KVCacheManager, "HybridKVCacheManager"]:
+    from vllm.v1.core.hybrid_kv_cache_manager import HybridKVCacheManager
+    if len(kv_cache_config.kv_cache_groups) > 1:
+        return HybridKVCacheManager(
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+            enable_caching=enable_caching,
+            num_preallocate_tokens=num_preallocate_tokens,
+        )
+    else:
+        return KVCacheManager(
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+            enable_caching=enable_caching,
+            num_preallocate_tokens=num_preallocate_tokens,
+        )

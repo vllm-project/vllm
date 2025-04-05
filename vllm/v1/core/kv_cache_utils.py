@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
+import math
 import os
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple, Optional
@@ -10,8 +11,9 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import sha256
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheSpec,
-                                        KVCacheTensor, SlidingWindowSpec)
+                                        KVCacheGroupSpec, KVCacheNewTensor,
+                                        KVCacheReuseTensor, KVCacheSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -263,11 +265,12 @@ class FreeKVCacheBlockQueue:
         return ret
 
 
-def need_extra_keys(request: Request) -> bool:
+def need_extra_keys(request: Request, kv_cache_group_id: int) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
 
     Args:
         request (Request): The request.
+        kv_cache_group_id (int): The id of the kv cache group. -1 means no kv cache group.
 
     Returns:
         bool: Whether blocks allocated to this request need extra hash keys.
@@ -275,7 +278,9 @@ def need_extra_keys(request: Request) -> bool:
 
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA ID.
-    return bool(request.mm_positions) or (request.lora_request is not None)
+    return bool(request.mm_positions) or (request.lora_request
+                                          is not None) or (kv_cache_group_id
+                                                           != -1)
 
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
@@ -364,7 +369,8 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
 
 def generate_block_hash_extra_keys(
         request: Request, start_token_idx: int, end_token_idx: int,
-        start_mm_idx: int) -> tuple[Optional[tuple[Any, ...]], int]:
+        start_mm_idx: int,
+        kv_cache_group_id: int) -> tuple[Optional[tuple[Any, ...]], int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
 
@@ -373,7 +379,8 @@ def generate_block_hash_extra_keys(
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
         start_mm_idx: The start multi-modal index of the block.
-
+        kv_cache_group_id: The id of the kv cache group. -1 means no kv cache 
+        group.
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
@@ -383,6 +390,8 @@ def generate_block_hash_extra_keys(
     lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(request)
 
     extra_keys: list[Any] = lora_extra_keys + mm_extra_keys
+    if kv_cache_group_id != -1:
+        extra_keys.append(kv_cache_group_id)
 
     if not extra_keys:
         return None, new_start_mm_idx
@@ -401,10 +410,12 @@ def hash_block_tokens(
     hash values for the same block contents.
 
     Args:
+        hash_function: The function used for hash
         parent_block_hash: The hash of the parent block. None
             if this is the first block.
         curr_block_token_ids: A list of token ids in the current
             block. The current block is assumed to be full.
+        kv_cache_group_id: The id of the kv cache group. -1 means no kv cache group.
         extra_keys: Extra keys for the block.
 
     Returns:
@@ -421,21 +432,24 @@ def hash_block_tokens(
         curr_block_token_ids_tuple, extra_keys)
 
 
-def hash_request_tokens(hash_function: Any, block_size: int,
-                        request: Request) -> list[BlockHashType]:
+def hash_request_tokens(hash_function: Any,
+                        block_size: int,
+                        request: Request,
+                        kv_cache_group_id: int = -1) -> list[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
     Args:
         block_size: The size of each block.
         request: The request object.
+        kv_cache_group_id: The id of the kv cache group. -1 means no kv cache group.
 
     Returns:
         The list of computed hash values.
     """
     token_ids = request.all_token_ids
 
-    req_need_extra_keys = need_extra_keys(request)
+    req_need_extra_keys = need_extra_keys(request, kv_cache_group_id)
     req_extra_keys = None
     curr_mm_idx = 0
 
@@ -451,7 +465,7 @@ def hash_request_tokens(hash_function: Any, block_size: int,
         if req_need_extra_keys:
             # MM and LoRA requests need extra keys for block-hash computation.
             req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, start, end, curr_mm_idx)
+                request, start, end, curr_mm_idx, kv_cache_group_id)
 
         block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
                                        block_token_ids, req_extra_keys)
@@ -589,12 +603,88 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         tensors={
-            layer_name: KVCacheTensor(size=per_layer_size)
+            layer_name: KVCacheNewTensor(size=per_layer_size)
             for layer_name in kv_cache_spec
         },
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
     )
+    return kv_cache_config
+
+
+def is_kv_cache_page_size_uniform(
+        kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+    """
+    Whether all layers in the given KVCacheSpec have the same page size.
+    Args:
+        kv_cache_spec: The KVCacheSpec of each attention layer in the model
+    
+    Returns:
+        True if all layers have the same page size, False otherwise.
+    """
+
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    return len(page_sizes) == 1
+
+
+def _get_kv_cache_config_uniform_page_size(
+        vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
+        available_memory: int) -> KVCacheConfig:
+    """
+    Generates the KV cache configuration for a model with one page size.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The KVCacheSpec of each attention layer in the model
+        available_memory: Memory available for KV cache in bytes.
+
+    Returns:
+        The generated KVCacheConfig
+    """
+    # Group all layers by type_id.
+    # E.g., 2 full attention layers and 4 sliding window attention layers,
+    # -> (full.0, full.1), (sw.0, sw.1, sw.2, sw.3).
+    same_type_layers: dict[str, list[str]] = defaultdict(list)
+    for layer_name, layer_spec in kv_cache_spec.items():
+        same_type_layers[layer_spec.type_id].append(layer_name)
+
+    # Split each group into smaller groups, to make the number of layers in
+    # each group identical.
+    # E.g., (full.0, full.1), (sw.0, sw.1, sw.2, sw.3), group_size_gcd is 2,
+    # split to 3 groups with 2 layers each:
+    # (full.0, full.1), (sw.0, sw.1), (sw.2, sw.3).
+    group_size_gcd = math.gcd(
+        *[len(layers) for layers in same_type_layers.values()])
+    grouped_layers = []
+    for layers in same_type_layers.values():
+        for i in range(0, len(layers), group_size_gcd):
+            grouped_layers.append(layers[i:i + group_size_gcd])
+
+    # Divide the available memory equally among all layers in the first group.
+    # The memory layout in the example will be:
+    # full.0: Tensor with size=available_memory//2
+    # full.1: Tensor with size=available_memory//2
+    kv_cache_spec_first_group = {
+        layer_name: kv_cache_spec[layer_name]
+        for layer_name in grouped_layers[0]
+    }
+    kv_cache_config = _get_kv_cache_config_uniform_type(
+        vllm_config, kv_cache_spec_first_group, available_memory)
+
+    # Reuse the KV cache tensors of the first group for the other groups.
+    # The memory layout in the example will be:
+    # full.0, sw.0, sw.2: share a Tensor with size=available_memory//2
+    # full.1, sw.1, sw.3: share another Tensor with size=available_memory//2
+    # Layers of different groups have different block table, so they will
+    # use different parts of the shared Tensor.
+    for layers in grouped_layers[1:]:
+        for layer_name, layer_name_first_group in zip(layers,
+                                                      grouped_layers[0]):
+            kv_cache_config.tensors[layer_name] = KVCacheReuseTensor(
+                reused_layer_name=layer_name_first_group)
+
+    kv_cache_config.kv_cache_groups = create_kv_cache_group_specs(
+        kv_cache_spec, grouped_layers)
     return kv_cache_config
 
 
@@ -618,10 +708,12 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
             if isinstance(spec, SlidingWindowSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=spec.block_size,
+                    num_query_heads=spec.num_query_heads,
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,
                     use_mla=spec.use_mla,
+                    compute_as_sliding_window=True,
                 )
 
 
@@ -641,14 +733,19 @@ def get_kv_cache_config(vllm_config: VllmConfig,
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
-    unify_hybrid_kv_cache_specs(kv_cache_spec)
+    if vllm_config.cache_config.disable_hybrid_allocator:
+        unify_hybrid_kv_cache_specs(kv_cache_spec)
     if is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
         # each layer.
         return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
                                                  available_memory)
-
+    elif is_kv_cache_page_size_uniform(kv_cache_spec):
+        # KV cache of all layers have the same page size. TODO more notes
+        return _get_kv_cache_config_uniform_page_size(vllm_config,
+                                                      kv_cache_spec,
+                                                      available_memory)
     raise NotImplementedError
 
 

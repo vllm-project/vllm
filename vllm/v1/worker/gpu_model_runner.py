@@ -3,7 +3,7 @@
 import gc
 import time
 import weakref
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Type, Union, cast
 
 import numpy as np
 import torch
@@ -11,6 +11,7 @@ import torch.distributed
 import torch.nn as nn
 
 from vllm.attention import AttentionType, get_attn_backend
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadataBuilder
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
@@ -39,6 +40,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
+from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
@@ -89,50 +91,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
-        # NOTE(woosuk): sliding_window is None for models with interleaved
-        # attention. Use interleaved_sliding_window instead.
-        self.sliding_window = model_config.get_sliding_window()
-        self.interleaved_sliding_window = getattr(
-            model_config.hf_text_config, "interleaved_sliding_window", None)
-        self.window_size = (self.sliding_window
-                            or self.interleaved_sliding_window)
-
         self.is_multimodal_model = model_config.is_multimodal_model
-        self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
-        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Model-related.
-        self.num_attn_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention)
-        self.num_query_heads = model_config.get_num_attention_heads(
-            parallel_config)
-        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
 
-        self.attn_backend = get_attn_backend(
-            self.head_size,
-            self.dtype,
-            self.kv_cache_dtype,
-            self.block_size,
-            self.model_config.is_attention_free,
-            use_mla=self.model_config.use_mla,
-        )
-        if self.attn_backend is None:
-            error_msg = (
-                f"Error with get_att_backend: {self.head_size=}, "
-                f"{self.dtype=}, {self.kv_cache_dtype=}, {self.block_size=}, "
-                f"{self.model_config.is_attention_free=}, "
-                f"{self.model_config.use_mla=}")
-            logger.error(error_msg)
-            raise NotImplementedError(
-                "Non-Attention backend is not supported by V1 GPUModelRunner.")
-
-        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
-            weakref.proxy(self))
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         # Multi-modal data support
@@ -149,7 +115,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
+        # init in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
+        self.kv_cache_config = cast(KVCacheConfig, None)
+        self.attn_backends: list[Type[AttentionBackend]] = []
+        self.attn_metadata_builders: list[Type[AttentionMetadataBuilder]] = []
+        # Persistent batch
+        self.input_batch = cast(InputBatch, None)
+
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
@@ -173,15 +146,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
-        # Persistent batch.
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            vocab_size=model_config.get_vocab_size(),
-        )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
@@ -535,23 +499,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
-        # Calculate the slot mapping.
-        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
-        # where K is the max_num_blocks_per_req and the block size is 2.
-        # NOTE(woosuk): We can't simply use `token_indices // block_size` here
-        # because M (max_model_len) is not necessarily divisible by block_size.
-        block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                               positions_np // self.block_size)
-        # NOTE(woosuk): We use torch.index_select instead of np.take here
-        # because torch.index_select is much faster than np.take for large
-        # tensors.
-        block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
-        block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
-        block_offsets = positions_np % self.block_size
-        np.add(block_numbers * self.block_size,
-               block_offsets,
-               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+        if len(self.kv_cache_config.kv_cache_groups) == 1:
+            may_multi_layer_unwrapper = lambda x, _group_id: x
+        else:
+            may_multi_layer_unwrapper = lambda x, group_id: x[group_id]
+
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups):
+            block_size = kv_cache_group_spec.kv_cache_spec.block_size
+            block_table: BlockTable = may_multi_layer_unwrapper(
+                self.input_batch.block_table, kv_cache_group_id)
+            # Calculate the slot mapping.
+            # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+            # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
+            # where K is the max_num_blocks_per_req and the block size is 2.
+            # NOTE(woosuk): We can't simply use `token_indices // block_size` here
+            # because M (max_model_len) is not necessarily divisible by block_size.
+            block_table_indices = (
+                req_indices * block_table.max_num_blocks_per_req +
+                positions_np // block_size)
+            # NOTE(woosuk): We use torch.index_select instead of np.take here
+            # because torch.index_select is much faster than np.take for large
+            # tensors.
+            block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
+            block_numbers = (
+                block_table_cpu.flatten()[block_table_indices].numpy())
+            block_offsets = positions_np % block_size
+            np.add(block_numbers * block_size,
+                   block_offsets,
+                   out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -575,20 +551,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.positions_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
 
-        # Prepare for cascade attention if enabled & beneficial.
-        common_prefix_len = 0
-        if self.cascade_attn_enabled:
-            common_prefix_len = self._compute_cascade_attn_prefix_len(
-                num_scheduled_tokens,
-                scheduler_output.num_common_prefix_blocks,
-            )
+        attn_metadata: dict[str, FlashAttentionMetadata] = {}
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups):
 
-        attn_metadata = self.attn_metadata_builder.build(
-            num_reqs=num_reqs,
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-            common_prefix_len=common_prefix_len,
-        )
+            # Prepare for cascade attention if enabled & beneficial.
+            common_prefix_len = 0
+            if self.cascade_attn_enabled:
+                common_prefix_len = self._compute_cascade_attn_prefix_len(
+                    num_scheduled_tokens,
+                    scheduler_output.num_common_prefix_blocks,
+                    kv_cache_group_spec.kv_cache_spec,
+                )
+
+            attn_metadata = self.attn_metadata_builder.build(
+                num_reqs=num_reqs,
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
+                common_prefix_len=common_prefix_len,
+            )
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -624,6 +605,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         num_scheduled_tokens: np.ndarray,
         num_common_prefix_blocks: int,
+        kv_cache_spec: KVCacheSpec,
     ) -> int:
         """Compute the length of the common prefix for cascade attention.
 
@@ -642,7 +624,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         Returns:
             int: Length of common prefix in tokens.
         """
-        common_prefix_len = num_common_prefix_blocks * self.block_size
+        common_prefix_len = num_common_prefix_blocks * kv_cache_spec.block_size
         if common_prefix_len == 0:
             # Common case.
             return 0
@@ -691,15 +673,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             common_prefix_len,
             self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
         # common_prefix_len should be a multiple of the block size.
-        common_prefix_len = (common_prefix_len // self.block_size *
-                             self.block_size)
+        common_prefix_len = (common_prefix_len // kv_cache_spec.block_size *
+                             kv_cache_spec.block_size)
+        use_sliding_window = (isinstance(kv_cache_spec, SlidingWindowSpec)
+                              or (isinstance(kv_cache_spec, FullAttentionSpec)
+                                  and kv_cache_spec.compute_as_sliding_window))
         use_cascade = self.attn_backend.use_cascade_attention(
             common_prefix_len=common_prefix_len,
             query_lens=num_scheduled_tokens,
-            num_query_heads=self.num_query_heads,
-            num_kv_heads=self.num_kv_heads,
+            num_query_heads=kv_cache_spec.num_query_heads,
+            num_kv_heads=kv_cache_spec.num_kv_heads,
             use_alibi=self.use_alibi,
-            use_sliding_window=self.window_size is not None,
+            use_sliding_window=use_sliding_window,
             num_sms=self.num_sms,
         )
         return common_prefix_len if use_cascade else 0
@@ -1552,14 +1537,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        if len(kv_cache_config.kv_cache_groups) > 1:
-            raise NotImplementedError(
-                "Hybrid models with more than one KV cache type are not "
-                "supported yet.")
+        self.kv_cache_config = kv_cache_config
+        self.initialize_attn_backend(kv_cache_config)
+        self.initialize_kv_cache_tensors(kv_cache_config)
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+            kv_cache_config=kv_cache_config,
+        )
 
+    def initialize_kv_cache_tensors(self,
+                                    kv_cache_config: KVCacheConfig) -> None:
         kv_caches: dict[str, torch.Tensor] = {}
 
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
+        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
                 tensor_config = kv_cache_config.tensors[layer_name]
@@ -1574,7 +1569,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # the min of all `num_blocks`. Verify it here.
                 assert num_blocks >= kv_cache_config.num_blocks
                 if isinstance(kv_cache_spec, AttentionSpec):
-                    kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                    kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
@@ -1590,6 +1585,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
+    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+        # TODO: docstring
+        assert (len(self.attn_backends) == 0
+                and len(self.attn_metadata_builders) == 0,
+                "already initialized")
+        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                raise NotImplementedError(
+                    "Only AttentionSpec is supported for now.")
+            attn_backend_i = get_attn_backend(
+                kv_cache_spec.head_size,
+                self.dtype,
+                kv_cache_spec.dtype,
+                kv_cache_spec.block_size,
+                self.model_config.is_attention_free,
+                use_mla=(isinstance(kv_cache_spec, AttentionSpec)
+                         and kv_cache_spec.use_mla),
+            )
+            if attn_backend_i is None:
+                error_msg = (
+                    f"Error with get_attn_backend: {kv_cache_spec.head_size=}, "
+                    f"{self.dtype=}, {kv_cache_spec.kv_cache_dtype=}, {kv_cache_spec.block_size=}, "
+                    f"{self.model_config.is_attention_free=}, "
+                    f"{kv_cache_spec.use_mla=}")
+                logger.error(error_msg)
+                raise NotImplementedError(
+                    "Non-Attention backend is not supported by V1 GPUModelRunner."
+                )
+            attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
+                weakref.proxy(self))
+            self.attn_backends.append(attn_backend_i)
+            self.attn_metadata_builders.append(attn_metadata_builder_i)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -1615,16 +1644,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
+                        num_query_heads=attn_module.num_heads,
+                        num_kv_heads=attn_module.num_kv_heads,
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
                         use_mla=use_mla)
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
+                        num_query_heads=attn_module.num_heads,
+                        num_kv_heads=attn_module.num_kv_heads,
                         dtype=self.kv_cache_dtype,
                         use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,

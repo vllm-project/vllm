@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+from vllm.v1.kv_cache_interface import MayMultiGroupBlockIDs
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -25,7 +27,7 @@ class NewRequestData:
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams
-    block_ids: list[int]
+    block_ids: MayMultiGroupBlockIDs
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
 
@@ -33,7 +35,7 @@ class NewRequestData:
     def from_request(
         cls,
         request: Request,
-        block_ids: list[int],
+        block_ids: MayMultiGroupBlockIDs,
     ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
@@ -58,7 +60,7 @@ class CachedRequestData:
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
     new_token_ids: list[int]
-    new_block_ids: list[int]
+    new_block_ids: MayMultiGroupBlockIDs
     num_computed_tokens: int
 
     @classmethod
@@ -67,7 +69,7 @@ class CachedRequestData:
         request: Request,
         resumed_from_preemption: bool,
         new_token_ids: list[int],
-        new_block_ids: list[int],
+        new_block_ids: MayMultiGroupBlockIDs,
     ) -> CachedRequestData:
         return cls(
             req_id=request.request_id,
