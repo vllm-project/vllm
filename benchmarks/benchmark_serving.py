@@ -49,7 +49,8 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
+from benchmark_dataset import (AIMODataset, BurstGPTDataset,
+                               ConversationDataset, HuggingFaceDataset,
                                InstructCoderDataset, RandomDataset,
                                SampleRequest, ShareGPTDataset, SonnetDataset,
                                VisionArenaDataset)
@@ -584,24 +585,39 @@ def main(args: argparse.Namespace):
                                             return_prompt_formatted=True)
 
     elif args.dataset_name == "hf":
-        # Choose between VisionArenaDataset
-        # and HuggingFaceDataset based on provided parameters.
-        dataset_class = HuggingFaceDataset
-        if args.dataset_path == VisionArenaDataset.VISION_ARENA_DATASET_PATH:
-            assert args.hf_subset is None, "VisionArenaDataset needs hf_subset to be None."  #noqa: E501
+        # all following datasets are implemented from the
+        # HuggingFaceDataset base class
+        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = VisionArenaDataset
-        elif args.dataset_path == "likaixin/InstructCoder":
+            args.hf_split = "train"
+            args.hf_subset = None
+        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = InstructCoderDataset
             args.hf_split = "train"
-
+        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ConversationDataset
+        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = AIMODataset
+            args.hf_split = "train"
+        else:
+            supported_datasets = set([
+                dataset_name for cls in HuggingFaceDataset.__subclasses__()
+                for dataset_name in cls.SUPPORTED_DATASET_PATHS
+            ])
+            raise ValueError(
+                f"Unsupported dataset path: {args.dataset_path}. "
+                "Huggingface dataset only supports dataset_path"
+                f" from one of following: {supported_datasets}. "
+                "Please consider contributing if you would "
+                "like to add support for additional dataset formats.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
             dataset_split=args.hf_split,
+            random_seed=args.seed,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
-            random_seed=args.seed,
             output_len=args.hf_output_len,
         )
 

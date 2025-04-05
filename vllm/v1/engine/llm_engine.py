@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from copy import copy
-from typing import Optional, Union
+from typing import Any, Callable, Optional, Union
 
 from typing_extensions import TypeVar
 
@@ -32,6 +32,7 @@ from vllm.v1.executor.abstract import Executor
 logger = init_logger(__name__)
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
+_R = TypeVar("_R", default=Any)
 
 
 class LLMEngine:
@@ -244,8 +245,8 @@ class LLMEngine:
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 
-    def wake_up(self):
-        self.engine_core.wake_up()
+    def wake_up(self, tags: Optional[list[str]] = None):
+        self.engine_core.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
@@ -281,6 +282,13 @@ class LLMEngine:
     def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
         return self.engine_core.pin_lora(lora_id)
+
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
     def __del__(self):
         if dp_group := getattr(self, "dp_group", None):

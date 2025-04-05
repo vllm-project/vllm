@@ -182,22 +182,7 @@ class EngineArgs:
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
 
-    speculative_config: Optional[Union[str, Dict[str, Any]]] = None
-
-    # TODO(Shangming): Deprecate these out-of-date params after next release
-    speculative_model: Optional[str] = None
-    speculative_model_quantization: Optional[str] = None
-    speculative_draft_tensor_parallel_size: Optional[int] = None
-    num_speculative_tokens: Optional[int] = None
-    speculative_disable_mqa_scorer: Optional[bool] = False
-    speculative_max_model_len: Optional[int] = None
-    speculative_disable_by_batch_size: Optional[int] = None
-    ngram_prompt_lookup_max: Optional[int] = None
-    ngram_prompt_lookup_min: Optional[int] = None
-    spec_decoding_acceptance_method: str = 'rejection_sampler'
-    typical_acceptance_sampler_posterior_threshold: Optional[float] = None
-    typical_acceptance_sampler_posterior_alpha: Optional[float] = None
-    disable_logprobs_during_spec_decoding: Optional[bool] = None
+    speculative_config: Optional[Dict[str, Any]] = None
 
     qlora_adapter_name_or_path: Optional[str] = None
     show_hidden_metrics_for_version: Optional[str] = None
@@ -323,9 +308,7 @@ class EngineArgs:
         parser.add_argument('--download-dir',
                             type=nullable_str,
                             default=EngineArgs.download_dir,
-                            help='Directory to download and load the weights, '
-                            'default to the default cache dir of '
-                            'huggingface.')
+                            help='Directory to download and load the weights.')
         parser.add_argument(
             '--load-format',
             type=str,
@@ -400,8 +383,7 @@ class EngineArgs:
             'Valid backend values are "xgrammar", "guidance", and "auto". '
             'With "auto", we will make opinionated choices based on request'
             'contents and what the backend libraries currently support, so '
-            'the behavior is subject to change in each release. '
-            'The default is xgrammar.')
+            'the behavior is subject to change in each release.')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,
@@ -494,8 +476,7 @@ class EngineArgs:
             default=EngineArgs.prefix_caching_hash_algo,
             help="Set the hash algorithm for prefix caching. "
             "Options are 'builtin' (Python's built-in hash) or 'sha256' "
-            "(collision resistant but with certain overheads). Defaults "
-            "to 'builtin'.",
+            "(collision resistant but with certain overheads).",
         )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
@@ -569,9 +550,7 @@ class EngineArgs:
             type=int,
             default=EngineArgs.max_num_partial_prefills,
             help="For chunked prefill, the max number of concurrent \
-            partial prefills."
-            "Defaults to 1",
-        )
+            partial prefills.")
         parser.add_argument(
             "--max-long-partial-prefills",
             type=int,
@@ -580,15 +559,13 @@ class EngineArgs:
             "than --long-prefill-token-threshold that will be prefilled "
             "concurrently. Setting this less than --max-num-partial-prefills "
             "will allow shorter prompts to jump the queue in front of longer "
-            "prompts in some cases, improving latency. Defaults to 1.")
+            "prompts in some cases, improving latency.")
         parser.add_argument(
             "--long-prefill-token-threshold",
             type=float,
             default=EngineArgs.long_prefill_token_threshold,
             help="For chunked prefill, a request is considered long if the "
-            "prompt is longer than this number of tokens. Defaults to 4%% of "
-            "the model's context length.",
-        )
+            "prompt is longer than this number of tokens.")
         parser.add_argument('--max-num-seqs',
                             type=int,
                             default=EngineArgs.max_num_seqs,
@@ -750,8 +727,7 @@ class EngineArgs:
             type=int,
             default=EngineArgs.max_cpu_loras,
             help=('Maximum number of LoRAs to store in CPU memory. '
-                  'Must be >= than max_loras. '
-                  'Defaults to max_loras.'))
+                  'Must be >= than max_loras.'))
         parser.add_argument(
             '--fully-sharded-loras',
             action='store_true',
@@ -813,122 +789,10 @@ class EngineArgs:
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
         parser.add_argument('--speculative-config',
-                            type=nullable_str,
+                            type=json.loads,
                             default=None,
                             help='The configurations for speculative decoding.'
                             ' Should be a JSON string.')
-        parser.add_argument(
-            '--speculative-model',
-            type=nullable_str,
-            default=EngineArgs.speculative_model,
-            help=
-            'The name of the draft model to be used in speculative decoding.')
-        # Quantization settings for speculative model.
-        parser.add_argument(
-            '--speculative-model-quantization',
-            type=nullable_str,
-            choices=[*QUANTIZATION_METHODS, None],
-            default=EngineArgs.speculative_model_quantization,
-            help='Method used to quantize the weights of speculative model. '
-            'If None, we first check the `quantization_config` '
-            'attribute in the model config file. If that is '
-            'None, we assume the model weights are not '
-            'quantized and use `dtype` to determine the data '
-            'type of the weights.')
-        parser.add_argument(
-            '--num-speculative-tokens',
-            type=int,
-            default=EngineArgs.num_speculative_tokens,
-            help='The number of speculative tokens to sample from '
-            'the draft model in speculative decoding.')
-        parser.add_argument(
-            '--speculative-disable-mqa-scorer',
-            action='store_true',
-            help=
-            'If set to True, the MQA scorer will be disabled in speculative '
-            ' and fall back to batch expansion')
-        parser.add_argument(
-            '--speculative-draft-tensor-parallel-size',
-            '-spec-draft-tp',
-            type=int,
-            default=EngineArgs.speculative_draft_tensor_parallel_size,
-            help='Number of tensor parallel replicas for '
-            'the draft model in speculative decoding.')
-
-        parser.add_argument(
-            '--speculative-max-model-len',
-            type=int,
-            default=EngineArgs.speculative_max_model_len,
-            help='The maximum sequence length supported by the '
-            'draft model. Sequences over this length will skip '
-            'speculation.')
-
-        parser.add_argument(
-            '--speculative-disable-by-batch-size',
-            type=int,
-            default=EngineArgs.speculative_disable_by_batch_size,
-            help='Disable speculative decoding for new incoming requests '
-            'if the number of enqueue requests is larger than this value.')
-
-        parser.add_argument(
-            '--ngram-prompt-lookup-max',
-            type=int,
-            default=EngineArgs.ngram_prompt_lookup_max,
-            help='Max size of window for ngram prompt lookup in speculative '
-            'decoding.')
-
-        parser.add_argument(
-            '--ngram-prompt-lookup-min',
-            type=int,
-            default=EngineArgs.ngram_prompt_lookup_min,
-            help='Min size of window for ngram prompt lookup in speculative '
-            'decoding.')
-
-        parser.add_argument(
-            '--spec-decoding-acceptance-method',
-            type=str,
-            default=EngineArgs.spec_decoding_acceptance_method,
-            choices=['rejection_sampler', 'typical_acceptance_sampler'],
-            help='Specify the acceptance method to use during draft token '
-            'verification in speculative decoding. Two types of acceptance '
-            'routines are supported: '
-            '1) RejectionSampler which does not allow changing the '
-            'acceptance rate of draft tokens, '
-            '2) TypicalAcceptanceSampler which is configurable, allowing for '
-            'a higher acceptance rate at the cost of lower quality, '
-            'and vice versa.')
-
-        parser.add_argument(
-            '--typical-acceptance-sampler-posterior-threshold',
-            type=float,
-            default=EngineArgs.typical_acceptance_sampler_posterior_threshold,
-            help='Set the lower bound threshold for the posterior '
-            'probability of a token to be accepted. This threshold is '
-            'used by the TypicalAcceptanceSampler to make sampling decisions '
-            'during speculative decoding. Defaults to 0.09')
-
-        parser.add_argument(
-            '--typical-acceptance-sampler-posterior-alpha',
-            type=float,
-            default=EngineArgs.typical_acceptance_sampler_posterior_alpha,
-            help='A scaling factor for the entropy-based threshold for token '
-            'acceptance in the TypicalAcceptanceSampler. Typically defaults '
-            'to sqrt of --typical-acceptance-sampler-posterior-threshold '
-            'i.e. 0.3')
-
-        parser.add_argument(
-            '--disable-logprobs-during-spec-decoding',
-            action=StoreBoolean,
-            default=EngineArgs.disable_logprobs_during_spec_decoding,
-            nargs="?",
-            const="True",
-            help='If set to True, token log probabilities are not returned '
-            'during speculative decoding. If set to False, log probabilities '
-            'are returned according to the settings in SamplingParams. If '
-            'not specified, it defaults to True. Disabling log probabilities '
-            'during speculative decoding reduces latency by skipping logprob '
-            'calculation in proposal sampling, target sampling, and after '
-            'accepted tokens are determined.')
 
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
@@ -1242,58 +1106,14 @@ class EngineArgs:
         This function utilizes `speculative_config` to create a
         SpeculativeConfig object. The `speculative_config` can either be
         provided as a JSON string input via CLI arguments or directly as a
-        dictionary from the engine. If `speculative_config` is not set, this
-        function will attempt to construct a configuration dictionary using
-        certain parameters, which are scheduled for deprecation in the next
-        release. Note that in next releases, `speculative_config` must be
-        provided, and the deprecated standalone speculative-related parameters
-        will be removed.
+        dictionary from the engine.
         """
         if self.speculative_config is None:
-            if (self.speculative_model is None
-                    and self.num_speculative_tokens is None):
-                return None
+            return None
 
-            # TODO(Shangming): Deprecate this way of setting SpeculativeConfig,
-            # only allow '--speculative-config' after next release
-            logger.warning_once(
-                "Please use '--speculative-config' to set all configurations "
-                "related to speculative decoding. The current method of "
-                "specifying the model through '--speculative-model' and "
-                "adding related parameters (e.g., '--num-speculative-tokens') "
-                "separately will be deprecated in the next release.")
-
-            spec_config_dict = {
-                "model": self.speculative_model,
-                "quantization": self.speculative_model_quantization,
-                "max_model_len": self.speculative_max_model_len,
-                "draft_tensor_parallel_size":
-                self.speculative_draft_tensor_parallel_size,
-                "num_speculative_tokens": self.num_speculative_tokens,
-                "disable_mqa_scorer": self.speculative_disable_mqa_scorer,
-                "disable_by_batch_size":
-                self.speculative_disable_by_batch_size,
-                "prompt_lookup_max": self.ngram_prompt_lookup_max,
-                "prompt_lookup_min": self.ngram_prompt_lookup_min,
-                "acceptance_method": self.spec_decoding_acceptance_method,
-                "posterior_threshold":
-                self.typical_acceptance_sampler_posterior_threshold,
-                "posterior_alpha":
-                self.typical_acceptance_sampler_posterior_alpha,
-                "disable_logprobs": self.disable_logprobs_during_spec_decoding,
-            }
-
-            self.speculative_config = spec_config_dict
-        else:
-            if isinstance(self.speculative_config, str):
-                import ast
-                self.speculative_config = ast.literal_eval(
-                    self.speculative_config)
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
-
-        assert isinstance(self.speculative_config, dict)
         self.speculative_config.update({
             "target_model_config": target_model_config,
             "target_parallel_config": target_parallel_config,
@@ -1467,6 +1287,10 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
+        # bitsandbytes pre-quantized model need a specific model loader
+        if model_config.quantization == "bitsandbytes":
+            self.quantization = self.load_format = "bitsandbytes"
+
         load_config = self.create_load_config()
 
         prompt_adapter_config = PromptAdapterConfig(
@@ -1616,12 +1440,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No CPU offloading yet.
-        if self.cpu_offload_gb != EngineArgs.cpu_offload_gb:
-            _raise_or_fallback(feature_name="--cpu-offload-gb",
-                               recommend_to_remove=False)
-            return False
-
         # Only Fp16 and Bf16 dtypes since we only support FA.
         V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
         if model_config.dtype not in V1_SUPPORTED_DTYPES:
@@ -1665,12 +1483,22 @@ class EngineArgs:
             return False
 
         # Only Ngram speculative decoding so far.
-        if (self.speculative_model is not None
-                or self.num_speculative_tokens is not None):
+        is_ngram_enabled = False
+        is_eagle_enabled = False
+        if self.speculative_config is not None:
             # This is supported but experimental (handled below).
-            if self.speculative_model in ("ngram", "[ngram]"):
-                pass
+            speculative_method = self.speculative_config.get("method")
+            if speculative_method:
+                if speculative_method in ("ngram", "[ngram]"):
+                    is_ngram_enabled = True
+                elif speculative_method == "eagle":
+                    is_eagle_enabled = True
             else:
+                speculative_model = self.speculative_config.get("model")
+                if speculative_model in ("ngram", "[ngram]"):
+                    is_ngram_enabled = True
+            if not (is_ngram_enabled or is_eagle_enabled):
+                # Other speculative decoding methods are not supported yet.
                 _raise_or_fallback(feature_name="Speculative Decoding",
                                    recommend_to_remove=False)
                 return False
@@ -1706,26 +1534,26 @@ class EngineArgs:
                 and _warn_or_fallback("Engine in background thread")):
             return False
 
-        # LoRA is supported on V1, but off by default for now.
-        if self.enable_lora and _warn_or_fallback("LORA"):
-            return False
-
         # PP is supported on V1 with Ray distributed executor,
         # but off for MP distributed executor for now.
         if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend == "mp"
-                and _warn_or_fallback("PP (MP distributed executor)")):
+                and self.distributed_executor_backend != "ray"):
+            name = "Pipeline Parallelism without Ray distributed executor"
+            _raise_or_fallback(feature_name=name, recommend_to_remove=False)
             return False
 
         # ngram is supported on V1, but off by default for now.
-        if self.speculative_model in (
-                "ngram", "[ngram]") and _warn_or_fallback("ngram"):
+        if is_ngram_enabled and _warn_or_fallback("ngram"):
+            return False
+
+        # Eagle is under development, so we don't support it yet.
+        if is_eagle_enabled and _warn_or_fallback("Eagle"):
             return False
 
         # Non-CUDA is supported on V1, but off by default for now.
         not_cuda = not current_platform.is_cuda()
         if not_cuda and _warn_or_fallback(  # noqa: SIM103
-                current_platform.device_type):
+                current_platform.device_name):
             return False
         #############################################################
 
@@ -1748,7 +1576,7 @@ class EngineArgs:
                 is_gpu = current_platform.is_cuda()
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
-                use_spec_decode = self.speculative_model is not None
+                use_spec_decode = self.speculative_config is not None
 
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora

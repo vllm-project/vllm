@@ -8,7 +8,7 @@ import time
 from concurrent.futures import Future
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import psutil
@@ -33,6 +33,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -42,6 +43,8 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
+
+_R = TypeVar('_R')  # Return type for collective_rpc
 
 
 class EngineCore:
@@ -64,8 +67,9 @@ class EngineCore:
         self.model_executor = executor_class(vllm_config)
 
         # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks = self._initialize_kv_caches(
-            vllm_config)
+        num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
+            self._initialize_kv_caches(vllm_config)
+
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
@@ -93,11 +97,11 @@ class EngineCore:
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
-            speculative_config=vllm_config.speculative_config,
+            kv_cache_config=kv_cache_config,
+            structured_output_manager=self.structured_output_manager,
             include_finished_set=vllm_config.parallel_config.data_parallel_size
             > 1,
             log_stats=self.log_stats,
-            structured_output_manager=self.structured_output_manager,
         )
 
         # Setup MM Input Mapper.
@@ -116,8 +120,8 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
-    def _initialize_kv_caches(self,
-                              vllm_config: VllmConfig) -> tuple[int, int]:
+    def _initialize_kv_caches(
+            self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
 
         # Get all kv cache needed by the model
@@ -142,13 +146,14 @@ class EngineCore:
         unify_kv_cache_configs(kv_cache_configs)
 
         # All workers have the same kv_cache_config except layer names, so use
-        # an arbitrary one to get the number of blocks.
+        # an arbitrary one to initialize the scheduler.
         assert all([
             cfg.num_blocks == kv_cache_configs[0].num_blocks
             for cfg in kv_cache_configs
         ])
         num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
+        scheduler_kv_cache_config = kv_cache_configs[0]
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
@@ -156,7 +161,7 @@ class EngineCore:
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
-        return num_gpu_blocks, num_cpu_blocks
+        return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
@@ -259,8 +264,8 @@ class EngineCore:
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 
-    def wake_up(self):
-        self.model_executor.wake_up()
+    def wake_up(self, tags: Optional[list[str]] = None):
+        self.model_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.model_executor.is_sleeping
@@ -280,6 +285,24 @@ class EngineCore:
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
 
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        self.model_executor.save_sharded_state(path=path,
+                                               pattern=pattern,
+                                               max_size=max_size)
+
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return self.model_executor.collective_rpc(method, timeout, args,
+                                                  kwargs)
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
@@ -295,6 +318,11 @@ class EngineCoreProc(EngineCore):
     ):
         super().__init__(vllm_config, executor_class, log_stats)
 
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
+
+        self.global_unfinished_reqs = False
+
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
         # and to overlap some serialization/deserialization with the
@@ -304,22 +332,16 @@ class EngineCoreProc(EngineCore):
                                             Any]] = queue.Queue()
         self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
-                         args=(input_path, ),
+                         args=(input_path, engine_index),
                          daemon=True).start()
         threading.Thread(target=self.process_output_socket,
                          args=(output_path, engine_index),
                          daemon=True).start()
 
-        self.global_unfinished_reqs = False
-
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
-
     @staticmethod
     def run_engine_core(*args,
                         dp_rank: int = 0,
                         local_dp_rank: int = 0,
-                        ready_pipe,
                         **kwargs):
         """Launch EngineCore busy loop in background process."""
 
@@ -353,9 +375,6 @@ class EngineCoreProc(EngineCore):
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
                 engine_core = EngineCoreProc(*args, **kwargs)
-
-            # Send Readiness signal to EngineClient.
-            ready_pipe.send({"status": "READY"})
 
             engine_core.run_busy_loop()
 
@@ -453,14 +472,22 @@ class EngineCoreProc(EngineCore):
             and not isinstance(v, p.annotation) else v
             for v, p in zip(args, arg_types))
 
-    def process_input_socket(self, input_path: str):
+    def process_input_socket(self, input_path: str, engine_index: int):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
         generic_decoder = MsgpackDecoder()
+        identity = engine_index.to_bytes(length=2, byteorder="little")
 
-        with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(input_path,
+                            zmq.DEALER,
+                            identity=identity,
+                            bind=False) as socket:
+
+            # Send ready message to front-end once input socket is connected.
+            socket.send(b'READY')
+
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)
