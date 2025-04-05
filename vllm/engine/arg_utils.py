@@ -361,11 +361,12 @@ class EngineArgs:
         parser.add_argument(
             '--kv-cache-dtype',
             type=str,
-            choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
+            choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3', 'fp8_inc'],
             default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
-            'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
+            'ROCm (AMD GPU) supports fp8 (=fp8_e4m3). '
+            'Intel Gaudi (HPU) supports fp8 (using fp8_inc).')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=EngineArgs.max_model_len,
@@ -1076,6 +1077,7 @@ class EngineArgs:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
+            device="cpu" if self.quantization == "inc" else None,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
