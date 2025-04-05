@@ -15,3 +15,11 @@ else
   python inference-benchmark/benchmark_serving.py --save-json-results --port=8009 --dataset=ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer=meta-llama/Meta-Llama-3-8B --request-rate=1 --backend=vllm --num-prompts=300 --max-input-length=1024 --max-output-length=1024 --file-prefix=benchmark --models=meta-llama/Meta-Llama-3-8B --stream-request --output-bucket="gs://manfei_public_experimental/scripts"
 fi
 ls
+
+wget https://storage.mtls.cloud.google.com/ml-auto-solutions/output/pytorch_xla/vllm_benchmark_nightly/vllm-nightly-v6e-4-2025-03-26-21-42-04/test-mar26.json
+mv test-mar26.json benchmark-vllm-1.0qps-20250404-195413-meta-llama-Meta-Llama-3-8B.json
+ls
+cat *meta-llama-Meta-Llama-3-8B.json
+cat *meta-llama-Meta-Llama-3-8B.json >> metric_result.jsonl
+echo '' >> metric_report.jsonl && rm *meta-llama-Meta-Llama-3-8B.json
+ls
