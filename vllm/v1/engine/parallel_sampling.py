@@ -64,6 +64,7 @@ class ParentRequest:
             return self.cached_child_sampling_params
         # Build child sampling_params
         child_sampling_params = copy(self.sampling_params)
+        child_sampling_params.num_bros = self.sampling_params.n
         child_sampling_params.n = 1
         if seed is None:
             # Cache child sampling_params for later reuse
