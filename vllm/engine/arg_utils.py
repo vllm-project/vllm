@@ -116,6 +116,10 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     data_parallel_size: int = 1
+    data_parallel_size_local: Optional[int] = None
+    data_parallel_start_rank: int = 0
+    data_parallel_address: Optional[str] = None
+    data_parallel_rpc_port: Optional[int] = None
     enable_expert_parallel: bool = False
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
@@ -434,6 +438,29 @@ class EngineArgs:
                             'MoE layers will be sharded according to the '
                             'product of the tensor-parallel-size and '
                             'data-parallel-size.')
+        parser.add_argument('--data-parallel-size-local',
+                            '-dpl',
+                            type=int,
+                            default=EngineArgs.data_parallel_size_local,
+                            help='Number of data parallel replicas to run on '
+                            'this node.')
+        parser.add_argument('--data-parallel-start-rank',
+                            '-dpr',
+                            type=int,
+                            default=EngineArgs.data_parallel_start_rank,
+                            help='Starting data parallel rank for secondary '
+                            'nodes.')
+        parser.add_argument('--data-parallel-address',
+                            '-dpa',
+                            type=str,
+                            default=EngineArgs.data_parallel_address,
+                            help='Address of data parallel cluster head-node.')
+        parser.add_argument('--data-parallel-rpc-port',
+                            '-dpp',
+                            type=int,
+                            default=EngineArgs.data_parallel_rpc_port,
+                            help='Port for data parallel RPC communication.')
+
         parser.add_argument(
             '--enable-expert-parallel',
             action='store_true',
@@ -1186,10 +1213,30 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
+        # Local DP size defaults to global DP size if not set.
+        data_parallel_size_local = self.data_parallel_size if (
+            self.data_parallel_size_local
+            is None) else self.data_parallel_size_local
+
+        # DP address, used in multi-node case for torch distributed group
+        # and ZMQ sockets.
+        data_parallel_address = self.data_parallel_address if (
+            self.data_parallel_address
+            is not None) else ParallelConfig.data_parallel_master_ip
+
+        # This port is only used when there are remote data parallel engines,
+        # otherwise the local IPC transport is used.
+        data_parallel_rpc_port = self.data_parallel_rpc_port if (
+            self.data_parallel_rpc_port
+            is not None) else ParallelConfig.data_parallel_rpc_port
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
+            data_parallel_size_local=data_parallel_size_local,
+            data_parallel_master_ip=data_parallel_address,
+            data_parallel_rpc_port=data_parallel_rpc_port,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,

@@ -1430,11 +1430,13 @@ class ParallelConfig:
     pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
     data_parallel_size: int = 1  # Number of data parallel groups.
+    data_parallel_size_local: int = 1  # Number of data parallel groups.
     data_parallel_rank: int = 0  # Rank of the data parallel group.
     # Local rank of the data parallel group, defaults to global rank.
     data_parallel_rank_local: Optional[int] = None
     # IP of the data parallel master.
     data_parallel_master_ip: str = "127.0.0.1"
+    data_parallel_rpc_port: int = 29550  # Port for data parallel messaging.
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
     enable_expert_parallel: bool = False  # Use EP instead of TP for MoE layers.
 
@@ -1537,10 +1539,13 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
+        if self.data_parallel_size_local > self.data_parallel_size:
+            raise ValueError(
+                "data_parallel_size_local must be <= data_parallel_size")
+
         if self.data_parallel_size > 1:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
-            # TODO multi-node
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
