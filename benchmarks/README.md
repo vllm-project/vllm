@@ -204,6 +204,24 @@ python3 vllm/benchmarks/benchmark_serving.py \
     --seed 42
 ```
 
+### Running With Sampling Parameters
+
+When using OpenAI-compatible backends such as `vllm`, optional sampling
+parameters can be specified. Example client command:
+
+```bash
+python3 vllm/benchmarks/benchmark_serving.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --endpoint /v1/completions \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --top-k 10 \
+  --top-p 0.9 \
+  --temperature 0.5 \
+  --num-prompts 10
+```
+
 ---
 ## Example - Offline Throughput Benchmark
 
