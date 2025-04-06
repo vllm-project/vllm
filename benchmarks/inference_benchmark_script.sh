@@ -16,8 +16,8 @@ apt-get -y install jq
 # fi
 # ls
 
-gsutil cp gs://ml-auto-solutions/output/pytorch_xla/vllm_benchmark_nightly/vllm-nightly-v6e-4-2025-03-26-21-42-04/test-mar26.json .
-mv test-mar26.json benchmark-vllm-1.0qps-20250404-195413-meta-llama-Meta-Llama-3-8B.json
+gsutil cp gs://ml-auto-solutions/output/pytorch_xla/vllm_benchmark_nightly/vllm-nightly-v6e-4-2025-03-26-21-42-04/metric_report.json .
+mv metric_report.json benchmark-vllm-1.0qps-20250404-195413-meta-llama-Meta-Llama-3-8B.json
 ls
 cat *meta-llama-Meta-Llama-3-8B.json
 cat *meta-llama-Meta-Llama-3-8B.json >> metric_result.jsonl
