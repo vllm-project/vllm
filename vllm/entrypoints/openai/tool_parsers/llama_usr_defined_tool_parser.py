@@ -3,6 +3,7 @@
 import json
 import re
 from collections.abc import Sequence
+from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -155,7 +156,7 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> DeltaMessage | None:
+    ) -> Union[DeltaMessage,None]:
         """
         Extract tool calls from a streaming response.
         Handles format: <function=functionName{arguments}>
