@@ -14,21 +14,23 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
-from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
+from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv, kill_process_tree
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.output_processor import (OutputProcessor,
+                                             RequestOutputCollector)
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
@@ -47,7 +49,7 @@ class AsyncLLM(EngineClient):
         executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
@@ -65,11 +67,17 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: list[StatLoggerBase] = []
+
+        # Set up stat loggers; independent set for each DP rank.
+        self.stat_loggers: list[list[StatLoggerBase]] = []
         if self.log_stats:
-            if logger.isEnabledFor(logging.INFO):
-                self.stat_loggers.append(LoggingStatLogger())
-            self.stat_loggers.append(PrometheusStatLogger(vllm_config))
+            for i in range(vllm_config.parallel_config.data_parallel_size):
+                loggers: list[StatLoggerBase] = []
+                if logger.isEnabledFor(logging.INFO):
+                    loggers.append(LoggingStatLogger(engine_index=i))
+                loggers.append(
+                    PrometheusStatLogger(vllm_config, engine_index=i))
+                self.stat_loggers.append(loggers)
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -83,7 +91,7 @@ class AsyncLLM(EngineClient):
         self.processor = Processor(
             vllm_config=vllm_config,
             tokenizer=self.tokenizer,
-            input_registry=input_registry,
+            mm_registry=mm_registry,
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
@@ -176,11 +184,14 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> asyncio.Queue[RequestOutput]:
+    ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
-        # Create a new output queue for the request.
-        queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
+        assert isinstance(params, SamplingParams), \
+            "Pooling is not supported in V1"
+
+        # Create a new output collector for the request.
+        queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
         request = self.processor.process_inputs(request_id, prompt, params,
@@ -189,17 +200,15 @@ class AsyncLLM(EngineClient):
                                                 prompt_adapter_request,
                                                 priority)
 
-        n = params.n if isinstance(params, SamplingParams) else 1
-
-        if n == 1:
+        if params.n == 1:
             await self._add_request(request, None, 0, queue)
             return queue
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request_id, params)
-        for idx in range(n):
+        for idx in range(params.n):
             request_id, params = parent_request.get_child_info(idx)
-            child_request = request if idx == n - 1 else copy(request)
+            child_request = request if idx == params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = params
             await self._add_request(child_request, parent_request, idx, queue)
@@ -207,7 +216,7 @@ class AsyncLLM(EngineClient):
 
     async def _add_request(self, request: EngineCoreRequest,
                            parent_req: Optional[ParentRequest], index: int,
-                           queue: asyncio.Queue[RequestOutput]):
+                           queue: RequestOutputCollector):
 
         # Add the request to OutputProcessor (this process).
         self.output_processor.add_request(request, parent_req, index, queue)
@@ -272,15 +281,7 @@ class AsyncLLM(EngineClient):
             while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() if not q.empty() else await q.get()
-
-                # Coalesce any additional queued outputs
-                while not q.empty():
-                    next_out = q.get_nowait()
-                    if sampling_params.output_kind == RequestOutputKind.DELTA:
-                        out.add(next_out)
-                    else:
-                        out = next_out
+                out = q.get_nowait() or await q.get()
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
@@ -335,6 +336,7 @@ class AsyncLLM(EngineClient):
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
                 self._record_stats(
+                    engine_index=outputs.engine_index,
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
                 )
@@ -356,12 +358,13 @@ class AsyncLLM(EngineClient):
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
+        engine_index: int = 0,
     ):
         if not self.log_stats:
             return
 
         assert scheduler_stats is not None
-        for stat_logger in self.stat_loggers:
+        for stat_logger in self.stat_loggers[engine_index]:
             stat_logger.record(scheduler_stats=scheduler_stats,
                                iteration_stats=iteration_stats)
 
@@ -399,8 +402,9 @@ class AsyncLLM(EngineClient):
         scheduler_outputs=None,
         model_output=None,
     ) -> None:
-        for stat_logger in self.stat_loggers:
-            stat_logger.log()
+        for loggers in self.stat_loggers:
+            for stat_logger in loggers:
+                stat_logger.log()
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
@@ -420,8 +424,8 @@ class AsyncLLM(EngineClient):
     async def sleep(self, level: int = 1) -> None:
         await self.engine_core.sleep_async(level)
 
-    async def wake_up(self) -> None:
-        await self.engine_core.wake_up_async()
+    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        await self.engine_core.wake_up_async(tags)
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()

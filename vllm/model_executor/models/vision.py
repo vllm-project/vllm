@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Final, Generic, Optional, Protocol, TypeVar, Union, cast
 
 import torch
@@ -68,6 +69,9 @@ def get_vision_encoder_info(
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPEncoderInfo(vision_config)
     if isinstance(vision_config, PixtralVisionConfig):
+        # Need to sneak in spatial_merge_size for Mistral3
+        vision_config.spatial_merge_size = getattr(hf_config,
+                                                   "spatial_merge_size", 1)
         return PixtralHFEncoderInfo(vision_config)
     if isinstance(vision_config, SiglipVisionConfig):
         return SiglipEncoderInfo(vision_config)
@@ -154,9 +158,8 @@ def resolve_visual_encoder_outputs(
 
 
 def scatter_patch_features(
-    features: torch.Tensor,
-    num_embeds: torch.Tensor,
-    embed_is_patch: torch.Tensor,
+    patches: Union[torch.Tensor, Sequence[torch.Tensor]],
+    embed_is_patch: Union[torch.Tensor, Sequence[torch.Tensor]],
 ) -> tuple[torch.Tensor, ...]:
     """
     Scatter the patch features into a contiguous tensor that corresponds
@@ -166,23 +169,50 @@ def scatter_patch_features(
     can be filtered out by :func`select_patch_features`.
 
     Args:
-        features: The patch features, concatenated across each image.
-          Shape: `(num_patch, feature_depth)`
-        num_embeds: The number of image embeddings for each image.
-          Shape: `(num_images,)`
+        patches: The patch features for each image.
+          Shape: `(num_images, <patch_dims>, feature_depth)`
         embed_is_patch: A boolean mask indicating which image embeddings
           correspond to patch tokens for each image.
           Shape: `(num_images, num_embeds)`
+
+    Note:
+        The original code only considers patch tokens as feature
+        tokens, but our processor considers all image-related tokens
+        as feature tokens because the feature tokens need to be
+        consecutive in `input_ids`.
+
+    Example:
+        A simplified example for one image:
+
+        .. code-block::
+
+            Embedding tokens (from HF processor):
+            [<start> <patch> <patch>  <col>  <patch> <patch>  <col>  <end> ]
+
+            embed_is_patch (from HF processor):
+            [ False   True    True    False    True    True   False  False ]
+
+            Encoder outputs (from model):
+            [  p1      p2      p3      p4   ]
+
+            The resulting embedding tensor is:
+            [  nan     p1      p2      nan      p3      p4     nan    nan  ]
     """
-    num_embeds_per_image: list[int] = num_embeds.tolist()
+    if len(patches) != len(embed_is_patch):
+        raise ValueError(f"Inconsistent num_images: {len(patches)=} vs. "
+                         f"{len(embed_is_patch)=}")
 
-    embeds_flat = features.new_full(
-        (sum(num_embeds_per_image), features.shape[-1]),
-        fill_value=torch.nan,
-    )
-    embeds_flat[embed_is_patch.view(-1)] = features.flatten(0, -2)
+    def get_embed_one(patches_one: torch.Tensor, e_is_patch: torch.Tensor):
+        embed_one = patches_one.new_full(
+            (e_is_patch.shape[0], patches_one.shape[-1]),
+            fill_value=torch.nan,
+        )
+        embed_one[e_is_patch] = patches_one
+        return embed_one
 
-    return embeds_flat.split(num_embeds_per_image)
+    return tuple(
+        get_embed_one(patches_one, e_is_patch)
+        for patches_one, e_is_patch in zip(patches, embed_is_patch))
 
 
 def select_patch_features(

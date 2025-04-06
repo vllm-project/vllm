@@ -41,7 +41,7 @@ def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 
     hf_model_kwargs = {"load_in_4bit": True}
     validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
-                             model_name, hf_model_kwargs)
+                             model_name, False, hf_model_kwargs)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
@@ -53,7 +53,7 @@ def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                        model_name, description) -> None:
 
     validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
-                             model_name)
+                             model_name, True)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
@@ -65,7 +65,7 @@ def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
     validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
-                             model_name)
+                             model_name, True)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -82,6 +82,7 @@ def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              vllm_runner,
                              example_prompts[:1],
                              model_name,
+                             False,
                              hf_model_kwargs,
                              vllm_tp_size=2)
 
@@ -100,8 +101,6 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
         "bfloat16",
         "--enable-prefix-caching",
         "--quantization",
-        "bitsandbytes",
-        "--load-format",
         "bitsandbytes",
         "--gpu-memory-utilization",
         "0.7",
@@ -130,14 +129,14 @@ def validate_generated_texts(hf_runner,
                              vllm_runner,
                              prompts,
                              model_name,
+                             pre_quant=False,
                              hf_model_kwargs=None,
                              vllm_tp_size=1):
 
     # NOTE: run vLLM first, as it requires a clean process
     # when using distributed inference
     with vllm_runner(model_name,
-                     quantization='bitsandbytes',
-                     load_format='bitsandbytes',
+                     quantization=None if pre_quant else 'bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
                      enforce_eager=False) as llm:
         vllm_outputs = llm.generate_greedy(prompts, 8)
