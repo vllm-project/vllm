@@ -624,8 +624,8 @@ class FlashAttentionImpl(AttentionImpl):
                 "FlashAttention does not support block-sparse attention.")
         if use_irope:
             logger.warning(
-                "Using irope in V0 is not supported yet, it will fall back to global attention for long context, which could impact accuracy"
-            )
+                "Using irope in V0 is not supported yet, it will fall back "
+                "to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
