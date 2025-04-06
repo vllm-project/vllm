@@ -82,6 +82,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
         input_tensor = input_.movedim(0, dim).contiguous()
 
+        if (input_tensor.shape[0] % world_size != 0):
+            print(f"zgj reduce_scatter {input_tensor.shape[0]}  {world_size=}")
+
         assert input_tensor.shape[0] % world_size == 0
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size, ) + input_tensor.shape[1:]

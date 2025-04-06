@@ -179,6 +179,7 @@ def split_graph(graph: fx.GraphModule,
     # otherwise pytorch might reorder the nodes and
     # the semantics of the graph will change when we
     # have mutations in the graph
+    # print(f"cascade graph before split: {graph.graph}")
     split_gm = torch.fx.passes.split_module.split_module(
         graph,
         None,

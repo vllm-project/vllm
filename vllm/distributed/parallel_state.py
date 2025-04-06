@@ -102,6 +102,14 @@ def _get_unique_name(name: str) -> str:
 _groups: Dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
 
 
+def get_group_from_group_name(group_name: str) -> "GroupCoordinator":
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group
+
+
 def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
@@ -370,6 +378,18 @@ class GroupCoordinator:
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
         return self.device_communicator.all_gather(input_, dim)
+
+    def reduce_scatter(self,
+                       input_: torch.Tensor,
+                       dim: int = -1) -> torch.Tensor:
+        world_size = self.world_size
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return input_
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
+
+        return self.device_communicator.reduce_scatter(input_, dim)
 
     def gather(self,
                input_: torch.Tensor,

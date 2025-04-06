@@ -593,6 +593,7 @@ class FusionPass(VllmInductorPass):
         Manually process multi-output matches and replace them with fused nodes.
         See MultiOutputMatch for more details.
         """
+        print("fusion pass matches", len(self.matches))
         for match in self.matches:
             match.process()
 
