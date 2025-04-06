@@ -24,7 +24,6 @@ import torch
 from torch import nn
 from transformers import BatchFeature, Llama4Config, Llama4VisionConfig
 from transformers.image_utils import SizeDict
-from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.llama4 import Llama4Processor
 from transformers.models.llama4.image_processing_llama4_fast import (
     find_supported_resolutions, get_best_fit)
@@ -346,7 +345,7 @@ class Llama4VisionEncoder(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-    ) -> BaseModelOutput:
+    ) -> torch.Tensor:
         r"""
         Args:
             inputs_embeds (`torch.FloatTensor` of shape
@@ -362,7 +361,7 @@ class Llama4VisionEncoder(nn.Module):
             layer_outputs = encoder_layer(hidden_states)
             hidden_states = layer_outputs[0]
 
-        return BaseModelOutput(last_hidden_state=hidden_states, )
+        return hidden_states
 
 
 class Llama4UnfoldConvolution(nn.Module):
@@ -434,7 +433,7 @@ class Llama4VisionModel(nn.Module):
     def forward(
         self,
         images_flattened: torch.Tensor,
-    ) -> BaseModelOutput:
+    ) -> torch.Tensor:
         # Patch embedding
         hidden_state = self.patch_embedding(images_flattened)
         num_tiles, num_patches, hidden_dim = hidden_state.shape
@@ -459,8 +458,7 @@ class Llama4VisionModel(nn.Module):
         hidden_state = hidden_state.view(num_tiles, -1, hidden_dim)
 
         # Apply encoder
-        output = self.model(hidden_state)
-        hidden_state = output.last_hidden_state
+        hidden_state = self.model(hidden_state)
         hidden_state = self.layernorm_post(hidden_state)
 
         # Remove CLS token output
@@ -469,10 +467,7 @@ class Llama4VisionModel(nn.Module):
         # now, we use Llama4VisionPixelShuffle + mlp to project embeddings
         hidden_state = self.vision_adapter(hidden_state)
 
-        return BaseModelOutput(
-            last_hidden_state=hidden_state,
-            attentions=None,
-        )
+        return hidden_state
 
 
 class Mllama4ProcessingInfo(BaseProcessingInfo):
@@ -753,7 +748,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal):
             self, image_input: Llama4ImagePatchInputs) -> MultiModalEmbeddings:
         flat_data = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"].tolist()
-        vision_embeddings_flat = self.vision_model(flat_data).last_hidden_state
+        vision_embeddings_flat = self.vision_model(flat_data)
         return vision_embeddings_flat.split(patches_per_image, dim=0)
 
     def get_multimodal_embeddings(self,
