@@ -25,14 +25,14 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
     def __init__(
         self,
         config: LlamaConfig,
-        layer_id: int = 0,
+        disable_input_layernorm: bool,
         prefix: str = "",
     ) -> None:
         super().__init__(config, prefix=prefix)
 
         # Skip the input_layernorm
         # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427
-        if layer_id == 0:
+        if disable_input_layernorm:
             del self.input_layernorm
             self.input_layernorm = nn.Identity()
 
@@ -57,7 +57,7 @@ class LlamaModel(nn.Module):
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
                 self.config,
-                i,
+                i == 0,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
             ) for i in range(self.config.num_hidden_layers)
         ])
