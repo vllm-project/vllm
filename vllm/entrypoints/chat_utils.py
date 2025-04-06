@@ -498,7 +498,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                                               hf_config.image_token_index)
             if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
                               "internvl_chat", "skywork_chat", "NVLM_D",
-                              "h2ovl_chat"):
+                              "h2ovl_chat", "idefics3"):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
@@ -506,8 +506,6 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "molmo":
                 return ""
-            if model_type == "idefics3":
-                return "<image>"
             if model_type == "aria":
                 return "<|fim_prefix|><|img|><|fim_suffix|>"
             if model_type == "gemma3":
