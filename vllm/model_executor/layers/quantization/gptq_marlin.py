@@ -19,8 +19,9 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_linear_quant_method)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    check_marlin_supported, marlin_moe_permute_scales,
-    marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
+    check_marlin_supported, check_moe_marlin_supports_layer,
+    marlin_moe_permute_scales, marlin_repeat_scales_on_all_ranks,
+    verify_marlin_supported)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
                                            PackedColumnParameter,
@@ -152,6 +153,14 @@ class GPTQMarlinConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, FusedMoE):
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Config)
+            if not check_moe_marlin_supports_layer(layer, self.group_size):
+                logger.warning_one(
+                    f"Layer '{prefix}' is not supported by GPTQMoeMarlin. "
+                    "Falling back to Moe WNA16 kernels.")
+                return MoeWNA16Config.from_config(
+                    self.full_config).get_quant_method(layer, prefix)
             return GPTQMarlinMoEMethod(self)
         return get_linear_quant_method(self, layer, prefix,
                                        GPTQMarlinLinearMethod)

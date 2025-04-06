@@ -20,10 +20,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
-    check_marlin_supports_layer, marlin_make_empty_g_idx,
-    marlin_make_workspace, marlin_moe_permute_scales, marlin_permute_scales,
-    moe_awq_to_marlin_zero_points, verify_marlin_supported,
-    verify_marlin_supports_shape)
+    check_marlin_supports_layer, check_moe_marlin_supports_layer,
+    marlin_make_empty_g_idx, marlin_make_workspace, marlin_moe_permute_scales,
+    marlin_permute_scales, moe_awq_to_marlin_zero_points,
+    verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
@@ -135,6 +135,14 @@ class AWQMarlinConfig(QuantizationConfig):
                     self.full_config).get_quant_method(layer, prefix)
             return AWQMarlinLinearMethod(self)
         elif isinstance(layer, FusedMoE):
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Config)
+            if not check_moe_marlin_supports_layer(layer, self.group_size):
+                logger.warning_one(
+                    f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
+                    "Falling back to Moe WNA16 kernels.")
+                return MoeWNA16Config.from_config(
+                    self.full_config).get_quant_method(layer, prefix)
             return AWQMoEMethod(self)
         return None
 
