@@ -8,10 +8,6 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 
-def print_msg(msg):
-    print(f"[debug] {msg}\n")
-
-
 def load_prompts(dataset_path, num_prompts):
     if os.path.exists(dataset_path):
         prompts = []
@@ -21,14 +17,12 @@ def load_prompts(dataset_path, num_prompts):
                     data = json.loads(line)
                     prompts.append(data["turns"][0])
         except Exception as e:
-            print_msg(f"Error reading dataset: {e}")
+            print(f"Error reading dataset: {e}")
             return []
     else:
         prompts = [
             "The future of AI is", "The president of the United States is"
         ]
-        print_msg(
-            f"Dataset not found at {dataset_path}, using prompts:\n{prompts}.")
 
     return prompts[:num_prompts]
 
@@ -53,22 +47,15 @@ def main():
     parser.add_argument("--temp", type=float, default=0)
     args = parser.parse_args()
 
-    print_msg(f"Starting inference with the following parameters:\n{args}")
-
     model_dir = "meta-llama/Meta-Llama-3-8B-Instruct"
     eagle_dir = "abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm"
 
     max_model_len = 2048
 
-    # Initialize tokenizer
-    print_msg(f"Loading tokenizer for model {model_dir}")
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
 
-    # Load prompts
     prompts = load_prompts(args.dataset, args.num_prompts)
-    print_msg(f"Loaded and tokenized {len(prompts)} prompts")
 
-    # Tokenize prompts
     prompt_ids = [
         tokenizer.apply_chat_template([{
             "role": "user",
@@ -78,9 +65,6 @@ def main():
         for prompt in prompts
     ]
 
-    # Initialize LLM
-    print_msg(
-        f"Initializing model {model_dir} with tensor parallel size {args.tp}")
     llm = LLM(
         model=model_dir,
         trust_remote_code=True,
@@ -102,8 +86,6 @@ def main():
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
 
-    # Start inference
-    print_msg("Starting inference...")
     outputs = llm.generate(prompt_token_ids=prompt_ids,
                            sampling_params=sampling_params)
 
