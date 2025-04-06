@@ -5,9 +5,6 @@ On the server side, run one of the following commands:
     (vLLM OpenAI API server)
     vllm serve <your_model> --disable-log-requests
 
-    (TGI backend)
-    ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
-
 On the client side, run:
     python benchmarks/benchmark_serving_structured_output.py \
         --backend <backend> \
@@ -999,11 +996,12 @@ if __name__ == "__main__":
                         type=float,
                         default=1.0,
                         help="Ratio of Structured Outputs requests")
-    parser.add_argument("--structured-output-backend",
-                        type=str,
-                        choices=["outlines", "lm-format-enforcer", "xgrammar"],
-                        default="xgrammar",
-                        help="Backend to use for structured outputs")
+    parser.add_argument(
+        "--structured-output-backend",
+        type=str,
+        choices=["outlines", "lm-format-enforcer", "xgrammar", "guidance"],
+        default="xgrammar",
+        help="Backend to use for structured outputs")
 
     args = parser.parse_args()
     main(args)

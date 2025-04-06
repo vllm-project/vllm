@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import multiprocessing
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
 if TYPE_CHECKING:
     import numpy as np
@@ -47,18 +47,23 @@ class StructuredOutputManager:
         if self.backend is None:
             backend_name = request.sampling_params.guided_decoding.backend_name
             if backend_name == "xgrammar":
+                from vllm.v1.structured_output.backend_xgrammar import (
+                    XgrammarBackend)
+
                 self.backend = XgrammarBackend(self.vllm_config)
+            elif backend_name == "guidance":
+                self.backend = GuidanceBackend(self.vllm_config)
             else:
                 raise ValueError(
                     f"Unsupported structured output backend: {backend_name}")
 
-        grammar: Future[StructuredOutputGrammar] = self.executor.submit(
-            self._async_create_grammar, request, self.backend)
+        grammar = self.executor.submit(self._async_create_grammar, request)
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
 
     def _async_create_grammar(
-            self, request: Request,
-            backend: StructuredOutputBackend) -> StructuredOutputGrammar:
+        self,
+        request: Request,
+    ) -> StructuredOutputGrammar:
         key = request.structured_output_request.structured_output_key  # type: ignore[union-attr]
 
         # Note that the request was validated in the engine core client,

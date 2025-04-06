@@ -12,7 +12,6 @@ from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
 import torch
-from cachetools import LRUCache
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
@@ -21,7 +20,7 @@ from vllm.jsontree import json_map_leaves, json_reduce_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
-from vllm.utils import GiB_bytes, flatten_2d_lists, full_groupby
+from vllm.utils import GiB_bytes, LRUCache, flatten_2d_lists, full_groupby
 
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -103,13 +102,13 @@ The token sequence or text to update.
 
 
 @dataclass
-class PromptUpdateDetails:
+class PromptUpdateDetails(Generic[_S]):
     """Details about the token sequence or text that are part of the update."""
 
-    full: PromptSeq
+    full: _S
     """The full content."""
 
-    features: PromptSeq
+    features: _S
     """
     The part of the content that corresponds to feature placeholders;
     this will be replaced by the output of the vision encoder during model
@@ -117,7 +116,7 @@ class PromptUpdateDetails:
     """
 
     @staticmethod
-    def from_seq(seq: PromptSeq) -> "PromptUpdateDetails":
+    def from_seq(seq: _S) -> "PromptUpdateDetails[_S]":
         return PromptUpdateDetails(full=seq, features=seq)
 
 

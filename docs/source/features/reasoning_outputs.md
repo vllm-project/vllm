@@ -4,16 +4,19 @@
 
 vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.co/deepseek-ai/DeepSeek-R1), which are designed to generate outputs containing both reasoning steps and final conclusions.
 
-Reasoning models return a additional `reasoning_content` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
+Reasoning models return an additional `reasoning_content` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
 
 ## Supported Models
 
 vLLM currently supports the following reasoning models:
 
-| Model Series | Parser Name | Structured Output Support |
-|--------------|-------------|------------------|
-| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` |
-| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` |
+| Model Series | Parser Name | Structured Output Support | Tool Calling |
+|--------------|-------------|------------------|-------------|
+| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` | ❌ |
+| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` | ✅ |
+| [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
+
+- IBM Granite 3.2 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
 
 ## Quickstart
 
@@ -43,6 +46,7 @@ model = models.data[0].id
 
 # Round 1
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
+# For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
 response = client.chat.completions.create(model=model, messages=messages)
 
 reasoning_content = response.choices[0].message.reasoning_content
@@ -97,6 +101,7 @@ models = client.models.list()
 model = models.data[0].id
 
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
+# For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
 stream = client.chat.completions.create(model=model,
                                         messages=messages,
                                         stream=True)
@@ -131,7 +136,14 @@ Remember to check whether the `reasoning_content` exists in the response before 
 
 ## Structured output
 
-The reasoning content is also available in the structured output. The structured output engine like `xgrammar` will use the reasoning content to generate structured output.
+The reasoning content is also available in the structured output. The structured output engine like `xgrammar` will use the reasoning content to generate structured output. It is only supported in v0 engine now.
+
+```bash
+VLLM_USE_V1=0 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
+    --enable-reasoning --reasoning-parser deepseek_r1
+```
+
+Please note that the `VLLM_USE_V1` environment variable must be set to `0` to use the v0 engine.
 
 ```python
 from openai import OpenAI
@@ -170,10 +182,51 @@ print("reasoning_content: ", completion.choices[0].message.reasoning_content)
 print("content: ", completion.choices[0].message.content)
 ```
 
+## Tool Calling
+
+The reasoning content is also available when both tool calling and the reasoning parser are enabled. Additionally, tool calling only parses functions from the `content` field, not from the `reasoning_content`.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather in a given location",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
+                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+            },
+            "required": ["location", "unit"]
+        }
+    }
+}]
+
+response = client.chat.completions.create(
+    model=client.models.list().data[0].id,
+    messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
+    tools=tools,
+    tool_choice="auto"
+)
+
+print(response)
+tool_call = response.choices[0].message.tool_calls[0].function
+
+print(f"reasoning_content: {response.choices[0].message.reasoning_content}")
+print(f"Function called: {tool_call.name}")
+print(f"Arguments: {tool_call.arguments}")
+```
+
+For more examples, please refer to <gh-file:examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py> .
+
 ## Limitations
 
 - The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).
-- It is not compatible with [`tool_calling`](#tool_calling).
 
 ## How to support a new reasoning model
 

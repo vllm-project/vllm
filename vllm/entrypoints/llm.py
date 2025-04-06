@@ -42,7 +42,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
+from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
+                        is_list_of)
 
 logger = init_logger(__name__)
 
@@ -491,8 +492,8 @@ class LLM:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
         """
-        executor = self.llm_engine.model_executor
-        return executor.collective_rpc(method, timeout, args, kwargs)
+
+        return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
@@ -689,8 +690,10 @@ class LLM:
         model_config = self.llm_engine.get_model_config()
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
+            tools,
             chat_template_content_format,
             tokenizer,
+            trust_remote_code=model_config.trust_remote_code,
         )
 
         prompts: list[Union[TokensPrompt, TextPrompt]] = []
@@ -712,18 +715,19 @@ class LLM:
                     tokenizer,
                     messages=msgs,
                     chat_template=chat_template,
+                    tools=tools,
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
-                    tools=tools,
                 )
             else:
                 prompt_data = apply_hf_chat_template(
                     tokenizer,
+                    trust_remote_code=model_config.trust_remote_code,
                     conversation=conversation,
                     chat_template=chat_template,
+                    tools=tools,
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
-                    tools=tools,
                 )
 
             prompt: Union[TokensPrompt, TextPrompt]
@@ -1187,8 +1191,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self) -> bool:
-        return self.llm_engine.reset_prefix_cache()
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+        return self.llm_engine.reset_prefix_cache(device)
 
     def sleep(self, level: int = 1):
         """
@@ -1196,26 +1200,35 @@ class LLM:
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
 
-        :param level: The sleep level. Level 1 sleep will offload the model 
-            weights and discard the kv cache. The content of kv cache is 
-            forgotten. Level 1 sleep is good for sleeping and waking up the 
-            engine to run the same model again. The model weights are backed 
-            up in CPU memory. Please make sure there's enough CPU memory to 
-            store the model weights. Level 2 sleep will discard both the model 
-            weights and the kv cache. The content of both the model weights 
-            and kv cache is forgotten. Level 2 sleep is good for sleeping and 
-            waking up the engine to run a different model or update the model, 
-            where previous model weights are not needed. It reduces CPU memory 
-            pressure.
+        Args:
+            level: The sleep level. Level 1 sleep will offload the model 
+                weights and discard the kv cache. The content of kv cache 
+                is forgotten. Level 1 sleep is good for sleeping and waking
+                up the engine to run the same model again. The model weights 
+                are backed up in CPU memory. Please make sure there's enough 
+                CPU memory to store the model weights. Level 2 sleep will 
+                discard both the model weights and the kv cache. The content 
+                of both the model weights and kv cache is forgotten. Level 2 
+                sleep is good for sleeping and waking up the engine to run a
+                different model or update the model, where previous model 
+                weights are not needed. It reduces CPU memory pressure.
         """
         self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
 
-    def wake_up(self):
+    def wake_up(self, tags: Optional[list[str]] = None):
         """
         Wake up the engine from sleep mode. See the :meth:`sleep` method
-        for more details."""
-        self.llm_engine.wake_up()
+        for more details.
+        
+        Args:
+            tags: An optional list of tags to reallocate the engine memory 
+                for specific memory allocations. Values must be in 
+                ("weights", "kv_cache",). If None, all memory is reallocated.
+                wake_up should be called with all tags (or None) before the 
+                engine is used again.
+        """
+        self.llm_engine.wake_up(tags)
 
     # LEGACY
     def _convert_v1_inputs(
