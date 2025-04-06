@@ -1785,7 +1785,7 @@ __global__ void Marlin(
             <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                 \
                 A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,      \
                 num_groups, prob_m, prob_n, prob_k, lda, locks,                \
-                use_atomic_add, use_fp32_reduce);                              \
+                part_use_atomic_add, use_fp32_reduce);                         \
       }                                                                        \
     }
 
@@ -2214,6 +2214,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
       i += exec_cfg.max_m_blocks * (par - 1);
       thread_m_blocks = exec_cfg.max_m_blocks;
     }
+
+    // atomic add reduce have better performance only when m * n is small
+    bool part_use_atomic_add =
+        use_atomic_add && div_ceil(prob_m, 64) * prob_n <= 2048;
 
     if (false) {
     }
