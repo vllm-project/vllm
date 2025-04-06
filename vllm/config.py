@@ -173,6 +173,9 @@ class ModelConfig:
             Defaults to True.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
+        hf_token: The token to use as HTTP bearer authorization for remote files
+            . If `True`, will use the token generated when running 
+            `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
@@ -256,6 +259,7 @@ class ModelConfig:
         limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
         use_async_output_proc: bool = True,
         config_format: ConfigFormat = ConfigFormat.AUTO,
+        hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         disable_mm_preprocessor_cache: bool = False,
@@ -356,7 +360,7 @@ class ModelConfig:
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
-            self.model, revision)
+            self.model, hf_token=hf_token, revision=revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
