@@ -22,14 +22,16 @@ logger = init_logger(__name__)
 
 def _count_substring(string, substring):
         """
-        Counts the number of non-overlapping occurrences of a substring in a string.
+        Counts the number of non-overlapping occurrences of a substring in 
+        a string.
         
         Args:
             string (str): The string to search in.
             substring (str): The substring to search for.
             
         Returns:
-            int: The number of non-overlapping occurrences of the substring in the string.
+            int: The number of non-overlapping occurrences of the substring in
+            the string.
         """
         count = 0
         start = 0
@@ -65,19 +67,20 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
         self.tool_call_end_token: str = "</function>"
         self.bot_token = "<|python_tag|>"
 
-        self.tool_call_start_token_id = tokenizer.encode(self.tool_call_start_token,
-                                             add_special_tokens=False)
+        self.tool_call_start_token_id = tokenizer.encode(
+            self.tool_call_start_token, add_special_tokens=False)
         
         self.tool_call_end_token_id = tokenizer.encode(self.tool_call_end_token,
                                              add_special_tokens=False)
           
-        self.tool_call_preargs_token_id = tokenizer.encode(self.tool_call_precall_token,
-                                             add_special_tokens=False)   
+        self.tool_call_preargs_token_id = tokenizer.encode(
+            self.tool_call_precall_token, add_special_tokens=False)   
                                             
         self.bot_token_id = tokenizer.encode(self.bot_token,
                                              add_special_tokens=False)
 
-        self.tool_call_regex = re.compile(r"<function=([^>]+)>\{([^}]+)\}(?:</function>|>)?")
+        self.tool_call_regex = re.compile(
+            r"<function=([^>]+)>\{([^}]+)\}(?:</function>|>)?")
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -157,10 +160,12 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
         Handles format: <function=functionName{arguments}>
         Returns DeltaMessage with either tool_calls or content.
         """
-        logger.debug("\n" + "="*50)
+        logger.debug("\n" , "=" * 50)
         logger.debug("STREAMING FUNCTION CALLED")
-        logger.debug("Tool call start token id IDs:", self.tool_call_start_token_id)
-        logger.debug("Tool call precall token id IDs:", self.tool_call_preargs_token_id)
+        logger.debug(
+            "Tool call start token id IDs:", self.tool_call_start_token_id)
+        logger.debug(
+            "Tool call precall token id IDs:", self.tool_call_preargs_token_id)
         logger.debug("Tool call end token id IDs:", self.tool_call_end_token_id)
         logger.debug("Previous text:", previous_text)
         logger.debug("Current text:", current_text)
@@ -169,16 +174,21 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
         logger.debug("Current token IDs:", current_token_ids)
         logger.debug("Delta token IDs:", delta_token_ids)
         logger.debug("Current tool name sent:", self.is_current_tool_name_sent)
-        logger.debug("-"*50 + "\n")
+        logger.debug("-"*50)
+        logger.debug("\n")
         flags = Allow.ALL if self.is_current_tool_name_sent \
                 else Allow.ALL & ~Allow.STR
         
-        logger.debug(f"{delta_token_ids[0] in self.tool_call_start_token_id=}")
+        logger.debug("%s=", delta_token_ids[0]
+                      in self.tool_call_start_token_id)
         if delta_token_ids[0] in self.tool_call_start_token_id : 
             # We possibly have a tool call (not sure yet) we don't stream
           
-            logger.debug(f"{_count_substring(current_text,self.tool_call_start_token)=}")
-            if _count_substring(current_text,self.tool_call_start_token) > self.nb_tool_calls \
+            logger.debug(
+                "%s=", _count_substring(current_text,self.tool_call_start_token)
+                )
+            if _count_substring(
+                current_text,self.tool_call_start_token) > self.nb_tool_calls \
                 and not self.is_parsing_toolcall :
 
                 self.is_parsing_toolcall=True
@@ -194,7 +204,7 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
             # We are parsing a tool call, we need to parse the tool name
             if delta_token_ids != self.tool_call_preargs_token_id:
                 self.current_tool_name += delta_text
-                logger.debug(f"{self.current_tool_name=}")
+                logger.debug("self.current_tool_name=",self.current_tool_name)
                 return None # moving on to the next iteration
             else : 
                 self.current_tool_name = self.current_tool_name.lstrip('=')
@@ -210,12 +220,15 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
         if self.is_current_tool_name_sent :
             logger.debug("Parsed tool name : ", self.current_tool_name)
 
-            if _count_substring(current_text,self.tool_call_end_token) < self.nb_tool_calls:
+            if _count_substring(
+                current_text,self.tool_call_end_token) < self.nb_tool_calls:
                 self.streamed_args_for_tool.append(delta_text)
                 return None # moving on to the next iteration
             else :
-                arguments = '{"'+''.join(self.streamed_args_for_tool) # adding back {" at the beginning for valid JSON
-                arguments = arguments.rstrip(self.tool_call_end_token) # removing the end token
+                # adding back {" at the beginning for valid JSON
+                arguments = '{"'+''.join(self.streamed_args_for_tool) 
+                # removing the end token
+                arguments = arguments.rstrip(self.tool_call_end_token) 
                 logger.debug("Concatenated tool call arguments  : ", arguments)
 
                 current_tool_args = partial_json_parser.loads(
@@ -238,7 +251,8 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
                 
                 return delta 
         else : 
-            logger.debug("No tool call detected, returning just text : ", delta_text)
+            logger.debug(
+                "No tool call detected, returning just text : ", delta_text)
             return DeltaMessage(content=delta_text)
             
     def reset_state(self):
