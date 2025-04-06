@@ -71,7 +71,8 @@ class ReferenceAttention:
         return self.fwd(q, k, v)
 
     def fwd_fp8_kv(self, q, k_quantized, v_quantized):
-        k_descale, v_descale = self.input_metadata.k_descale, self.input_metadata.v_descale
+        k_descale, v_descale = (self.input_metadata.k_descale,
+                                self.input_metadata.v_descale)
         k_dequantized = (k_quantized.to(torch.float32) *
                          k_descale.to(torch.float32)).half()
         v_dequantized = (v_quantized.to(torch.float32) *
@@ -81,8 +82,8 @@ class ReferenceAttention:
     def varlen_fwd(self, q, k, v, is_mqa=False):
         ref_out = torch.empty_like(q)
         if is_mqa:
-            # Make KV look like HQ/HK "groups" of HK. Later, we will reshape so the
-            # size aligns with Q.
+            # Make KV look like HQ/HK "groups" of HK. Later, we will reshape so
+            # the size aligns with Q.
             k_ref = k.view(k.shape[0], k.shape[1], 1,
                            k.shape[2]).expand(-1, -1, self.HQ // self.HK, -1)
             v_ref = v.view(v.shape[0], v.shape[1], 1,
