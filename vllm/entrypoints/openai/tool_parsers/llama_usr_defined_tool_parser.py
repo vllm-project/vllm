@@ -51,8 +51,7 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
         super().__init__(tokenizer)
 
         if isinstance(self.model_tokenizer, MistralTokenizer):
-            logger.error(
-                "Detected Mistral tokenizer when using a Llama model")
+            logger.error("Detected Mistral tokenizer when using a Llama model")
             self.model_tokenizer = self.model_tokenizer.tokenizer
 
         self.prev_tool_call_arr: list[dict] = []
