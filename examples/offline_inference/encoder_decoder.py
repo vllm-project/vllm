@@ -75,8 +75,6 @@ prompts = [
     enc_dec_prompt1, enc_dec_prompt2, enc_dec_prompt3
 ] + zipped_prompt_list
 
-print(prompts)
-
 # Create a sampling params object.
 sampling_params = SamplingParams(
     temperature=0,
@@ -91,10 +89,13 @@ sampling_params = SamplingParams(
 outputs = llm.generate(prompts, sampling_params)
 
 # Print the outputs.
-for output in outputs:
+print("-" * 50)
+for i, output in enumerate(outputs):
     prompt = output.prompt
     encoder_prompt = output.encoder_prompt
     generated_text = output.outputs[0].text
-    print(f"Encoder prompt: {encoder_prompt!r}, "
-          f"Decoder prompt: {prompt!r}, "
+    print(f"Output {i+1}:")
+    print(f"Encoder prompt: {encoder_prompt!r}\n"
+          f"Decoder prompt: {prompt!r}\n"
           f"Generated text: {generated_text!r}")
+    print("-" * 50)
