@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import pickle
 import random
 import socket
 import threading
 import uuid
 
 import aiohttp
+import msgpack
 import zmq
 from quart import Quart, make_response, request
 
@@ -25,7 +25,7 @@ def _listen_for_register(poller, router_socket):
             remote_address, message = router_socket.recv_multipart()
             # data: {"type": "P", "http_address": "ip:port",
             #        "zmq_address": "ip:port"}
-            data = pickle.loads(message)
+            data = msgpack.loads(message)
             # print("Received message from %s, data: %s",
             #              remote_address.decode(), data)
             if data["type"] == "P":

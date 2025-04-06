@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import pickle
 import threading
 import time
 import typing
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
+import msgpack
 import torch
 import zmq
 
@@ -92,9 +92,9 @@ class P2pNcclPipe:
                 return sock, self.comms[remote_address]
 
             unique_id = self.nccl.ncclGetUniqueId()
-            unique_id_obj = pickle.dumps(unique_id)
+            unique_id_obj = msgpack.dumps(unique_id)
             data = {"cmd": "NEW", "unique_id": unique_id_obj}
-            sock.send(pickle.dumps(data))
+            sock.send(msgpack.dumps(data))
 
             with torch.cuda.device(self.device):
                 rank = 0
@@ -142,10 +142,10 @@ class P2pNcclPipe:
         comm, rank = self.comms[remote_address]
 
         data = {"cmd": "GET", "tensor_id": tensor_id}
-        sock.send(pickle.dumps(data))
+        sock.send(msgpack.dumps(data))
 
         message = sock.recv()
-        data = pickle.loads(message)
+        data = msgpack.loads(message)
         if data["ret"] == 0:
             tensor = torch.empty(data["shape"],
                                  dtype=data["dtype"],
@@ -160,11 +160,11 @@ class P2pNcclPipe:
             socks = dict(self.poller.poll())
             if self.router_socket in socks:
                 remote_address, message = self.router_socket.recv_multipart()
-                data = pickle.loads(message)
+                data = msgpack.loads(message)
                 logger.debug("Received message from %s, data: %s",
                              remote_address.decode(), data)
                 if data["cmd"] == "NEW":
-                    unique_id = pickle.loads(data["unique_id"])
+                    unique_id = msgpack.loads(data["unique_id"])
                     with torch.cuda.device(self.device):
                         rank = 1
                         comm: ncclComm_t = self.nccl.ncclCommInitRank(
@@ -203,7 +203,7 @@ class P2pNcclPipe:
                                 data = {"ret": 1}
                             self.router_socket.send_multipart(
                                 [remote_address,
-                                 pickle.dumps(data)])
+                                 msgpack.dumps(data)])
                             if data["ret"] == 0:
                                 self._send(comm, tensor.to(self.device),
                                            rank ^ 1)
@@ -232,7 +232,7 @@ class P2pNcclPipe:
                     "shape": tensor.shape,
                     "dtype": tensor.dtype
                 }
-                sock.send(pickle.dumps(data))
+                sock.send(msgpack.dumps(data))
 
                 response = sock.recv()
                 if response != b"0" or tensor is None:
@@ -254,7 +254,7 @@ class P2pNcclPipe:
             "zmq_address": self.zmq_address
         }
         while True:
-            sock.send(pickle.dumps(data))
+            sock.send(msgpack.dumps(data))
             # logger.info("ping, zmq_address: %s", self.zmq_address)
             time.sleep(1)
 
