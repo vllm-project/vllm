@@ -163,7 +163,6 @@ def validate_guidance_grammar(
         tokenizer: Optional[llguidance.LLTokenizer] = None) -> None:
     tp, grm = get_structured_output_key(sampling_params)
     guidance_grm = serialize_guidance_grammar(tp, grm)
-    err = llguidance.LLMatcher.validate_grammar(guidance_grm,
-                                                tokenizer=tokenizer)
+    err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
     if err:
         raise ValueError(f"Grammar error: {err}")
