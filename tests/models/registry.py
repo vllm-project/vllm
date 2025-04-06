@@ -283,6 +283,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
+    "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
+                                                      min_transformers_version="4.51"),
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
                                                      extras={"mistral": "mistral-community/pixtral-12b", # noqa: E501
                                                              "mistral-fp8": "nm-testing/pixtral-12b-FP8-dynamic"}),  # noqa: E501
@@ -337,7 +339,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          tokenizer="facebook/bart-base",
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
-    "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 }
 
