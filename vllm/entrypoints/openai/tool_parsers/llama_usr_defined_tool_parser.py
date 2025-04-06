@@ -2,7 +2,7 @@
 
 import json
 import re
-from typing import Dict, List, Sequence, Union
+from collections.abc import Sequence
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -54,8 +54,8 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
                 "Detected Mistral tokenizer when using a Llama model")
             self.model_tokenizer = self.model_tokenizer.tokenizer
 
-        self.prev_tool_call_arr: List[Dict] = []
-        self.streamed_args_for_tool: List[str] = []
+        self.prev_tool_call_arr: list[dict] = []
+        self.streamed_args_for_tool: list[str] = []
         self.is_parsing_toolcall = False
         
         self.nb_tool_calls = 0
@@ -105,7 +105,8 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
                 # tag and end-of-string so the result of
                 # findall is an array of tuples where one is a function call and
                 # the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_output)
+                function_call_tuples = self.tool_call_regex.findall(
+                    model_output)
                 
                 logger.info("function_call_tuples: %s", function_call_tuples)
                 print("function_call_tuples: %s", function_call_tuples)
@@ -154,7 +155,7 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Extract tool calls from a streaming response.
         Handles format: <function=functionName{arguments}>
@@ -194,10 +195,12 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
                 self.is_parsing_toolcall=True
                 self.nb_tool_calls +=1 #will serve as id
                 self.current_tool_call_uuid = random_uuid()
-                logger.debug("New tool call detected, id:", self.nb_tool_calls-1)
+                logger.debug(
+                    "New tool call detected, id:", self.nb_tool_calls-1)
                 return None # going to the next iter 
             else : 
-                logger.debug("Tool call already parsed, id:", self.nb_tool_calls-1)
+                logger.debug(
+                    "Tool call already parsed, id:", self.nb_tool_calls-1)
             
         if self.is_parsing_toolcall and not self.is_current_tool_name_sent : 
             logger.debug("Parsing tool call, id:", self.nb_tool_calls-1)
