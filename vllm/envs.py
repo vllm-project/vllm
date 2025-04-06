@@ -665,6 +665,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
 
     # Use model_redirect to redirect the model name to a local folder.
+    # `model_redirect` can be a json file mapping the model between
+    # repo_id and local folder:
+    # {"meta-llama/Llama-3.2-1B": "/tmp/Llama-3.2-1B"}
+    # or a space separated values table file:
+    # meta-llama/Llama-3.2-1B   /tmp/Llama-3.2-1B
     "VLLM_MODEL_REDIRECT_PATH":
     lambda: os.environ.get("VLLM_MODEL_REDIRECT_PATH", None),
 
