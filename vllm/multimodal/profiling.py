@@ -216,7 +216,7 @@ class MultiModalProfiler(Generic[_I]):
         # Encoder-decoder multimodal models only support v0
         if total_len > seq_len:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
-            logger.warning_once(
+            logger.warning(
                 "The encoder sequence length used for profiling ("
                 "max_num_batched_tokens / max_num_seqs = %d) is too short "
                 "to hold the multi-modal embeddings in the worst case "
@@ -251,7 +251,7 @@ class MultiModalProfiler(Generic[_I]):
         # V0 does not support chunked prefill.
         if total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
-            logger.warning_once(
+            logger.warning(
                 "The sequence length used for profiling ("
                 "max_num_batched_tokens / max_num_seqs = %d) is too short "
                 "to hold the multi-modal embeddings in the worst case "
