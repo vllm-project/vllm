@@ -110,6 +110,7 @@ def set_forward_context(attn_metadata: Any,
     if has_kv_transfer_group() and attn_metadata is not None and \
             is_v1_kv_transfer_group():
         kv_connector = get_kv_transfer_group()
+        assert isinstance(kv_connector, KVConnectorBase_V1)
         kv_connector.start_load_kv(_forward_context)
 
     try:
@@ -152,6 +153,7 @@ def set_forward_context(attn_metadata: Any,
         if has_kv_transfer_group() and attn_metadata is not None and \
                 is_v1_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase_V1)
             kv_connector.wait_for_save()
 
         _forward_context = prev_context

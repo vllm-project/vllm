@@ -181,8 +181,7 @@ class Attention(nn.Module):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
-        if has_kv_transfer_group() and is_v1_kv_transfer_group():
-            get_kv_transfer_group().wait_for_layer_load(self.layer_name)
+        wait_for_kv_layer_from_connector(self.layer_name)
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
@@ -341,6 +340,20 @@ class MultiHeadAttention(nn.Module):
             out = out.transpose(1, 2)
 
         return out.reshape(bsz, q_len, -1)
+
+
+def wait_for_kv_layer_from_connector(layer_name: str):
+    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+        return
+
+    connector = get_kv_transfer_group()
+
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if attn_metadata is None:
+        return
+
+    connector.wait_for_layer_load(layer_name)
 
 
 def maybe_save_kv_layer_to_connector(
