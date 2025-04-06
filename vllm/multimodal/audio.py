@@ -6,7 +6,6 @@ from typing import Literal, Optional
 
 import numpy as np
 import numpy.typing as npt
-import scipy.signal
 
 from vllm.inputs.registry import InputContext
 from vllm.utils import PlaceholderModule
@@ -59,6 +58,9 @@ def resample_audio_scipy(
     orig_sr: float,
     target_sr: float,
 ):
+    # lazy import scipy.signal, otherwise it will crash doc build.
+    import scipy.signal
+
     if orig_sr > target_sr:
         return scipy.signal.resample_poly(audio, 1, orig_sr // target_sr)
     elif orig_sr < target_sr:
