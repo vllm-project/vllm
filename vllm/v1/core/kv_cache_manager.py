@@ -130,7 +130,6 @@ class KVCacheManager:
         if request.sampling_params.prompt_logprobs is not None:
             return [], 0
 
-        self.prefix_cache_stats.queries += len(block_hashes)
         if len(block_hashes) * self.block_size == request.num_tokens:
             # When prompt length is divisible by the block size and all
             # blocks are cached, we need to recompute the last token. This
@@ -144,6 +143,7 @@ class KVCacheManager:
 
         computed_blocks = (
             self.specialized_manager.find_longest_cache_hit(block_hashes))
+        self.prefix_cache_stats.queries += len(block_hashes)
         self.prefix_cache_stats.hits += len(computed_blocks)
 
         # NOTE(woosuk): Since incomplete blocks are not eligible for
