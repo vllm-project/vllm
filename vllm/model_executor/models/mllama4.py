@@ -39,6 +39,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.model_loader.loader import _initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -709,9 +710,10 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             prefix=maybe_prefix(prefix, "multi_modal_projector"))
         language_model_vllm_config = vllm_config.with_hf_config(
             config.text_config, architectures=["Llama4ForCausalLM"])
-        self.language_model = Llama4ForCausalLM(
+        self.language_model = _initialize_model(
             vllm_config=language_model_vllm_config,
             prefix=maybe_prefix(prefix, "language_model"),
+            model_class=Llama4ForCausalLM,
         )
 
         self.make_empty_intermediate_tensors = (
