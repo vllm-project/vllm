@@ -70,7 +70,7 @@ class BlockPool:
         cached_blocks = self.cached_block_hash_to_block.get(block_hash)
         if not cached_blocks:
             return None
-        first_block_id = list(cached_blocks.keys())[0]
+        first_block_id = next(iter(cached_blocks))
         return cached_blocks[first_block_id]
 
     def cache_full_blocks(
