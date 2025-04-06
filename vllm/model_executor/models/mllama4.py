@@ -801,9 +801,11 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        if "pixel_values" in kwargs:
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+        elif inputs_embeds is None and "pixel_values" in kwargs:
+            # NOTE: In v1, inputs_embeds is always generated at model runner,
+            # this condition is for v0 compatibility.
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
