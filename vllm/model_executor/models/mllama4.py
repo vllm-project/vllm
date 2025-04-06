@@ -55,8 +55,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+from .llama4 import Llama4ForCausalLM
+from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
+                    merge_multimodal_embeddings)
 from .vision import scatter_patch_features, select_patch_features
 
 logger = init_logger(__name__)
@@ -710,12 +711,12 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal):
             self.config,
             None,
             prefix=maybe_prefix(prefix, "multi_modal_projector"))
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            architectures=["Llama4ForCausalLM"],
-            prefix=maybe_prefix(prefix, "language_model"))
-
+        language_model_vllm_config = vllm_config.with_hf_config(
+            config.text_config, architectures=["Llama4ForCausalLM"])
+        self.language_model = Llama4ForCausalLM(
+            vllm_config=language_model_vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
 
     def _parse_and_validate_image_input(
@@ -857,9 +858,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         # language_model is an Llama4ForCausalLM instance. We load it's
         # using llama4's load_weights routine.
-        language_model_prefix = "language_model.model."
         language_model_weights, other_weights = self.separate_weights(
-            weights, prefix=language_model_prefix)
+            weights, prefix="language_model.model.")
         loader = AutoWeightsLoader(self)
         loaded_language_model_params = loader.load_weights(
             language_model_weights)
