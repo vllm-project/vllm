@@ -379,8 +379,8 @@ class InputBatch:
         if lora_id != 0:
             self.lora_id_to_request_ids[lora_id].discard(req_id)
             if len(self.lora_id_to_request_ids[lora_id]) == 0:
-                self.lora_id_to_request_ids.pop(lora_id)
-                self.lora_id_to_lora_request.pop(lora_id)
+                del self.lora_id_to_request_ids[lora_id]
+                del self.lora_id_to_lora_request[lora_id]
             self.request_lora_mapping[req_index] = 0
 
         self.logit_bias[req_index] = None
