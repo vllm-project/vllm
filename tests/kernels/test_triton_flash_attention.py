@@ -10,27 +10,103 @@ from vllm.attention.ops.triton_flash_attention import (SUPPORTED_LAYOUTS,
                                                        MetaData,
                                                        compute_alibi_tensor,
                                                        triton_attention_rocm)
+from vllm.platforms import current_platform
 
-FP8_DTYPE_TORCH = torch.float8_e4m3fnuz
+FP8_DTYPE_TORCH = current_platform.fp8_dtype()
 
 float8_info = torch.finfo(FP8_DTYPE_TORCH)
 FP8_MIN = float8_info.min
 FP8_MAX = float8_info.max
 
 
-def get_shape_from_layout(q, k, metadata):
-    assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
-    if metadata.layout == 'thd':
-        nheads_q, nheads_k = q.shape[1], k.shape[1]
-        head_size = q.shape[-1]
-        batch = metadata.num_contexts
-    elif metadata.layout == 'bhsd':
-        batch, nheads_q, _, head_size = q.shape
-        nheads_k = k.shape[1]
-    elif metadata.layout == 'bshd':
-        batch, _, nheads_q, head_size = q.shape
-        nheads_k = k.shape[2]
-    return batch, nheads_q, nheads_k, head_size
+class ReferenceAttention:
+
+    def __init__(self, Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, use_alibi, dtype,
+                 input_metadata):
+        self.Z = Z
+        self.HQ = HQ
+        self.HK = HK
+        self.N_CTX_Q = N_CTX_Q
+        self.N_CTX_K = N_CTX_K
+        self.D_HEAD = D_HEAD
+        self.use_alibi = use_alibi
+        self.dtype = dtype
+        self.input_metadata = input_metadata
+
+    def fwd(self, q, k, v):
+        scores = torch.einsum('bhqd,bhkd->bhqk', q,
+                              k).float() * self.input_metadata.sm_scale
+        if self.input_metadata.causal:
+            mask = torch.tril(torch.ones(self.N_CTX_Q,
+                                         self.N_CTX_K,
+                                         device="cuda"),
+                              diagonal=self.N_CTX_K - self.N_CTX_Q)
+            scores[:, :, mask == 0] = float("-inf")
+
+        if self.input_metadata.bias is not None:
+            scores += self.input_metadata.bias
+
+        if self.use_alibi:
+            scores += compute_alibi_tensor(self.input_metadata.alibi_slopes,
+                                           self.N_CTX_Q, self.N_CTX_K)
+
+        p = torch.softmax(scores, dim=-1)
+        if self.input_metadata.causal:
+            # If N_CTX_Q > N_CTX_K, there's at least one row of all -infs going
+            # into softmax. This creates a row of NaNs as -inf - -inf == NaN.
+            # So we fix this by converting the NaNs to 0s, which is what they
+            # should be out of the softmax.
+            nan_mask = torch.isnan(p)
+            p[nan_mask == 1] = 0
+        ref_out = torch.einsum('bhqk,bhkd->bhqd', p.to(self.dtype), v)
+        # compare
+        if self.input_metadata.layout == 'bshd':
+            ref_out = ref_out.transpose(1, 2).clone()
+        return ref_out
+
+    def fwd_fp8(self, q_quantized, k_quantized, v_quantized):
+        q = q_quantized.to(torch.float16) * self.input_metadata.q_descale
+        k = k_quantized.to(torch.float16) * self.input_metadata.k_descale
+        v = v_quantized.to(torch.float16) * self.input_metadata.v_descale
+        return self.fwd(q, k, v)
+
+    def fwd_fp8_kv(self, q, k_quantized, v_quantized):
+        k_descale, v_descale = self.input_metadata.k_descale, self.input_metadata.v_descale
+        k_dequantized = (k_quantized.to(torch.float32) *
+                         k_descale.to(torch.float32)).half()
+        v_dequantized = (v_quantized.to(torch.float32) *
+                         v_descale.to(torch.float32)).half()
+        return self.fwd(q, k_dequantized, v_dequantized)
+
+    def varlen_fwd(self, q, k, v, is_mqa=False):
+        ref_out = torch.empty_like(q)
+        if is_mqa:
+            # Make KV look like HQ/HK "groups" of HK. Later, we will reshape so the
+            # size aligns with Q.
+            k_ref = k.view(k.shape[0], k.shape[1], 1,
+                           k.shape[2]).expand(-1, -1, self.HQ // self.HK, -1)
+            v_ref = v.view(v.shape[0], v.shape[1], 1,
+                           v.shape[2]).expand(-1, -1, self.HQ // self.HK, -1)
+        else:
+            k_ref = k
+            v_ref = v
+
+        for i in range(0, self.input_metadata.num_contexts):
+            start_q, start_k = self.input_metadata.cu_seqlens_q[
+                i], self.input_metadata.cu_seqlens_k[i]
+            end_q, end_k = self.input_metadata.cu_seqlens_q[
+                i + 1], self.input_metadata.cu_seqlens_k[i + 1]
+            k_curr = k_ref[start_k:end_k]
+            v_curr = v_ref[start_k:end_k]
+            if is_mqa:
+                k_curr = k_curr.reshape(k_curr.shape[0], -1, k_curr.shape[3])
+                v_curr = v_curr.reshape(v_curr.shape[0], -1, v_curr.shape[3])
+            scores = torch.einsum('qhd,khd->qhk', q[start_q:end_q],
+                                  k_curr).float()
+            p = torch.softmax(scores * self.input_metadata.sm_scale,
+                              dim=-1).half()
+            ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v_curr)
+        return ref_out
 
 
 def quantize_fp8(tensor: torch.Tensor,
@@ -82,8 +158,7 @@ def quantize_input(q, k, v, input_metadata: MetaData, fp8_kv=False):
         v_descale=v_descale,
         # By default p_scaling is not enabled
         p_scale=p_scale,
-        p_descale=p_descale,
-        o_scale=None)
+        p_descale=p_descale)
 
     return q, k, v
 
@@ -241,27 +316,10 @@ def test_op_fwd(Z,
                                       -1).reshape(v.shape[0], -1, v.shape[2],
                                                   v.shape[3])
 
-    scores = torch.einsum('bhqd,bhkd->bhqk', q,
-                          k).float() * input_metadata.sm_scale
-    if causal:
-        mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"),
-                          diagonal=N_CTX_K - N_CTX_Q)
-        scores[:, :, mask == 0] = float("-inf")
-    if use_alibi:
-        scores += compute_alibi_tensor(alibi_slopes, N_CTX_Q, N_CTX_K)
+    ref_impl = ReferenceAttention(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
+                                  use_alibi, dtype, input_metadata)
+    ref_out = ref_impl.fwd(q, k, v)
 
-    p = torch.softmax(scores, dim=-1)
-    if causal:
-        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going
-        # into the softmax. This produces a row of NaNs as -inf - -inf == NaN.
-        # So we fix this by converting the NaNs to 0s, which is what they
-        # should be out of the softmax.
-        nan_mask = torch.isnan(p)
-        p[nan_mask == 1] = 0
-    ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
-    # compare
-    if layout == 'bshd':
-        ref_out = ref_out.transpose(1, 2).clone()
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
@@ -329,27 +387,10 @@ def test_op_persistent_fwd(Z,
                                       -1).reshape(v.shape[0], -1, v.shape[2],
                                                   v.shape[3])
 
-    scores = torch.einsum('bhqd,bhkd->bhqk', q,
-                          k).float() * input_metadata.sm_scale
-    if causal:
-        mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"),
-                          diagonal=N_CTX_K - N_CTX_Q)
-        scores[:, :, mask == 0] = float("-inf")
-    if use_alibi:
-        scores += compute_alibi_tensor(alibi_slopes, N_CTX_Q, N_CTX_K)
+    ref_impl = ReferenceAttention(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
+                                  use_alibi, dtype, input_metadata)
+    ref_out = ref_impl.fwd(q, k, v)
 
-    p = torch.softmax(scores, dim=-1)
-    if causal:
-        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going
-        # into the softmax. This produces a row of NaNs as -inf - -inf == NaN.
-        # So we fix this by converting the NaNs to 0s, which is what they
-        # should be out of the softmax.
-        nan_mask = torch.isnan(p)
-        p[nan_mask == 1] = 0
-    ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
-    # compare
-    if layout == 'bshd':
-        ref_out = ref_out.transpose(1, 2).clone()
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
@@ -393,30 +434,9 @@ def test_op_fwd_fp8(Z,
     tri_out, _ = triton_attention_rocm(q_quantized, k_quantized, v_quantized,
                                        o, input_metadata)
 
-    q_descale, k_descale, v_descale = (input_metadata.q_descale,
-                                       input_metadata.k_descale,
-                                       input_metadata.v_descale)
-
-    q = q_quantized.to(torch.float16) * q_descale
-    k = k_quantized.to(torch.float16) * k_descale
-    v = v_quantized.to(torch.float16) * v_descale
-
-    scores = torch.einsum('bhqd,bhkd->bhqk', q,
-                          k).float() * input_metadata.sm_scale
-    if causal:
-        mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"),
-                          diagonal=N_CTX_K - N_CTX_Q)
-        scores[:, :, mask == 0] = float("-inf")
-
-    p = torch.softmax(scores, dim=-1)
-    if causal:
-        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going
-        # into the softmax. This produces a row of NaNs as -inf - -inf == NaN.
-        # So we fix this by converting the NaNs to 0s, which is what they
-        # should be out of the softmax.
-        nan_mask = torch.isnan(p)
-        p[nan_mask == 1] = 0
-    ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
+    ref_impl = ReferenceAttention(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, False,
+                                  dtype, input_metadata)
+    ref_out = ref_impl.fwd_fp8(q_quantized, k_quantized, v_quantized)
 
     # compare
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
@@ -454,31 +474,13 @@ def test_op_fwd_fp8_kv(Z,
                                                  v,
                                                  input_metadata,
                                                  fp8_kv=True)
-    k_descale, v_descale = input_metadata.k_descale, input_metadata.v_descale
-    k_dequantized = (k_quantized.to(torch.float32) *
-                     k_descale.to(torch.float32)).half()
-    v_dequantized = (v_quantized.to(torch.float32) *
-                     v_descale.to(torch.float32)).half()
 
     tri_out, _ = triton_attention_rocm(q, k_quantized, v_quantized, o,
                                        input_metadata)
 
-    # Compute scores
-    scores = torch.einsum('bhqd,bhkd->bhqk', q,
-                          k_dequantized).float() * input_metadata.sm_scale
-
-    if causal:
-        mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"),
-                          diagonal=N_CTX_K - N_CTX_Q)
-        scores[:, :, mask == 0] = float("-inf")
-
-    p = torch.softmax(scores, dim=-1)
-    ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(),
-                           v_dequantized).to(torch.float16)
-
-    if causal:
-        nan_mask = torch.isnan(ref_out)
-        ref_out[nan_mask] = 0
+    ref_impl = ReferenceAttention(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, False,
+                                  dtype, input_metadata)
+    ref_out = ref_impl.fwd_fp8_kv(q, k_quantized, v_quantized)
 
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
@@ -518,25 +520,11 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
 
     # triton implementation
     tri_out, _ = triton_attention_rocm(q, k, v, o, input_metadata)
-    # reference implementation:171
 
-    scores = torch.einsum('bhqd,bhkd->bhqk', q, k).float() * sm_scale
-    if causal:
-        mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"),
-                          diagonal=N_CTX_K - N_CTX_Q)
-        scores[:, :, mask == 0] = float("-inf")
-    if use_bias:
-        scores += input_metadata.bias
-    p = torch.softmax(scores, dim=-1)
-    if causal:
-        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going
-        # into the softmax. This produces a row of NaNs as -inf - -inf == NaN.
-        # So we fix this by converting the NaNs to 0s, which is what they
-        # should be out of the softmax.
-        nan_mask = torch.isnan(p)
-        p[nan_mask == 1] = 0
+    ref_impl = ReferenceAttention(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, False,
+                                  dtype, input_metadata)
+    ref_out = ref_impl.fwd(q, k, v)
 
-    ref_out = torch.einsum('bhqk,bhkd->bhqd', p.to(dtype), v)
     # compare
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
@@ -550,21 +538,13 @@ def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
     q, k, v, input_metadata = varlen_input_helper(Z, H, H, N_CTX, N_CTX,
                                                   D_HEAD, dtype)
 
-    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
     tri_out = torch.empty_like(q)
-    ref_out = torch.empty_like(q)
-
-    for i in range(0, input_metadata.num_contexts):
-        start_q, start_k = (input_metadata.cu_seqlens_q[i],
-                            input_metadata.cu_seqlens_k[i])
-        end_q, end_k = (input_metadata.cu_seqlens_q[i + 1],
-                        input_metadata.cu_seqlens_k[i + 1])
-        scores = torch.einsum('qhd,khd->qhk', q[start_q:end_q],
-                              k[start_k:end_k]).float()
-        p = torch.softmax(scores * input_metadata.sm_scale, dim=-1).half()
-        ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p,
-                                              v[start_k:end_k])
     triton_attention_rocm(q, k, v, tri_out, input_metadata)
+
+    ref_impl = ReferenceAttention(Z, H, H, N_CTX, N_CTX, D_HEAD, False, dtype,
+                                  input_metadata)
+    ref_out = ref_impl.varlen_fwd(q, k, v, is_mqa=False)
+
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
@@ -583,25 +563,12 @@ def test_op_varlen_mqa_fwd(Z,
     q, k, v, input_metadata = varlen_input_helper(Z, HQ, HK, N_CTX, N_CTX,
                                                   D_HEAD, dtype)
     input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
-    ref_out = torch.empty_like(q)
+
     tri_out = torch.empty_like(q)
-    # Make KV look like HQ/HK "groups" of HK. Later, we will reshape so the
-    # size aligns with Q.
-    k_ref = k.view(k.shape[0], k.shape[1], 1,
-                   k.shape[2]).expand(-1, -1, HQ // HK, -1)
-    v_ref = v.view(v.shape[0], v.shape[1], 1,
-                   v.shape[2]).expand(-1, -1, HQ // HK, -1)
-    for i in range(0, input_metadata.num_contexts):
-        start_q, start_k = input_metadata.cu_seqlens_q[
-            i], input_metadata.cu_seqlens_k[i]
-        end_q, end_k = input_metadata.cu_seqlens_q[
-            i + 1], input_metadata.cu_seqlens_k[i + 1]
-        k_curr = k_ref[start_k:end_k]
-        k_curr = k_curr.reshape(k_curr.shape[0], -1, k_curr.shape[3])
-        v_curr = v_ref[start_k:end_k]
-        v_curr = v_curr.reshape(v_curr.shape[0], -1, v_curr.shape[3])
-        scores = torch.einsum('qhd,khd->qhk', q[start_q:end_q], k_curr).float()
-        p = torch.softmax(scores * input_metadata.sm_scale, dim=-1).half()
-        ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v_curr)
     triton_attention_rocm(q, k, v, tri_out, input_metadata)
+
+    ref_impl = ReferenceAttention(Z, HQ, HK, N_CTX, N_CTX, D_HEAD, False,
+                                  dtype, input_metadata)
+    ref_out = ref_impl.varlen_fwd(q, k, v, is_mqa=True)
+
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)

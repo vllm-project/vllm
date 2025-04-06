@@ -18,17 +18,22 @@ Currently only the forward kernel is supported, and contains these features:
 4) Multi and grouped query attention
 5) Variable sequence lengths
 6) ALiBi and matrix bias
+7) FP8 support
 
 """
+
+from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
 
+from vllm.platforms import current_platform
+
 SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
 default_eight_bit_dtype_triton = tl.float8e4b8
-default_eight_bit_dtype_torch = torch.float8_e4m3fnuz
+default_eight_bit_dtype_torch = current_platform.fp8_dtype()
 default_float8_info = torch.finfo(default_eight_bit_dtype_torch)
 
 
@@ -73,14 +78,13 @@ class MetaData:
         self.persistent = persistent
 
     def set_eight_bit_params(self, q_descale, k_descale, v_descale, p_scale,
-                             p_descale, o_scale):
+                             p_descale):
         self.eight_bit = True
         self.q_descale = q_descale
         self.k_descale = k_descale
         self.v_descale = v_descale
         self.p_scale = p_scale
         self.p_descale = p_descale
-        self.o_scale = o_scale
         self.use_p_scale = (p_scale is not None) and (
             p_descale is not None) and (v_descale is not None)
         self.eight_bit_kv = ((q_descale is None) and (k_descale is not None)
@@ -191,8 +195,8 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
 # Convenience function to load with optional boundary checks.
 # "First" is the major dim, "second" is the minor dim.
 @triton.jit
-def load_fn(ptrs, offset_first, offset_second, boundary_first,
-            boundary_second):
+def masked_load(ptrs, offset_first, offset_second, boundary_first,
+                boundary_second):
     if offset_first is not None and offset_second is not None:
         mask = (offset_first[:, None] < boundary_first) & \
                (offset_second[None, :] < boundary_second)
@@ -317,12 +321,12 @@ def _attn_fwd_inner(
         # we load all BLOCK_N. For others, the blocks are all within range.
         k_offs_n = start_n + tl.arange(0, BLOCK_N) if MASK_STEPS else None
         k_offs_k = None if not PADDED_HEAD else tl.arange(0, BLOCK_DMODEL)
-        k = load_fn(k_ptrs, k_offs_k, k_offs_n, ACTUAL_BLOCK_DMODEL,
-                    actual_seqlen_k)
+        k = masked_load(k_ptrs, k_offs_k, k_offs_n, ACTUAL_BLOCK_DMODEL,
+                        actual_seqlen_k)
         if PRE_LOAD_V:
             # We can use the same offsets as k, just with dims transposed.
-            v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k,
-                        ACTUAL_BLOCK_DMODEL)
+            v = masked_load(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k,
+                            ACTUAL_BLOCK_DMODEL)
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
@@ -357,8 +361,8 @@ def _attn_fwd_inner(
         if bias_ptrs is not None:
             bias_offs_n = start_n + tl.arange(0,
                                               BLOCK_N) if MASK_STEPS else None
-            bias = load_fn(bias_ptrs, OFFS_M, bias_offs_n, actual_seqlen_q,
-                           actual_seqlen_k)
+            bias = masked_load(bias_ptrs, OFFS_M, bias_offs_n, actual_seqlen_q,
+                               actual_seqlen_k)
             # While bias is added after multiplying qk with sm_scale,
             # our optimization to use 2^x instead of e^x results in an
             # additional scale factor of log2(e) which we must also multiply
@@ -399,8 +403,8 @@ def _attn_fwd_inner(
         alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
         if not PRE_LOAD_V:
-            v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k,
-                        ACTUAL_BLOCK_DMODEL)
+            v = masked_load(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k,
+                            ACTUAL_BLOCK_DMODEL)
         # -- update m_i and l_i
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
@@ -408,7 +412,7 @@ def _attn_fwd_inner(
 
         if EIGHT_BIT_GEMM:
             if USE_P_SCALE:
-                p = (p * p_scale).to(EIGHT_BIT_DTYPE)
+                p = tl.clamp(p * p_scale, FP8_MIN, FP8_MAX).to(EIGHT_BIT_DTYPE)
                 # They are all eight bit
                 acc += tl.dot(p, v)
             else:
@@ -428,19 +432,16 @@ def _attn_fwd_inner(
     return acc, l_i, m_i
 
 
-def is_hip():
-    return triton.runtime.driver.active.get_current_target().backend == "hip"
-
-
 def is_cdna():
-    return is_hip() and triton.runtime.driver.active.get_current_target(
-    ).arch in ('gfx940', 'gfx941', 'gfx942', 'gfx90a', 'gfx908')
+    return current_platform.is_rocm(
+    ) and triton.runtime.driver.active.get_current_target().arch in (
+        'gfx940', 'gfx941', 'gfx942', 'gfx90a', 'gfx908')
 
 
 def is_rdna():
-    return is_hip() and triton.runtime.driver.active.get_current_target(
-    ).arch in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200",
-               "gfx1201")
+    return current_platform.is_rocm(
+    ) and triton.runtime.driver.active.get_current_target().arch in (
+        "gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
 
 
 def get_cdna_autotune_configs():
@@ -667,7 +668,6 @@ def attn_fwd(
     K_descale,
     P_scale,
     P_descale,
-    o_descale,
     V_descale,
     cu_seqlens_q,
     cu_seqlens_k,
@@ -788,8 +788,6 @@ def attn_fwd(
                                 cu_seqlens_q_start * stride_om)
                     o_ptrs = (o_offset + offs_m[:, None] * stride_om +
                               offs_d[None, :] * stride_on)
-                    # acc = tl.zeros([BLOCK_M, BLOCK_DMODEL],
-                    # dtype=Out.type.element_ty)
                     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
                     o_ptrs_mask = (offs_m[:, None] < seqlen_q).broadcast_to(
                         [BLOCK_M, BLOCK_DMODEL])
@@ -1071,10 +1069,6 @@ def attn_fwd(
                 end_m_idx = (start_m + 1) * BLOCK_M
                 start_m_idx = start_m * BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k
-                if EIGHT_BIT and not EIGHT_BIT_KV:  # noqa: SIM102
-                    if o_descale is not None:
-                        acc *= o_descale
-                        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
                 acc = acc.to(Out.type.element_ty)
                 if IS_CAUSAL:  # noqa: SIM102
                     if (causal_start_idx > start_m_idx
@@ -1146,25 +1140,20 @@ def get_shape_from_layout(q, k, metadata):
     return batch, nheads_q, nheads_k, head_size
 
 
-# TODO: This can probably optimized to have fewer lines of code.
 def get_strides_from_layout(q, k, v, o, metadata):
     assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
-    if metadata.layout == 'thd':
-        q_strides = (0, q.stride(1), q.stride(0), q.stride(2))
-        k_strides = (0, k.stride(1), k.stride(0), k.stride(2))
-        v_strides = (0, v.stride(1), v.stride(0), v.stride(2))
-        o_strides = (0, o.stride(1), o.stride(0), o.stride(2))
-    elif metadata.layout == 'bhsd':
-        q_strides = (q.stride(0), q.stride(1), q.stride(2), q.stride(3))
-        k_strides = (k.stride(0), k.stride(1), k.stride(2), k.stride(3))
-        v_strides = (v.stride(0), v.stride(1), v.stride(2), v.stride(3))
-        o_strides = (o.stride(0), o.stride(1), o.stride(2), o.stride(3))
-    elif metadata.layout == 'bshd':
-        q_strides = (q.stride(0), q.stride(2), q.stride(1), q.stride(3))
-        k_strides = (k.stride(0), k.stride(2), k.stride(1), k.stride(3))
-        v_strides = (v.stride(0), v.stride(2), v.stride(1), v.stride(3))
-        o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
-    return q_strides, k_strides, v_strides, o_strides
+
+    STRIDE_PERMUTATIONS = {
+        'thd': (None, 1, 0, 2),
+        'bhsd': (0, 1, 2, 3),
+        'bshd': (0, 2, 1, 3),
+    }
+
+    perm = STRIDE_PERMUTATIONS[metadata.layout]
+    stride = lambda x, p: (0 if p is None else x.stride(p))
+    strides = lambda x: (stride(x, p) for p in perm)
+
+    return tuple(strides(x) for x in [q, k, v, o])
 
 
 class _attention(torch.autograd.Function):
@@ -1230,13 +1219,12 @@ class _attention(torch.autograd.Function):
             alibi_strides = (0, 0)
 
         if metadata.eight_bit:
-            q_descale, k_descale, p_scale, p_descale, v_descale, o_scale = (
+            q_descale, k_descale, p_scale, p_descale, v_descale = (
                 metadata.q_descale, metadata.k_descale, metadata.p_scale,
-                metadata.p_descale, metadata.v_descale, metadata.o_scale)
-            o_descale = 1.0 / o_scale if o_scale is not None else None
+                metadata.p_descale, metadata.v_descale)
         else:
             q_descale = k_descale = p_scale = None
-            p_descale = v_descale = o_descale = None
+            p_descale = v_descale = None
 
         # number of compute units available
         NUM_CU = torch.cuda.get_device_properties("cuda").multi_processor_count
@@ -1271,7 +1259,6 @@ class _attention(torch.autograd.Function):
                        k_descale,
                        p_scale,
                        p_descale,
-                       o_descale,
                        v_descale,
                        metadata.cu_seqlens_q,
                        metadata.cu_seqlens_k,
@@ -1332,23 +1319,61 @@ def quantize_fp8(x, scale, eight_bit_dtype):
     return x
 
 
+def maybe_quantize_fp8(t, scale):
+    eight_bit_dtype = current_platform.fp8_dtype()
+    if t.dtype != eight_bit_dtype:
+        t = quantize_fp8(t, 1.0 / scale, eight_bit_dtype)
+    return t
+
+
+def check_and_maybe_quantize_qkv(q, k, v, fp8_scales):
+    (q_scale, k_scale, v_scale, p_scale) = fp8_scales
+
+    q = maybe_quantize_fp8(q, q_scale)
+    k = maybe_quantize_fp8(k, k_scale)
+    v = maybe_quantize_fp8(v, v_scale)
+
+    return q, k, v
+
+
+def prepare_scales_for_triton(q, k, v, fp8_scales):
+    (q_scale, k_scale, v_scale, p_scale) = fp8_scales
+    q_scale = torch.full((q.shape[1], ),
+                         q_scale,
+                         dtype=torch.float32,
+                         device=q.device)
+    k_scale = torch.full((k.shape[1], ),
+                         k_scale,
+                         dtype=torch.float32,
+                         device=k.device)
+    v_scale = torch.full((v.shape[1], ),
+                         v_scale,
+                         dtype=torch.float32,
+                         device=v.device)
+    p_scale = torch.full((q.shape[1], ),
+                         p_scale,
+                         dtype=torch.float32,
+                         device=q.device)
+    return q_scale, k_scale, v_scale, p_scale
+
+
 # query   - [num_tokens, num_heads, head_size]
 # key     - [num_tokens, num_kv_heads, head_size]
 # value   - [num_tokens, num_kv_heads, head_size
 # output  - [num_tokens, num_heads, head_size]
 def triton_attention(
-    q,
-    k,
-    v,
-    o,
-    cu_seqlens_q,
-    cu_seqlens_k,
-    max_seqlens_q,
-    max_seqlens_k,
-    causal=False,
-    sm_scale=1.0,
-    bias=None,
-    fp8_scales=None,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlens_q: int,
+    max_seqlens_k: int,
+    causal: bool = False,
+    sm_scale: float = 1.0,
+    bias: Optional[torch.Tensor] = None,
+    fp8_scales: Optional[tuple[float, ...]] = None,
 ) -> torch.Tensor:
     num_seqs, num_heads, head_size = q.shape
     attn_metadata = MetaData(sm_scale=sm_scale)
@@ -1359,33 +1384,14 @@ def triton_attention(
     attn_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
 
     if fp8_scales is not None:
-        from vllm.platforms import current_platform
-        eight_bit_dtype = current_platform.fp8_dtype()
+        q, k, v = check_and_maybe_quantize_qkv(q, k, v, fp8_scales)
+        q_scale, k_scale, v_scale, p_scale = prepare_scales_for_triton(
+            q, k, v, fp8_scales)
 
-        (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
-        if q.dtype != eight_bit_dtype:
-            q = quantize_fp8(q, 1.0 / q_scale, eight_bit_dtype)
-            k = quantize_fp8(k, 1.0 / k_scale, eight_bit_dtype)
-            v = quantize_fp8(v, 1.0 / v_scale, eight_bit_dtype)
-
-        q_scale = torch.full((q.shape[1], 1, 1),
-                             q_scale,
-                             dtype=torch.float32,
-                             device=q.device)
-        k_scale = torch.full((k.shape[1], 1, 1),
-                             k_scale,
-                             dtype=torch.float32,
-                             device=k.device)
-        v_scale = torch.full((v.shape[1], 1, 1),
-                             v_scale,
-                             dtype=torch.float32,
-                             device=v.device)
-        p_scale = torch.full((q.shape[1], 1, 1),
-                             p_scale,
-                             dtype=torch.float32,
-                             device=q.device)
         attn_metadata.set_eight_bit_params(q_scale, k_scale, v_scale,
-                                           1.0 / p_scale, p_scale, o_scale)
+                                           1.0 / p_scale, p_scale)
+
+        eight_bit_dtype = current_platform.fp8_dtype()
         attn_metadata.eight_bit_dtype_torch = eight_bit_dtype
 
     return triton_attention_rocm(q, k, v, o, attn_metadata)
