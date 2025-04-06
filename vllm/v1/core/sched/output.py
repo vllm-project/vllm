@@ -125,4 +125,4 @@ class SchedulerOutput:
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
 
     # the connector metadata
-    connector_metadata: Optional[KVConnectorMetadata] = None
+    kv_connector_metadata: Optional[KVConnectorMetadata] = None

@@ -128,7 +128,6 @@ class SharedStorageConnector(KVConnectorBase_V1):
             dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
             dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
-        logger.info("Start loading KV cache from the connector")
         # Get the metadata
         metadata: KVConnectorMetadata = \
             self._get_connector_metadata()
@@ -146,15 +145,17 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 "In connector.start_load_kv, but the attn_metadata is None")
             return
 
-        # Load the KV for each layer
-        for layer_name in forward_context.no_compile_layers:
-            attn_layer = forward_context.no_compile_layers[layer_name]
-            kv_cache_layer = attn_layer.kv_cache[
-                forward_context.virtual_engine]
+        # Load the KV for each request each layer
+        for request in metadata.requests:
+            if request.is_store:
+                continue
+            logger.info("Inject KV cache of %d tokens to the paged memory",
+                        len(request.slot_mapping))
+            for layer_name in forward_context.no_compile_layers:
+                attn_layer = forward_context.no_compile_layers[layer_name]
+                kv_cache_layer = attn_layer.kv_cache[\
+                        forward_context.virtual_engine]
 
-            for request in metadata.requests:
-                if request.is_store:
-                    continue
                 filename = self.generate_filename_debug(
                     layer_name, request.token_ids)
                 kv_cache = torch.load(filename).cuda(
@@ -264,7 +265,10 @@ class SharedStorageConnector(KVConnectorBase_V1):
             old_req_id = request.request_id
             request.request_id = "temp-req-id-for-connector"
             allocated_blocks = kv_cache_manager.allocate_slots(
-                request, need_to_allocate, computed_blocks, preallocate=False)
+                request,
+                need_to_allocate,
+                computed_blocks,
+                skip_preallocate=True)
             request.request_id = old_req_id
             kv_cache_manager.req_to_blocks.pop("temp-req-id-for-connector")
             kv_cache_manager.num_cached_block.pop("temp-req-id-for-connector")
@@ -285,7 +289,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """Attach the connector metadata to the request object.
 
         This function should NOT modify other fields in the scheduler_output 
-        except the `connector_metadata` field.
+        except the `kv_connector_metadata` field.
         Also, calling this function will reset the state of the connector.
 
         Args:
@@ -302,7 +306,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # store and load status
                 if not self.found_match_for_request(request):
                     meta.add_request(request, self._block_size, is_store=True)
-        scheduler_output.connector_metadata = meta
+        scheduler_output.kv_connector_metadata = meta
 
         self._requests_need_load.clear()
         return scheduler_output

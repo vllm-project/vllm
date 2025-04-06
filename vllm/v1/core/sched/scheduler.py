@@ -7,8 +7,7 @@ from collections import deque
 from collections.abc import Iterable
 from typing import Optional, Union
 
-from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
-                         VllmConfig)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -35,10 +34,6 @@ class Scheduler(SchedulerInterface):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        scheduler_config: SchedulerConfig,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        lora_config: Optional[LoRAConfig],
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
@@ -46,9 +41,9 @@ class Scheduler(SchedulerInterface):
         log_stats: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
-        self.scheduler_config = scheduler_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
         self.kv_cache_config = kv_cache_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
@@ -79,14 +74,14 @@ class Scheduler(SchedulerInterface):
         else:
             self.connector = None
 
-        num_gpu_blocks = cache_config.num_gpu_blocks
+        num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            enable_caching=cache_config.enable_prefix_caching,
+            enable_caching=self.cache_config.enable_prefix_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             log_stats=self.log_stats,
             connector=self.connector)
@@ -118,8 +113,8 @@ class Scheduler(SchedulerInterface):
         # This can be changed when we make encoder cache for embedding caching
         # across requests.
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
+            model_config=vllm_config.model_config,
+            scheduler_config=vllm_config.scheduler_config,
             mm_registry=mm_registry,
         )
 
@@ -461,7 +456,8 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            self.connector.attach_connector_meta(scheduler_output)
+            scheduler_output = self.connector.attach_connector_meta(
+                scheduler_output)
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.

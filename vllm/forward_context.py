@@ -11,7 +11,8 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed import (get_kv_transfer_group, has_kv_transfer_group,
+                              is_v1_kv_transfer_group)
 # yapf: disable
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 # yapf: enable
@@ -106,10 +107,10 @@ def set_forward_context(attn_metadata: Any,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata)
 
-    if has_kv_transfer_group() and attn_metadata is not None:
+    if has_kv_transfer_group() and attn_metadata is not None and \
+            is_v1_kv_transfer_group():
         kv_connector = get_kv_transfer_group()
         kv_connector.start_load_kv(_forward_context)
-        _forward_context.kv_connector = kv_connector
 
     try:
         yield
@@ -148,7 +149,9 @@ def set_forward_context(attn_metadata: Any,
                                 forward_stats)
 
         # Waiting for the save operation to finish
-        if _forward_context.kv_connector is not None:
-            _forward_context.kv_connector.wait_for_save()
+        if has_kv_transfer_group() and attn_metadata is not None and \
+                is_v1_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            kv_connector.wait_for_save()
 
         _forward_context = prev_context

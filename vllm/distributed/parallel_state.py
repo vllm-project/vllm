@@ -40,6 +40,8 @@ from torch.distributed import Backend, ProcessGroup
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase)
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import (direct_register_custom_op, resolve_obj_by_qualname,
@@ -47,8 +49,6 @@ from vllm.utils import (direct_register_custom_op, resolve_obj_by_qualname,
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_transfer.kv_connector.kv_connector_agent import (
-        KVConnectorAgent)
 
 
 @dataclass
@@ -768,10 +768,10 @@ def get_pp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
-_KV_CONNECTOR_AGENT: Optional["KVConnectorAgent"] = None
+_KV_CONNECTOR_AGENT: Union[KVConnectorBase, KVConnectorBase_V1, None] = None
 
 
-def get_kv_transfer_group() -> "KVConnectorAgent":
+def get_kv_transfer_group() -> Union[KVConnectorBase, KVConnectorBase_V1]:
     assert _KV_CONNECTOR_AGENT is not None, (
         "disaggregated KV cache transfer parallel group is not initialized")
     return _KV_CONNECTOR_AGENT
@@ -779,6 +779,30 @@ def get_kv_transfer_group() -> "KVConnectorAgent":
 
 def has_kv_transfer_group() -> bool:
     return _KV_CONNECTOR_AGENT is not None
+
+
+def is_v1_kv_transfer_group(
+    connector: Union[KVConnectorBase_V1, KVConnectorBase,
+                     None] = None) -> bool:
+    """Check if the KV connector is the v1 connector.
+    If the argument is None, it will check the global KV connector
+
+    Args:
+        connector: The KV connector to check. If None, it will check the
+            global KV connector.
+
+    Note:
+        This function will no-longer be needed after the v1 KV connector
+        becomes the default.
+    """
+    if connector is None:
+        connector = _KV_CONNECTOR_AGENT
+
+    if connector is None:
+        # Global KV connector is not set
+        return False
+
+    return isinstance(connector, KVConnectorBase_V1)
 
 
 @contextmanager
@@ -985,12 +1009,11 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
             "rank": get_world_group().rank,
             "local_rank": get_world_group().local_rank,
             "config": vllm_config,
-        }
-        if envs.VLLM_USE_V1:
             # NOTE(Kuntai):
             # Parallel state is initialized in v1 worker,
             # so this connector is for sure worker connector.
-            kwargs["role"] = KVConnectorRole_V1.WORKER
+            "role": KVConnectorRole_V1.WORKER,
+        }
         _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(**kwargs)
 
 

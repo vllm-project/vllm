@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
@@ -13,6 +13,9 @@ from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 
 logger = init_logger(__name__)
 
@@ -27,7 +30,7 @@ class KVCacheManager:
         caching_hash_algo: str = "builtin",
         num_preallocate_tokens: int = 64,
         log_stats: bool = False,
-        connector=None,
+        connector: "KVConnectorBase_V1" = None,
     ) -> None:
         assert len(kv_cache_config.kv_cache_groups) == 1, (
             "KVCacheManager does not support hybrid models with more than 1 "
@@ -173,7 +176,7 @@ class KVCacheManager:
         request: Request,
         num_tokens: int,
         new_computed_blocks: Optional[list[KVCacheBlock]] = None,
-        preallocate=True,
+        skip_preallocate: bool = False,
     ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -183,7 +186,8 @@ class KVCacheManager:
                 not include the tokens that have already been computed.
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
-            preallocate: Whether to preallocate blocks for the request.
+            skip_preallocate: Whether to skip preallocating blocks for 
+                the request.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -256,8 +260,8 @@ class KVCacheManager:
         else:
             # Get new blocks from the free block pool considering
             # preallocated blocks.
-            num_preallocate_blocks =\
-                    self.num_preallocate_blocks if preallocate else 0
+            num_preallocate_blocks = self.num_preallocate_blocks \
+                    if not skip_preallocate else 0
             num_new_blocks = min(
                 num_new_blocks + num_preallocate_blocks,
                 self.block_pool.get_num_free_blocks(),
