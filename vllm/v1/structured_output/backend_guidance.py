@@ -41,6 +41,9 @@ class GuidanceBackend(StructuredOutputBackend):
         tokenizer_group.ping()
         self.vllm_config = vllm_config
         self.vocab_size = vllm_config.model_config.get_vocab_size()
+        self.disable_any_whitespace = (
+            "disable-any-whitespace"
+            in vllm_config.decoding_config.guided_decoding_backend)
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.ll_tokenizer = llguidance_hf.from_tokenizer(tokenizer, None)
@@ -48,7 +51,7 @@ class GuidanceBackend(StructuredOutputBackend):
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
         self.serialized_grammar = serialize_guidance_grammar(
-            request_type, grammar_spec)
+            request_type, grammar_spec, self.disable_any_whitespace)
 
         ll_matcher = llguidance.LLMatcher(
             self.ll_tokenizer,
@@ -126,17 +129,19 @@ class GuidanceGrammar(StructuredOutputGrammar):
 
 
 def serialize_guidance_grammar(request_type: StructuredOutputOptions,
-                               grammar_spec: str) -> str:
+                               grammar_spec: str,
+                               disable_any_whitespace: bool = False) -> str:
     if request_type == StructuredOutputOptions.JSON:
-        # TODO: make whitespace_flexible configurable
         return llguidance.LLMatcher.grammar_from_json_schema(
-            grammar_spec, defaults={
-                "whitespace_flexible": True,
+            grammar_spec,
+            defaults={
+                "whitespace_flexible": not disable_any_whitespace,
             })
     elif request_type == StructuredOutputOptions.JSON_OBJECT:
         return llguidance.LLMatcher.grammar_from_json_schema(
-            '{"type": "object"}', defaults={
-                "whitespace_flexible": True,
+            '{"type": "object"}',
+            defaults={
+                "whitespace_flexible": not disable_any_whitespace,
             })
     else:
         if request_type == StructuredOutputOptions.REGEX:
@@ -158,7 +163,6 @@ def validate_guidance_grammar(
         tokenizer: Optional[llguidance.LLTokenizer] = None) -> None:
     tp, grm = get_structured_output_key(sampling_params)
     guidance_grm = serialize_guidance_grammar(tp, grm)
-    err = llguidance.LLMatcher.validate_grammar(guidance_grm,
-                                                tokenizer=tokenizer)
+    err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
     if err:
         raise ValueError(f"Grammar error: {err}")
