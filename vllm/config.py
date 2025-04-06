@@ -1124,6 +1124,11 @@ class ModelConfig:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_v1_compatible(architectures)
 
+    @property
+    def matryoshka(self) -> bool:
+        return (hasattr(self.hf_config, "matryoshka_dimensions")
+                or getattr(self.hf_config, "matryoshka", False))
+
 
 class CacheConfig:
     """Configuration for the KV cache.

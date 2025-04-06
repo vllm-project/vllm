@@ -4,7 +4,7 @@ from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
-from transformers import BertConfig
+from transformers import BertConfig, PretrainedConfig
 
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
@@ -18,6 +18,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
                                                PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -401,6 +402,7 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         pooler_config = vllm_config.model_config.pooler_config
+        self.config = vllm_config.model_config.hf_config
         self.model = self._build_model(vllm_config=vllm_config,
                                        prefix=maybe_prefix(prefix, "model"))
         self._pooler = self._build_pooler(pooler_config)
@@ -514,3 +516,291 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                          inputs_embeds=inputs_embeds,
                          intermediate_tensors=intermediate_tensors,
                          token_type_ids=token_type_ids)
+
+
+class BertWithRotaryEmbedding(nn.Module):
+
+    def __init__(self, config: PretrainedConfig):
+        super().__init__()
+        self.size = config.hidden_size
+        self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
+                                                      config.hidden_size)
+        self.token_type_embeddings = nn.Embedding(config.type_vocab_size,
+                                                  config.hidden_size)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
+
+        self.position_embedding_type = config.position_embedding_type
+        if self.position_embedding_type != "rotary":
+            raise ValueError("Only 'rotary' position_embedding_type" +
+                             " is supported")
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        seq_lens: torch.Tensor,
+        position_ids: torch.Tensor,
+        token_type_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        input_shape = input_ids.size()
+        inputs_embeds = self.word_embeddings(input_ids)
+        if token_type_ids is None:
+            token_type_ids = torch.zeros(input_shape,
+                                         dtype=torch.long,
+                                         device=inputs_embeds.device)
+
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+        embeddings = inputs_embeds + token_type_embeddings
+        embeddings = self.LayerNorm(embeddings)
+        return embeddings
+
+
+@support_torch_compile
+class BertWithRotaryEncoder(nn.Module):
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 rotary_kwargs: Optional[dict] = None):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        self.layer = nn.ModuleList([
+            BertWithRotaryLayer(config=config,
+                                cache_config=cache_config,
+                                quant_config=quant_config,
+                                rotary_kwargs=rotary_kwargs,
+                                prefix=f"{prefix}.layer.{layer_idx}")
+            for layer_idx in range(config.num_hidden_layers)
+        ])
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        for layer in self.layer:
+            hidden_states = layer(positions, hidden_states)
+        return hidden_states
+
+
+class BertWithRotaryLayer(nn.Module):
+
+    def __init__(self,
+                 config: BertConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "",
+                 rotary_kwargs: Optional[dict] = None):
+        super().__init__()
+
+        self.attention = BertWithRotaryAttention(
+            hidden_size=config.hidden_size,
+            num_attention_heads=config.num_attention_heads,
+            layer_norm_eps=config.layer_norm_eps,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            rotary_kwargs=rotary_kwargs,
+            prefix=f"{prefix}.attention")
+
+        self.intermediate = BertIntermediate(
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            prefix=f"{prefix}.intermediate")
+
+        self.output = BertOutput(hidden_size=config.hidden_size,
+                                 intermediate_size=config.intermediate_size,
+                                 layer_norm_eps=config.layer_norm_eps,
+                                 quant_config=quant_config,
+                                 prefix=f"{prefix}.output")
+
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor):
+        attn_output = self.attention(positions, hidden_states)
+        intermediate_output = self.intermediate(attn_output)
+        output = self.output(intermediate_output, attn_output)
+        return output
+
+
+class BertWithRotaryAttention(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_attention_heads: int,
+        layer_norm_eps: float,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        rotary_kwargs: Optional[dict] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+
+        self.self = BertWithRotarySelfAttention(
+            hidden_size=hidden_size,
+            num_attention_heads=num_attention_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            rotary_kwargs=rotary_kwargs,
+            prefix=f"{prefix}.output")
+
+        self.output = BertSelfOutput(hidden_size=hidden_size,
+                                     layer_norm_eps=layer_norm_eps,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.output")
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        self_output = self.self(positions, hidden_states)
+        return self.output(self_output, hidden_states)
+
+
+class BertWithRotarySelfAttention(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_attention_heads: int,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        rotary_kwargs: Optional[dict] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+
+        self.total_num_heads = num_attention_heads
+        assert self.total_num_heads % tp_size == 0
+
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = self.total_num_heads
+        self.head_dim = self.hidden_size // self.total_num_heads
+        assert self.head_dim * self.total_num_heads == self.hidden_size
+
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=self.hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj")
+
+        self.rotary_emb = get_rope(**rotary_kwargs)
+
+        self.attn = Attention(num_heads=self.num_heads,
+                              head_size=self.head_dim,
+                              scale=self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn",
+                              attn_type=AttentionType.ENCODER_ONLY)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(positions, q, k)
+        output = self.attn(q, k, v)
+        return output
+
+
+class BertWithRotaryModel(nn.Module):
+    packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
+
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 add_pooling_layer: bool = False):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+
+        assert config.position_embedding_type == "rotary"
+
+        head_dim = config.hidden_size // config.num_attention_heads
+
+        self.rotary_kwargs = {
+            "head_size": head_dim,
+            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+            "max_position": config.max_position_embeddings,
+            "base": config.rotary_emb_base,
+            "rope_scaling": getattr(config, "rope_scaling", None)
+        }
+
+        self.embeddings = BertWithRotaryEmbedding(config)
+        self.encoder = BertWithRotaryEncoder(vllm_config=vllm_config,
+                                             prefix=f"{prefix}.encoder",
+                                             rotary_kwargs=self.rotary_kwargs)
+        self.pooler = BertPooler(config) if add_pooling_layer else None
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            attn_metadata = get_forward_context().attn_metadata
+            assert hasattr(attn_metadata, "seq_lens_tensor")
+            hidden_states = self.embeddings(
+                input_ids=input_ids,
+                seq_lens=attn_metadata.seq_lens_tensor,
+                position_ids=position_ids,
+                token_type_ids=token_type_ids)
+        return self.encoder(position_ids, hidden_states)
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "query", "q"),
+            ("qkv_proj", "key", "k"),
+            ("qkv_proj", "value", "v"),
+        ]
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            if self.pooler is None and "pooler" in name:
+                continue
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
