@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Iterable, Tuple
+from typing import Iterable, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -10,7 +10,8 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
 
@@ -61,7 +62,8 @@ class LlamaModel(nn.Module):
             ) for i in range(self.config.num_hidden_layers)
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
-                                  self.config.hidden_size)
+                                  self.config.hidden_size,
+                                  bias=False)
 
     def forward(
         self,
@@ -82,6 +84,35 @@ class LlamaModel(nn.Module):
             )
         return hidden_states + residual
 
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class LlamaForCausalLMEagle(LlamaForCausalLM):
 
@@ -91,16 +122,6 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         self.model = LlamaModel(model_config=model_config,
                                 start_layer_id=start_layer_id,
                                 prefix="model")
-
-        # Llama 3.2 1B Instruct set tie_word_embeddings to True
-        # Llama 3.1 8B Instruct set tie_word_embeddings to False
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens
-        else:
-            self.lm_head = ParallelLMHead(
-                self.config.vocab_size,
-                self.config.hidden_size,
-            )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
@@ -115,7 +136,11 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         return self.model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
 
         model_weights = {}
         for name, loaded_weight in weights:
@@ -123,6 +148,4 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
                 name = "model." + name
             model_weights[name] = loaded_weight
 
-        loader.load_weights(
-            self.maybe_remap_mistral(name, loaded_weight)
-            for name, loaded_weight in weights)
+        loader.load_weights(model_weights.items())

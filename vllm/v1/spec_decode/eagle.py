@@ -203,6 +203,7 @@ class EagleProposer:
             loader.get_all_weights(
                 self.vllm_config.speculative_config.draft_model_config,
                 self.model))
+        self.model.lm_head = target_model.lm_head
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
