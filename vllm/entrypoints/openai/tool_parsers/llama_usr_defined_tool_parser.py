@@ -21,8 +21,9 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
+
 def _count_substring(string, substring):
-        """
+    """
         Counts the number of non-overlapping occurrences of a substring in 
         a string.
         
@@ -34,15 +35,16 @@ def _count_substring(string, substring):
             int: The number of non-overlapping occurrences of the substring in
             the string.
         """
-        count = 0
-        start = 0
-        while True:
-            start = string.find(substring, start)
-            if start == -1:
-                break
-            count += 1
-            start += len(substring)
-        return count
+    count = 0
+    start = 0
+    while True:
+        start = string.find(substring, start)
+        if start == -1:
+            break
+        count += 1
+        start += len(substring)
+    return count
+
 
 @ToolParserManager.register_module("llama3_user_defined_custom")
 class Llama3UserDefinedCustomToolParser(ToolParser):
@@ -57,10 +59,10 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
         self.prev_tool_call_arr: list[dict] = []
         self.streamed_args_for_tool: list[str] = []
         self.is_parsing_toolcall = False
-        
+
         self.nb_tool_calls = 0
-        self.current_tool_name=""
-        self.current_tool_call_uuid=""
+        self.current_tool_name = ""
+        self.current_tool_call_uuid = ""
         self.is_current_tool_name_sent = False
         self.tool_call_start_token: str = "<function"
         self.tool_call_precall_token: str = '>{"'
@@ -69,13 +71,13 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
 
         self.tool_call_start_token_id = tokenizer.encode(
             self.tool_call_start_token, add_special_tokens=False)
-        
-        self.tool_call_end_token_id = tokenizer.encode(self.tool_call_end_token,
-                                             add_special_tokens=False)
-          
+
+        self.tool_call_end_token_id = tokenizer.encode(
+            self.tool_call_end_token, add_special_tokens=False)
+
         self.tool_call_preargs_token_id = tokenizer.encode(
-            self.tool_call_precall_token, add_special_tokens=False)   
-                                            
+            self.tool_call_precall_token, add_special_tokens=False)
+
         self.bot_token_id = tokenizer.encode(self.bot_token,
                                              add_special_tokens=False)
 
@@ -86,7 +88,7 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction.")
-        
+
     def extract_tool_calls(
         self,
         model_output: str,
@@ -107,19 +109,18 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
                 # the other is None
                 function_call_tuples = self.tool_call_regex.findall(
                     model_output)
-                
+
                 logger.info("function_call_tuples: %s", function_call_tuples)
                 print("function_call_tuples: %s", function_call_tuples)
-                
+
                 # load the JSON, and then use it to build the Function and
                 # Tool Call
-                raw_function_calls = [
-                    {
-                        "name":match[0],
-                        "arguments":json.loads("{"+match[1]+"}")
-                     } 
-                     for match in function_call_tuples
-                ]
+                raw_function_calls = [{
+                    "name":
+                    match[0],
+                    "arguments":
+                    json.loads("{" + match[1] + "}")
+                } for match in function_call_tuples]
                 tool_calls = [
                     ToolCall(
                         type="function",
@@ -144,7 +145,6 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
                 return ExtractedToolCallInformation(tools_called=False,
                                                     tool_calls=[],
                                                     content=model_output)
-    
 
     def extract_tool_calls_streaming(
         self,
@@ -155,19 +155,20 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage,None]:
+    ) -> Union[DeltaMessage, None]:
         """
         Extract tool calls from a streaming response.
         Handles format: <function=functionName{arguments}>
         Returns DeltaMessage with either tool_calls or content.
         """
-        logger.debug("\n" , "=" * 50)
+        logger.debug("\n", "=" * 50)
         logger.debug("STREAMING FUNCTION CALLED")
-        logger.debug(
-            "Tool call start token id IDs:", self.tool_call_start_token_id)
-        logger.debug(
-            "Tool call precall token id IDs:", self.tool_call_preargs_token_id)
-        logger.debug("Tool call end token id IDs:", self.tool_call_end_token_id)
+        logger.debug("Tool call start token id IDs:",
+                     self.tool_call_start_token_id)
+        logger.debug("Tool call precall token id IDs:",
+                     self.tool_call_preargs_token_id)
+        logger.debug("Tool call end token id IDs:",
+                     self.tool_call_end_token_id)
         logger.debug("Previous text:", previous_text)
         logger.debug("Current text:", current_text)
         logger.debug("Delta text:", delta_text)
@@ -175,91 +176,93 @@ class Llama3UserDefinedCustomToolParser(ToolParser):
         logger.debug("Current token IDs:", current_token_ids)
         logger.debug("Delta token IDs:", delta_token_ids)
         logger.debug("Current tool name sent:", self.is_current_tool_name_sent)
-        logger.debug("-"*50)
+        logger.debug("-" * 50)
         logger.debug("\n")
         flags = Allow.ALL if self.is_current_tool_name_sent \
                 else Allow.ALL & ~Allow.STR
-        
+
         logger.debug("%s=", delta_token_ids[0]
-                      in self.tool_call_start_token_id)
-        if delta_token_ids[0] in self.tool_call_start_token_id : 
+                     in self.tool_call_start_token_id)
+        if delta_token_ids[0] in self.tool_call_start_token_id:
             # We possibly have a tool call (not sure yet) we don't stream
-          
+
             logger.debug(
-                "%s=", _count_substring(current_text,self.tool_call_start_token)
-                )
+                "%s=",
+                _count_substring(current_text, self.tool_call_start_token))
             if _count_substring(
                 current_text,self.tool_call_start_token) > self.nb_tool_calls \
                 and not self.is_parsing_toolcall :
 
-                self.is_parsing_toolcall=True
-                self.nb_tool_calls +=1 #will serve as id
+                self.is_parsing_toolcall = True
+                self.nb_tool_calls += 1  #will serve as id
                 self.current_tool_call_uuid = random_uuid()
-                logger.debug(
-                    "New tool call detected, id:", self.nb_tool_calls-1)
-                return None # going to the next iter 
-            else : 
-                logger.debug(
-                    "Tool call already parsed, id:", self.nb_tool_calls-1)
-            
-        if self.is_parsing_toolcall and not self.is_current_tool_name_sent : 
-            logger.debug("Parsing tool call, id:", self.nb_tool_calls-1)
+                logger.debug("New tool call detected, id:",
+                             self.nb_tool_calls - 1)
+                return None  # going to the next iter
+            else:
+                logger.debug("Tool call already parsed, id:",
+                             self.nb_tool_calls - 1)
+
+        if self.is_parsing_toolcall and not self.is_current_tool_name_sent:
+            logger.debug("Parsing tool call, id:", self.nb_tool_calls - 1)
             # We are parsing a tool call, we need to parse the tool name
             if delta_token_ids != self.tool_call_preargs_token_id:
                 self.current_tool_name += delta_text
-                logger.debug("self.current_tool_name=",self.current_tool_name)
-                return None # moving on to the next iteration
-            else : 
+                logger.debug("self.current_tool_name=", self.current_tool_name)
+                return None  # moving on to the next iteration
+            else:
                 self.current_tool_name = self.current_tool_name.lstrip('=')
                 self.is_current_tool_name_sent = True
                 return DeltaMessage(tool_calls=[
-                    DeltaToolCall(index=self.nb_tool_calls - 1,
-                                    type="function",
-                                    id=f"chatcmpl-tool-{self.current_tool_call_uuid}",
-                                    function=DeltaFunctionCall(
-                                        name=self.current_tool_name))
+                    DeltaToolCall(
+                        index=self.nb_tool_calls - 1,
+                        type="function",
+                        id=f"chatcmpl-tool-{self.current_tool_call_uuid}",
+                        function=DeltaFunctionCall(
+                            name=self.current_tool_name))
                 ])
-            
-        if self.is_current_tool_name_sent :
+
+        if self.is_current_tool_name_sent:
             logger.debug("Parsed tool name : ", self.current_tool_name)
 
-            if _count_substring(
-                current_text,self.tool_call_end_token) < self.nb_tool_calls:
+            if _count_substring(current_text,
+                                self.tool_call_end_token) < self.nb_tool_calls:
                 self.streamed_args_for_tool.append(delta_text)
-                return None # moving on to the next iteration
-            else :
+                return None  # moving on to the next iteration
+            else:
                 # adding back {" at the beginning for valid JSON
-                arguments = '{"'+''.join(self.streamed_args_for_tool) 
+                arguments = '{"' + ''.join(self.streamed_args_for_tool)
                 # removing the end token
-                arguments = arguments.rstrip(self.tool_call_end_token) 
+                arguments = arguments.rstrip(self.tool_call_end_token)
                 logger.debug("Concatenated tool call arguments  : ", arguments)
 
                 current_tool_args = partial_json_parser.loads(
-                arguments or "{}",
-                flags) if self.streamed_args_for_tool else None
-                
-                logger.debug("Parsed tool call arguments : ", current_tool_args)
+                    arguments or "{}",
+                    flags) if self.streamed_args_for_tool else None
 
-                
+                logger.debug("Parsed tool call arguments : ",
+                             current_tool_args)
+
                 delta = DeltaMessage(tool_calls=[
-                    DeltaToolCall(index=self.nb_tool_calls - 1,
-                                    type="function",
-                                    id=f"chatcmpl-tool-{self.current_tool_call_uuid}",
-                                    function=DeltaFunctionCall(
-                                        name=self.current_tool_name,
-                                        arguments=json.dumps(current_tool_args)))
+                    DeltaToolCall(
+                        index=self.nb_tool_calls - 1,
+                        type="function",
+                        id=f"chatcmpl-tool-{self.current_tool_call_uuid}",
+                        function=DeltaFunctionCall(name=self.current_tool_name,
+                                                   arguments=json.dumps(
+                                                       current_tool_args)))
                 ])
 
                 self.reset_state()
-                
-                return delta 
-        else : 
-            logger.debug(
-                "No tool call detected, returning just text : ", delta_text)
+
+                return delta
+        else:
+            logger.debug("No tool call detected, returning just text : ",
+                         delta_text)
             return DeltaMessage(content=delta_text)
-            
+
     def reset_state(self):
         self.current_tool_name = ''
-        self.is_parsing_toolcall=False
+        self.is_parsing_toolcall = False
         self.is_current_tool_name_sent = False
         self.streamed_args_for_tool = []
