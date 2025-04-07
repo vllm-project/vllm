@@ -1666,12 +1666,14 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
             }
+            default_max_num_seqs = 1024
         else:
             # TODO(woosuk): Tune the default values for other hardware.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 8192,
                 UsageContext.OPENAI_API_SERVER: 2048,
             }
+            default_max_num_seqs = 256
 
         use_context_value = usage_context.value if usage_context else None
         if (self.max_num_batched_tokens is None
@@ -1682,7 +1684,6 @@ class EngineArgs:
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
 
-        default_max_num_seqs = 1024
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs
 
