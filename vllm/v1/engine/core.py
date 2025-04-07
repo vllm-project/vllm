@@ -285,6 +285,16 @@ class EngineCore:
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
 
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        self.model_executor.save_sharded_state(path=path,
+                                               pattern=pattern,
+                                               max_size=max_size)
+
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
@@ -308,6 +318,11 @@ class EngineCoreProc(EngineCore):
     ):
         super().__init__(vllm_config, executor_class, log_stats)
 
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
+
+        self.global_unfinished_reqs = False
+
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
         # and to overlap some serialization/deserialization with the
@@ -317,22 +332,16 @@ class EngineCoreProc(EngineCore):
                                             Any]] = queue.Queue()
         self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
-                         args=(input_path, ),
+                         args=(input_path, engine_index),
                          daemon=True).start()
         threading.Thread(target=self.process_output_socket,
                          args=(output_path, engine_index),
                          daemon=True).start()
 
-        self.global_unfinished_reqs = False
-
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
-
     @staticmethod
     def run_engine_core(*args,
                         dp_rank: int = 0,
                         local_dp_rank: int = 0,
-                        ready_pipe,
                         **kwargs):
         """Launch EngineCore busy loop in background process."""
 
@@ -366,9 +375,6 @@ class EngineCoreProc(EngineCore):
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
                 engine_core = EngineCoreProc(*args, **kwargs)
-
-            # Send Readiness signal to EngineClient.
-            ready_pipe.send({"status": "READY"})
 
             engine_core.run_busy_loop()
 
@@ -466,14 +472,22 @@ class EngineCoreProc(EngineCore):
             and not isinstance(v, p.annotation) else v
             for v, p in zip(args, arg_types))
 
-    def process_input_socket(self, input_path: str):
+    def process_input_socket(self, input_path: str, engine_index: int):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
         generic_decoder = MsgpackDecoder()
+        identity = engine_index.to_bytes(length=2, byteorder="little")
 
-        with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(input_path,
+                            zmq.DEALER,
+                            identity=identity,
+                            bind=False) as socket:
+
+            # Send ready message to front-end once input socket is connected.
+            socket.send(b'READY')
+
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)
