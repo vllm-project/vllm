@@ -1448,3 +1448,35 @@ def flash_mla_with_kvcache(
         num_splits,
     )
     return out, softmax_lse
+
+
+def valkey_connect(
+        ip: str,
+        port: int,
+        enable_rdma: bool = True,
+        rank: int = 0):
+    return torch.ops._C_valkey_ops.valkey_connect(ip, port, enable_rdma, rank)
+
+def valkey_set(client: int, key: str, val: torch.Tensor):
+    torch.ops._C_valkey_ops.valkey_set(client, key, val)
+
+def valkey_get(client: int, key: str, val: torch.Tensor):
+    torch.ops._C_valkey_ops.valkey_get(client, key, val)
+
+def valkey_reg_mr(client: int, tensors: list[torch.Tensor]):
+        torch.ops._C_valkey_ops.reg_mr(client, tensors)
+
+def valkey_exist(client: int, key: str) -> bool:
+        return torch.ops._C_valkey_ops.valkey_exist(client, key)
+
+def valkey_swap_in(client: int, req_id: str, hashs: list[int], blocks: list[int]) -> None:
+        torch.ops._C_valkey_ops.swap_in(client, req_id, hashs, blocks)
+
+def valkey_swap_out(client: int, blocks: list[int], hashs: list[int]) -> None:
+    torch.ops._C_valkey_ops.swap_out(client, blocks, hashs)
+
+def valkey_get_loaded_reqs(client: int):
+    return torch.ops._C_valkey_ops.get_loaded_reqs(client)
+
+def valkey_get_saved_blocks(client: int):
+    return torch.ops._C_valkey_ops.get_saved_blocks(client)

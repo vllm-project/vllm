@@ -16,6 +16,7 @@ from vllm.platforms import current_platform
 from vllm.utils import cdiv
 from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version)
+from vllm.v1.core.swapper.base_swapper import SwapperBase
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -66,6 +67,13 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
+
+    def async_swap_in(swapper: SwapperBase, req_id: str,
+                      block_mapping: dict[int, int]):
+        swapper.swap_in_mha(req_id, block_mapping)
+
+    def async_swap_out(swapper: SwapperBase, block_mapping: dict[int, int]):
+        swapper.swap_out_mha(block_mapping)
 
 
 @dataclass

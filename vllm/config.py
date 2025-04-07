@@ -1178,6 +1178,7 @@ class CacheConfig:
         prefix_caching_hash_algo: str = "builtin",
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
+        kv_cache_swapper: Optional[str] = None,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -1190,6 +1191,8 @@ class CacheConfig:
         self.prefix_caching_hash_algo = prefix_caching_hash_algo
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
+        self.kv_cache_swapper = kv_cache_swapper
+
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -1216,6 +1219,10 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+
+        if self.kv_cache_swapper is not None:
+            if not self.kv_cache_swapper.startswith("redis://"):
+                raise ValueError("'redis' is only supported at present.")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":

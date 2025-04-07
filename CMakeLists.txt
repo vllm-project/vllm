@@ -245,6 +245,60 @@ set(VLLM_EXT_SRC
   "csrc/custom_all_reduce.cu"
   "csrc/torch_bindings.cpp")
 
+if(DEFINED ENV{USE_VALKEY})
+  list(APPEND VLLM_EXT_SRC "csrc/valkey.cu")
+  if(DEFINED ENV{VALKEY_SRC_DIR})
+    set(VALKEY_SRC_DIR $ENV{VALKEY_SRC_DIR})
+  endif()
+  
+  if(VALKEY_SRC_DIR)
+    if(NOT IS_ABSOLUTE VALKEY_SRC_DIR)
+      get_filename_component(VALKEY_SRC_DIR "${VALKEY_SRC_DIR}" ABSOLUTE)
+    endif()
+    message(STATUS "The VALKEY_SRC_DIR is set, using ${VALKEY_SRC_DIR} for compilation")
+    FetchContent_Declare(libvalkey SOURCE_DIR ${VALKEY_SRC_DIR})
+    set(libvalkey_SOURCE_DIR ${VALKEY_SRC_DIR})
+  else()
+    FetchContent_Declare(
+      libvalkey
+      GIT_REPOSITORY https://github.com/valkey-io/libvalkey.git
+      GIT_TAG cd282b18164d83fb97b8f70994b11f935bc92f05
+      GIT_PROGRESS TRUE
+      GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(libvalkey)
+  endif()
+
+  message(STATUS "libvalkey is available at ${libvalkey_SOURCE_DIR}")
+  execute_process(
+    COMMAND bash -c "USE_RDMA=1 make -j"
+    WORKING_DIRECTORY ${libvalkey_SOURCE_DIR}
+    RESULT_VARIABLE libvalkey_build_result
+    OUTPUT_VARIABLE libvalkey_build_output
+    OUTPUT_FILE ${libvalkey_SOURCE_DIR}/libvalkey_build.log
+    ERROR_FILE ${libvalkey_SOURCE_DIR}/libvalkey_build.log
+  )
+  if(NOT libvalkey_build_result EQUAL 0)
+    message(FATAL_ERROR "Libvalkey build failed."
+                        " Result: \"${libvalkey_build_result}\"" 
+                        "\nCheck the log for details: "
+                        "${CMAKE_CURRENT_BINARY_DIR}/libvalkey_build.log")
+  else()
+    message(STATUS "Libvalkey build successfully.")
+  endif()
+
+  set(VALKEY_INCLUDE_DIRS ${libvalkey_SOURCE_DIR}/include)
+  set(VALKEY_LIBRARIES_DIRS
+    ${libvalkey_SOURCE_DIR}/lib/libvalkey_rdma.a
+    ${libvalkey_SOURCE_DIR}/lib/libvalkey.a
+    rdmacm
+    ibverbs
+  )
+  
+  message(STATUS "VALKEY_INCLUDE_DIRS is ${VALKEY_INCLUDE_DIRS}")
+  message(STATUS "VALKEY_LIBRARIES_DIRS is ${VALKEY_LIBRARIES_DIRS}")
+endif()
+
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 

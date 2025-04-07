@@ -9,6 +9,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
 import torch
 
 from vllm.multimodal import MultiModalPlaceholderMap
+from vllm.v1.core.swapper.base_swapper import SwapperBase
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import (ModelRunnerBase,
@@ -97,6 +98,17 @@ class AttentionBackend(ABC):
     def advance_step(self, model_input: "ModelRunnerInputBase",
                      sampled_token_ids: Optional[torch.Tensor],
                      block_size: int, num_seqs: int, num_queries: int) -> None:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def async_swap_in(swapper: SwapperBase, req_id: str,
+                      block_mapping: dict[int, int]):
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def async_swap_out(swapper: SwapperBase, block_mapping: dict[int, int]):
         raise NotImplementedError
 
 

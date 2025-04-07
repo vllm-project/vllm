@@ -119,6 +119,7 @@ class EngineArgs:
     enable_expert_parallel: bool = False
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
+    kv_cache_swapper: Optional[str] = None
     enable_prefix_caching: Optional[bool] = None
     prefix_caching_hash_algo: str = "builtin"
     disable_sliding_window: bool = False
@@ -1012,6 +1013,11 @@ class EngineArgs:
             "Note that even if this is set to False, cascade attention will be "
             "only used when the heuristic tells that it's beneficial.")
 
+        parser.add_argument("--kv-cache-swapper",
+                            type=str,
+                            default=EngineArgs.kv_cache_swapper,
+                            help="Select the swapper for kv cache offloading.")
+
         return parser
 
     @classmethod
@@ -1185,6 +1191,7 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_cache_swapper=self.kv_cache_swapper,
         )
 
         # Get the current placement group if Ray is initialized and

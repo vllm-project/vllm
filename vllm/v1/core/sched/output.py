@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock
 
 
 @dataclass
@@ -121,3 +122,20 @@ class SchedulerOutput:
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
+
+    # During swap-in, the swap operation should be performed on
+    # a per-req basis. When all blocks of a req have been successfully
+    # swapped in, then the request is ready to be scheduled.
+    swap_in_blocks: Optional[dict[str, dict[int, int]]] = None
+    swap_out_blocks: Optional[dict[int, int]] = None
+
+
+@dataclass
+class LoadingReqInfo:
+    """ Information of the first scheduling of the loading request. """
+    computed_blocks: list[KVCacheBlock]
+    new_blocks:  list[KVCacheBlock]
+    num_new_tokens: int
+    num_computed_tokens: int
+    encoder_inputs_to_schedule: list[int]
+    new_encoder_budget: int

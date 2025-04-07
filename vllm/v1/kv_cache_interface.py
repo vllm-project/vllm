@@ -164,3 +164,7 @@ class KVCacheConfig:
     there are 3 groups, each of which represents 10 layers in the model.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
+    """
+    The kv cache offloading swapper.
+    """
+    kv_cache_swapper: str

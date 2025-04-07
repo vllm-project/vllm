@@ -54,6 +54,7 @@ import yaml
 import zmq
 import zmq.asyncio
 from packaging.version import Version
+from safetensors.torch import load, save
 from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
@@ -2579,3 +2580,10 @@ def sha256(input) -> int:
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
     return int.from_bytes(hashlib.sha256(input_bytes).digest(),
                           byteorder="big")
+
+def tensor_to_bytes(t: torch.Tensor) -> bytes:
+    return save({"tensor_bytes": t.cpu().contiguous()})
+
+
+def tensor_from_bytes(b: Union[bytearray, bytes]) -> torch.Tensor:
+    return load(bytes(b))["tensor_bytes"]

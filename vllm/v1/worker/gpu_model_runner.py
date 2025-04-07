@@ -31,6 +31,7 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
                                         SlidingWindowSpec)
+from vllm.v1.core.swapper.base_swapper import get_swapper_class
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -61,6 +62,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        local_rank: Optional[int] = None,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -72,6 +74,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.local_rank = local_rank
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
@@ -268,6 +271,38 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+
+        self.swapper = None
+        if vllm_config.cache_config.kv_cache_swapper is not None:
+            self.swapper = get_swapper_class(
+                vllm_config.cache_config.kv_cache_swapper,
+                local_rank=self.local_rank)
+
+    def async_swap_in(self, swap_in_mapping: dict[str, dict[int, int]]):
+        if len(swap_in_mapping) == 0 or self.swapper is None:
+            return
+
+        for req_id, block_mapping in swap_in_mapping.items():
+            self.attn_backend.async_swap_in(self.swapper, req_id,
+                                            block_mapping)
+
+    def async_swap_out(self, swap_out_mapping: dict[int, int]):
+        if len(swap_out_mapping) == 0 or self.swapper is None:
+            return
+
+        self.attn_backend.async_swap_out(self.swapper, swap_out_mapping)
+
+    def get_kv_cache_loaded_reqs(self):
+        if self.swapper is None:
+            return []
+
+        return self.swapper.get_loaded_reqs()
+
+    def get_kv_cache_saved_blocks(self):
+        if self.swapper is None:
+            return []
+
+        return self.swapper.get_saved_blocks()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -1652,6 +1687,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
+        # register memory
+        if self.swapper is not None:
+            self.swapper.reg_mr(self.kv_caches)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

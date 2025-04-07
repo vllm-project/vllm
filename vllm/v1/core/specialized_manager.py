@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
+from typing import Optional
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         SlidingWindowSpec)
+from vllm.v1.core.swapper.base_swapper import SwapperBase
 
 
 class SpecializedManager(ABC):
@@ -32,7 +34,7 @@ class SpecializedManager(ABC):
 
     @abstractmethod
     def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+            self, block_hashes: list[BlockHashType], swapper: Optional[SwapperBase] = None) -> tuple[list[KVCacheBlock], list[BlockHashType]]:
         """
         Get the longest cache hit prefix of the blocks. If no cache hit is 
         found, return an empty list.
@@ -69,8 +71,9 @@ class SpecializedManager(ABC):
 class FullAttentionManager(SpecializedManager):
 
     def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+            self, block_hashes: list[BlockHashType], swapper: Optional[SwapperBase] = None) -> tuple[list[KVCacheBlock], list[BlockHashType]]:
         computed_blocks: list[KVCacheBlock] = []
+        computed_extended_block_hash = []
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
@@ -78,8 +81,11 @@ class FullAttentionManager(SpecializedManager):
             if cached_block := self.block_pool.get_cached_block(block_hash):
                 computed_blocks.append(cached_block)
             else:
-                break
-        return computed_blocks
+                if swapper is not None and swapper.exist(str(block_hash.hash_value)):
+                    computed_extended_block_hash.append(block_hash)
+                else:
+                    break
+        return computed_blocks, computed_extended_block_hash
 
     def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
                               num_computed_tokens: int) -> list[KVCacheBlock]:
@@ -100,7 +106,7 @@ class SlidingWindowManager(SpecializedManager):
         self._null_block = block_pool.null_block
 
     def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+            self, block_hashes: list[BlockHashType], swapper: Optional[SwapperBase] = None) -> tuple[list[KVCacheBlock], list[BlockHashType]]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(len(block_hashes)) to
         # O(len(block_hashes) / sliding_window_contiguous_blocks +
@@ -127,7 +133,7 @@ class SlidingWindowManager(SpecializedManager):
         # The first `num_contiguous_blocks` is a cache hit even if
         # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
         del computed_blocks[num_contiguous_blocks:]
-        return computed_blocks
+        return computed_blocks, []
 
     def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
                               num_computed_tokens: int) -> list[KVCacheBlock]:

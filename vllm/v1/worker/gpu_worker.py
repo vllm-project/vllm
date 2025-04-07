@@ -118,7 +118,7 @@ class Worker(WorkerBase):
 
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device)
+            self.vllm_config, self.device, self.local_rank)
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
@@ -241,6 +241,18 @@ class Worker(WorkerBase):
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.is_driver_worker else None
+
+    def async_swap_in(self, block_mapping: dict[str, dict[int, int]]):
+        return self.model_runner.async_swap_in(block_mapping)
+
+    def async_swap_out(self, block_mapping: dict[int, int]):
+        return self.model_runner.async_swap_out(block_mapping)
+
+    def get_kv_cache_loaded_reqs(self):
+        return self.model_runner.get_kv_cache_loaded_reqs()
+
+    def get_kv_cache_saved_blocks(self):
+        return self.model_runner.get_kv_cache_saved_blocks()
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:

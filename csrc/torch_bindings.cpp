@@ -2,6 +2,7 @@
 #include "cuda_utils.h"
 #include "ops.h"
 #include "core/registration.h"
+#include "valkey.h"
 
 #include <torch/library.h>
 #include <torch/version.h>
@@ -640,6 +641,33 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.impl("open_mem_handle", torch::kCPU, &open_mem_handle);
 
   custom_ar.def("free_shared_buffer", &free_shared_buffer);
+}
+
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _valkey_ops), valkey_ops) {
+  valkey_ops.def(
+      "valkey_connect(str ip, int port, bool enable_rdma, int rank) -> (int)");
+  valkey_ops.impl("valkey_connect", &valkey_connect);
+  valkey_ops.def("valkey_set(int fa, str key, Tensor value) -> ()");
+  valkey_ops.impl("valkey_set", &valkey_set);
+  valkey_ops.def("valkey_get(int fa, str key, Tensor! value) -> ()");
+  valkey_ops.impl("valkey_get", &valkey_get);
+  valkey_ops.def("valkey_delete(int fa, str key) -> ()");
+  valkey_ops.impl("valkey_delete", &valkey_delete);
+  valkey_ops.def("valkey_exist(int fa, str key) -> bool");
+  valkey_ops.impl("valkey_exist", &valkey_exist);
+  valkey_ops.def("valkey_disconnect(int fa) -> ()");
+  valkey_ops.impl("valkey_disconnect", &valkey_disconnect);
+  valkey_ops.def(
+      "swap_in(int fa, str req_id, int[] hashs, int[] blocks) -> ()");
+  valkey_ops.impl("swap_in", &swap_in);
+  valkey_ops.def("swap_out(int fa, int[] blocks, int[] hashs) -> ()");
+  valkey_ops.impl("swap_out", &swap_out);
+  valkey_ops.def("get_loaded_reqs(int fa) -> (str[])");
+  valkey_ops.impl("get_loaded_reqs", &get_loaded_reqs);
+  valkey_ops.def("get_saved_blocks(int fa) -> (int[])");
+  valkey_ops.impl("get_saved_blocks", &get_saved_blocks);
+  valkey_ops.def("reg_mr(int fa, Tensor[] kv_caches) -> ()");
+  valkey_ops.impl("reg_mr", &reg_mr);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

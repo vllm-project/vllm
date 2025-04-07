@@ -594,6 +594,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         },
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
+        kv_cache_swapper=vllm_config.cache_config.kv_cache_swapper,
     )
     return kv_cache_config
 

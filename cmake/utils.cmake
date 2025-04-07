@@ -442,6 +442,11 @@ function (define_gpu_extension_target GPU_MOD_NAME)
 
   target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${GPU_LIBRARIES})
 
+  if(DEFINED ENV{USE_VALKEY})
+    target_include_directories(${GPU_MOD_NAME} PRIVATE ${VALKEY_INCLUDE_DIRS})
+    target_link_libraries(${GPU_MOD_NAME} PRIVATE ${VALKEY_LIBRARIES_DIRS})
+  endif()
+
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
   if (GPU_LANGUAGE STREQUAL "CUDA")

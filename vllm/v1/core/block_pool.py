@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Callable, Optional
 
@@ -82,7 +82,7 @@ class BlockPool:
         num_full_blocks: int,
         block_size: int,
         hash_fn: Callable,
-    ) -> None:
+    ) -> list[KVCacheBlock]:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
         metadata to be updated and cached. Given a request, it computes the
@@ -103,10 +103,14 @@ class BlockPool:
             hash_fn: The hash function to use for block hashes.
         """
         if num_cached_blocks == num_full_blocks:
-            return
+            return []
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(block_hashes) >= num_cached_blocks
         new_block_hashes = block_hashes[num_cached_blocks:]
+
+        # When async kv cache swapper is used, newly generated blocks need
+        # to be recorded and then swapped out.
+        new_cached_blk_list = []
 
         # Update the new blocks with the block hashes through the chain.
         if num_cached_blocks == 0:
@@ -154,8 +158,13 @@ class BlockPool:
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
             prev_block_hash_value = block_hash.hash_value
+            new_cached_blk_list.append(blk)
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+        return new_cached_blk_list
+
+    def get_new_blocks(self,
+                       num_blocks: int,
+                       saving_blocks=None) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
@@ -172,18 +181,30 @@ class BlockPool:
 
         ret: list[KVCacheBlock] = []
         idx = 0
+        if saving_blocks:
+            pending_queue: deque = deque()
+
         while idx < num_blocks:
             # First allocate blocks.
             curr_block = self.free_block_queue.popleft()
             assert curr_block.ref_cnt == 0
-
             # If the block is cached, evict it.
             if self.enable_caching:
+                if saving_blocks:
+                    if curr_block.block_id in saving_blocks:
+                        pending_queue.append(curr_block)
+                        continue
+
                 self._maybe_evict_cached_block(curr_block)
 
             curr_block.incr_ref()
             ret.append(curr_block)
             idx += 1
+
+        if saving_blocks:
+            while pending_queue:
+                item = pending_queue.popleft()
+                self.free_block_queue.append(item)
 
         return ret
 
@@ -264,13 +285,15 @@ class BlockPool:
         logger.info("Successfully reset prefix cache")
         return True
 
-    def get_num_free_blocks(self) -> int:
+    def get_num_free_blocks(self, num_loading_blocks: int = 0) -> int:
         """Get the number of free blocks in the pool.
 
         Returns:
             The number of free blocks.
         """
-        return self.free_block_queue.num_free_blocks
+
+        # Assume all loading blocks are in the free queue.
+        return self.free_block_queue.num_free_blocks - num_loading_blocks
 
     def get_usage(self) -> float:
         """Get the KV cache usage.
