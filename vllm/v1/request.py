@@ -3,7 +3,10 @@
 import enum
 from typing import TYPE_CHECKING, Optional, Union
 
+from vllm.disaggregated.protocol import (RemoteDecodeParams,
+                                         RemotePrefillParams)
 from vllm.sampling_params import SamplingParams
+
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
@@ -31,6 +34,8 @@ class Request:
         arrival_time: float,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
+        remote_decode_params: Optional[RemoteDecodeParams] = None,
+        remote_prefill_params: Optional[RemotePrefillParams] = None,
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
@@ -38,6 +43,8 @@ class Request:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
+        self.remote_decode_params = remote_decode_params
+        self.remote_prefill_params = remote_decode_params
 
         self.status = (RequestStatus.WAITING_FOR_FSM
                        if sampling_params.guided_decoding is not None else
@@ -88,6 +95,8 @@ class Request:
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
+            remote_decode_params=request.remote_decode_params,
+            remote_prefill_params=request.remote_prefill_params,
         )
 
     def append_output_token_ids(
@@ -140,6 +149,14 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
+
+    @property
+    def is_remote_prefill_worker(self) -> bool:
+        return self.remote_decode_params is not None
+
+    @property
+    def has_remote_prefill(self) -> bool:
+        return self.remote_prefill_params is not None
 
 
 class RequestStatus(enum.IntEnum):

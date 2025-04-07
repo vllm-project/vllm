@@ -6,6 +6,8 @@ from typing import Any, Optional, Union
 
 import msgspec
 
+from vllm.disaggregated.protocol import (RemoteDecodeParams,
+                                         RemotePrefillParams)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
@@ -59,6 +61,8 @@ class EngineCoreRequest(
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
+    remote_decode_params: Optional[RemotePrefillParams] = None
+    remote_prefill_params: Optional[RemoteDecodeParams] = None
 
 
 class EngineCoreEventType(enum.IntEnum):

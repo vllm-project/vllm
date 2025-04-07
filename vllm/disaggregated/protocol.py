@@ -1,57 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import List, Optional
 
 import msgspec
 
 from vllm import SamplingParams
-from vllm.outputs import RequestOutput
 
-# NOTE FOR DEVELOPERS:
-# DO NOT USE PICKLE FOR THESE CLASSES. IN A MULTI NODE
-# SETUP WE WILL USE TCP. WE CANNOT USE PICKLE OTHERWISE
-# WE RISK REMOTE CODE EXECUTION FROM UNSTRUSTED USERS.
-
-
-class PDRequestType:
-    GENERATION = b'\x00'
-    ABORT = b'\x01'
-
-
-class PDGenerationRequest(msgspec.Struct):
+class RemotePrefillRequest(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):
+    """The request data of one remote prefill output of a request.
+    Args:
+        engine_id: The unique ID of the sending engine.
+        request_id: The unique ID of the request.
+        prompt_token_ids: The token IDs of the prompt.
+        sampling_params: The sampling parameters.
+        block_ids: The block IDs of the request.
+    """
+    engine_id: str
     request_id: str
-    prompt_token_ids: list[int]
+    prompt_token_ids: List[int]
     sampling_params: SamplingParams
-    # TODO: support multimodal inputs.
+    block_ids: List[int]
 
 
-class PDAbortRequest(msgspec.Struct):
-    request_id: str
+class RemotePrefillParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):
+    """Remote prefill parameters for text generation."""
+    decode_engine_id: Optional[str] = None
 
 
-class PDResponseType:
-    GENERATION = b'\x00'
-    FAILURE = b'\x01'
-
-
-class PDGenerationResponse(msgspec.Struct):
-    request_id: str
-    text: str
-    token_ids: list[int]
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[str] = None
-    # TODO: support full protocol.
-    logprobs = None
-
-    @classmethod
-    def from_request_output(
-            self, request_output: RequestOutput) -> "PDGenerationResponse":
-        assert len(request_output.outputs) == 1, "Only support N=1 right now."
-        out = request_output.outputs[0]
-        return PDGenerationResponse(
-            request_id=request_output.request_id,
-            text=out.text,
-            token_ids=out.token_ids,
-            finish_reason=out.finish_reason,
-            stop_reason=out.stop_reason,
-        )
+class RemoteDecodeParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):
+    """Remote decode parameters for text generation."""
+    decode_engine_id: str
+    decode_block_ids: List[int]

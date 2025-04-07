@@ -340,6 +340,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_params=sampling_params,
                 generator=generator,
                 block_ids=new_req_data.block_ids,
+                staging_block_ids=new_req_data.staging_block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,

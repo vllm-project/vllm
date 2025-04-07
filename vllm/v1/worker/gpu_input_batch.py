@@ -31,6 +31,7 @@ class CachedRequestState:
     generator: Optional[torch.Generator]
 
     block_ids: list[int]
+    staging_block_ids: Optional[list[int]] = None
     num_computed_tokens: int
     output_token_ids: list[int]
 

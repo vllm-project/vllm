@@ -28,12 +28,14 @@ class NewRequestData:
     block_ids: list[int]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
+    staging_block_ids: Optional[list[int]] = None
 
     @classmethod
     def from_request(
         cls,
         request: Request,
         block_ids: list[int],
+        staging_block_ids: Optional[list[int]] = None,
     ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
@@ -46,6 +48,7 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
+            staging_block_ids=staging_block_ids,
         )
 
 
