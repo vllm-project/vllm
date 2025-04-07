@@ -37,6 +37,14 @@ else:
     ]
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 def do_sample(llm: vllm.LLM,
               lora_path: str,
               lora_id: int,
@@ -67,14 +75,6 @@ def do_sample(llm: vllm.LLM,
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -178,7 +178,8 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
                                  model):
     if num_gpus_available < 2:
         pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
-
+    if model.quantization == "GPTQ":
+        pytest.skip("GPTQ lora outputs are just incredibly unstable")
     llm_tp1 = vllm.LLM(
         model=model.model_path,
         enable_lora=True,

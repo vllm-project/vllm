@@ -34,8 +34,8 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
-from .interfaces import (SupportsMultiModal, SupportsTranscription,
-                         SupportsV0Only)
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
+                         SupportsTranscription, SupportsV0Only)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     make_layers)
 
@@ -49,10 +49,7 @@ class WhisperAudioInputs(TypedDict):
 
 class WhisperPositionalEmbedding(nn.Embedding):
 
-    def __init__(self,
-                 num_positions: int,
-                 embedding_dim: int,
-                 padding_idx: Optional[int] = None):
+    def __init__(self, num_positions: int, embedding_dim: int):
         super().__init__(num_positions, embedding_dim)
 
     def forward(self, position_ids):
@@ -359,7 +356,6 @@ class WhisperEncoder(nn.Module):
         config = vllm_config.model_config.hf_config
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
-        self.padding_idx = config.pad_token_id
         self.max_source_positions = config.max_source_positions
         self.embed_scale = (math.sqrt(embed_dim)
                             if config.scale_embedding else 1.0)
@@ -584,6 +580,10 @@ class WhisperMultiModalProcessor(
         feature_extractor = self.info.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
+    @property
+    def pad_dummy_encoder_prompt(self) -> bool:
+        return True
+
     def create_encoder_prompt(
         self,
         prompt: Union[str, list[int]],
@@ -692,7 +692,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         )
         return decoder_outputs
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         # TODO: This method does not obey the interface for SupportsMultiModal.
         # Refactor this once encoder/decoder support is implemented in V1.
         audio_input = self._parse_and_validate_audio_input(**kwargs)

@@ -11,7 +11,6 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
 
-from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.config import CompilationConfig
@@ -43,7 +42,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
+from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
+                        is_list_of)
 
 logger = init_logger(__name__)
 
@@ -100,7 +100,8 @@ class LLM:
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
             requests will have `best_of=1`, you can safely set this to 0.
-            Otherwise, too small values may cause out-of-memory (OOM) errors.
+            Noting that `best_of` is only supported in V0. Otherwise, too small
+            values may cause out-of-memory (OOM) errors.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -116,6 +117,9 @@ class LLM:
         disable_custom_all_reduce: See :class:`~vllm.config.ParallelConfig`
         disable_async_output_proc: Disable async output processing.
             This may result in lower performance.
+        hf_token: The token to use as HTTP bearer authorization for remote files
+            . If `True`, will use the token generated when running 
+            `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
@@ -168,7 +172,7 @@ class LLM:
         quantization: Optional[str] = None,
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
-        seed: int = 0,
+        seed: Optional[int] = None,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
@@ -176,6 +180,7 @@ class LLM:
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
+        hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
@@ -231,27 +236,21 @@ class LLM:
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
+            hf_token=hf_token,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
             **kwargs,
         )
-        # Logic to switch between engines is done at runtime instead of import
-        # to avoid import order issues
-        self.engine_class = self.get_engine_class()
-        self.llm_engine = self.engine_class.from_engine_args(
-            engine_args, usage_context=UsageContext.LLM_CLASS)
+
+        # Create the Engine (autoselects V0 vs V1)
+        self.llm_engine = LLMEngine.from_engine_args(
+            engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
+        self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
-
-    @staticmethod
-    def get_engine_class() -> type[LLMEngine]:
-        if envs.VLLM_USE_V1:
-            # Lazy import: the v1 package isn't distributed
-            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-            return V1LLMEngine  # type: ignore
-        return LLMEngine
+        self.default_sampling_params: Union[dict[str, Any], None] = None
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
@@ -268,10 +267,11 @@ class LLM:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
     def get_default_sampling_params(self) -> SamplingParams:
-        diff_sampling_param = (
-            self.llm_engine.model_config.get_diff_sampling_param())
-        if diff_sampling_param:
-            return SamplingParams.from_optional(**diff_sampling_param)
+        if self.default_sampling_params is None:
+            self.default_sampling_params = (
+                self.llm_engine.model_config.get_diff_sampling_param())
+        if self.default_sampling_params:
+            return SamplingParams.from_optional(**self.default_sampling_params)
         return SamplingParams()
 
     @overload
@@ -497,8 +497,8 @@ class LLM:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
         """
-        executor = self.llm_engine.model_executor
-        return executor.collective_rpc(method, timeout, args, kwargs)
+
+        return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
@@ -695,8 +695,10 @@ class LLM:
         model_config = self.llm_engine.get_model_config()
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
+            tools,
             chat_template_content_format,
             tokenizer,
+            trust_remote_code=model_config.trust_remote_code,
         )
 
         prompts: list[Union[TokensPrompt, TextPrompt]] = []
@@ -718,18 +720,19 @@ class LLM:
                     tokenizer,
                     messages=msgs,
                     chat_template=chat_template,
+                    tools=tools,
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
-                    tools=tools,
                 )
             else:
                 prompt_data = apply_hf_chat_template(
                     tokenizer,
+                    trust_remote_code=model_config.trust_remote_code,
                     conversation=conversation,
                     chat_template=chat_template,
+                    tools=tools,
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
-                    tools=tools,
                 )
 
             prompt: Union[TokensPrompt, TextPrompt]
@@ -1193,8 +1196,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self) -> bool:
-        return self.llm_engine.reset_prefix_cache()
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+        return self.llm_engine.reset_prefix_cache(device)
 
     def sleep(self, level: int = 1):
         """
@@ -1202,26 +1205,35 @@ class LLM:
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
 
-        :param level: The sleep level. Level 1 sleep will offload the model 
-            weights and discard the kv cache. The content of kv cache is 
-            forgotten. Level 1 sleep is good for sleeping and waking up the 
-            engine to run the same model again. The model weights are backed 
-            up in CPU memory. Please make sure there's enough CPU memory to 
-            store the model weights. Level 2 sleep will discard both the model 
-            weights and the kv cache. The content of both the model weights 
-            and kv cache is forgotten. Level 2 sleep is good for sleeping and 
-            waking up the engine to run a different model or update the model, 
-            where previous model weights are not needed. It reduces CPU memory 
-            pressure.
+        Args:
+            level: The sleep level. Level 1 sleep will offload the model 
+                weights and discard the kv cache. The content of kv cache 
+                is forgotten. Level 1 sleep is good for sleeping and waking
+                up the engine to run the same model again. The model weights 
+                are backed up in CPU memory. Please make sure there's enough 
+                CPU memory to store the model weights. Level 2 sleep will 
+                discard both the model weights and the kv cache. The content 
+                of both the model weights and kv cache is forgotten. Level 2 
+                sleep is good for sleeping and waking up the engine to run a
+                different model or update the model, where previous model 
+                weights are not needed. It reduces CPU memory pressure.
         """
         self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
 
-    def wake_up(self):
+    def wake_up(self, tags: Optional[list[str]] = None):
         """
         Wake up the engine from sleep mode. See the :meth:`sleep` method
-        for more details."""
-        self.llm_engine.wake_up()
+        for more details.
+        
+        Args:
+            tags: An optional list of tags to reallocate the engine memory 
+                for specific memory allocations. Values must be in 
+                ("weights", "kv_cache",). If None, all memory is reallocated.
+                wake_up should be called with all tags (or None) before the 
+                engine is used again.
+        """
+        self.llm_engine.wake_up(tags)
 
     # LEGACY
     def _convert_v1_inputs(
@@ -1381,8 +1393,9 @@ class LLM:
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
+                            n = len(output.outputs)
                             assert output.prompt_token_ids is not None
-                            total_in_toks += len(output.prompt_token_ids)
+                            total_in_toks += len(output.prompt_token_ids) * n
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(
                                 len(stp.token_ids) for stp in output.outputs)
@@ -1391,7 +1404,9 @@ class LLM:
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
-                        pbar.update(1)
+                            pbar.update(n)
+                        else:
+                            pbar.update(1)
 
         if use_tqdm:
             pbar.close()

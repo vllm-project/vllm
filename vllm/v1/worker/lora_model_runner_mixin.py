@@ -62,9 +62,10 @@ class LoRAModelRunnerMixin:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
 
-        # We dont make any distinction between prefills and decodes in the
-        # scheduler. To that effect, set is_prefill to True so we use the
-        # sgmv punica kernels always.
+        # Set is_prefill to True, so we always use the SGMV kernels on
+        # non-cuda platforms.
+        # On cuda platforms we use the same kernels for prefill and
+        # decode and this flag is generally ignored.
         lora_mapping = LoRAMapping(token_lora_mapping,
                                    prompt_lora_mapping,
                                    is_prefill=True)
@@ -83,8 +84,8 @@ class LoRAModelRunnerMixin:
                                       lora_requests)
 
     @contextmanager
-    def maybe_profile_with_lora(self, lora_config: LoRAConfig,
-                                num_scheduled_tokens: np.ndarray):
+    def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
+                                  num_scheduled_tokens: np.ndarray):
         if lora_config is None:
             yield
         else:

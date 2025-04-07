@@ -1,12 +1,12 @@
 [build-system]
-# Should be mirrored in requirements-build.txt
+# Should be mirrored in requirements/build.txt
 requires = [
     "cmake>=3.26",
     "ninja",
     "packaging",
     "setuptools>=61",
     "setuptools-scm>=8.0",
-    "torch == 2.5.1",
+    "torch == 2.6.0",
     "wheel",
     "jinja2",
 ]
@@ -30,7 +30,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.13"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -63,6 +63,7 @@ exclude = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
 # Python 3.8 typing. TODO: Remove these excludes after v1.0.0
@@ -74,23 +75,18 @@ exclude = [
 "vllm/distributed/**/*.py" = ["UP006", "UP035"]
 "vllm/engine/**/*.py" = ["UP006", "UP035"]
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
-"vllm/inputs/**/*.py" = ["UP006", "UP035"]
-"vllm/logging_utils/**/*.py" = ["UP006", "UP035"]
 "vllm/lora/**/*.py" = ["UP006", "UP035"]
 "vllm/model_executor/**/*.py" = ["UP006", "UP035"]
-"vllm/multimodal/**/*.py" = ["UP006", "UP035"]
 "vllm/platforms/**/*.py" = ["UP006", "UP035"]
 "vllm/plugins/**/*.py" = ["UP006", "UP035"]
 "vllm/profiler/**/*.py" = ["UP006", "UP035"]
 "vllm/prompt_adapter/**/*.py" = ["UP006", "UP035"]
 "vllm/spec_decode/**/*.py" = ["UP006", "UP035"]
-"vllm/third_party/**/*.py" = ["UP006", "UP035"]
 "vllm/transformers_utils/**/*.py" = ["UP006", "UP035"]
 "vllm/triton_utils/**/*.py" = ["UP006", "UP035"]
-"vllm/usage/**/*.py" = ["UP006", "UP035"]
 "vllm/vllm_flash_attn/**/*.py" = ["UP006", "UP035"]
-"vllm/assets/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
+"vllm/utils.py" = ["UP006", "UP035"]
 
 [tool.ruff.lint]
 select = [

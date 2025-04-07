@@ -42,7 +42,7 @@ from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob
+from vllm.sequence import Logprob, PromptLogprobs
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -379,14 +379,18 @@ class OpenAIServing:
         add_special_tokens: bool = False,
     ) -> tuple[list[ConversationMessage], Sequence[RequestPrompt],
                list[TokensPrompt]]:
+        model_config = self.model_config
+
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
+            tool_dicts,
             chat_template_content_format,
             tokenizer,
+            trust_remote_code=model_config.trust_remote_code,
         )
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
-            self.model_config,
+            model_config,
             tokenizer,
             content_format=resolved_content_format,
         )
@@ -410,6 +414,7 @@ class OpenAIServing:
         else:
             request_prompt = apply_hf_chat_template(
                 tokenizer,
+                trust_remote_code=model_config.trust_remote_code,
                 conversation=conversation,
                 **_chat_template_kwargs,
             )
@@ -532,6 +537,21 @@ class OpenAIServing:
                         lora_request: Optional[LoRARequest] = None) -> str:
         if lora_request:
             return lora_request.lora_name
-        if model_name is None:
+        if not model_name:
             return self.models.base_model_paths[0].name
         return model_name
+
+
+def clamp_prompt_logprobs(
+    prompt_logprobs: Union[PromptLogprobs,
+                           None]) -> Union[PromptLogprobs, None]:
+    if prompt_logprobs is None:
+        return prompt_logprobs
+
+    for logprob_dict in prompt_logprobs:
+        if logprob_dict is None:
+            continue
+        for logprob_values in logprob_dict.values():
+            if logprob_values.logprob == float('-inf'):
+                logprob_values.logprob = -9999.0
+    return prompt_logprobs

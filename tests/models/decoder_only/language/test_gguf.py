@@ -110,16 +110,6 @@ def test_models(
         example_prompts = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True)
 
-    # Run unquantized model.
-    with vllm_runner(
-            model_name=model.original_model,
-            enforce_eager=True,  # faster tests
-            dtype=dtype,
-            max_model_len=MAX_MODEL_LEN,
-            tensor_parallel_size=tp_size) as original_model:
-        original_outputs = original_model.generate_greedy_logprobs(
-            example_prompts[:-1], max_tokens, num_logprobs)
-
     # Run gguf model.
     with vllm_runner(model_name=model.gguf_model,
                      enforce_eager=True,
@@ -128,6 +118,16 @@ def test_models(
                      max_model_len=MAX_MODEL_LEN,
                      tensor_parallel_size=tp_size) as gguf_model:
         gguf_outputs = gguf_model.generate_greedy_logprobs(
+            example_prompts[:-1], max_tokens, num_logprobs)
+
+    # Run unquantized model.
+    with vllm_runner(
+            model_name=model.original_model,
+            enforce_eager=True,  # faster tests
+            dtype=dtype,
+            max_model_len=MAX_MODEL_LEN,
+            tensor_parallel_size=tp_size) as original_model:
+        original_outputs = original_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
 
     check_logprobs_close(
