@@ -116,7 +116,7 @@ __global__ void merge_attn_states_kernel(
   }
 }
 
-#define LAUNCHE_MERGE_ATTN_STATES_KERNEL(LOOP_OVER_HEAD, OUTPUT_LSE)       \
+#define LAUNCH_MERGE_ATTN_STATES_KERNEL(LOOP_OVER_HEAD, OUTPUT_LSE)        \
   {                                                                        \
     merge_attn_states_kernel<LOOP_OVER_HEAD, OUTPUT_LSE><<<grid, block>>>( \
         output.data_ptr<float>(), output_lse_ptr,                          \
@@ -147,18 +147,18 @@ void merge_attn_states(
     dim3 grid(NUM_TOKENS, NUM_HEADS);
     dim3 block(HEAD_SIZE / 4);
     if (output_lse_ptr != nullptr) {
-      LAUNCHE_MERGE_ATTN_STATES_KERNEL(false, true);
+      LAUNCH_MERGE_ATTN_STATES_KERNEL(false, true);
     } else {
-      LAUNCHE_MERGE_ATTN_STATES_KERNEL(false, false);
+      LAUNCH_MERGE_ATTN_STATES_KERNEL(false, false);
     }
   } else {
     // try loop over num heads for large NUM_TOKENS
     dim3 grid(NUM_TOKENS);
     dim3 block(HEAD_SIZE / 4);
     if (output_lse_ptr != nullptr) {
-      LAUNCHE_MERGE_ATTN_STATES_KERNEL(true, true);
+      LAUNCH_MERGE_ATTN_STATES_KERNEL(true, true);
     } else {
-      LAUNCHE_MERGE_ATTN_STATES_KERNEL(true, false);
+      LAUNCH_MERGE_ATTN_STATES_KERNEL(true, false);
     }
   }
 }
