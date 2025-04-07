@@ -12,6 +12,12 @@ class NgramProposer:
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
 
+    def get_draft_token_ids(self):
+        return None
+
+    def get_draft_probs(self):
+        return None
+
     def propose(
         self,
         context_token_ids: np.ndarray,

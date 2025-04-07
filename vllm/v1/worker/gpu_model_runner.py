@@ -103,9 +103,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         
-        # REMOVE
-        print(f"self.block_size: {self.block_size}, self.max_model_len: {self.max_model_len}, self.max_num_blocks_per_req: {self.max_num_blocks_per_req}")
-        
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -1092,7 +1089,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             target_logits = logits[spec_decode_metadata.target_logits_indices]
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
-                None,  # draft_probs
+                self.drafter.get_draft_probs(),
                 target_logits,
                 bonus_token_ids,
                 sampling_metadata,
@@ -1211,10 +1208,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_table=attn_metadata.block_table,
                 sampling_metadata=sampling_metadata,
             )
-            spec_token_ids = draft_token_ids.tolist()
-            # TODO(woosuk): Cache draft_probs and use it for rejection sampling
-            # in the next step.
-            del draft_probs
+            spec_token_ids = self.drafter.get_draft_token_ids().tolist()
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
