@@ -13,6 +13,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.sched.disaggregated_utils import RequestTransferState
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -20,7 +21,6 @@ from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -78,7 +78,7 @@ class Scheduler(SchedulerInterface):
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
         # P/D: requests transfering from P -> D (NIXL).
-        self.transfering: list[str] = []
+        self.transfering: set[str] = set()
 
         # The requests that have been scheduled and are being executed
         # by the executor.
@@ -346,7 +346,8 @@ class Scheduler(SchedulerInterface):
                     # TODO: make sure we handle Preemption.
                     # TODO: make sure we handle Sliding Window.
                     assert request.status == RequestStatus.WAITING
-                    self.transfering.append(request.request_id)
+                    assert request.request_id not in self.transfering
+                    self.transfering.add(request.request_id)
                     req_to_staging_block_ids[request.request_id] = [
                         b.block_id for b in staging_blocks
                     ]
@@ -687,9 +688,15 @@ class Scheduler(SchedulerInterface):
             self.scheduled_req_ids.remove(req_id)
             if not stopped:
                 new_running.append(request)
-        
-        for req_id, cnt in model_runner_output.nixl_transfer_done_counter.values():
-            self._transfer_done_counter[req_id] += cnt
+
+        # P/D: PWorker requests that finished NIXL transfer.
+        for req_id in model_runner_output.transfer_done:
+            self._free_transfer_request(req_id)
+
+        # P/D: DWorker requests that just got prefill_ready.
+        for req_id in model_runner_output.remote_prefill_ready:
+            # TODO: handle this.
+            pass
 
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(
@@ -741,12 +748,20 @@ class Scheduler(SchedulerInterface):
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
-        self.kv_cache_manager.free(request)
-        self.kv_cache_manager.free_block_hashes(request)
+        self.kv_cache_manager.free(request.request_id)
+        self.kv_cache_manager.free_block_hashes(request.request_id)
         self.encoder_cache_manager.free(request)
         self._cached_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
+
+    def _free_transfer_request(self, request_id: str) -> None:
+        # TODO(rob): make sure that we reject request_ids
+        # that have active transfers already.
+        assert request_id not in self.requests
+        self.transfering.remove(request_id)
+        self.kv_cache_manager.free(request_id)
+        self.kv_cache_manager.free_block_hashes(request_id)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
