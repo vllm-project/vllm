@@ -110,6 +110,7 @@ def paged_attention_rocm(
     scale: float,
     block_tables: torch.Tensor,
     seq_lens: torch.Tensor,
+    query_start_loc: Optional[torch.Tensor],
     block_size: int,
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
@@ -120,8 +121,9 @@ def paged_attention_rocm(
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
-                                      block_size, max_seq_len, alibi_slopes,
-                                      kv_cache_dtype, k_scale, v_scale)
+                                      query_start_loc, block_size, max_seq_len,
+                                      alibi_slopes, kv_cache_dtype, k_scale,
+                                      v_scale)
 
 
 def mla_decode_kvcache_cpu(
