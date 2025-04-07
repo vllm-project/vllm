@@ -476,7 +476,7 @@ class Scheduler(SchedulerInterface):
 
         self.finished_req_ids = set()
         return scheduler_output
- 
+
     def _make_cached_request_data(
         self,
         request: Request,
