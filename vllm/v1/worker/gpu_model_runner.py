@@ -1624,7 +1624,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. Please add "
-                "-O %s or -O %s to use CUDA graphs.", CompilationLevel.PIECEWISE, CompilationLevel.FULL_GRAPH)
+                "-O %s or -O %s to use CUDA graphs.",
+                CompilationLevel.PIECEWISE, CompilationLevel.FULL_GRAPH)
             return
 
         start_time = time.perf_counter()
@@ -1637,7 +1638,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens, initialize_attention_metadata=True)
+                    self._dummy_run(num_tokens,
+                                    initialize_attention_metadata=True)
                 self._dummy_run(num_tokens, initialize_attention_metadata=True)
 
         end_time = time.perf_counter()

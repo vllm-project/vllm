@@ -109,9 +109,8 @@ class FlashAttentionMetadataBuilder:
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        query_start_loc = self.runner.query_start_loc[:num_reqs + 1] 
+        query_start_loc = self.runner.query_start_loc[:num_reqs + 1]
         seq_lens = self.runner.seq_lens[:num_reqs]
-        
 
         block_table = (
             self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
@@ -150,6 +149,7 @@ class FlashAttentionMetadataBuilder:
             suffix_kv_lens=suffix_kv_lens,
         )
         return attn_metadata
+
 
 class FlashAttentionImpl(AttentionImpl):
 

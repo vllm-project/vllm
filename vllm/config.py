@@ -3372,15 +3372,14 @@ class CompilationConfig(BaseModel):
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called
-        if not self.splitting_ops: 
-            if self.level == CompilationLevel.PIECEWISE: 
+        if not self.splitting_ops:
+            if self.level == CompilationLevel.PIECEWISE:
                 self.splitting_ops = [
                     "vllm.unified_attention",
                     "vllm.unified_attention_with_output",
                 ]
             elif self.level == CompilationLevel.FULL_GRAPH:
                 self.splitting_ops = []
-        
 
 
 @dataclass
