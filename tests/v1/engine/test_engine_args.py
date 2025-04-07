@@ -64,15 +64,17 @@ def test_defaults_with_usage_context():
         # For H100 and H200, we use larger default values.
         default_llm_tokens = 16384
         default_server_tokens = 8192
+        default_max_num_seqs = 1024
     else:
         default_llm_tokens = 8192
         default_server_tokens = 2048
+        default_max_num_seqs = 256
 
-    assert vllm_config.scheduler_config.max_num_seqs == 1024
+    assert vllm_config.scheduler_config.max_num_seqs == default_max_num_seqs
     assert vllm_config.scheduler_config.max_num_batched_tokens == default_llm_tokens  # noqa: E501
 
     engine_args = EngineArgs(model="facebook/opt-125m")
     vllm_config = engine_args.create_engine_config(
         UsageContext.OPENAI_API_SERVER)
-    assert vllm_config.scheduler_config.max_num_seqs == 1024
+    assert vllm_config.scheduler_config.max_num_seqs == default_max_num_seqs
     assert vllm_config.scheduler_config.max_num_batched_tokens == default_server_tokens  # noqa: E501
