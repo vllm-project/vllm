@@ -33,8 +33,6 @@ endif()
 
 if(MACOSX_FOUND)
     list(APPEND CXX_COMPILE_FLAGS
-        "-Xpreprocessor"
-        "-fopenmp"
         "-DVLLM_CPU_EXTENSION")
 else()
     list(APPEND CXX_COMPILE_FLAGS
@@ -197,6 +195,7 @@ set(VLLM_EXT_SRC
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
         "csrc/cpu/quant.cpp"
+        "csrc/cpu/shm.cpp"
         ${VLLM_EXT_SRC})
 endif()
 

@@ -305,7 +305,7 @@ def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
 
     # the performance of atomicAdd is better than global reduce
     # only when m*n is small and k is large
-    return max(m, 64) * n < 64 * 2048 and k >= 2048
+    return n < 2048 and k >= 2048
 
 
 def apply_gptq_marlin_linear(

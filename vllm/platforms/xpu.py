@@ -140,3 +140,7 @@ class XPUPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
+
+    @classmethod
+    def supports_structured_output(cls) -> bool:
+        return True
