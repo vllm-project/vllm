@@ -92,6 +92,7 @@ class RMSNorm(CustomOp):
         eps: float = 1e-6,
         var_hidden_size: Optional[int] = None,
         has_weight: bool = True,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
 
@@ -100,8 +101,10 @@ class RMSNorm(CustomOp):
         self.variance_size_override = (None if var_hidden_size == hidden_size
                                        else var_hidden_size)
         self.has_weight = has_weight
-
-        self.weight = torch.ones(hidden_size)
+        if dtype is not None:
+            self.weight = torch.ones(hidden_size, dtype=dtype)
+        else:
+            self.weight = torch.ones(hidden_size)
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
 

@@ -176,6 +176,8 @@ def test_chat(
             model,
             dtype=dtype,
             tokenizer_mode="mistral",
+            load_format="mistral",
+            config_format="mistral",
             max_model_len=max_model_len,
             limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
     ) as vllm_model:
