@@ -167,7 +167,7 @@ def test_human_readable_model_len():
     args = parser.parse_args(["--max-model-len", "10M"])
     assert args.max_model_len == 2**20 * 10
 
-    # Decimal values..
+    # Decimal values
     args = parser.parse_args(["--max-model-len", "10.2k"])
     assert args.max_model_len == 10200
     # ..truncated to the nearest int
