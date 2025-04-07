@@ -715,10 +715,11 @@ def get_cutlass_moe_mm_data(
 
 
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
-                   b_tensors: torch.Tensor, a_scales: torch.Tensor,
-                   b_scales: torch.Tensor, expert_offsets: torch.Tensor,
-                   problem_sizes: torch.Tensor, a_strides: torch.Tensor,
-                   b_strides: torch.Tensor, c_strides: torch.Tensor):
+                   b_tensors: torch.Tensor, a_scales: Optional[torch.Tensor],
+                   b_scales: Optional[torch.Tensor],
+                   expert_offsets: torch.Tensor, problem_sizes: torch.Tensor,
+                   a_strides: torch.Tensor, b_strides: torch.Tensor,
+                   c_strides: torch.Tensor):
     """
     A single grouped matrix multiplication used in CUTLASS-based fused MoE.
     The function executes fp8-quantized OUT = AB matrix multiplication.

@@ -286,6 +286,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
+    "csrc/cutlass_moe/moe_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
@@ -470,21 +471,21 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
-             "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+    set(SRCS "csrc/cutlass_moe/moe_mm_c3x.cu"
+             "csrc/cutlass_moe/moe_data.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM90=1")
-    message(STATUS "Building grouped_mm_c3x for archs: ${SCALED_MM_ARCHS}")
+    message(STATUS "Building moe_mm_c3x for archs: ${SCALED_MM_ARCHS}")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
-      message(STATUS "Not building grouped_mm_c3x kernels as CUDA Compiler version is "
+      message(STATUS "Not building moe_mm_c3x kernels as CUDA Compiler version is "
                      "not >= 12.3, we recommend upgrading to CUDA 12.3 or later "
                      "if you intend on running FP8 quantized MoE models on Hopper.")
     else()
-      message(STATUS "Not building grouped_mm_c3x as no compatible archs found "
+      message(STATUS "Not building moe_mm_c3x as no compatible archs found "
                      "in CUDA target architectures")
     endif()
   endif()
