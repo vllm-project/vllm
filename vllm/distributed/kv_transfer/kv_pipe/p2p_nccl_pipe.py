@@ -234,37 +234,35 @@ class P2pNcclPipe:
             with self.send_store_cv:
                 while not self.send_store:
                     self.send_store_cv.wait()
-
                 tensor_id, remote_address, tensor = self.send_store.popleft()
 
-                if remote_address not in self.socks:
-                    self._create_connect(remote_address)
+            if remote_address not in self.socks:
+                self._create_connect(remote_address)
 
-                sock = self.socks[remote_address]
-                comm, rank = self.comms[remote_address]
-                data = {
-                    "cmd": "PUT",
-                    "tensor_id": tensor_id,
-                    "shape": tensor.shape,
-                    "dtype": str(tensor.dtype).replace("torch.", "")
-                }
-                sock.send(msgpack.dumps(data))
+            sock = self.socks[remote_address]
+            comm, rank = self.comms[remote_address]
+            data = {
+                "cmd": "PUT",
+                "tensor_id": tensor_id,
+                "shape": tensor.shape,
+                "dtype": str(tensor.dtype).replace("torch.", "")
+            }
+            sock.send(msgpack.dumps(data))
 
-                response = sock.recv()
-                if response != b"0":
-                    self.send_store.append([tensor_id, remote_address, tensor])
-                    logger.warning(
-                        "Send Tensor, Peer Out Of Memory, %s 👉 %s, "
-                        "MyRank: %s, data: %s, tensor: %s, size: %fGB",
-                        self.zmq_address, remote_address, rank, data,
-                        tensor.shape,
-                        tensor.element_size() * tensor.numel() / 1024**3)
-                    continue
+            response = sock.recv()
+            if response != b"0":
+                self.send_store.append([tensor_id, remote_address, tensor])
+                logger.warning(
+                    "Send Tensor, Peer Out Of Memory, %s 👉 %s, "
+                    "MyRank: %s, data: %s, tensor: %s, size: %fGB",
+                    self.zmq_address, remote_address, rank, data, tensor.shape,
+                    tensor.element_size() * tensor.numel() / 1024**3)
+                continue
 
-                self._send(comm, tensor.to(self.device), rank ^ 1)
-                logger.info(
-                    "Send Tensor, %s 👉 %s, MyRank: %s, data: %s, tensor: %s",
-                    self.zmq_address, remote_address, rank, data, tensor.shape)
+            self._send(comm, tensor.to(self.device), rank ^ 1)
+            logger.info(
+                "Send Tensor, %s 👉 %s, MyRank: %s, data: %s, tensor: %s",
+                self.zmq_address, remote_address, rank, data, tensor.shape)
 
     def _ping(self):
         sock = self.context.socket(zmq.DEALER)
