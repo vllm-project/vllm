@@ -835,7 +835,7 @@ class Florence2MultiModalProcessor(
         prompt_text = tokenizer.decode(prompt_tokens)
         # convert task tokens to prompt
         prompt_text = hf_processor._construct_prompts([prompt_text])[0]
-        prompt_tokens = tokenizer.encode(prompt_text)
+        prompt_tokens = tokenizer.encode(prompt_text, add_special_tokens=False)
         return prompt_tokens
 
     def _call_hf_processor(
