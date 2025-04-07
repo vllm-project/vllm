@@ -310,9 +310,6 @@ class GraniteSpeechAudioInputs(TypedDict):
     input_features: torch.Tensor
     """Shape: `(bsz, num_features, 160)`"""
 
-    input_features_mask: torch.Tensor
-    """Shape: `TODO`"""
-
 
 class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
 
@@ -481,33 +478,41 @@ class GraniteSpeechForConditionalGeneration(
         if input_features is None:
             return None
 
-        if not isinstance(input_features, torch.Tensor):
+        if not isinstance(input_features, (torch.Tensor, list)):
             raise ValueError("Incorrect type of audio input features. "
                              f"Got type: {type(input_features)}")
-
-        # Granite speech currently only allows one audio token per instance,
-        # and features are already unsqueezed in the processor, so one
-        # instance will have shape [1, {num_features}, 160]. As such,
-        # input features will usually be of shape[bsz, 1, num_features, 160],
-        # which we squeeze to [bsz, num_features, 160] here.
-        if len(input_features.shape) == 4:
-            input_features = input_features.squeeze(1)
-        if len(input_features.shape) != 3:
-            raise ValueError(
-                "Squeezed input features should be 3D but are of shape "
-                f"{input_features.shape}")
-        input_features = input_features.to(
-            self.encoder.input_linear.weight.dtype)
 
         if input_features_mask and not isinstance(input_features_mask,
                                                   (torch.Tensor, list)):
             raise ValueError("Incorrect type of audio input features mask. "
                              f"Got type: {type(input_features_mask)}")
 
-        return GraniteSpeechAudioInputs(
-            input_features=input_features,
-            input_features_mask=input_features_mask,
-        )
+        input_features = self._resolve_masked_features(input_features,
+                                                       input_features_mask)
+        return GraniteSpeechAudioInputs(input_features=input_features)
+
+    def _resolve_masked_features(self, input_features, input_features_mask):
+        # Granite speech currently only allows one audio token per instance,
+        # and features are already unsqueezed in the processor, so one
+        # instance will have shape [1, {num_features}, 160]. As such,
+        # input features will usually be of shape[bsz, 1, num_features, 160],
+        # which we squeeze to [bsz, num_features, 160] here.
+        if isinstance(input_features, torch.Tensor):
+            if len(input_features.shape) == 4:
+                input_features = input_features.squeeze(1)
+            if len(input_features.shape) != 3:
+                raise ValueError(
+                    "Squeezed input features should be 3D but are of shape "
+                    f"{input_features.shape}")
+            input_features = input_features.to(
+                self.encoder.input_linear.weight.dtype)
+        # If we have a batch of variable feature length audio clips, we need
+        # to mask the features; usually we would get an input_features_mask
+        # from the processor, but we handle rebuilding it here since
+        # vLLM generally adds the components of the batch separately.
+        elif isinstance(input_features, list):
+            raise ValueError("TODO - fix variable length batch processing")
+        return input_features
 
     def _process_audio_input(self, audio_input: GraniteSpeechAudioInputs):
         # TODO - probably should handle audio embeddings
