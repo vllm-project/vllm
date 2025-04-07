@@ -1654,6 +1654,10 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         """
         raise NotImplementedError
 
+    @property
+    def pad_dummy_encoder_prompt(self) -> bool:
+        return False
+
     def create_decoder_prompt(
         self,
         prompt: Union[str, list[int]],

@@ -580,6 +580,10 @@ class WhisperMultiModalProcessor(
         feature_extractor = self.info.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
+    @property
+    def pad_dummy_encoder_prompt(self) -> bool:
+        return True
+
     def create_encoder_prompt(
         self,
         prompt: Union[str, list[int]],
