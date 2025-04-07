@@ -1125,9 +1125,9 @@ class ModelConfig:
         return ModelRegistry.is_v1_compatible(architectures)
 
     @property
-    def matryoshka(self) -> bool:
+    def is_matryoshka(self) -> bool:
         return (hasattr(self.hf_config, "matryoshka_dimensions")
-                or getattr(self.hf_config, "matryoshka", False))
+                or getattr(self.hf_config, "is_matryoshka", False))
 
 
 class CacheConfig:

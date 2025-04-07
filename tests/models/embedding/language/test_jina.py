@@ -90,10 +90,10 @@ def emb_model_name(request):
     yield request.param
 
 
-def test_matryoshka(vllm_runner, emb_model_name):
+def test_is_matryoshka(vllm_runner, emb_model_name):
     with vllm_runner(emb_model_name, task="embed",
                      max_model_len=None) as vllm_model:
-        assert vllm_model.model.llm_engine.model_config.matryoshka
+        assert vllm_model.model.llm_engine.model_config.is_matryoshka
 
 
 @pytest.mark.parametrize("model", EMBEDDING_MODELS)
