@@ -411,10 +411,21 @@ class MPClient(EngineCoreClient):
 
         # Wait for engine core process(es) to send ready messages.
         identities = set(eng.index for eng in self.resources.core_engines)
+        poller = zmq.Poller()
+        poller.register(sync_input_socket, zmq.POLLIN)
+        for eng in self.resources.core_engines:
+            poller.register(eng.proc_handle, zmq.POLLIN)
         while identities:
-            while not sync_input_socket.poll(timeout=STARTUP_POLL_PERIOD_MS):
-                logger.info("Waiting for %d core engine proc(s) to start: %s",
-                            len(identities), identities)
+            events = poller.poll(STARTUP_POLL_PERIOD_MS)
+            if not events:
+                logger.debug("Waiting for %d core engine proc(s) to start: %s",
+                             len(identities), identities)
+                continue
+            if len(events) > 1 or events[0][0] != sync_input_socket:
+                # One of the core processes exited.
+                raise RuntimeError("Engine core initialization failed. "
+                                   "See root cause above.")
+
             eng_id_bytes, msg = sync_input_socket.recv_multipart()
             eng_id = int.from_bytes(eng_id_bytes, byteorder="little")
             if eng_id not in identities:
@@ -423,12 +434,6 @@ class MPClient(EngineCoreClient):
                 raise RuntimeError(f"Engine {eng_id} failed: {msg.decode()}")
             logger.info("Core engine process %d ready.", eng_id)
             identities.discard(eng_id)
-
-        # Double check that the process are running.
-        for engine in self.resources.core_engines:
-            proc = engine.proc_handle.proc
-            if proc.exitcode is not None:
-                raise RuntimeError(f"Engine proc {proc.name} not running")
 
     def _init_core_engines(
         self,
