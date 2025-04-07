@@ -331,7 +331,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                           min_transformers_version="4.49"),  # noqa: E501
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
-                                     trust_remote_code=True),
+                                     trust_remote_code=True,
+                                     max_transformers_version="4.50"),
     # [Encoder-decoder]
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
     # Therefore, we borrow the BartTokenizer from the original Bart model
