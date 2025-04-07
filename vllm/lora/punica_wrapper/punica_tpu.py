@@ -4,6 +4,7 @@ import math
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 import torch_xla.core.xla_model as xm
 
 from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
@@ -39,8 +40,12 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             dtype=torch.int32)
 
     def mark_compiled(self):
+        torch._dynamo.mark_dynamic(self._token_lora_indices, 0)
         torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
         torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)
+
+    def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
+        return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
     @property
     def embeddings_indices(self) -> torch.Tensor:
@@ -63,14 +68,14 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         scale: float,
     ):
-        return bgmv_shrink(x, w_t_all, self.token_lora_indices, scale)
+        return bgmv_shrink(x, w_t_all, self._get_token_lora_indices(x), scale)
 
     def expand(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor,
                add_inputs: bool, enable_laning: bool):
         return bgmv_expand(x,
                            w_t_all,
                            y,
-                           self.token_lora_indices,
+                           self._get_token_lora_indices(x),
                            add_inputs,
                            enable_laning=enable_laning)
 
@@ -80,7 +85,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         return bgmv_expand_slice(x,
                                  w_t_all,
                                  y,
-                                 self.token_lora_indices,
+                                 self._get_token_lora_indices(x),
                                  y_offset,
                                  y_slice_size,
                                  add_inputs,
@@ -142,9 +147,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y_org = y
         y = y.view(-1, y.shape[-1])
         offset_left = 0
+
         if lora_bias_stacked is not None:
-            y = self._apply_bias(self.token_lora_indices, y, output_slices,
-                                 lora_bias_stacked)
+            y = self._apply_bias(self._get_token_lora_indices(y), y,
+                                 output_slices, lora_bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
             y = self.expand_slice(y,
                                   x[slice_idx],
@@ -219,8 +225,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
         if lora_bias_stacked is not None:
             assert len(lora_bias_stacked) == len(output_slices)
-            y = self._apply_bias(self.token_lora_indices, y, output_slices,
-                                 lora_bias_stacked)
+            y = self._apply_bias(self._get_token_lora_indices(y), y,
+                                 output_slices, lora_bias_stacked)
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
@@ -278,6 +284,42 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                         add_inputs=True,
                         enable_laning=True)
         return y.view_as(y_org)
+
+    def _apply_bias(
+        self,
+        indices: torch.Tensor,
+        output: torch.Tensor,
+        output_slices: Tuple[int, ...],
+        lora_bias_stacked: Tuple[Optional[torch.Tensor], ...],
+    ):
+        """Applies bias to output
+
+        Input shapes:
+            lora_bias_stacked:      3 element tuple of (num_loras, output_dim)
+            indices:           (batch_size)
+            output:            (batch_size, q_slice_size + 2*kv_slice_size)
+            output_slices:     n-1 element tuple of (slice_size...),
+                            where n is number of slices
+        """
+        org_output = output
+        output = output.view(-1, output.shape[-1])
+        indices = indices.view(-1)
+
+        offset_left = 0
+        for slice_idx, slice in enumerate(output_slices):
+            bias = lora_bias_stacked[slice_idx]
+            if bias is not None:
+                bias = bias.view(-1, bias.shape[-1])
+                bias = bias[indices]
+                bias = torch.where(indices[:, None] == -1, 0, bias)
+
+                bias = F.pad(bias, (offset_left, output.shape[1] -
+                                    (offset_left + slice), 0, 0))
+
+                output += bias
+            offset_left += slice
+
+        return output.view_as(org_output)
 
     # This performs the same tensor ops as the base method, except it does them
     # on the CPU then transfers the results to the TPU
