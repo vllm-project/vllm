@@ -33,8 +33,6 @@ endif()
 
 if(MACOSX_FOUND)
     list(APPEND CXX_COMPILE_FLAGS
-        "-Xpreprocessor"
-        "-fopenmp"
         "-DVLLM_CPU_EXTENSION")
 else()
     list(APPEND CXX_COMPILE_FLAGS

@@ -444,16 +444,31 @@ class MPClient(EngineCoreClient):
         # [local, remote] counts
         conn_pending, start_pending = [local_count, remote_count], [0, 0]
 
+        poller = zmq.Poller()
+        poller.register(sync_input_socket, zmq.POLLIN)
+        proc_manager = self.resources.local_engine_manager
+        if proc_manager is not None:
+            for sentinel in proc_manager.sentinels():
+                poller.register(sentinel, zmq.POLLIN)
         while any(conn_pending) or any(start_pending):
-            while not sync_input_socket.poll(timeout=STARTUP_POLL_PERIOD_MS):
+            events = poller.poll(STARTUP_POLL_PERIOD_MS)
+            if not events:
                 if any(conn_pending):
-                    logger.info(
+                    logger.debug(
                         "Waiting for %d local, %d remote core engine proc(s) "
                         "to connect.", *conn_pending)
                 if any(start_pending):
-                    logger.info(
+                    logger.debug(
                         "Waiting for %d local, %d remote core engine proc(s) "
                         "to start.", *start_pending)
+                continue
+            if len(events) > 1 or events[0][0] != sync_input_socket:
+                # One of the local core processes exited.
+                finished = proc_manager.finished_procs(
+                ) if proc_manager else {}
+                raise RuntimeError("Engine core initialization failed. "
+                                   "See root cause above. "
+                                   f"Failed core proc(s): {finished}")
 
             # Receive HELLO and READY messages from the input socket.
             eng_identity, ready_msg_bytes = sync_input_socket.recv_multipart()
@@ -502,12 +517,6 @@ class MPClient(EngineCoreClient):
 
             logger.debug("%s from %s core engine process %s.", status,
                          "local" if local else "remote", eng_index)
-
-        # Double check that the process are running.
-        engine_manager = self.resources.local_engine_manager
-        if engine_manager and (procs := engine_manager.finished_procs()):
-            raise RuntimeError(
-                f"Local engine proc(s) exited unexpectedly: {procs}")
 
     def shutdown(self):
         self._finalizer()

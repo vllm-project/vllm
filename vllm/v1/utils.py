@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import multiprocessing
 import os
 import time
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
-from multiprocessing import connection
+from multiprocessing import Process, connection
 from typing import (TYPE_CHECKING, Callable, Generic, Optional, TypeVar, Union,
                     overload)
 
@@ -121,7 +120,7 @@ class CoreEngineProcManager:
             "log_stats": log_stats,
         }
 
-        self.processes = []
+        self.processes: list[Process] = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
@@ -152,7 +151,10 @@ class CoreEngineProcManager:
         """Wait for any process to exit."""
         connection.wait(proc.sentinel for proc in self.processes)
 
-    def finished_procs(self) -> dict[int, int]:
+    def sentinels(self) -> list:
+        return [proc.sentinel for proc in self.processes]
+
+    def finished_procs(self) -> dict[str, int]:
         """Returns dict of proc name -> exit code for any finished procs."""
         return {
             proc.name: proc.exitcode
@@ -162,7 +164,7 @@ class CoreEngineProcManager:
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(procs: list[multiprocessing.Process], input_address: str):
+def shutdown(procs: list[Process], input_address: str):
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():

@@ -30,7 +30,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.13"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
