@@ -169,6 +169,11 @@ class AllToAllCache:
             self._cache[key] = instance
             return instance
 
+    def clear():
+        for k, v in self._cache.items():
+            v.destroy()
+        del self._cache
+
 
 # Global singleton
 _all_to_all_cache = AllToAllCache()

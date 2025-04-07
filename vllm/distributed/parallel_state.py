@@ -35,6 +35,9 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
+from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
+                                  nvshmem_get_unique_id, nvshmem_init,
+                                  nvshmem_finalize)
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
@@ -938,8 +941,6 @@ def init_distributed_environment(
 
 @run_once
 def pplx_init(rank, world_size):
-    from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
-                                      nvshmem_get_unique_id, nvshmem_init)
     print(f"PPLX_INIT {rank} {world_size}")
     uid = nvshmem_get_unique_id(
     ) if rank == 0 else nvshmem_alloc_empty_unique_id()
@@ -1149,6 +1150,8 @@ def get_tensor_model_parallel_rank():
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP
+    nvshmem_finalize()
+
     if _TP:
         _TP.destroy()
     _TP = None
@@ -1167,6 +1170,7 @@ def destroy_model_parallel():
     if _EP:
         _EP.destroy()
     _EP = None
+
 
 
 def destroy_distributed_environment():
