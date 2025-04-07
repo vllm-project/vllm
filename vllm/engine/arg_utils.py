@@ -368,10 +368,11 @@ class EngineArgs:
             'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
             'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
         parser.add_argument('--max-model-len',
-                            type=int,
+                            type=human_readable_int,
                             default=EngineArgs.max_model_len,
                             help='Model context length. If unspecified, will '
-                            'be automatically derived from the model config.')
+                            'be automatically derived from the model config. '
+                            'Supports k, M, G suffixes.')
         parser.add_argument(
             '--guided-decoding-backend',
             type=str,
@@ -1737,6 +1738,22 @@ def _warn_or_fallback(feature_name: str) -> bool:
             "Falling back to V0 Engine.", feature_name)
         should_exit = True
     return should_exit
+
+
+def human_readable_int(value):
+    """Parse human-readable integers like '1k', '2M', etc."""
+    value = value.strip().lower()
+
+    multipliers = {
+        'k': 1e3,
+        'm': 1e6,
+        'g': 1e9,
+    }
+
+    if value[-1] in multipliers:
+        number = float(value[:-1])
+        return int(number * multipliers[value[-1]])
+    return int(value)
 
 
 # These functions are used by sphinx to build the documentation
