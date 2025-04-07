@@ -158,16 +158,14 @@ class GraniteSpeechConformerFeedForward(nn.Module):
         self.up_proj = nn.Linear(config.hidden_dim,
                                  config.hidden_dim * config.feedforward_mult)
         self.silu = nn.SiLU()
-        self.dropout = nn.Dropout(config.dropout)
         self.down_proj = nn.Linear(config.hidden_dim * config.feedforward_mult,
                                    config.hidden_dim)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.pre_norm(hidden_states)
         hidden_states = self.up_proj(hidden_states)
-        hidden_states = self.dropout(self.silu(hidden_states))
+        hidden_states = self.silu(hidden_states)
         hidden_states = self.down_proj(hidden_states)
-        hidden_states = self.dropout(hidden_states)
         return hidden_states
 
 
@@ -189,7 +187,6 @@ class GraniteSpeechConformerAttention(nn.Module):
         self.to_out = nn.Linear(inner_dim, config.hidden_dim)
         self.rel_pos_emb = nn.Embedding(2 * self.max_pos_emb + 1,
                                         self.dim_head)
-        self.dropout = nn.Dropout(config.dropout)
 
         if self.context_size <= 0 or self.context_size > self.max_pos_emb:
             raise ValueError(
@@ -245,7 +242,7 @@ class GraniteSpeechConformerAttention(nn.Module):
                                                  scale=self.scale)
         out = out.transpose(2, 3).reshape(bsz, hidden_states.shape[1], -1)
         out = self.to_out(out[:, :num_features, :])
-        return self.dropout(out)
+        return out
 
 
 class GraniteSpeechConformerConvModule(nn.Module):
@@ -268,7 +265,6 @@ class GraniteSpeechConformerConvModule(nn.Module):
         self.silu = nn.SiLU()
         self.batch_norm = nn.BatchNorm1d(inner_dim)
         self.down_conv = nn.Conv1d(inner_dim, config.hidden_dim, 1)
-        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.norm(hidden_states)
@@ -277,7 +273,6 @@ class GraniteSpeechConformerConvModule(nn.Module):
         hidden_states = self.depth_conv(hidden_states)
         hidden_states = self.silu(self.batch_norm(hidden_states))
         hidden_states = self.down_conv(hidden_states).permute(0, 2, 1)
-        hidden_states = self.dropout(hidden_states)
         return hidden_states
 
     @staticmethod
