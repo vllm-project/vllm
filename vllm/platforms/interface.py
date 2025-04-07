@@ -380,6 +380,13 @@ class Platform:
         return False
 
     @classmethod
+    def supports_structured_output(cls) -> bool:
+        """
+        Returns whether the current platform can support structured output.
+        """
+        return False
+
+    @classmethod
     def use_custom_allreduce(cls) -> bool:
         """
         Returns if custom allreduce is supported on the current platform
