@@ -63,7 +63,7 @@ class KVCacheManager:
             FullAttentionManager(kv_cache_spec, self.block_pool),
             SlidingWindowManager(kv_cache_spec, self.block_pool),
         ]
-        self.group_ids = [(1,), (0,)]
+        self.group_ids = [(1, ), (0, )]
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
