@@ -231,7 +231,7 @@ class Attention(nn.Module):
             else:
                 output = torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
-        
+
         maybe_save_kv_layer_to_connector(self.layer_name,
                                          self.kv_cache)
         return output
