@@ -2,10 +2,11 @@
 import argparse
 import json
 import os
+import time
 
 from transformers import AutoTokenizer
 
-from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams, envs
 
 parser = argparse.ArgumentParser()
 
@@ -31,7 +32,8 @@ args = parser.parse_args()
 print(args)
 
 model_dir = "meta-llama/Meta-Llama-3-8B-Instruct"
-eagle_dir = "abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm"
+# eagle_dir = "abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm"
+eagle_dir = "yuhuili/EAGLE-LLaMA3-Instruct-8B"
 
 max_model_len = 2048
 
@@ -69,28 +71,42 @@ llm = LLM(
     max_model_len=max_model_len,
     max_num_seqs=args.max_num_seqs,
     gpu_memory_utilization=0.8,
-    speculative_config={
-        "method": "eagle",
-        "model": eagle_dir,
-        "num_speculative_tokens": args.num_spec_tokens,
-        "draft_tensor_parallel_size": args.draft_tp,
-        "max_model_len": max_model_len,
-    },
+    # speculative_config={
+    #     "method": "eagle",
+    #     "model": eagle_dir,
+    #     "num_speculative_tokens": args.num_spec_tokens,
+    #     "draft_tensor_parallel_size": args.draft_tp,
+    #     "max_model_len": max_model_len,
+    # },
     disable_log_stats=False,
 )
 
 sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
 
+# warmup
 outputs = llm.generate(prompt_token_ids=prompt_ids,
                        sampling_params=sampling_params)
 
-# calculate the average number of accepted tokens per forward pass, +1 is
-# to account for the token from the target model that's always going to be
-# accepted
-acceptance_counts = [0] * (args.num_spec_tokens + 1)
-for output in outputs:
-    for step, count in enumerate(output.metrics.spec_token_acceptance_counts):
-        acceptance_counts[step] += count
+start = time.time()
+repeat = 5
+for _ in range(repeat):
+    outputs = llm.generate(prompt_token_ids=prompt_ids,
+                           sampling_params=sampling_params)
+end = time.time()
 
-print(f"mean acceptance length: \
-    {sum(acceptance_counts) / acceptance_counts[0]:.2f}")
+for output in outputs:
+    print(output.outputs[0].text)
+
+print(f"total time: {(end - start) / repeat:.2f}s")
+if not envs.VLLM_USE_V1:
+    # calculate the average number of accepted tokens per forward pass, +1 is
+    # to account for the token from the target model that's always going to be
+    # accepted
+    acceptance_counts = [0] * (args.num_spec_tokens + 1)
+    for output in outputs:
+        for step, count in enumerate(
+                output.metrics.spec_token_acceptance_counts):
+            acceptance_counts[step] += count
+
+    print(f"mean acceptance length: \
+        {sum(acceptance_counts) / acceptance_counts[0]:.2f}")
