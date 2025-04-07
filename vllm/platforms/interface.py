@@ -380,7 +380,7 @@ class Platform:
         return False
 
     @classmethod
-    def attention_threads(cls) -> int:
+    def paged_attention_v1_v2_threads(cls) -> int:
         """
         Returns the number of threads to use for attention.
         """

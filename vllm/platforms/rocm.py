@@ -304,7 +304,7 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def attention_threads(cls):
+    def paged_attention_v1_v2_threads(cls):
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         if "gfx1" in gcn_arch:
             # Radeon

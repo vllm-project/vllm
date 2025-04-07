@@ -78,7 +78,7 @@ def paged_attention_v1(
         blocksparse_vert_stride,
         blocksparse_block_size,
         blocksparse_head_sliding_step,
-        num_threads=current_platform.attention_threads())
+        num_threads=current_platform.paged_attention_v1_v2_threads())
 
 
 def paged_attention_v2(
@@ -128,7 +128,7 @@ def paged_attention_v2(
         blocksparse_vert_stride,
         blocksparse_block_size,
         blocksparse_head_sliding_step,
-        num_threads=current_platform.attention_threads())
+        num_threads=current_platform.paged_attention_v1_v2_threads())
 
 
 def paged_attention_rocm(

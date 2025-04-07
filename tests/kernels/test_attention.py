@@ -192,7 +192,7 @@ def test_paged_attention(
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # additional argument for v1/v2 pa kernel
-    num_threads = current_platform.attention_threads()
+    num_threads = current_platform.paged_attention_v1_v2_threads()
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
