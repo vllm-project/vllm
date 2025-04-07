@@ -235,7 +235,6 @@ class Scheduler(SchedulerInterface):
             req_to_new_block_ids[request.request_id] = [
                 b.block_id for b in new_blocks
             ]
-
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
