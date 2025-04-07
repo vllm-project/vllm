@@ -358,7 +358,6 @@ class Scheduler(SchedulerInterface):
                         request.request_id] = req_index
                 req_index += 1
                 self.running.append(request)
-        
                 self.scheduled_req_ids.add(request.request_id)
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
