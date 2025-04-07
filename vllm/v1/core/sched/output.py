@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
     import numpy as np
@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
+
+MayMultiGroupBlockIDs = Union[list[int], list[list[int]]]
+MayMultiGroupInt = Union[int, list[int]]
 
 
 @dataclass
@@ -25,7 +28,7 @@ class NewRequestData:
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams
-    block_ids: list[int]
+    block_ids: MayMultiGroupBlockIDs
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
 
@@ -33,7 +36,7 @@ class NewRequestData:
     def from_request(
         cls,
         request: Request,
-        block_ids: list[int],
+        block_ids: MayMultiGroupBlockIDs,
     ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
@@ -58,7 +61,7 @@ class CachedRequestData:
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
     new_token_ids: list[int]
-    new_block_ids: list[int]
+    new_block_ids: MayMultiGroupBlockIDs
     num_computed_tokens: int
 
     @classmethod
@@ -67,7 +70,7 @@ class CachedRequestData:
         request: Request,
         resumed_from_preemption: bool,
         new_token_ids: list[int],
-        new_block_ids: list[int],
+        new_block_ids: MayMultiGroupBlockIDs,
     ) -> CachedRequestData:
         return cls(
             req_id=request.request_id,
@@ -106,7 +109,7 @@ class SchedulerOutput:
     scheduled_encoder_inputs: dict[str, list[int]]
     # Number of common prefix blocks for all requests.
     # This can be used for cascade attention.
-    num_common_prefix_blocks: int
+    num_common_prefix_blocks: MayMultiGroupInt
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests

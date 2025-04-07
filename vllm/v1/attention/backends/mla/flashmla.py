@@ -16,6 +16,8 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.worker.block_table import BlockTable
 
 logger = init_logger(__name__)
 
@@ -52,8 +54,9 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
-    def __init__(self, runner):
-        super().__init__(runner)
+    def __init__(self, runner, kv_cache_spec: KVCacheSpec,
+                 persistent_block_table: BlockTable):
+        super().__init__(runner, kv_cache_spec, persistent_block_table)
 
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)

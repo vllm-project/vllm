@@ -82,6 +82,7 @@ class BlockPool:
         num_full_blocks: int,
         block_size: int,
         hash_fn: Callable,
+        kv_cache_group_id: int = -1,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
@@ -101,6 +102,8 @@ class BlockPool:
                 be cached after this function.
             block_size: Number of tokens in each block.
             hash_fn: The hash function to use for block hashes.
+            kv_cache_group_id: The id of the kv cache group. -1 means no kv 
+            cache group.
         """
         if num_cached_blocks == num_full_blocks:
             return
@@ -143,7 +146,8 @@ class BlockPool:
                 # we reach to this branch only when the block is completed with
                 # generated tokens, we only need to consider the last mm input.
                 extra_keys, _ = generate_block_hash_extra_keys(
-                    request, start_token_idx, end_token_idx, -1)
+                    request, start_token_idx, end_token_idx, -1,
+                    kv_cache_group_id)
 
                 # Compute the hash of the current block.
                 block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,

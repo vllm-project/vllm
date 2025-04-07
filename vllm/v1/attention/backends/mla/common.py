@@ -203,6 +203,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
+from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.worker.block_table import BlockTable
 from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 try:
@@ -342,6 +344,8 @@ class MLACommonMetadataBuilder(Generic[M]):
 
     def __init__(self,
                  runner: "GPUModelRunner",
+                 kv_cache_spec: KVCacheSpec,
+                 persistent_block_table: BlockTable,
                  metadata_cls: Optional[type[M]] = None):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
@@ -375,7 +379,8 @@ class MLACommonMetadataBuilder(Generic[M]):
                 dtype=model_config.dtype,
                 device=runner.device,
             )
-            self.page_size = self.runner.block_size
+            self.page_size = kv_cache_spec.block_size
+        self.persistent_block_table = persistent_block_table
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -455,12 +460,13 @@ class MLACommonMetadataBuilder(Generic[M]):
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
         device = self.runner.device
-        block_table = (
-            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+        block_table = (self.persistent_block_table.block_table.
+                       get_device_tensor()[:num_reqs])
         query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
             device, non_blocking=True)
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            device, non_blocking=True).long()
+        slot_mapping = (self.persistent_block_table.
+                        slot_mapping_cpu[:num_actual_tokens].to(
+                            device, non_blocking=True).long())
         input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
             device, non_blocking=True).long()
 
