@@ -1553,12 +1553,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
                                          dtype=torch.int32,
                                          device=self.device))
-        print(f"{num_tokens=}")
-        print(f"{num_reqs=}")
-        print(f"{req_num_tokens=}")
-        print(f"{hidden_states.shape=}")
-        print(f"{dummy_metadata.prompt_lens=}")
-        print(f"{dummy_metadata.prompt_token_ids=}")
 
         try:
             pooler_output = self.model.pooler(hidden_states=hidden_states,
