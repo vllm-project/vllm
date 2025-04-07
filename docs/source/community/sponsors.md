@@ -22,6 +22,7 @@ Compute Resources:
 - Databricks
 - DeepInfra
 - Google Cloud
+- Intel
 - Lambda Lab
 - Nebius
 - Novita AI
