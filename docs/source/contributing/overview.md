@@ -11,6 +11,15 @@ We also believe in the power of community support; thus, answering queries, offe
 
 Finally, one of the most impactful ways to support us is by raising awareness about vLLM. Talk about it in your blog posts and highlight how it's driving your incredible projects. Express your support on social media if you're using vLLM, or simply offer your appreciation by starring our repository!
 
+## Job Board
+
+Unsure on where to start? Check out the following links for tasks to work on:
+
+- [Good first issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
+  - [Selected onboarding tasks](gh-project:6)
+- [New model requests](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22new%20model%22)
+  - [Models with multi-modal capabilities](gh-project:10)
+
 ## License
 
 See <gh-file:LICENSE>.
@@ -23,29 +32,35 @@ Check out the [building from source](#build-from-source) documentation for detai
 ## Testing
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements/dev.txt
 
-# linting and formatting
-bash format.sh
-# Static type checking
-mypy
+# Linting, formatting and static type checking
+pre-commit install --hook-type pre-commit --hook-type commit-msg
+
+# You can manually run pre-commit with
+pre-commit run --all-files
+
 # Unit tests
 pytest tests/
 ```
 
-```{note}
-Currently, the repository is not fully checked by `mypy`.
-```
+:::{tip}
+Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
 
-# Contribution Guidelines
+Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
+:::
+
+:::{note}
+Currently, the repository is not fully checked by `mypy`.
+:::
 
 ## Issues
 
 If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
-```{important}
+:::{important}
 If you discover a security vulnerability, please follow the instructions [here](gh-file:SECURITY.md#reporting-a-vulnerability).
-```
+:::
 
 ## Pull Requests & Code Reviews
 
@@ -81,16 +96,17 @@ appropriately to indicate the type of change. Please use one of the following:
 - `[Misc]` for PRs that do not fit the above categories. Please use this
   sparingly.
 
-```{note}
+:::{note}
 If the PR spans more than one category, please include all relevant prefixes.
-```
+:::
 
 ### Code Quality
 
 The PR needs to meet the following code quality standards:
 
 - We adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html) and [Google C++ style guide](https://google.github.io/styleguide/cppguide.html).
-- Pass all linter checks. Please use <gh-file:format.sh> to format your code.
+- Pass all linter checks. Please use `pre-commit` to format your code. See
+  <https://pre-commit.com/#usage> if `pre-commit` is new to you.
 - The code needs to be well-documented to ensure future contributors can easily
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This
@@ -144,6 +160,9 @@ review process:
 - Please respond to all comments within a reasonable time frame. If a comment
   isn't clear or you disagree with a suggestion, feel free to ask for
   clarification or discuss the suggestion.
+- Note that not all CI checks will be executed due to limited computational
+  resources. The reviewer will add `ready` label to the PR when the PR is
+  ready to merge or a full CI run is needed.
 
 ## Thank You
 

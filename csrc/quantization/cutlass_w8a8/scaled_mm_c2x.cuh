@@ -103,14 +103,19 @@ struct cutlass_2x_gemm {
 
   using EVTD = cutlass::epilogue::threadblock::Sm80EVT<D, EVTCompute>;
 
+  // These are the minimum alignments needed for the kernels to compile
+  static constexpr int AlignmentAB =
+      128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentCD = 4;
+
   // clang-format off
   using RowMajor = typename cutlass::layout::RowMajor;
   using ColumnMajor = typename cutlass::layout::ColumnMajor;
   using KernelType =
     ArchGuard<typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
-      ElementAB, RowMajor, cutlass::ComplexTransform::kNone, 16,
-      ElementAB, ColumnMajor, cutlass::ComplexTransform::kNone, 16,
-      float, cutlass::layout::RowMajor, 4,
+      ElementAB, RowMajor, cutlass::ComplexTransform::kNone, AlignmentAB,
+      ElementAB, ColumnMajor, cutlass::ComplexTransform::kNone, AlignmentAB,
+      float, cutlass::layout::RowMajor, AlignmentCD,
       ElementAcc, float, cutlass::arch::OpClassTensorOp,
       Arch,
       TileShape, WarpShape, InstructionShape,

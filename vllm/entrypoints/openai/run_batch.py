@@ -1,7 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
+import tempfile
+from collections.abc import Awaitable
 from http import HTTPStatus
 from io import StringIO
-from typing import Awaitable, Callable, List, Optional
+from typing import Callable, Optional
 
 import aiohttp
 import torch
@@ -16,12 +20,14 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
                                               BatchResponseData,
                                               ChatCompletionResponse,
-                                              EmbeddingResponse, ErrorResponse)
+                                              EmbeddingResponse, ErrorResponse,
+                                              ScoreResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
+from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
@@ -47,6 +53,13 @@ def parse_args():
         help="The path or url to a single output file. Currently supports "
         "local file paths, or web (http or https) urls. If a URL is specified,"
         " the file should be available via HTTP PUT.")
+    parser.add_argument(
+        "--output-tmp-dir",
+        type=str,
+        default=None,
+        help="The directory to store the output file before uploading it "
+        "to the output URL.",
+    )
     parser.add_argument("--response-role",
                         type=nullable_str,
                         default="assistant",
@@ -130,17 +143,107 @@ async def read_file(path_or_url: str) -> str:
             return f.read()
 
 
-async def write_file(path_or_url: str, data: str) -> None:
+async def write_local_file(output_path: str,
+                           batch_outputs: list[BatchRequestOutput]) -> None:
+    """
+    Write the responses to a local file.
+    output_path: The path to write the responses to.
+    batch_outputs: The list of batch outputs to write.
+    """
+    # We should make this async, but as long as run_batch runs as a
+    # standalone program, blocking the event loop won't effect performance.
+    with open(output_path, "w", encoding="utf-8") as f:
+        for o in batch_outputs:
+            print(o.model_dump_json(), file=f)
+
+
+async def upload_data(output_url: str, data_or_file: str,
+                      from_file: bool) -> None:
+    """
+    Upload a local file to a URL.
+    output_url: The URL to upload the file to.
+    data_or_file: Either the data to upload or the path to the file to upload.
+    from_file: If True, data_or_file is the path to the file to upload.
+    """
+    # Timeout is a common issue when uploading large files.
+    # We retry max_retries times before giving up.
+    max_retries = 5
+    # Number of seconds to wait before retrying.
+    delay = 5
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            # We increase the timeout to 1000 seconds to allow
+            # for large files (default is 300).
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(
+                    total=1000)) as session:
+                if from_file:
+                    with open(data_or_file, "rb") as file:
+                        async with session.put(output_url,
+                                               data=file) as response:
+                            if response.status != 200:
+                                raise Exception(f"Failed to upload file.\n"
+                                                f"Status: {response.status}\n"
+                                                f"Response: {response.text()}")
+                else:
+                    async with session.put(output_url,
+                                           data=data_or_file) as response:
+                        if response.status != 200:
+                            raise Exception(f"Failed to upload data.\n"
+                                            f"Status: {response.status}\n"
+                                            f"Response: {response.text()}")
+
+        except Exception as e:
+            if attempt < max_retries:
+                logger.error(
+                    f"Failed to upload data (attempt {attempt}). "
+                    f"Error message: {str(e)}.\nRetrying in {delay} seconds..."
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise Exception(f"Failed to upload data (attempt {attempt}). "
+                                f"Error message: {str(e)}.") from e
+
+
+async def write_file(path_or_url: str, batch_outputs: list[BatchRequestOutput],
+                     output_tmp_dir: str) -> None:
+    """
+    Write batch_outputs to a file or upload to a URL.
+    path_or_url: The path or URL to write batch_outputs to.
+    batch_outputs: The list of batch outputs to write.
+    output_tmp_dir: The directory to store the output file before uploading it
+    to the output URL.
+    """
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        async with aiohttp.ClientSession() as session, \
-                   session.put(path_or_url, data=data.encode("utf-8")):
-            pass
+        if output_tmp_dir is None:
+            logger.info("Writing outputs to memory buffer")
+            output_buffer = StringIO()
+            for o in batch_outputs:
+                print(o.model_dump_json(), file=output_buffer)
+            output_buffer.seek(0)
+            logger.info("Uploading outputs to %s", path_or_url)
+            await upload_data(
+                path_or_url,
+                output_buffer.read().strip().encode("utf-8"),
+                from_file=False,
+            )
+        else:
+            # Write responses to a temporary file and then upload it to the URL.
+            with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=output_tmp_dir,
+                    prefix="tmp_batch_output_",
+                    suffix=".jsonl",
+            ) as f:
+                logger.info("Writing outputs to temporary local file %s",
+                            f.name)
+                await write_local_file(f.name, batch_outputs)
+                logger.info("Uploading outputs to %s", path_or_url)
+                await upload_data(path_or_url, f.name, from_file=True)
     else:
-        # We should make this async, but as long as this is always run as a
-        # standalone program, blocking the event loop won't effect performance
-        # in this particular case.
-        with open(path_or_url, "w", encoding="utf-8") as f:
-            f.write(data)
+        logger.info("Writing outputs to local file %s", path_or_url)
+        await write_local_file(path_or_url, batch_outputs)
 
 
 def make_error_request_output(request: BatchRequestInput,
@@ -167,7 +270,8 @@ async def run_request(serving_engine_func: Callable,
                       tracker: BatchProgressTracker) -> BatchRequestOutput:
     response = await serving_engine_func(request.body)
 
-    if isinstance(response, (ChatCompletionResponse, EmbeddingResponse)):
+    if isinstance(response,
+                  (ChatCompletionResponse, EmbeddingResponse, ScoreResponse)):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
@@ -215,6 +319,7 @@ async def main(args):
 
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
+        engine_client=engine,
         model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=None,
@@ -238,12 +343,18 @@ async def main(args):
         chat_template=None,
         chat_template_content_format="auto",
     ) if model_config.task == "embed" else None
+    openai_serving_scores = (ServingScores(
+        engine,
+        model_config,
+        openai_serving_models,
+        request_logger=request_logger,
+    ) if model_config.task == "score" else None)
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
 
     # Submit all requests in the file to the engine "concurrently".
-    response_futures: List[Awaitable[BatchRequestOutput]] = []
+    response_futures: list[Awaitable[BatchRequestOutput]] = []
     for request_json in (await read_file(args.input_file)).strip().split("\n"):
         # Skip empty lines.
         request_json = request_json.strip()
@@ -254,9 +365,9 @@ async def main(args):
 
         # Determine the type of request and run it.
         if request.url == "/v1/chat/completions":
-            handler_fn = (None if openai_serving_chat is None else
-                          openai_serving_chat.create_chat_completion)
-            if handler_fn is None:
+            chat_handler_fn = (None if openai_serving_chat is None else
+                               openai_serving_chat.create_chat_completion)
+            if chat_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
                         request,
@@ -265,12 +376,13 @@ async def main(args):
                     ))
                 continue
 
-            response_futures.append(run_request(handler_fn, request, tracker))
+            response_futures.append(
+                run_request(chat_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/embeddings":
-            handler_fn = (None if openai_serving_embedding is None else
-                          openai_serving_embedding.create_embedding)
-            if handler_fn is None:
+            embed_handler_fn = (None if openai_serving_embedding is None else
+                                openai_serving_embedding.create_embedding)
+            if embed_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
                         request,
@@ -278,25 +390,36 @@ async def main(args):
                     ))
                 continue
 
-            response_futures.append(run_request(handler_fn, request, tracker))
+            response_futures.append(
+                run_request(embed_handler_fn, request, tracker))
+            tracker.submitted()
+        elif request.url == "/v1/score":
+            score_handler_fn = (None if openai_serving_scores is None else
+                                openai_serving_scores.create_score)
+            if score_handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg="The model does not support Scores API",
+                    ))
+                continue
+
+            response_futures.append(
+                run_request(score_handler_fn, request, tracker))
             tracker.submitted()
         else:
             response_futures.append(
                 make_async_error_request_output(
                     request,
-                    error_msg="Only /v1/chat/completions and "
-                    "/v1/embeddings are supported in the batch endpoint.",
+                    error_msg=
+                    "Only /v1/chat/completions, /v1/embeddings, and /v1/score "
+                    "are supported in the batch endpoint.",
                 ))
 
     with tracker.pbar():
         responses = await asyncio.gather(*response_futures)
 
-    output_buffer = StringIO()
-    for response in responses:
-        print(response.model_dump_json(), file=output_buffer)
-
-    output_buffer.seek(0)
-    await write_file(args.output_file, output_buffer.read().strip())
+    await write_file(args.output_file, responses, args.output_tmp_dir)
 
 
 if __name__ == "__main__":

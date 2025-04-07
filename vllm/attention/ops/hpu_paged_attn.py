@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
@@ -21,6 +23,7 @@ class HPUPagedAttentionMetadata:
     block_indices: Optional[torch.Tensor]
     block_offsets: Optional[torch.Tensor]
     block_scales: Optional[torch.Tensor]
+    block_groups: Optional[torch.Tensor]
 
 
 class HPUPagedAttention:

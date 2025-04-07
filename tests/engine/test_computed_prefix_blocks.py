@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from vllm.engine.arg_utils import EngineArgs
@@ -5,7 +7,7 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.sampling_params import SamplingParams
 
 
-@pytest.mark.parametrize("model", ["facebook/opt-125m"])
+@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 @pytest.mark.parametrize("block_size", [16])
 def test_computed_prefix_blocks(model: str, block_size: int):
     # This test checks if we are able to run the engine to completion

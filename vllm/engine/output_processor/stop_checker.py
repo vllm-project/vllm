@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Callable, List, Optional, Tuple
 
 from vllm.lora.request import LoRARequest
@@ -111,7 +113,7 @@ class StopChecker:
             stop_string_len = len(stop_str)
             # Avoid searching already-searched text.
             stop_index = output_text.find(stop_str,
-                                          -new_char_count - stop_string_len)
+                                          1 - new_char_count - stop_string_len)
             if stop_index == -1:
                 continue
 

@@ -1,6 +1,6 @@
 (new-model-registration)=
 
-# Model Registration
+# Registering a Model to vLLM
 
 vLLM relies on a model registry to determine how to run each model.
 A list of pre-registered architectures can be found [here](#supported-models).
@@ -15,20 +15,19 @@ This gives you the ability to modify the codebase and test your model.
 
 After you have implemented your model (see [tutorial](#new-model-basic)), put it into the <gh-dir:vllm/model_executor/models> directory.
 Then, add your model class to `_VLLM_MODELS` in <gh-file:vllm/model_executor/models/registry.py> so that it is automatically registered upon importing vLLM.
-You should also include an example HuggingFace repository for this model in <gh-file:tests/models/registry.py> to run the unit tests.
 Finally, update our [list of supported models](#supported-models) to promote your model!
 
-```{important}
+:::{important}
 The list of models in each section should be maintained in alphabetical order.
-```
+:::
 
 ## Out-of-tree models
 
 You can load an external model using a plugin without modifying the vLLM codebase.
 
-```{seealso}
+:::{seealso}
 [vLLM's Plugin System](#plugin-system)
-```
+:::
 
 To register the model, use the following code:
 
@@ -46,11 +45,11 @@ from vllm import ModelRegistry
 ModelRegistry.register_model("YourModelForCausalLM", "your_code:YourModelForCausalLM")
 ```
 
-```{important}
+:::{important}
 If your model is a multimodal model, ensure the model class implements the {class}`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
-Read more about that [here](#enabling-multimodal-inputs).
-```
+Read more about that [here](#supports-multimodal).
+:::
 
-```{note}
+:::{note}
 Although you can directly put these code snippets in your script using `vllm.LLM`, the recommended way is to place these snippets in a vLLM plugin. This ensures compatibility with various vLLM features like distributed inference and the API server.
-```
+:::

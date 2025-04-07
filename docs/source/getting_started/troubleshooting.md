@@ -4,9 +4,9 @@
 
 This document outlines some troubleshooting strategies you can consider. If you think you've discovered a bug, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
-```{note}
+:::{note}
 Once you've debugged a problem, remember to turn off any debugging environment variables defined, or simply start a new shell to avoid being affected by lingering debugging settings. Otherwise, the system might be slow with debugging functionalities left activated.
-```
+:::
 
 ## Hangs downloading a model
 
@@ -18,13 +18,21 @@ It's recommended to download the model first using the [huggingface-cli](https:/
 If the model is large, it can take a long time to load it from disk. Pay attention to where you store the model. Some clusters have shared filesystems across nodes, e.g. a distributed filesystem or a network filesystem, which can be slow.
 It'd be better to store the model in a local disk. Additionally, have a look at the CPU memory usage, when the model is too large it might take a lot of CPU memory, slowing down the operating system because it needs to frequently swap between disk and memory.
 
-```{note}
+:::{note}
 To isolate the model downloading and loading issue, you can use the `--load-format dummy` argument to skip loading the model weights. This way, you can check if the model downloading and loading is the bottleneck.
-```
+:::
 
-## Model is too large
+## Out of memory
 
-If the model is too large to fit in a single GPU, you might want to [consider tensor parallelism](#distributed-serving) to split the model across multiple GPUs. In that case, every process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the size of tensor parallelism). You can convert the model checkpoint to a sharded checkpoint using <gh-file:examples/offline_inference/save_sharded_state.py>. The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the size of tensor parallelism.
+If the model is too large to fit in a single GPU, you will get an out-of-memory (OOM) error. Consider [using tensor parallelism](#distributed-serving) to split the model across multiple GPUs. In that case, every process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the size of tensor parallelism). You can convert the model checkpoint to a sharded checkpoint using <gh-file:examples/offline_inference/save_sharded_state.py>. The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the size of tensor parallelism.
+
+## Generation quality changed
+
+In v0.8.0, the source of default sampling parameters was changed in <gh-pr:12622>. Prior to v0.8.0, the default sampling parameters came from vLLM's set of neutral defaults. From v0.8.0 onwards, the default sampling parameters come from the `generation_config.json` provided by the model creator.
+
+In most cases, this should lead to higher quality responses, because the model creator is likely to know which sampling parameters are best for their model. However, in some cases the defaults provided by the model creator can lead to degraded performance.
+
+You can check if this is happening by trying the old defaults with `--generation-config vllm` for online and `generation_config="vllm"` for offline. If, after trying this, your generation quality improves we would recommend continuing to use the vLLM defaults and petition the model creator on <https://huggingface.co> to update their default `generation_config.json` so that it produces better quality generations.
 
 ## Enable more logging
 
@@ -48,6 +56,7 @@ If vLLM crashes and the error trace captures it somewhere around `self.graph.rep
 To identify the particular CUDA operation that causes the error, you can add `--enforce-eager` to the command line, or `enforce_eager=True` to the {class}`~vllm.LLM` class to disable the CUDAGraph optimization and isolate the exact CUDA operation that causes the error.
 
 (troubleshooting-incorrect-hardware-driver)=
+
 ## Incorrect hardware/driver
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
@@ -93,20 +102,20 @@ pynccl.disabled = False
 s = torch.cuda.Stream()
 with torch.cuda.stream(s):
     data.fill_(1)
-    pynccl.all_reduce(data, stream=s)
-    value = data.mean().item()
+    out = pynccl.all_reduce(data, stream=s)
+    value = out.mean().item()
     assert value == world_size, f"Expected {world_size}, got {value}"
 
 print("vLLM NCCL is successful!")
 
 g = torch.cuda.CUDAGraph()
 with torch.cuda.graph(cuda_graph=g, stream=s):
-    pynccl.all_reduce(data, stream=torch.cuda.current_stream())
+    out = pynccl.all_reduce(data, stream=torch.cuda.current_stream())
 
 data.fill_(1)
 g.replay()
 torch.cuda.current_stream().synchronize()
-value = data.mean().item()
+value = out.mean().item()
 assert value == world_size, f"Expected {world_size}, got {value}"
 
 print("vLLM NCCL with cuda graph is successful!")
@@ -118,29 +127,30 @@ dist.destroy_process_group()
 If you are testing with a single node, adjust `--nproc-per-node` to the number of GPUs you want to use:
 
 ```console
-$ NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
+NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
 ```
 
 If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address of the master node, reachable from all nodes. Then, run:
 
 ```console
-$ NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR test.py
+NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR test.py
 ```
 
 If the script runs successfully, you should see the message `sanity check is successful!`.
 
 If the test script hangs or crashes, usually it means the hardware/drivers are broken in some sense. You should try to contact your system administrator or hardware vendor for further assistance. As a common workaround, you can try to tune some NCCL environment variables, such as `export NCCL_P2P_DISABLE=1` to see if it helps. Please check [their documentation](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html) for more information. Please only use these environment variables as a temporary workaround, as they might affect the performance of the system. The best solution is still to fix the hardware/drivers so that the test script can run successfully.
 
-```{note}
+:::{note}
 A multi-node environment is more complicated than a single-node one. If you see errors such as `torch.distributed.DistNetworkError`, it is likely that the network/DNS setup is incorrect. In that case, you can manually assign node rank and specify the IP via command line arguments:
 
 - In the first node, run `NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --node-rank 0 --master_addr $MASTER_ADDR test.py`.
 - In the second node, run `NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --node-rank 1 --master_addr $MASTER_ADDR test.py`.
 
 Adjust `--nproc-per-node`, `--nnodes`, and `--node-rank` according to your setup, being sure to execute different commands (with different `--node-rank`) on different nodes.
-```
+:::
 
 (troubleshooting-python-multiprocessing)=
+
 ## Python multiprocessing
 
 ### `RuntimeError` Exception
@@ -194,6 +204,67 @@ if __name__ == '__main__':
 
     llm = vllm.LLM(...)
 ```
+
+## `torch.compile` Error
+
+vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](https://github.com/vllm-project/vllm/pull/10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
+
+```python
+import torch
+
+@torch.compile
+def f(x):
+    # a simple function to test torch.compile
+    x = x + 1
+    x = x * 2
+    x = x.sin()
+    return x
+
+x = torch.randn(4, 4).cuda()
+print(f(x))
+```
+
+If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See [this issue](https://github.com/vllm-project/vllm/issues/12219) for example.
+
+## Model failed to be inspected
+
+If you see an error like:
+
+```text
+  File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
+    raise ValueError(
+ValueError: Model architectures ['<arch>'] failed to be inspected. Please check the logs for more details.
+```
+
+It means that vLLM failed to import the model file.
+Usually, it is related to missing dependencies or outdated binaries in the vLLM build.
+Please read the logs carefully to determine the root cause of the error.
+
+## Model not supported
+
+If you see an error like:
+
+```text
+Traceback (most recent call last):
+...
+  File "vllm/model_executor/models/registry.py", line xxx, in inspect_model_cls
+    for arch in architectures:
+TypeError: 'NoneType' object is not iterable
+```
+
+or:
+
+```text
+  File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
+    raise ValueError(
+ValueError: Model architectures ['<arch>'] are not supported for now. Supported architectures: [...]
+```
+
+But you are sure that the model is in the [list of supported models](#supported-models), there may be some issue with vLLM's model resolution. In that case, please follow [these steps](#model-resolution) to explicitly specify the vLLM implementation for the model.
+
+## Failed to infer device type
+
+If you see an error like `RuntimeError: Failed to infer device type`, it means that vLLM failed to infer the device type of the runtime environment. You can check [the code](gh-file:vllm/platforms/__init__.py) to see how vLLM infers the device type and why it is not working as expected. After [this PR](gh-pr:14195), you can also set the environment variable `VLLM_LOGGING_LEVEL=DEBUG` to see more detailed logs to help debug the issue.
 
 ## Known Issues
 

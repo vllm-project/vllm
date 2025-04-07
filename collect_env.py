@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # ruff: noqa
 # code borrowed from https://github.com/pytorch/pytorch/blob/main/torch/utils/collect_env.py
 
@@ -480,16 +482,28 @@ def get_pip_packages(run_lambda, patterns=None):
     if patterns is None:
         patterns = DEFAULT_PIP_PATTERNS
 
-    # People generally have `pip` as `pip` or `pip3`
-    # But here it is invoked as `python -mpip`
-    def run_with_pip(pip):
-        out = run_and_read_all(run_lambda, pip + ["list", "--format=freeze"])
+    def run_with_pip():
+        try:
+            import importlib.util
+            pip_spec = importlib.util.find_spec('pip')
+            pip_available = pip_spec is not None
+        except ImportError:
+            pip_available = False
+
+        if pip_available:
+            cmd = [sys.executable, '-mpip', 'list', '--format=freeze']
+        elif os.environ.get("UV") is not None:
+            print("uv is set")
+            cmd = ["uv", "pip", "list", "--format=freeze"]
+        else:
+            raise RuntimeError("Could not collect pip list output (pip or uv module not available)")
+
+        out = run_and_read_all(run_lambda, cmd)
         return "\n".join(line for line in out.splitlines()
                          if any(name in line for name in patterns))
 
     pip_version = 'pip3' if sys.version[0] == '3' else 'pip'
-    out = run_with_pip([sys.executable, '-mpip'])
-
+    out = run_with_pip()
     return pip_version, out
 
 

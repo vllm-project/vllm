@@ -15,7 +15,7 @@ more are listed [here](#supported-models).
 
 By extracting hidden states, vLLM can automatically convert text generation models like [Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B),
 [Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3) into embedding models,
-but they are expected be inferior to models that are specifically trained on embedding tasks.
+but they are expected to be inferior to models that are specifically trained on embedding tasks.
 
 ______________________________________________________________________
 
@@ -30,7 +30,7 @@ changes in batch size, or batch expansion in speculative decoding. These batchin
 can lead to slightly different logit/logprob values at each step. Such differences can accumulate, potentially resulting in
 different tokens being sampled. Once a different token is sampled, further divergence is likely.
 
-**Mitigation Strategies**
+## Mitigation Strategies
 
 - For improved stability and reduced variance, use `float32`. Note that this will require more memory.
 - If using `bfloat16`, switching to `float16` can also help.

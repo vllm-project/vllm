@@ -23,11 +23,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                Tensor query, Tensor key_cache,"
       "                Tensor value_cache, int num_kv_heads,"
       "                float scale, Tensor block_tables,"
-      "                Tensor context_lens, int block_size,"
+      "                Tensor context_lens,"
+      "                Tensor? query_start_loc,"
+      "                int block_size,"
       "                int max_context_len,"
       "                Tensor? alibi_slopes,"
       "                str kv_cache_dtype,"
-      "                float k_scale, float v_scale) -> ()");
+      "                Tensor k_scale, Tensor v_scale) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
 }
 

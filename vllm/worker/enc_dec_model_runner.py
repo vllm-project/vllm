@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import itertools
 from typing import Any, Dict, List, Optional, Tuple, Type, cast
@@ -175,14 +177,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         } if self.has_inner_state else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        with set_forward_context(model_input.attn_metadata, self.vllm_config):
+        with set_forward_context(model_input.attn_metadata, self.vllm_config,
+                                 model_input.virtual_engine):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 encoder_input_ids=model_input.encoder_input_tokens,
                 encoder_positions=model_input.encoder_input_positions,
-                kv_caches=kv_caches,
-                attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                              device=self.device),
@@ -321,21 +322,11 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 or encoder_dummy_data.multi_modal_placeholders)
             seqs.append(seq)
 
-        # Run the model with the dummy inputs.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-        # use an empty tensor instead of `None`` to force Dynamo to pass
-        # it by reference, rather by specializing on the value ``None``.
-        # the `dtype` argument does not matter, and we use `float32` as
-        # a placeholder (it has wide hardware support).
-        kv_caches = [
-            torch.tensor([], dtype=torch.float32, device=self.device)
-            for _ in range(num_layers)
-        ]
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
         intermediate_tensors = None
-        self.execute_model(model_input, kv_caches, intermediate_tensors)
+        self.execute_model(model_input, None, intermediate_tensors)
         torch.cuda.synchronize()
         return
 

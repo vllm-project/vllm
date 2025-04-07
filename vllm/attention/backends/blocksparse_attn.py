@@ -1,9 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
@@ -89,8 +92,7 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        # For attention layer compatibility
-        return "FLASH_ATTN"
+        return "BLOCK_SPARSE_FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> Type["BlocksparseFlashAttentionImpl"]:
@@ -222,6 +224,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
+            enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -251,6 +254,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=False,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
@@ -331,11 +335,11 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         self.sparse_block_size = self.blocksparse_params.block_size
         self.head_sliding_step = self.blocksparse_params.head_sliding_step
 
-        suppored_head_sizes = PagedAttention.get_supported_head_sizes()
-        if head_size not in suppored_head_sizes:
+        supported_head_sizes = PagedAttention.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
-                f"Supported head sizes are: {suppored_head_sizes}.")
+                f"Supported head sizes are: {supported_head_sizes}.")
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -359,13 +363,12 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: BlocksparseFlashAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
@@ -402,8 +405,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                k_scale,
-                v_scale,
+                layer._k_scale,
+                layer._v_scale,
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
@@ -440,8 +443,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                k_scale,
-                v_scale,
+                layer._k_scale,
+                layer._v_scale,
                 tp_rank=self.tp_rank,
                 blocksparse_local_blocks=self.local_blocks,
                 blocksparse_vert_stride=self.vert_stride,

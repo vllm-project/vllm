@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -20,13 +22,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GraniteMoe model."""
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
 from transformers.models.granitemoe import GraniteMoeConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -171,13 +173,11 @@ class GraniteMoeAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -224,8 +224,6 @@ class GraniteMoeDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
@@ -233,8 +231,6 @@ class GraniteMoeDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states * self.residual_multiplier
         residual = hidden_states
@@ -256,7 +252,6 @@ class GraniteMoeModel(nn.Module):
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
-        self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
@@ -285,8 +280,6 @@ class GraniteMoeModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -301,11 +294,8 @@ class GraniteMoeModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
-            hidden_states = layer(positions, hidden_states,
-                                  kv_caches[i - self.start_layer],
-                                  attn_metadata)
+        for layer in self.layers[self.start_layer:self.end_layer]:
+            hidden_states = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -327,13 +317,6 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "embed_tokens",
-        "lm_head",
-        "layer",
-    ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
@@ -348,6 +331,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.config = config
         self.lora_config = lora_config
+        self.quant_config = quant_config  # Required by MixtralForCausalLM
 
         self.model = GraniteMoeModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))
@@ -381,13 +365,10 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
 
@@ -428,10 +409,10 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
                         '.block_sparse_moe.input_linear.weight',
-                        ".block_sparse_moe.experts.%d.w1.weight" % e)
+                        f".block_sparse_moe.experts.{e}.w1.weight")
                     w3_name = n.replace(
                         '.block_sparse_moe.input_linear.weight',
-                        ".block_sparse_moe.experts.%d.w3.weight" % e)
+                        f".block_sparse_moe.experts.{e}.w3.weight")
                     w1_param, w3_param = p[e].chunk(2, dim=0)
                     assert w1_name not in new_weights
                     assert w3_name not in new_weights
@@ -441,7 +422,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
                         '.block_sparse_moe.output_linear.weight',
-                        ".block_sparse_moe.experts.%d.w2.weight" % e)
+                        f".block_sparse_moe.experts.{e}.w2.weight")
                     w2_param = p[e]
                     assert w2_name not in new_weights
                     new_weights[w2_name] = w2_param

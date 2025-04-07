@@ -1,12 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import json
-from typing import Dict
 
 from vllm.profiler.layerwise_profile import ModelStatsEntry, SummaryStatsEntry
 from vllm.profiler.utils import TablePrinter, indent_string
 
 
-def flatten_entries(entry_cls, profile_dict: Dict):
+def flatten_entries(entry_cls, profile_dict: dict):
     entries_and_depth = []
 
     def get_entries(node, curr_depth=0):
@@ -31,7 +32,7 @@ if __name__ == "__main__":
                         type=str,
                         required=True,
                         help="json trace file output by "
-                        "examples/offline_inference/offline_profile.py")
+                        "examples/offline_inference/profiling.py")
     parser.add_argument("--phase",
                         type=str,
                         required=True,

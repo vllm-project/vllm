@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention backend utils"""
 from collections import defaultdict
 from contextlib import contextmanager
@@ -10,8 +11,11 @@ import torch
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
 from vllm.attention.backends.abstract import AttentionType
+from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import ModelRunnerBase
@@ -122,6 +126,13 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
     _metadata_cls: Type[TAttentionMetadata]
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
+
+        self.sliding_window = input_builder.sliding_window
+        self.block_size = input_builder.block_size
+
+    def prepare(self):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
@@ -133,12 +144,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
-
-        self.input_builder = input_builder
-        self.runner = input_builder.runner
-
-        self.sliding_window = input_builder.sliding_window
-        self.block_size = input_builder.block_size
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -264,6 +269,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
+            enable_kv_scales_calculation=True,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -287,7 +293,9 @@ class CommonAttentionState(AttentionState):
 
     @contextmanager
     def graph_capture(self, max_batch_size: int):
+
         self._is_graph_capturing = True
+
         self._graph_slot_mapping = torch.full((max_batch_size, ),
                                               PAD_SLOT_ID,
                                               dtype=torch.long,
@@ -297,7 +305,9 @@ class CommonAttentionState(AttentionState):
                                           device=self.runner.device)
         self._graph_block_tables = torch.from_numpy(
             self.runner.graph_block_tables).to(device=self.runner.device)
+
         yield
+
         self._is_graph_capturing = False
         del self._graph_slot_mapping
         del self._graph_seq_lens
@@ -316,6 +326,7 @@ class CommonAttentionState(AttentionState):
             num_decode_tokens=batch_size,
             slot_mapping=self._graph_slot_mapping[:batch_size],
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=True,
             seq_lens=None,
             seq_lens_tensor=self._graph_seq_lens[:batch_size],
             max_query_len=1,

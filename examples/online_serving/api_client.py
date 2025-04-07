@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Example Python client for `vllm.entrypoints.api_server`
 NOTE: The API server is used only for demonstration and simple performance
 benchmarks. It is not intended for production use.
@@ -6,7 +7,7 @@ For production use, we recommend `vllm serve` and the OpenAI client API.
 
 import argparse
 import json
-from typing import Iterable, List
+from collections.abc import Iterable
 
 import requests
 
@@ -38,17 +39,17 @@ def post_http_request(prompt: str,
     return response
 
 
-def get_streaming_response(response: requests.Response) -> Iterable[List[str]]:
+def get_streaming_response(response: requests.Response) -> Iterable[list[str]]:
     for chunk in response.iter_lines(chunk_size=8192,
                                      decode_unicode=False,
-                                     delimiter=b"\0"):
+                                     delimiter=b"\n"):
         if chunk:
             data = json.loads(chunk.decode("utf-8"))
             output = data["text"]
             yield output
 
 
-def get_response(response: requests.Response) -> List[str]:
+def get_response(response: requests.Response) -> list[str]:
     data = json.loads(response.content)
     output = data["text"]
     return output

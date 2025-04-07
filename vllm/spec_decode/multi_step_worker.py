@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 import weakref
 from typing import Dict, List, Set, Tuple
@@ -5,6 +7,7 @@ from typing import Dict, List, Set, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
                            SequenceGroupMetadata)
@@ -16,10 +19,10 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.worker.worker_base import DelegateWorkerBase
 
 
-class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
+class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
     """The MultiStepWorker is equivalent to a Worker except that it allows
     multiple forward passes in a single call, assuming the scheduler has
     allocated enough space to store the additional KV. This reduces overhead
@@ -32,15 +35,12 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(kwargs.get("vllm_config"))
-        self.init_worker(*args, **kwargs)
-
+        DelegateWorkerBase.__init__(self, *args, **kwargs)
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
     def init_device(self) -> None:
         self.worker.init_device()
-
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]
             self.device,
@@ -55,18 +55,6 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
     def set_should_modify_greedy_probs_inplace(self) -> None:
         self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
             True)
-
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        return self.worker.determine_num_available_blocks()
-
-    def get_cache_block_size_bytes(self) -> int:
-        return self.worker.get_cache_block_size_bytes()
-
-    def initialize_cache(self, *args, **kwargs) -> None:
-        self.worker.initialize_cache(*args, **kwargs)
-
-    def execute_model(self, *args, **kwargs) -> List[SamplerOutput]:
-        return self.worker.execute_model(*args, **kwargs)
 
     @torch.inference_mode()
     def sampler_output(
@@ -108,12 +96,16 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
             # TODO: Remove this branch once DraftModelRunner supports TP>1
             # and other restrictions that are part of DraftModelRunner's
             # supports_gpu_multi_step(..)
+            if expanded_request.previous_hidden_states is not None:
+                self.worker.model_runner.return_hidden_states = True
             for _ in range(sample_len):
                 model_output: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"
                 model_output = model_output[0]
+                self._maybe_update_previous_hidden_states(
+                    model_output, expanded_request)
 
                 self._append_new_tokens(
                     model_output, expanded_request.seq_group_metadata_list,
@@ -126,6 +118,19 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
         filtered_model_outputs = self._filter_model_output(
             model_outputs, indices_of_seq_with_bonus_tokens)
         return filtered_model_outputs, True
+
+    @staticmethod
+    def _maybe_update_previous_hidden_states(
+            model_output: SamplerOutput,
+            expanded_request: ExecuteModelRequest) -> None:
+        """
+        Updates the previous hidden states in an expanded request
+        in-place with the hidden states from the model output. 
+        """
+        if expanded_request.previous_hidden_states is not None:
+            expanded_request.previous_hidden_states = HiddenStates(
+                model_output.hidden_states,
+                expanded_request.seq_group_metadata_list)
 
     @staticmethod
     def _expand_execute_model_request(
@@ -399,3 +404,14 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
                 execute_model_req.seq_group_metadata_list):
             raise NotImplementedError(
                 "MultiStepWorker does not support beam search.")
+
+    def maybe_load_lm_head_weight(
+        self,
+        lm_head_weight: torch.Tensor,
+    ) -> None:
+        weight_loader = getattr(
+            self.worker.model_runner.model_runner.model.lm_head.weight,
+            "weight_loader", default_weight_loader)
+        weight_loader(
+            self.worker.model_runner.model_runner.model.lm_head.weight,
+            lm_head_weight)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Configuration file for the Sphinx documentation builder.
 #
 # This file only contains a selection of the most common options. For a full
@@ -10,11 +12,11 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
+import datetime
 import inspect
 import logging
 import os
 import sys
-from typing import List
 
 import requests
 from sphinx.ext import autodoc
@@ -25,7 +27,7 @@ sys.path.append(os.path.abspath("../.."))
 # -- Project information -----------------------------------------------------
 
 project = 'vLLM'
-copyright = '2024, vLLM Team'
+copyright = f'{datetime.datetime.now().year}, vLLM Team'
 author = 'the vLLM Team'
 
 # -- General configuration ---------------------------------------------------
@@ -35,7 +37,6 @@ author = 'the vLLM Team'
 # ones.
 extensions = [
     "sphinx.ext.napoleon",
-    "sphinx.ext.viewcode",
     "sphinx.ext.linkcode",
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",
@@ -43,6 +44,7 @@ extensions = [
     "sphinx.ext.autosummary",
     "myst_parser",
     "sphinxarg.ext",
+    "sphinx_design",
     "sphinx_togglebutton",
 ]
 myst_enable_extensions = [
@@ -55,7 +57,7 @@ templates_path = ['_templates']
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns: List[str] = ["**/*.template.md"]
+exclude_patterns: list[str] = ["**/*.template.md", "**/*.inc.md"]
 
 # Exclude the prompt "$" when copying code
 copybutton_prompt_text = r"\$ "
@@ -69,15 +71,21 @@ copybutton_prompt_is_regexp = True
 html_title = project
 html_theme = 'sphinx_book_theme'
 html_logo = 'assets/logos/vllm-logo-text-light.png'
+html_favicon = 'assets/logos/vllm-logo-only-light.ico'
 html_theme_options = {
     'path_to_docs': 'docs/source',
     'repository_url': 'https://github.com/vllm-project/vllm',
     'use_repository_button': True,
     'use_edit_page_button': True,
 }
+# Add any paths that contain custom static files (such as style sheets) here,
+# relative to this directory. They are copied after the builtin static files,
+# so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
 html_js_files = ["custom.js"]
+html_css_files = ["custom.css"]
 
+myst_heading_anchors = 2
 myst_url_schemes = {
     'http': None,
     'https': None,
@@ -93,6 +101,11 @@ myst_url_schemes = {
         "url":
         "https://github.com/vllm-project/vllm/pull/{{path}}#{{fragment}}",
         "title": "Pull Request #{{path}}",
+        "classes": ["github"],
+    },
+    "gh-project": {
+        "url": "https://github.com/orgs/vllm-project/projects/{{path}}",
+        "title": "Project #{{path}}",
         "classes": ["github"],
     },
     "gh-dir": {
@@ -117,11 +130,6 @@ if READTHEDOCS_VERSION_TYPE == "tag":
     # (readthedocs build both HTML and PDF versions separately)
     if os.path.exists(header_file):
         os.remove(header_file)
-
-# Add any paths that contain custom static files (such as style sheets) here,
-# relative to this directory. They are copied after the builtin static files,
-# so a file named "default.css" will overwrite the builtin "default.css".
-# html_static_path = ['_static']
 
 
 # Generate additional rst documentation here.

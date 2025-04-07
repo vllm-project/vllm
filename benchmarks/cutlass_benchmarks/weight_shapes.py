@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Weight Shapes are in the format
 # ([K, N], TP_SPLIT_DIM)
 # Example:

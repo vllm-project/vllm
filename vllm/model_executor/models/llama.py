@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -20,17 +22,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, Union
+from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
 
 import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -38,16 +39,13 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -97,20 +95,19 @@ class LlamaMLP(nn.Module):
 
 class LlamaAttention(nn.Module):
 
-    def __init__(
-        self,
-        config: LlamaConfig,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
-        bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self,
+                 config: LlamaConfig,
+                 hidden_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 rope_theta: float = 10000,
+                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 max_position_embeddings: int = 8192,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 bias: bool = False,
+                 bias_o_proj: bool = False,
+                 cache_config: Optional[CacheConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
@@ -131,6 +128,9 @@ class LlamaAttention(nn.Module):
         # MistralConfig has an optional head_dim introduced by Mistral-Nemo
         self.head_dim = getattr(config, "head_dim",
                                 self.hidden_size // self.total_num_heads)
+        # Phi models introduced a partial_rotary_factor parameter in the config
+        partial_rotary_factor = getattr(config, "partial_rotary_factor", 1)
+        self.rotary_dim = int(partial_rotary_factor * self.head_dim)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -150,18 +150,19 @@ class LlamaAttention(nn.Module):
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
-            bias=bias,
+            bias=bias_o_proj,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
 
         is_neox_style = True
-        if quant_config is not None and quant_config.get_name() == "gguf":
+        is_gguf = quant_config and quant_config.get_name() == "gguf"
+        if is_gguf and config.model_type == "llama":
             is_neox_style = False
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
+            rotary_dim=self.rotary_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
@@ -196,13 +197,11 @@ class LlamaAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -230,6 +229,11 @@ class LlamaDecoderLayer(nn.Module):
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
+        bias_o_proj = attention_bias
+        # support internlm/internlm3-8b with qkv_bias
+        if hasattr(config, 'qkv_bias'):
+            attention_bias = config.qkv_bias
+
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
@@ -241,6 +245,7 @@ class LlamaDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,
+            bias_o_proj=bias_o_proj,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
@@ -261,8 +266,6 @@ class LlamaDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -273,9 +276,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
         hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states,
-                                       kv_cache=kv_cache,
-                                       attn_metadata=attn_metadata)
+                                       hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -300,7 +301,7 @@ class LlamaModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
-        self.padding_idx = config.pad_token_id
+        self.quant_config = quant_config
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
@@ -339,8 +340,6 @@ class LlamaModel(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -355,11 +354,8 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states,
-                                            kv_caches[i - self.start_layer],
-                                            attn_metadata, residual)
+        for layer in self.layers[self.start_layer:self.end_layer]:
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -390,15 +386,22 @@ class LlamaModel(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if scale_name := get_compressed_tensors_cache_scale(name):
-                # Loading kv cache scales for compressed-tensors quantization
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                loaded_weight = loaded_weight[0]
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
+            if "scale" in name:
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -418,10 +421,6 @@ class LlamaModel(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
 
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -433,32 +432,6 @@ class LlamaModel(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
-    # If this function is called, it should always initialize KV cache scale
-    # factors (or else raise an exception). Thus, handled exceptions should
-    # make sure to leave KV cache scale factors in a known good (dummy) state
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for layer_idx, scaling_factor in kv_cache_scales_loader(
-                quantization_param_path, tp_rank, tp_size,
-                self.config.num_hidden_layers,
-                self.config.__class__.model_type):
-            if not isinstance(self.layers[layer_idx], nn.Identity):
-                layer_self_attn = self.layers[layer_idx].self_attn
-
-            if current_platform.is_rocm():
-                # The scaling factor convention we are assuming is
-                # quantized_value * scaling_factor ~= true_value
-                # which is consistent with the practice of setting
-                # scaling_factor = tensor_amax / FPtype_max
-                scaling_factor *= 2
-            if hasattr(layer_self_attn.attn, "_k_scale"):
-                layer_self_attn.attn._k_scale = scaling_factor
-                layer_self_attn.attn._v_scale = scaling_factor
-            else:
-                raise RuntimeError("Self attention has no KV cache scaling "
-                                   "factor attribute!")
-
 
 class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
@@ -467,31 +440,20 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
-        "lm_head"
-    ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings"
     }
     embedding_padding_modules = ["lm_head"]
 
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
-
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
     mistral_mapping = {
         "layers": "model.layers",
         "attention": "self_attn",
+        "qscale_act": "input_scale",
+        "qscale_weight": "weight_scale",
+        "kv_fake_quantizer.qscale_act": "kv_scale",
         "wq": "q_proj",
         "wk": "k_proj",
         "wv": "v_proj",
@@ -561,13 +523,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.model(input_ids, positions, kv_caches,
-                                  attn_metadata, intermediate_tensors,
+        model_output = self.model(input_ids, positions, intermediate_tensors,
                                   inputs_embeds)
         return model_output
 
@@ -596,9 +555,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.maybe_remap_mistral(name, loaded_weight)
             for name, loaded_weight in weights)
 
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        self.model.load_kv_cache_scales(quantization_param_path)
-
     # This function is used to remap the mistral format as
     # used by Mistral and Llama <=2
     def maybe_remap_mistral(
@@ -618,15 +574,24 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         modules = name.split(".")
 
         # rotary embeds should be sliced
-        if "wk" in modules:
+        if "wk" in modules and modules[-1] == "weight":
             loaded_weight = permute(loaded_weight,
                                     self.config.num_key_value_heads)
-        elif "wq" in modules:
+        elif "wq" in modules and modules[-1] == "weight":
             loaded_weight = permute(loaded_weight,
                                     self.config.num_attention_heads)
 
-        for item in modules:
-            if item in mapping and mapping[item] not in name:
+        num_modules = len(modules)
+        for i in range(num_modules):
+            item = modules[i]
+            next_item = modules[i + 1] if i < num_modules - 1 else None
+
+            combined_item = (f"{item}.{next_item}"
+                             if next_item is not None else None)
+
+            if combined_item in mapping:
+                name = name.replace(combined_item, mapping[combined_item])
+            elif item in mapping and mapping[item] not in name:
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight

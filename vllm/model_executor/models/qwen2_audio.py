@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
@@ -19,9 +21,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Any, Iterable, List, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import Any, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -31,21 +33,20 @@ from transformers.models.qwen2_audio import (Qwen2AudioConfig,
                                              Qwen2AudioProcessor)
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -90,8 +91,9 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
         *,
         # Ignored in initialization
         sampling_rate: Optional[int] = None,
+        **kwargs: object,
     ) -> Qwen2AudioProcessor:
-        return self.ctx.get_hf_processor(Qwen2AudioProcessor)
+        return self.ctx.get_hf_processor(Qwen2AudioProcessor, **kwargs)
 
     def get_feature_extractor(
         self,
@@ -107,7 +109,11 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         hf_config = self.get_hf_config()
         max_source_positions = hf_config.audio_config.max_source_positions
         max_output_lengths = (max_source_positions - 2) // 2 + 1
@@ -153,28 +159,23 @@ class Qwen2AudioMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
     ) -> BatchFeature:
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+        # Text-only input not supported in composite processor
+        if not mm_data.get("audios", []):
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        if audios:
-            mm_data["audios"] = audios
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+        mm_kwargs = dict(
+            **mm_kwargs,
+            sampling_rate=feature_extractor.sampling_rate,
+        )
 
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
-        else:
-            # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
-            pass
-
-        processed_outputs = super()._call_hf_processor(
+        return super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
-
-        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -186,14 +187,26 @@ class Qwen2AudioMultiModalProcessor(
             feature_attention_mask=MultiModalFieldConfig.batched("audio"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
-        hf_config = self.info.get_hf_config()
-        placeholder = hf_config.audio_token_index
+    ) -> Sequence[PromptUpdate]:
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        # Use getattr with default to be compatible with transformers<4.48
+        audio_token = getattr(processor, "audio_token", "<|AUDIO|>")
+        audio_bos_token = getattr(processor, "audio_bos_token",
+                                  "<|audio_bos|>")
+        audio_eos_token = getattr(processor, "audio_eos_token",
+                                  "<|audio_eos|>")
+
+        audio_token_id = vocab[audio_token]
+        audio_bos_id = vocab[audio_bos_token]
+        audio_eos_id = vocab[audio_eos_token]
 
         feature_attention_mask = out_mm_kwargs.get("feature_attention_mask")
         if feature_attention_mask is None:
@@ -206,33 +219,28 @@ class Qwen2AudioMultiModalProcessor(
             audio_output_lengths = audio_output_lens.tolist()
 
         def get_replacement_qwen2_audio(item_idx: int):
-            num_placeholders = audio_output_lengths[item_idx]
-            if num_placeholders == 0:
+            num_features = audio_output_lengths[item_idx]
+            if num_features == 0:
                 audios = mm_items.get_items("audio", AudioProcessorItems)
-                audio = audios.get(item_idx)
-                raise ValueError(
-                    f"The audio {audio} (len={len(audio)}) is too short "
-                    "to be represented inside the model")
+                audio_len = audios.get_audio_length(item_idx)
 
-            return [placeholder] * num_placeholders
+                raise ValueError(f"The audio (len={audio_len}) is too short "
+                                 "to be represented inside the model")
+
+            audio_tokens = [audio_token_id] * num_features
+
+            return PromptUpdateDetails(
+                full=[audio_bos_id] + audio_tokens + [audio_eos_id],
+                features=audio_tokens,
+            )
 
         return [
             PromptReplacement(
                 modality="audio",
-                target=[placeholder],
+                target=audio_token,
                 replacement=get_replacement_qwen2_audio,
             )
         ]
-
-    def _always_apply_prompt_replacements(self) -> bool:
-        # Qwen2-Audio processor will start inserting placeholder tokens
-        # in an upcoming release:
-        # https://github.com/huggingface/transformers/pull/35534
-        # NOTE: `_find_placeholders_by_modality` may incorrectly think that HF
-        # has already performed processing for multi-audio input when the input
-        # audios are short (the corresponding placeholders may take up fewer
-        # tokens than the number of audio items)
-        return not hasattr(self.info.get_hf_processor(), "audio_token")
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -347,7 +355,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         return torch.split(masked_audio_features,
                            audio_output_lengths.flatten().tolist())
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return None
@@ -357,7 +366,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
@@ -370,8 +379,6 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -390,8 +397,6 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
         return hidden_states

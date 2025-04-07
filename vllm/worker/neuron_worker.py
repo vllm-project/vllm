@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A Neuron worker class."""
 from typing import List, Optional, Tuple
 
@@ -8,14 +9,15 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase, WorkerBase,
+                                     LoRANotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 
-class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
+class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
     """
 
@@ -25,6 +27,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        is_driver_worker: bool = True,
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
         self.local_rank = local_rank
@@ -37,7 +40,22 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
             vllm_config=vllm_config)
-        self.is_driver_worker = True
+        self.is_driver_worker = is_driver_worker
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+    ) -> Optional[List[SamplerOutput]]:
+        assert execute_model_req is not None
+        assert (not execute_model_req.blocks_to_swap_in
+                and not execute_model_req.blocks_to_swap_out
+                and not execute_model_req.blocks_to_copy), (
+                    "Cache operations are not supported for Neuron backend.")
+        assert execute_model_req.num_lookahead_slots == 0, (
+            "lookahead not supported for Neuron backend.")
+        output = LocalOrDistributedWorkerBase.execute_model(
+            self, execute_model_req)
+        return output
 
     def init_device(self) -> None:
         self.init_distributed_environment()
@@ -58,7 +76,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # Set the number of GPU blocks to be the same as the maximum number of
         # sequences that can be processed in a single batch. This is equivalent
         # to schedule without PagedAttention.
-        num_gpu_blocks = self.scheduler_config.max_num_seqs
+        num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
 
         # Swap not yet supported with Neuron backend.
         num_cpu_blocks = 0
@@ -72,7 +90,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         # Different values are not tested.
         assert num_cpu_blocks == 0
-        assert num_gpu_blocks == self.scheduler_config.max_num_seqs
+        assert num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -103,13 +121,14 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def init_distributed_environment(self):
         """Neuron uses transformers-neuronx for tensor parallelism.
-
-        vLLM still needs the environment inited when TP/PP > 1
+        It has only one process to control multiple devices.
+        vLLM still needs the environment initialized when TP/PP > 1,
+        so we initialize a distributed environment with one process.
         """
         init_distributed_environment(
             world_size=1,
-            rank=self.rank,
-            local_rank=self.local_rank,
+            rank=0,
+            local_rank=0,
             distributed_init_method=self.distributed_init_method,
             backend="gloo",
         )

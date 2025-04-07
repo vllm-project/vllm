@@ -3,7 +3,7 @@
 ## User-facing inputs
 
 ```{eval-rst}
-.. autodata:: vllm.multimodal.MultiModalDataDict
+.. autodata:: vllm.multimodal.inputs.MultiModalDataDict
 ```
 
 ## Internal data structures
@@ -43,7 +43,7 @@
 ```
 
 ```{eval-rst}
-.. autoclass:: vllm.multimodal.inputs.MultiModalInputsV2
+.. autoclass:: vllm.multimodal.inputs.MultiModalInputs
     :members:
     :show-inheritance:
 ```

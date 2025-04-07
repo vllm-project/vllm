@@ -1,4 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
 """vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
+# The version.py should be independent library, and we always import the
+# version library first.  Such assumption is critical for some customization.
+from .version import __version__, __version_tuple__  # isort:skip
+
+# The environment variables override should be imported before any other
+# modules to ensure that the environment variables are set before any
+# other modules are imported.
+import vllm.env_override  # isort:skip  # noqa: F401
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -14,8 +23,6 @@ from vllm.outputs import (ClassificationOutput, ClassificationRequestOutput,
                           ScoringRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-
-from .version import __version__, __version_tuple__
 
 __all__ = [
     "__version__",

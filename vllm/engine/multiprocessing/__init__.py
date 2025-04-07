@@ -1,4 +1,7 @@
-from dataclasses import dataclass
+# SPDX-License-Identifier: Apache-2.0
+
+import uuid
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Mapping, Optional, Union, overload
 
@@ -10,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.utils import deprecate_kwargs
+from vllm.utils import Device, deprecate_kwargs
 
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
 
@@ -120,10 +123,52 @@ class RPCUProfileRequest(Enum):
     STOP_PROFILE = 2
 
 
-RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
-                      RPCUProfileRequest]
+@dataclass
+class RPCResetPrefixCacheRequest:
+    device: Device
 
-REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
+
+class RPCSleepRequest(Enum):
+    SLEEP_LEVEL_1 = 1
+    SLEEP_LEVEL_2 = 2
+
+
+@dataclass
+class RPCWakeUpRequest:
+    tags: Optional[list[str]] = None
+
+
+@dataclass
+class RPCIsSleepingRequest:
+    # Set the default value of request_id to a new UUID
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class RPCIsSleepingResponse:
+    request_id: str
+    is_sleeping: bool
+
+
+@dataclass
+class RPCLoadAdapterRequest:
+    lora_request: LoRARequest
+    # Set the default value of request_id to a new UUID
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class RPCAdapterLoadedResponse:
+    request_id: str
+
+
+RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
+                      RPCUProfileRequest, RPCLoadAdapterRequest,
+                      RPCResetPrefixCacheRequest, RPCSleepRequest,
+                      RPCWakeUpRequest, RPCIsSleepingRequest]
+
+REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
+                          RPCIsSleepingResponse, RPCError]
 
 
 def ENGINE_DEAD_ERROR(

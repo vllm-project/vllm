@@ -1,17 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# ruff: noqa
+
 import asyncio
-import os
+import hashlib
+import pickle
 import socket
-from typing import AsyncIterator, Tuple
+from collections.abc import AsyncIterator
+from unittest.mock import patch
 
 import pytest
 import torch
-from vllm_test_utils import monitor
+from vllm_test_utils.monitor import monitor
 
-from vllm.utils import (FlexibleArgumentParser, StoreBoolean, deprecate_kwargs,
-                        get_open_port, memory_profiling, merge_async_iterators,
-                        supports_kw)
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
+                        PlaceholderModule, StoreBoolean, bind_kv_cache,
+                        deprecate_kwargs, get_open_port, memory_profiling,
+                        merge_async_iterators, sha256, supports_kw,
+                        swap_dict_values)
 
-from .utils import error_on_warning, fork_new_process_for_each_test
+from .utils import create_new_process_for_each_test, error_on_warning
 
 
 @pytest.mark.asyncio
@@ -28,7 +36,7 @@ async def test_merge_async_iterators():
     iterators = [mock_async_iterator(i) for i in range(3)]
     merged_iterator = merge_async_iterators(*iterators)
 
-    async def stream_output(generator: AsyncIterator[Tuple[int, str]]):
+    async def stream_output(generator: AsyncIterator[tuple[int, str]]):
         async for idx, output in generator:
             print(f"idx: {idx}, output: {output}")
 
@@ -107,16 +115,16 @@ def test_deprecate_kwargs_additional_message():
         dummy(old_arg=1)
 
 
-def test_get_open_port():
-    os.environ["VLLM_PORT"] = "5678"
-    # make sure we can get multiple ports, even if the env var is set
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
-        s1.bind(("localhost", get_open_port()))
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
-            s2.bind(("localhost", get_open_port()))
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
-                s3.bind(("localhost", get_open_port()))
-    os.environ.pop("VLLM_PORT")
+def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", "5678")
+        # make sure we can get multiple ports, even if the env var is set
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
+            s1.bind(("localhost", get_open_port()))
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                s2.bind(("localhost", get_open_port()))
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
+                    s3.bind(("localhost", get_open_port()))
 
 
 # Tests for FlexibleArgumentParser
@@ -135,7 +143,8 @@ def parser():
 def parser_with_config():
     parser = FlexibleArgumentParser()
     parser.add_argument('serve')
-    parser.add_argument('model_tag')
+    parser.add_argument('model_tag', nargs='?')
+    parser.add_argument('--model', type=str)
     parser.add_argument('--served-model-name', type=str)
     parser.add_argument('--config', type=str)
     parser.add_argument('--port', type=int)
@@ -191,29 +200,29 @@ def test_missing_required_argument(parser):
         parser.parse_args([])
 
 
-def test_cli_override_to_config(parser_with_config):
+def test_cli_override_to_config(parser_with_config, cli_config_file):
     args = parser_with_config.parse_args([
-        'serve', 'mymodel', '--config', './data/test_config.yaml',
+        'serve', 'mymodel', '--config', cli_config_file,
         '--tensor-parallel-size', '3'
     ])
     assert args.tensor_parallel_size == 3
     args = parser_with_config.parse_args([
         'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-        './data/test_config.yaml'
+        cli_config_file
     ])
     assert args.tensor_parallel_size == 3
     assert args.port == 12312
     args = parser_with_config.parse_args([
         'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-        './data/test_config.yaml', '--port', '666'
+        cli_config_file, '--port', '666'
     ])
     assert args.tensor_parallel_size == 3
     assert args.port == 666
 
 
-def test_config_args(parser_with_config):
+def test_config_args(parser_with_config, cli_config_file):
     args = parser_with_config.parse_args(
-        ['serve', 'mymodel', '--config', './data/test_config.yaml'])
+        ['serve', 'mymodel', '--config', cli_config_file])
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code
     assert not args.multi_step_stream_outputs
@@ -235,10 +244,9 @@ def test_config_file(parser_with_config):
         ])
 
 
-def test_no_model_tag(parser_with_config):
+def test_no_model_tag(parser_with_config, cli_config_file):
     with pytest.raises(ValueError):
-        parser_with_config.parse_args(
-            ['serve', '--config', './data/test_config.yaml'])
+        parser_with_config.parse_args(['serve', '--config', cli_config_file])
 
 
 # yapf: enable
@@ -271,7 +279,7 @@ def test_supports_kw(callable,kw_name,requires_kw_only,
     ) == is_supported
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_memory_profiling():
     # Fake out some model loading + inference memory usage to test profiling
     # Memory used by other processes will show up as cuda usage outside of torch
@@ -281,14 +289,13 @@ def test_memory_profiling():
     # 512 MiB allocation outside of this instance
     handle1 = lib.cudaMalloc(512 * 1024 * 1024)
 
-    baseline_memory_in_bytes = \
-        torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+    baseline_snapshot = MemorySnapshot()
 
     # load weights
 
     weights = torch.randn(128, 1024, 1024, device='cuda', dtype=torch.float32)
 
-    weights_memory_in_bytes = 128 * 1024 * 1024 * 4 # 512 MiB
+    weights_memory = 128 * 1024 * 1024 * 4 # 512 MiB
 
     def measure_current_non_torch():
         free, total = torch.cuda.mem_get_info()
@@ -297,8 +304,8 @@ def test_memory_profiling():
         current_non_torch = current_used - current_torch
         return current_non_torch
 
-    with memory_profiling(baseline_memory_in_bytes=baseline_memory_in_bytes,
-    weights_memory_in_bytes=weights_memory_in_bytes) as result, \
+    with memory_profiling(baseline_snapshot=baseline_snapshot,
+    weights_memory=weights_memory) as result, \
         monitor(measure_current_non_torch) as monitored_values:
         # make a memory spike, 1 GiB
         spike = torch.randn(256, 1024, 1024, device='cuda', dtype=torch.float32)
@@ -313,13 +320,222 @@ def test_memory_profiling():
     assert measured_diff == 256 * 1024 * 1024
 
     # Check that the memory usage is within 5% of the expected values
-    # 5% tolerance is caused by PyTorch caching allocator,
-    # we cannot control PyTorch's behavior of its internal buffers,
+    # 5% tolerance is caused by cuda runtime.
+    # we cannot control cuda runtime in the granularity of bytes,
     # which causes a small error (<10 MiB in practice)
-    non_torch_ratio = result.non_torch_increase_in_bytes / (256 * 1024 * 1024) # noqa
-    torch_peak_ratio = result.torch_peak_increase_in_bytes / (1024 * 1024 * 1024) # noqa
+    non_torch_ratio = result.non_torch_increase / (256 * 1024 * 1024) # noqa
     assert abs(non_torch_ratio - 1) <= 0.05
-    assert abs(torch_peak_ratio - 1) <= 0.05
+    assert result.torch_peak_increase == 1024 * 1024 * 1024
     del weights
     lib.cudaFree(handle1)
     lib.cudaFree(handle2)
+
+
+def test_bind_kv_cache():
+    from vllm.attention import Attention
+
+    ctx = {
+        'layers.0.self_attn': Attention(32, 128, 0.1),
+        'layers.1.self_attn': Attention(32, 128, 0.1),
+        'layers.2.self_attn': Attention(32, 128, 0.1),
+        'layers.3.self_attn': Attention(32, 128, 0.1),
+    }
+    kv_cache = [
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+    ]
+    bind_kv_cache(ctx, [kv_cache])
+    assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0]
+    assert ctx['layers.1.self_attn'].kv_cache[0] is kv_cache[1]
+    assert ctx['layers.2.self_attn'].kv_cache[0] is kv_cache[2]
+    assert ctx['layers.3.self_attn'].kv_cache[0] is kv_cache[3]
+
+def test_bind_kv_cache_non_attention():
+    from vllm.attention import Attention
+
+    # example from Jamba PP=2
+    ctx = {
+        'model.layers.20.attn': Attention(32, 128, 0.1),
+        'model.layers.28.attn': Attention(32, 128, 0.1),
+    }
+    kv_cache = [
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+    ]
+    bind_kv_cache(ctx, [kv_cache])
+    assert ctx['model.layers.20.attn'].kv_cache[0] is kv_cache[0]
+    assert ctx['model.layers.28.attn'].kv_cache[0] is kv_cache[1]
+
+
+def test_bind_kv_cache_encoder_decoder(monkeypatch: pytest.MonkeyPatch):
+    # V1 TESTS: ENCODER_DECODER is not supported on V1 yet.
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "0")
+
+        from vllm.attention import Attention, AttentionType
+
+        # example from bart
+        ctx = {
+            'encoder.layers.0.self_attn.attn':
+                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
+            'decoder.layers.0.encoder_attn.attn':
+                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
+            'decoder.layers.0.self_attn.attn':
+                Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
+        }
+
+        kv_cache = [
+            torch.zeros((1, )),
+        ]
+        encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
+
+        bind_kv_cache(ctx, [kv_cache])
+        assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
+        assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
+        assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
+
+
+def test_bind_kv_cache_pp():
+    with patch("vllm.utils.cuda_device_count_stateless", lambda: 2):
+        # this test runs with 1 GPU, but we simulate 2 GPUs
+        cfg = VllmConfig(
+            parallel_config=ParallelConfig(pipeline_parallel_size=2))
+    with set_current_vllm_config(cfg):
+        from vllm.attention import Attention
+
+        ctx = {
+            'layers.0.self_attn': Attention(32, 128, 0.1),
+        }
+        kv_cache = [
+            [torch.zeros((1, ))],
+            [torch.zeros((1, ))]
+        ]
+        bind_kv_cache(ctx, kv_cache)
+        assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0][0]
+        assert ctx['layers.0.self_attn'].kv_cache[1] is kv_cache[1][0]
+
+
+def test_placeholder_module_error_handling():
+    placeholder = PlaceholderModule("placeholder_1234")
+
+    def build_ctx():
+        return pytest.raises(ModuleNotFoundError,
+                             match="No module named")
+
+    with build_ctx():
+        int(placeholder)
+
+    with build_ctx():
+        placeholder()
+
+    with build_ctx():
+        _ = placeholder.some_attr
+
+    with build_ctx():
+        # Test conflict with internal __name attribute
+        _ = placeholder.name
+
+    # OK to print the placeholder or use it in a f-string
+    _ = repr(placeholder)
+    _ = str(placeholder)
+
+    # No error yet; only error when it is used downstream
+    placeholder_attr = placeholder.placeholder_attr("attr")
+
+    with build_ctx():
+        int(placeholder_attr)
+
+    with build_ctx():
+        placeholder_attr()
+
+    with build_ctx():
+        _ = placeholder_attr.some_attr
+
+    with build_ctx():
+        # Test conflict with internal __module attribute
+        _ = placeholder_attr.module
+
+
+@pytest.mark.parametrize(
+    "obj,key1,key2",
+    [
+        # Tests for both keys exist
+        ({1: "a", 2: "b"}, 1, 2),
+        # Tests for one key does not exist
+        ({1: "a", 2: "b"}, 1, 3),
+        # Tests for both keys do not exist
+        ({1: "a", 2: "b"}, 3, 4),
+    ])
+def test_swap_dict_values(obj, key1, key2):
+    original_obj = obj.copy()
+    swap_dict_values(obj, key1, key2)
+    if key1 in original_obj:
+        assert obj[key2] == original_obj[key1]
+    else:
+        assert key2 not in obj
+    if key2 in original_obj:
+        assert obj[key1] == original_obj[key2]
+    else:
+        assert key1 not in obj
+
+
+def test_model_specification(parser_with_config,
+                             cli_config_file,
+                             cli_config_file_with_model):
+    # Test model in CLI takes precedence over config
+    args = parser_with_config.parse_args([
+        'serve', 'cli-model', '--config', cli_config_file_with_model
+    ])
+    assert args.model_tag == 'cli-model'
+    assert args.served_model_name == 'mymodel'
+
+    # Test model from config file works
+    args = parser_with_config.parse_args([
+        'serve', '--config', cli_config_file_with_model,
+    ])
+    assert args.model == 'config-model'
+    assert args.served_model_name == 'mymodel'
+
+    # Test no model specified anywhere raises error
+    with pytest.raises(ValueError, match="No model specified!"):
+        parser_with_config.parse_args(['serve', '--config', cli_config_file])
+
+    # Test using --model option raises error
+    with pytest.raises(
+        ValueError,
+        match=(
+            "With `vllm serve`, you should provide the model as a positional "
+            "argument or in a config file instead of via the `--model` option."
+        ),
+    ):
+        parser_with_config.parse_args(['serve', '--model', 'my-model'])
+
+    # Test other config values are preserved
+    args = parser_with_config.parse_args([
+        'serve', 'cli-model', '--config', cli_config_file_with_model,
+    ])
+    assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code is True
+    assert args.multi_step_stream_outputs is False
+    assert args.port == 12312
+
+
+@pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
+                                    (None, bool, [1, 2, 3])])
+@pytest.mark.parametrize("output", [0, 1, 2])
+def test_sha256(input: tuple, output: int):
+    hash = sha256(input)
+    assert hash is not None
+    assert isinstance(hash, int)
+    assert hash != 0
+
+    bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    assert hash == int.from_bytes(hashlib.sha256(bytes).digest(), byteorder="big")
+
+    # hashing again, returns the same value
+    assert hash == sha256(input)
+
+    # hashing different input, returns different value
+    assert hash != sha256(input + (1, ))

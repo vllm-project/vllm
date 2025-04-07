@@ -2,27 +2,27 @@
 
 # dstack
 
-```{raw} html
+:::{raw} html
 <p align="center">
     <img src="https://i.ibb.co/71kx6hW/vllm-dstack.png" alt="vLLM_plus_dstack"/>
 </p>
-```
+:::
 
 vLLM can be run on a cloud based GPU machine with [dstack](https://dstack.ai/), an open-source framework for running LLMs on any cloud. This tutorial assumes that you have already configured credentials, gateway, and GPU quotas on your cloud environment.
 
 To install dstack client, run:
 
 ```console
-$ pip install "dstack[all]
-$ dstack server
+pip install "dstack[all]
+dstack server
 ```
 
 Next, to configure your dstack project, run:
 
 ```console
-$ mkdir -p vllm-dstack
-$ cd vllm-dstack
-$ dstack init
+mkdir -p vllm-dstack
+cd vllm-dstack
+dstack init
 ```
 
 Next, to provision a VM instance with LLM of your choice (`NousResearch/Llama-2-7b-chat-hf` for this example), create the following `serve.dstack.yml` file for the dstack `Service`:
@@ -97,6 +97,6 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-```{note}
+:::{note}
 dstack automatically handles authentication on the gateway using dstack's tokens. Meanwhile, if you don't want to configure a gateway, you can provision dstack `Task` instead of `Service`. The `Task` is for development purpose only. If you want to know more about hands-on materials how to serve vLLM using dstack, check out [this repository](https://github.com/dstackai/dstack-examples/tree/main/deployment/vllm)
-```
+:::

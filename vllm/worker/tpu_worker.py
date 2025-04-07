@@ -1,8 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from typing import List, Optional, Tuple, Union
 
 import torch
 import torch_xla.core.xla_model as xm
+import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
@@ -12,16 +15,16 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, bind_kv_cache, get_dtype_size
 from vllm.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase, WorkerBase,
+                                     LoRANotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 logger = init_logger(__name__)
 
 
-class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
+class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
@@ -47,6 +50,9 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         self.model_runner: TPUModelRunner = TPUModelRunner(
             vllm_config=vllm_config, is_driver_worker=is_driver_worker)
+
+        if self.model_config.seed is None:
+            self.model_config.seed = 0
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
@@ -87,9 +93,37 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # can have slightly different XLA graphs.
         world_size = self.parallel_config.world_size
         rank = xr.global_ordinal()
-        per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                     f"tp{world_size}_rank{rank}")
-        xr.initialize_cache(per_rank_path, readonly=False)
+        # The PyTorch/XLA compilation cache uses the Torch IR to generate keys.
+        # Consequently, changes in optimization flags, which affect compilation
+        # results, don't change the cache key. This can result in the wrong
+        # compilation being used. To prevent this, disabling the XLA compilation
+        # cache during development is recommended.We can disable it by
+        # `export VLLM_XLA_CACHE_PATH=`
+        if envs.VLLM_XLA_CACHE_PATH:
+            per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
+                                         f"tp{world_size}_rank{rank}")
+            xr.initialize_cache(per_rank_path, readonly=False)
+
+        self.profiler = None
+        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+            # For TPU, we can only have 1 active profiler session for 1 profiler
+            # server. So we only profile on rank0.
+            self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        self.profile_dir)
+            self.profiler = xp.start_server(9012)
+
+    def start_profile(self):
+        if self.rank < 1:
+            if self.profiler is None:
+                raise RuntimeError("Profiler is not enabled.")
+            xp.start_trace(self.profile_dir)
+
+    def stop_profile(self):
+        if self.rank < 1:
+            if self.profiler is None:
+                raise RuntimeError("Profiler is not enabled.")
+            xp.stop_trace()
 
     def load_model(self):
         self.model_runner.load_model()
@@ -108,6 +142,8 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                       torch.tensor([], dtype=torch.float32,
                                    device=self.device))
                      for _ in range(num_layers)]
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      [kv_caches])
         self.model_runner._dummy_run(
             batch_size=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
@@ -170,6 +206,8 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                                       device="cpu")
             cpu_v_cache = torch.zeros_like(cpu_k_cache)
             self.cpu_cache.append((cpu_k_cache, cpu_v_cache))
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      [self.tpu_cache])
         self._warmup_model()
 
     def _warmup_model(self) -> None:

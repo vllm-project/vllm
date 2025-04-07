@@ -7,7 +7,7 @@ vLLM is also available via [LangChain](https://github.com/langchain-ai/langchain
 To install LangChain, run
 
 ```console
-$ pip install langchain langchain_community -q
+pip install langchain langchain_community -q
 ```
 
 To run inference on a single or multiple GPUs, use `VLLM` class from `langchain`.

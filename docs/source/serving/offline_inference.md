@@ -11,6 +11,8 @@ For example, the following code downloads the [`facebook/opt-125m`](https://hugg
 and runs it in vLLM using the default configuration.
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="facebook/opt-125m")
 ```
 
@@ -22,14 +24,40 @@ The available APIs depend on the type of model that is being run:
 
 Please refer to the above pages for more details about each API.
 
-```{seealso}
+:::{seealso}
 [API Reference](/api/offline_inference/index)
-```
+:::
 
 ## Configuration Options
 
 This section lists the most common options for running the vLLM engine.
 For a full list, refer to the [Engine Arguments](#engine-args) page.
+
+(model-resolution)=
+
+### Model resolution
+
+vLLM loads HuggingFace-compatible models by inspecting the `architectures` field in `config.json` of the model repository
+and finding the corresponding implementation that is registered to vLLM.
+Nevertheless, our model resolution may fail for the following reasons:
+
+- The `config.json` of the model repository lacks the `architectures` field.
+- Unofficial repositories refer to a model using alternative names which are not recorded in vLLM.
+- The same architecture name is used for multiple models, creating ambiguity as to which model should be loaded.
+
+To fix this, explicitly specify the model architecture by passing `config.json` overrides to the `hf_overrides` option.
+For example:
+
+```python
+from vllm import LLM
+
+model = LLM(
+    model="cerebras/Cerebras-GPT-1.3B",
+    hf_overrides={"architectures": ["GPT2LMHeadModel"]},  # GPT-2
+)
+```
+
+Our [list of supported models](#supported-models) shows the model architectures that are recognized by vLLM.
 
 ### Reducing memory usage
 
@@ -46,12 +74,12 @@ llm = LLM(model="ibm-granite/granite-3.1-8b-instruct",
           tensor_parallel_size=2)
 ```
 
-```{important}
+:::{important}
 To ensure that vLLM initializes CUDA correctly, you should avoid calling related functions (e.g. {func}`torch.cuda.set_device`)
 before initializing vLLM. Otherwise, you may run into an error like `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
 
 To control which devices are used, please instead set the `CUDA_VISIBLE_DEVICES` environment variable.
-```
+:::
 
 #### Quantization
 
@@ -64,14 +92,23 @@ Dynamic quantization is also supported via the `quantization` option -- see [her
 
 #### Context length and batch size
 
-You can further reduce memory usage by limit the context length of the model (`max_model_len` option)
+You can further reduce memory usage by limiting the context length of the model (`max_model_len` option)
 and the maximum batch size (`max_num_seqs` option).
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="adept/fuyu-8b",
           max_model_len=2048,
           max_num_seqs=2)
 ```
+
+#### Adjust cache size
+
+If you run out of CPU RAM, try the following options:
+
+- (Multi-modal models only) you can set the size of multi-modal input cache using `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
+- (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable (default 4 GiB).
 
 ### Performance optimization and tuning
 

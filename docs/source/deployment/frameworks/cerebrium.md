@@ -2,25 +2,25 @@
 
 # Cerebrium
 
-```{raw} html
+:::{raw} html
 <p align="center">
     <img src="https://i.ibb.co/hHcScTT/Screenshot-2024-06-13-at-10-14-54.png" alt="vLLM_plus_cerebrium"/>
 </p>
-```
+:::
 
 vLLM can be run on a cloud based GPU machine with [Cerebrium](https://www.cerebrium.ai/), a serverless AI infrastructure platform that makes it easier for companies to build and deploy AI based applications.
 
 To install the Cerebrium client, run:
 
 ```console
-$ pip install cerebrium
-$ cerebrium login
+pip install cerebrium
+cerebrium login
 ```
 
 Next, create your Cerebrium project, run:
 
 ```console
-$ cerebrium init vllm-project
+cerebrium init vllm-project
 ```
 
 Next, to install the required packages, add the following to your cerebrium.toml:
@@ -58,10 +58,10 @@ def run(prompts: list[str], temperature: float = 0.8, top_p: float = 0.95):
 Then, run the following code to deploy it to the cloud:
 
 ```console
-$ cerebrium deploy
+cerebrium deploy
 ```
 
-If successful, you should be returned a CURL command that you can call inference against. Just remember to end the url with the function name you are calling (in our case` /run`)
+If successful, you should be returned a CURL command that you can call inference against. Just remember to end the url with the function name you are calling (in our case`/run`)
 
 ```python
 curl -X POST https://api.cortex.cerebrium.ai/v4/p-xxxxxx/vllm/run \

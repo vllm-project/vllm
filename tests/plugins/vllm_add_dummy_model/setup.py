@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from setuptools import setup
 
 setup(name='vllm_add_dummy_model',

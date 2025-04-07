@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,

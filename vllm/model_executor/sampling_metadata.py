@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from array import array
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -166,7 +168,8 @@ class SamplingMetadata:
             pin_memory=pin_memory,
         )
         categorized_sample_indices = {
-            t: async_tensor_h2d(
+            t:
+            async_tensor_h2d(
                 seq_ids,
                 dtype=torch.int,
                 target_device=device,
@@ -188,7 +191,7 @@ class SamplingMetadata:
             "SamplingMetadata("
             f"seq_groups={self.seq_groups}, "
             f"selected_token_indices={self.selected_token_indices}, "
-            f"categorized_sample_indices={self.categorized_sample_indices}), ")
+            f"categorized_sample_indices={self.categorized_sample_indices})")
 
 
 def _prepare_seq_groups(
@@ -198,8 +201,12 @@ def _prepare_seq_groups(
     device: str,
     generators: Optional[Dict[str, torch.Generator]] = None,
     cache: Optional[SamplingMetadataCache] = None,
-) -> Tuple[List[SequenceGroupToSample], List[int], Dict[SamplingType,
-                                                        List[int]], int, ]:
+) -> Tuple[
+        List[SequenceGroupToSample],
+        List[int],
+        Dict[SamplingType, List[int]],
+        int,
+]:
     """Prepare sequence groups and indices for sampling.
 
     Args:

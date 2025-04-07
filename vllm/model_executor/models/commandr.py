@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024 Cohere and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -19,14 +21,13 @@
 
 # This file is based on the LLama model definition file in transformers
 """PyTorch Cohere model."""
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
-import torch.utils.checkpoint
 from torch import nn
 from transformers import CohereConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -45,15 +46,16 @@ from vllm.model_executor.model_loader.weight_utils import (
     row_parallel_weight_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (extract_layer_index, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
 
-@torch.compile
+@torch.compile(backend=current_platform.simple_compile_backend)
 def layer_norm_func(hidden_states, weight, variance_epsilon):
     input_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)
@@ -215,8 +217,6 @@ class CohereAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -224,7 +224,7 @@ class CohereAttention(nn.Module):
             q, k = self._apply_qk_norm(q, k)
         if self.v1 or self.sliding_window:
             q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -252,8 +252,6 @@ class CohereDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -262,8 +260,6 @@ class CohereDecoderLayer(nn.Module):
         hidden_states_attention = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         hidden_states_mlp = self.mlp(hidden_states)
         # Add everything together
@@ -308,8 +304,6 @@ class CohereModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -323,13 +317,10 @@ class CohereModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
@@ -341,7 +332,7 @@ class CohereModel(nn.Module):
         return hidden_states
 
 
-class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -354,11 +345,7 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ],
     }
     # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens"
-    ]
     embedding_modules = {"embed_tokens": "input_embeddings"}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -390,13 +377,10 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
 
@@ -436,6 +420,19 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue

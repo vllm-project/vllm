@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 import random
-from typing import List, Optional
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -63,8 +65,8 @@ class TestPrefixCachingBlock:
 
         previous_block = MagicMock(spec=PrefixCachingBlock)
         prev_block_hash = random.randint(0, 1000)
-        previous_block.content_hash = (prev_block_hash
-                                       if prev_block_has_hash else None)
+        previous_block.content_hash = (prev_block_hash if prev_block_has_hash
+                                       else hash('None'))
 
         num_to_fill = block_size if is_curr_block_full else random.randint(
             0, block_size - 1)
@@ -121,11 +123,11 @@ class TestPrefixCachingBlock:
 
     @staticmethod
     def create_chain(block_size: int,
-                     token_ids: List[int],
-                     num_empty_trailing_blocks=0) -> List[PrefixCachingBlock]:
+                     token_ids: list[int],
+                     num_empty_trailing_blocks=0) -> list[PrefixCachingBlock]:
         """Helper method which creates a chain of blocks.
         """
-        blocks: List[PrefixCachingBlock] = []
+        blocks: list[PrefixCachingBlock] = []
         num_blocks = math.ceil(
             len(token_ids) / block_size) + num_empty_trailing_blocks
 
@@ -159,7 +161,7 @@ class TestPrefixCachingBlockAllocator:
     @staticmethod
     def create_allocate_lambda(allocate_type: str, allocator: BlockAllocator,
                                prev_block: Optional[Block],
-                               token_ids: List[int]):
+                               token_ids: list[int]):
         if allocate_type == "immutable":
             allocate_block = lambda: allocator.allocate_immutable_block(
                 prev_block=prev_block, token_ids=token_ids)
@@ -796,16 +798,54 @@ class TestPrefixCachingBlockAllocator:
             block_hashes=block_hashes_seq1)
         assert len(cached_blocks) == len(blocks_seq1) - num_evicted_blocks
 
+    # Test reset prefix cache
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [10])
+    @pytest.mark.parametrize("block_size", [16])
+    def test_reset_prefix_cache(num_blocks: int, block_size: int):
+        """This test case simulates the case of resetting the prefix cache."""
+
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
+                                                block_size=block_size)
+        token_ids = list(range(3 * block_size))
+
+        first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            allocator=allocator,
+        )
+        second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            allocator=allocator,
+        )
+
+        # Free each block in the first chain.
+        for block in first_chain:
+            allocator.free(block)
+
+        # Failed to reset prefix cache because some blocks are not freed yet.
+        assert not allocator.reset_prefix_cache()
+        assert allocator.get_prefix_cache_hit_rate() > 0.0
+
+        # Free each block in the second chain.
+        for block in second_chain:
+            allocator.free(block)
+
+        # Reset prefix cache.
+        assert allocator.reset_prefix_cache()
+        assert allocator.get_prefix_cache_hit_rate() == 0.0
+
     @staticmethod
     def create_immutable_chain(
         block_size: int,
-        token_ids: List[int],
+        token_ids: list[int],
         allocator: PrefixCachingBlockAllocator,
         extra_hash: Optional[int] = None,
-    ) -> List[PrefixCachingBlock]:
+    ) -> list[PrefixCachingBlock]:
         """Helper method which creates a chain of blocks.
         """
-        blocks: List[Block] = []
+        blocks: list[Block] = []
         num_blocks = math.ceil(len(token_ids) / block_size)
 
         if num_blocks == 0:

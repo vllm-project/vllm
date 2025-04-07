@@ -1,5 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 """An example showing how to use vLLM to serve multimodal models 
-and run online inference with OpenAI client.
+and run online serving with OpenAI client.
 
 Launch the vLLM server with the following command:
 
@@ -11,7 +12,7 @@ vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
     --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt image=2
 
 (audio inference with Ultravox)
-vllm serve fixie-ai/ultravox-v0_3 --max-model-len 4096
+vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b --max-model-len 4096
 """
 import base64
 
@@ -309,7 +310,7 @@ def main(args) -> None:
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description='Demo on using OpenAI client for online inference with '
+        description='Demo on using OpenAI client for online serving with '
         'multimodal language models served with vLLM.')
     parser.add_argument('--chat-type',
                         '-c',

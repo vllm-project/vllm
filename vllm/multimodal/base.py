@@ -1,8 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, Generic, NamedTuple,
-                    Optional, Sequence, Tuple, Type, TypeVar, Union)
+                    Optional, TypeVar, Union)
 
 from torch import nn
 
@@ -37,7 +40,7 @@ model. This does not include tokens that correspond to the input text.
 """
 
 _T = TypeVar("_T")
-N = TypeVar("N", bound=Type[nn.Module])
+N = TypeVar("N", bound=type[nn.Module])
 
 
 class MultiModalPlugin(ABC):
@@ -90,10 +93,6 @@ class MultiModalPlugin(ABC):
         invoked to transform the data into a dictionary of model inputs.
 
         If `None` is provided, then the default input mapper is used instead.
-
-        See also:
-            - :ref:`input-processing-pipeline`
-            - :ref:`enabling-multimodal-inputs`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -126,10 +125,6 @@ class MultiModalPlugin(ABC):
 
         Raises:
             TypeError: If the data type is not supported.
-
-        See also:
-            - :ref:`input-processing-pipeline`
-            - :ref:`enabling-multimodal-inputs`
         """
 
         # Avoid circular import
@@ -186,9 +181,6 @@ class MultiModalPlugin(ABC):
         for a model class.
 
         If `None` is provided, then the default calculation is used instead.
-
-        See also:
-            :ref:`enabling-multimodal-inputs`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -218,9 +210,6 @@ class MultiModalPlugin(ABC):
         If this registry is not applicable to the model, `0` is returned.
 
         The model is identified by ``model_config``.
-
-        See also:
-            :ref:`enabling-multimodal-inputs`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
@@ -237,7 +226,11 @@ class MultiModalPlugin(ABC):
 
         if callable(max_mm_tokens):
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-                max_mm_tokens, overrides=model_config.mm_processor_kwargs)
+                max_mm_tokens,
+                overrides=model_config.mm_processor_kwargs,
+                requires_kw_only=False,
+                allow_var_kwargs=True,
+            )
             max_mm_tokens = max_mm_tokens(InputContext(model_config),
                                           **mm_processor_kwargs)
 
@@ -286,7 +279,7 @@ class MultiModalPlaceholderMap:
     @classmethod
     def from_seq_group(
         cls, seq_group: "SequenceGroupMetadata", positions: range
-    ) -> Tuple[Optional[MultiModalDataDict], dict[str,
+    ) -> tuple[Optional[MultiModalDataDict], dict[str,
                                                   "MultiModalPlaceholderMap"]]:
         """
         Returns the multi-modal items that intersect with the portion of a

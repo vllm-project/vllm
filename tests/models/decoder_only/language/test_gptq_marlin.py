@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compares the outputs of gptq vs gptq_marlin 
 Note: GPTQ and Marlin do not have bitwise correctness.
 As a result, in this test, we just confirm that the top selected tokens of the

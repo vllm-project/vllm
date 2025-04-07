@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -21,22 +23,20 @@
 # limitations under the License.
 """Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
-import re
+from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property, partial
-from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
-                    Set, Tuple, TypedDict, Union)
+from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
+                    Union)
 
+import numpy as np
 import torch
 import torch.types
-from PIL import Image
 from torch import nn
-from transformers import PretrainedConfig
-from typing_extensions import NotRequired
+from transformers import BatchFeature, PretrainedConfig
+from typing_extensions import TypeVar
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
                                                   get_2d_sincos_pos_embed)
@@ -48,68 +48,76 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.image import cached_get_image_processor
-from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
+from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
+                                   ImageProcessorItems, ImageSize,
+                                   ModalityData, ModalityDataItems,
+                                   MultiModalDataItems, MultiModalDataParser,
+                                   VideoItem, VideoProcessorItems)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+from vllm.utils import flatten_2d_lists
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
-from .utils import AutoWeightsLoader, maybe_prefix
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
+from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
+                    merge_multimodal_embeddings)
+from .vision import scatter_patch_features, select_patch_features
 
-RawImageType = Union[Image.Image, torch.Tensor]
-
-
-class MiniCPMVRawImageInput(TypedDict):
-    """Input mapper input with auxiliary data for computing image bounds."""
-    image: RawImageType
-
-    # Image bounds token ids in 0-dim scaler tensor.
-    im_start_id: torch.Tensor
-    im_end_id: torch.Tensor
-    slice_start_id: NotRequired[torch.Tensor]
-    slice_end_id: NotRequired[torch.Tensor]
+# For profile run
+_MAX_FRAMES_PER_VIDEO = 16
 
 
 class MiniCPMVImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: List[torch.Tensor]
+    pixel_values: list[torch.Tensor]
     """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
+    Shape: `(batch_size * num_images * num_slices, num_channels, height, width)`
 
     Note that the image size may vary, so we pass it as a list
     instead of a batched tensor.
     """
 
-    image_bounds: torch.Tensor
-    """
-    Shape: `(batch_size * num_images, 2)`
-
-    This should be in `(start, stop)` format.
-    """
-
     tgt_sizes: torch.Tensor
     """
-    Shape: `(batch_size * num_images, 2)`
+    Shape: `(batch_size * num_images * num_slices, 2)`
 
     This should be in `(height, width)` format.
     """
 
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
+    """
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
+
+    Shape: `(batch_size * num_images, num_embeds)`
+    """
+
+    num_slices: torch.Tensor
+    """Shape: `(batch_size * num_images)`"""
+
 
 class MiniCPMVImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    data: torch.Tensor
+    image_embeds: Union[torch.Tensor, list[torch.Tensor]]
     """
-    Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
+    Shape: `(batch_size * num_images, num_slices, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     instead of a batched tensor.
     """
 
-    image_bounds: torch.Tensor
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
     """
-    Shape: `(batch_size * num_images, 2)`
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
 
-    This should be in `(start, stop)` format.
+    Shape: `(batch_size * num_images, num_embeds)`
     """
 
 
@@ -212,25 +220,6 @@ class Resampler2_5(BaseResampler):
         return x
 
 
-def _build_image_input(ctx: InputContext,
-                       image: RawImageType) -> MiniCPMVRawImageInput:
-    tokenizer = cached_get_tokenizer(
-        ctx.model_config.tokenizer,
-        trust_remote_code=ctx.model_config.trust_remote_code)
-    if hasattr(tokenizer, "slice_start_id"):
-        return MiniCPMVRawImageInput(
-            image=image,
-            im_start_id=torch.tensor(tokenizer.im_start_id),
-            im_end_id=torch.tensor(tokenizer.im_end_id),
-            slice_start_id=torch.tensor(tokenizer.slice_start_id),
-            slice_end_id=torch.tensor(tokenizer.slice_end_id))
-    else:
-        return MiniCPMVRawImageInput(
-            image=image,
-            im_start_id=torch.tensor(tokenizer.im_start_id),
-            im_end_id=torch.tensor(tokenizer.im_end_id))
-
-
 def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
     version_float = getattr(config, "version", None)
 
@@ -240,129 +229,546 @@ def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
         if config.hidden_size == 2304 and config.query_num == 64:
             return (2, 0)
         return (2, 5)
-
     version_str = str(version_float)
     return tuple(int(x) for x in version_str.split("."))
 
 
-def get_max_minicpmv_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config()
-    return getattr(hf_config, "query_num", 64)
+def _minicpmv_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    pixel_values = hf_inputs.get("pixel_values", torch.empty(0))
+    num_images = len(pixel_values)
 
+    video_pixel_values = hf_inputs.get("video_pixel_values", torch.empty(0))
+    num_videos = len(video_pixel_values)
 
-def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
-    return SequenceData.from_prompt_token_counts((0, seq_len))
-
-
-def dummy_image_for_minicpmv(ctx: InputContext, hf_config: PretrainedConfig,
-                             num_images: int):
-    width = height = hf_config.image_size
-    image = _build_image_input(ctx,
-                               image=Image.new("RGB", (width, height),
-                                               color=0))
-    return {"image": [image] if num_images == 1 else [image] * num_images}
-
-
-def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
-                            mm_counts: Mapping[str, int]):
-    hf_config = ctx.get_hf_config()
-    num_images = mm_counts["image"]
-
-    seq_data = dummy_seq_data_for_minicpmv(seq_len, num_images)
-    mm_data = dummy_image_for_minicpmv(ctx, hf_config, num_images)
-
-    return DummyData(seq_data, mm_data)
-
-
-def input_processor_for_minicpmv(ctx: InputContext, inputs: DecoderOnlyInputs):
-    multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
-    model_config = ctx.model_config
-    version = get_version_by_config(model_config.hf_config)
-    tokenizer = cached_get_tokenizer(
-        model_config.tokenizer,
-        trust_remote_code=model_config.trust_remote_code)
-    image_processor = cached_get_image_processor(model_config.tokenizer)
-
-    def get_placeholder(image_size: Tuple[int, int], num_image: int):
-        if version == (2, 0) or version == (2, 5):
-            return image_processor.get_slice_image_placeholder(image_size)
-        return image_processor.get_slice_image_placeholder(
-            image_size, num_image)
-
-    prompt = inputs.get("prompt")
-    token_ids = inputs.get("prompt_token_ids")
-    if prompt is None:
-        prompt = tokenizer.decode(token_ids)
-
-    pattern = "(<image>./</image>)"
-    images = multi_modal_data["image"]
-    image_tags = re.findall(pattern, prompt)
-    if len(image_tags) == 0:
-        new_token_ids = token_ids
-        new_prompt = prompt
-    else:
-        if isinstance(images, dict):
-            image_size_list = images.get("image_size_list")
-            images = [images.get("image_embeds")]
-        else:
-            if isinstance(images, Image.Image):
-                images = [images]
-            image_size_list = [image.size for image in images]
-
-        text_chunks = prompt.split(pattern)
-        new_prompt_chunks: List[str] = []
-        for i in range(len(image_size_list)):
-            new_prompt_chunks += [
-                text_chunks[i],
-                get_placeholder(image_size_list[i], i)
-            ]
-        new_prompt_chunks.append(text_chunks[-1])
-        new_prompt = "".join(new_prompt_chunks)
-        new_token_ids = tokenizer.encode(new_prompt)
-
-    multi_modal_data["image"] = [
-        _build_image_input(ctx, image) for image in images
-    ]
-
-    return token_inputs(
-        prompt_token_ids=new_token_ids,
-        prompt=new_prompt,
-        multi_modal_data=multi_modal_data,
+    return dict(
+        pixel_values=MultiModalFieldConfig.batched("image"),
+        image_sizes=MultiModalFieldConfig.batched("image"),
+        tgt_sizes=MultiModalFieldConfig.batched("image"),
+        image_embeds=MultiModalFieldConfig.batched("image"),
+        embed_is_patch=MultiModalFieldConfig.batched("image"),
+        video_pixel_values=MultiModalFieldConfig.batched("video"),
+        video_image_sizes=MultiModalFieldConfig.batched("video"),
+        video_tgt_sizes=MultiModalFieldConfig.batched("video"),
+        video_embeds=MultiModalFieldConfig.batched("video"),
+        video_embed_is_patch=MultiModalFieldConfig.batched("video"),
+        image_token_id=MultiModalFieldConfig.shared("image", num_images),
+        video_token_id=MultiModalFieldConfig.shared("video", num_videos),
     )
 
 
-def input_mapper_for_minicpmv(ctx: InputContext, data: object):
-    model_config = ctx.model_config
+class MiniCPMVImageEmbeddingItems(DictEmbeddingItems):
 
-    image_processor = cached_get_image_processor(
-        model_config.model, trust_remote_code=model_config.trust_remote_code)
-    if image_processor is None:
-        raise RuntimeError("No HuggingFace processor is available "
-                           "to process the image object")
+    def __init__(
+        self,
+        data: Mapping[str, torch.Tensor],
+        fields_factory: Callable[
+            [Mapping[str, torch.Tensor]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
+    ) -> None:
+        super().__init__(
+            data,
+            modality="image",
+            required_fields={"image_embeds", "image_sizes"},
+            fields_factory=fields_factory,
+        )
 
-    if not isinstance(data, list):
-        raise ValueError(
-            "Image input must be list of MiniCPMVImageInput, got (%s)", data)
+    def get_image_size(self, index: int) -> ImageSize:
+        image_size = self.get(index)["image_sizes"].tolist()
+        return ImageSize(width=image_size[0], height=image_size[1])
 
-    if len(data) > 0 and isinstance(data[0]['image'], torch.Tensor):
-        batch_data = {
-            "image_embeds": data[0]['image'],
+
+class MiniCPMVVideoEmbeddingItems(DictEmbeddingItems):
+
+    def __init__(
+        self,
+        data: Mapping[str, torch.Tensor],
+        fields_factory: Callable[
+            [Mapping[str, torch.Tensor]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
+    ) -> None:
+        super().__init__(
+            data,
+            modality="video",
+            required_fields={"video_embeds", "video_image_sizes"},
+            fields_factory=fields_factory,
+        )
+
+    def get_frame_size(self, index: int) -> ImageSize:
+        frame_size = self.get(index)["video_image_sizes"].tolist()
+        return ImageSize(width=frame_size[0], height=frame_size[1])
+
+    def get_num_frames(self, index: int) -> int:
+        return len(self.get(index)["video_image_sizes"])
+
+
+class MiniCPMVMultiModalDataParser(MultiModalDataParser):
+
+    def _parse_image_data(
+        self,
+        data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
+    ) -> ModalityDataItems[Any, Any]:
+        if isinstance(data, dict):
+            return MiniCPMVImageEmbeddingItems(
+                data,
+                fields_factory=_minicpmv_field_config,
+            )
+
+        return super()._parse_image_data(data)
+
+    def _parse_video_data(
+        self,
+        data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
+    ) -> ModalityDataItems[Any, Any]:
+        if isinstance(data, dict):
+            return MiniCPMVVideoEmbeddingItems(
+                data,
+                fields_factory=_minicpmv_field_config,
+            )
+
+        return super()._parse_video_data(data)
+
+
+class MiniCPMVProcessingInfo(BaseProcessingInfo):
+    image_pattern = "(<image>./</image>)"
+    video_pattern = "(<video>./</video>)"
+
+    def get_hf_config(self):
+        return self.ctx.get_hf_config()
+
+    def get_hf_processor(self, **kwargs: object):
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
+
+        # NumPy arrays are considered as Iterable but not Sequence in
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
+        image_processor = hf_processor.image_processor  # type: ignore
+        for attr in ("mean", "std"):
+            val = getattr(image_processor, attr)
+            if isinstance(val, np.ndarray):
+                setattr(image_processor, attr, val.tolist())
+
+        return hf_processor
+
+    def get_image_processor(self):
+        hf_processor = self.get_hf_processor()
+        image_processor = hf_processor.image_processor  # type: ignore
+        return image_processor
+
+    def get_model_version(self):
+        return get_version_by_config(self.get_hf_config())
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        mm_limits = {"image": None}
+        if self.get_model_version() == (2, 6):
+            mm_limits["video"] = None
+
+        return mm_limits
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        mm_max_tokens = {"image": self.get_max_image_tokens()}
+        if self.get_model_version() == (2, 6):
+            mm_max_tokens["video"] = self.get_max_video_tokens(
+                seq_len, mm_counts)
+
+        return mm_max_tokens
+
+    def get_slice_image_placeholder(
+        self,
+        image_size: ImageSize,
+        # For MiniCPM V/O 2.6
+        image_idx: int = 0,
+        max_slice_nums: Optional[int] = None,
+        use_image_id: bool = True,
+    ) -> str:
+        image_processor = self.get_image_processor()
+        version = self.get_model_version()
+
+        if version == (2, 0) or version == (2, 5):
+            return image_processor.get_slice_image_placeholder(image_size)
+
+        return image_processor.get_slice_image_placeholder(
+            image_size,
+            image_idx=image_idx,
+            max_slice_nums=max_slice_nums,
+            use_image_id=use_image_id,
+        )
+
+    def get_num_image_tokens(
+        self,
+        image_size: ImageSize,
+        max_slice_nums: Optional[int] = None,
+        use_image_id: bool = True,
+    ) -> int:
+        tokenizer = self.get_tokenizer()
+        image_placeholders = self.get_slice_image_placeholder(
+            image_size,
+            max_slice_nums=max_slice_nums,
+            use_image_id=use_image_id,
+        )
+        image_token_ids = tokenizer.encode(image_placeholders,
+                                           add_special_tokens=False)
+
+        return len(image_token_ids)
+
+    def get_max_image_tokens(self) -> int:
+        image_size = self.get_image_size_with_most_features()
+        return self.get_num_image_tokens(image_size)
+
+    def get_image_max_slice_num(self) -> int:
+        return getattr(self.get_hf_config(), "max_slice_num", 9)
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        image_size = getattr(self.get_hf_config(), "image_size", 448)
+        max_slice_num = self.get_image_max_slice_num()
+        return ImageSize(width=image_size, height=image_size * max_slice_num)
+
+    def get_max_video_frame_tokens(self) -> int:
+        frame_size = self.get_video_frame_size_with_most_features()
+
+        return self.get_num_image_tokens(
+            frame_size,
+            max_slice_nums=self.get_video_max_slice_num(),
+            use_image_id=False,
+        )
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_video_tokens_total = self.get_max_video_frame_tokens() * num_frames
+        return num_video_tokens_total
+
+    def get_video_max_slice_num(self) -> int:
+        return 1
+
+    def get_video_frame_size_with_most_features(self) -> ImageSize:
+        image_size = getattr(self.get_hf_config(), "image_size", 448)
+        max_slice_num = self.get_video_max_slice_num()
+        return ImageSize(width=image_size, height=image_size * max_slice_num)
+
+    def get_max_video_frames(self, max_tokens: int) -> int:
+        num_frame_tokens = self.get_max_video_frame_tokens()
+        num_frames = max_tokens // num_frame_tokens
+        return num_frames
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        max_images = mm_counts.get("image", 0)
+        max_videos = mm_counts.get("video", 0)
+
+        max_image_tokens = self.get_max_image_tokens() * max_images
+        max_total_frames = self.get_max_video_frames(seq_len -
+                                                     max_image_tokens)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   _MAX_FRAMES_PER_VIDEO)
+
+        return max(max_frames_per_video, 1)
+
+
+_I = TypeVar("_I",
+             bound=MiniCPMVProcessingInfo,
+             default=MiniCPMVProcessingInfo)
+
+
+class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+
+        image_width, image_height = \
+            self.info.get_image_size_with_most_features()
+        video_width, video_height = \
+            self.info.get_video_frame_size_with_most_features()
+        num_video_frames = \
+            self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=image_width,
+                                   height=image_height,
+                                   num_images=num_images),
+            "video": [
+                self._get_dummy_images(width=video_width,
+                                       height=video_height,
+                                       num_images=num_video_frames)
+            ] * num_videos,
         }
-    else:
-        batch_data = image_processor \
-            .preprocess([img["image"] for img in data], return_tensors="pt") \
-            .data
 
-    if len(data) > 0:
-        batch_data["im_start_id"] = data[0]["im_start_id"]
-        batch_data["im_end_id"] = data[0]["im_end_id"]
-        if "slice_start_id" in data[0]:
-            batch_data["slice_start_id"] = data[0]["slice_start_id"]
-            batch_data["slice_end_id"] = data[0]["slice_end_id"]
+        image_prompt_texts = self.info.image_pattern * num_images
+        video_prompt_texts = self.info.video_pattern * num_videos
 
-    return MultiModalKwargs(batch_data)
+        return ProcessorInputs(prompt_text=image_prompt_texts +
+                               video_prompt_texts,
+                               mm_data=mm_data)
+
+
+class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
+
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return MiniCPMVMultiModalDataParser()
+
+    def get_image_prompt_texts(self,
+                               image_size: ImageSize,
+                               image_idx: int = 0) -> str:
+        return self.info.get_slice_image_placeholder(
+            image_size,
+            image_idx=image_idx,
+        )
+
+    def get_video_prompt_texts(self, image_size: ImageSize,
+                               num_frames: int) -> str:
+        return self.info.get_slice_image_placeholder(
+            image_size=image_size,
+            image_idx=0,
+            max_slice_nums=self.info.get_video_max_slice_num(),
+            use_image_id=False,
+        ) * num_frames
+
+    def get_embed_is_patch(
+        self,
+        input_ids: list[int],
+    ) -> torch.Tensor:
+        tokenizer = self.info.get_tokenizer()
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        return torch.tensor(input_ids) == unk_token_id
+
+    def process_images(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        if (images := mm_data.get("images")) is None:
+            return {}
+
+        parsed_images = (self._get_data_parser().parse_mm_data({
+            "image": images
+        }).get_items("image",
+                     (MiniCPMVImageEmbeddingItems, ImageProcessorItems)))
+
+        if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
+            image_inputs = {}
+        else:
+            image_inputs = self._base_call_hf_processor(
+                prompts=[self.info.image_pattern] * len(parsed_images),
+                mm_data={"images": [[image] for image in parsed_images]},
+                mm_kwargs=mm_kwargs,
+                out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
+            )
+
+        image_sizes = [
+            parsed_images.get_image_size(i) for i in range(len(parsed_images))
+        ]
+        image_repl_features = [
+            self.get_image_prompt_texts(size, idx)
+            for idx, size in enumerate(image_sizes)
+        ]
+
+        tokenizer = self.info.get_tokenizer()
+        image_repls_feature_tokens = [
+            tokenizer.encode(image_repl, add_special_tokens=False)
+            for image_repl in image_repl_features
+        ]
+
+        embed_is_patch = [
+            self.get_embed_is_patch(image_repl_tokens)
+            for image_repl_tokens in image_repls_feature_tokens
+        ]
+        image_inputs["embed_is_patch"] = embed_is_patch
+
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        image_inputs["image_token_id"] = torch.tensor(unk_token_id)
+
+        return image_inputs
+
+    def process_videos(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        if (videos := mm_data.get("videos")) is None:
+            return {}
+
+        parsed_videos = (self._get_data_parser().parse_mm_data({
+            "video": videos
+        }).get_items("video",
+                     (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)))
+
+        if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
+            video_inputs = {}
+        else:
+            video_inputs = self._base_call_hf_processor(
+                prompts=[
+                    self.info.image_pattern * len(video)
+                    for video in parsed_videos
+                ],
+                mm_data={"images": list(parsed_videos)},
+                mm_kwargs={
+                    **mm_kwargs,
+                    "max_slice_nums":
+                    self.info.get_video_max_slice_num(),
+                },
+                out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
+            )
+
+        frame_sizes = [
+            parsed_videos.get_frame_size(i) for i in range(len(parsed_videos))
+        ]
+        num_frames = [
+            parsed_videos.get_num_frames(i) for i in range(len(parsed_videos))
+        ]
+        video_repl_features = [
+            self.get_video_prompt_texts(size, nframes)
+            for size, nframes in zip(frame_sizes, num_frames)
+        ]
+
+        tokenizer = self.info.get_tokenizer()
+        video_repls_feature_tokens = [
+            tokenizer.encode(video_repl, add_special_tokens=False)
+            for video_repl in video_repl_features
+        ]
+
+        embed_is_patch = [
+            self.get_embed_is_patch(video_repl_tokens)
+            for video_repl_tokens in video_repls_feature_tokens
+        ]
+        video_inputs["embed_is_patch"] = embed_is_patch
+
+        video_inputs = {f"video_{k}": v for k, v in video_inputs.items()}
+
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        video_inputs["video_token_id"] = torch.tensor(unk_token_id)
+
+        return video_inputs
+
+    def process_mm_inputs(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        return {
+            **self.process_images(mm_data, mm_kwargs),
+            **self.process_videos(mm_data, mm_kwargs),
+        }
+
+    def _base_call_hf_processor(
+        self,
+        prompts: list[str],
+        mm_data: Mapping[str, Sequence[object]],
+        mm_kwargs: Mapping[str, object],
+        *,
+        out_keys: set[str],
+    ) -> dict[str, NestedTensors]:
+        # This processor supports zipping prompt and mm_data together
+        if self.info.get_model_version() == (2, 6):
+            inputs = super()._call_hf_processor(
+                prompt=prompts,  # type: ignore
+                mm_data=mm_data,
+                mm_kwargs=mm_kwargs,
+            )
+        else:
+            inputs = defaultdict[str, list[torch.Tensor]](list)
+
+            for i, prompt in enumerate(prompts):
+                inputs_one = super()._call_hf_processor(
+                    prompt=prompt,
+                    mm_data={
+                        k: v[i]
+                        for k, v in mm_data.items()
+                    },
+                    mm_kwargs=mm_kwargs,
+                )
+
+                for k, v in inputs_one.items():
+                    assert len(v) == 1, (k, len(v))
+                    inputs[k].append(v[0])
+
+        return {k: inputs[k] for k in out_keys}
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        tokenizer = self.info.get_tokenizer()
+
+        input_ids = torch.tensor([tokenizer.encode(prompt)])
+        mm_inputs = self.process_mm_inputs(mm_data, mm_kwargs)
+
+        return BatchFeature({
+            "input_ids": input_ids,
+            **mm_inputs,
+        })
+
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
+        placeholder = {
+            "image": self.info.image_pattern,
+            "video": self.info.video_pattern,
+        }
+
+        def get_image_replacement(item_idx: int):
+            images = mm_items.get_items(
+                "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems))
+
+            image_size = images.get_image_size(item_idx)
+
+            return self.get_image_prompt_texts(image_size, item_idx)
+
+        def get_video_replacement(item_idx: int):
+            videos = mm_items.get_items(
+                "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems))
+
+            frame_size = videos.get_frame_size(item_idx)
+            num_frames = videos.get_num_frames(item_idx)
+
+            return self.get_video_prompt_texts(frame_size, num_frames)
+
+        get_replacement = {
+            "image": get_image_replacement,
+            "video": get_video_replacement,
+        }
+
+        return [
+            PromptReplacement(modality=modality,
+                              target=placeholder[modality],
+                              replacement=get_replacement[modality])
+            for modality in ("image", "video")
+        ]
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return _minicpmv_field_config(hf_inputs)
 
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
@@ -399,6 +805,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                                              prefix=maybe_prefix(
                                                  prefix, "resampler"))
 
+        self.mm_token_ids = set[int]()
         self.make_empty_intermediate_tensors = (
             self.llm.make_empty_intermediate_tensors)
 
@@ -409,171 +816,194 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         return get_sampler()
 
-    def get_embedding(
+    def _parse_and_validate_vision_input(
         self,
-        input_ids: torch.Tensor,
-        image_inputs: Optional[MiniCPMVImageInputs],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        vlm_embedding: torch.Tensor = self.llm.get_input_embeddings(input_ids)
-
-        if image_inputs is None:  # No image
-            vision_hidden_states = torch.tensor([], device=input_ids.device)
-        else:
-            if image_inputs["type"] == "image_embeds":
-                vision_hidden_states = (image_inputs["data"].type(
-                    vlm_embedding.dtype).to(vlm_embedding.device))
-            else:
-                vision_hidden_states = self.get_vision_hidden_states(
-                    image_inputs)
-
-            # See NOTE in _parse_and_validate_inputs
-            image_bounds = image_inputs["image_bounds"]
-            if len(image_bounds) > 0:
-                image_indices = torch.stack([
-                    torch.arange(start, end, dtype=torch.long)
-                    for start, end in image_bounds.tolist()
-                ]).to(vlm_embedding.device)
-                vlm_embedding.scatter_(
-                    0,
-                    image_indices.view(-1, 1).repeat(1,
-                                                     vlm_embedding.shape[-1]),
-                    vision_hidden_states.view(-1,
-                                              vision_hidden_states.shape[-1]),
-                )
-
-        return vlm_embedding, vision_hidden_states
-
-    def _get_image_bounds(
-            self,
-            input_ids: torch.Tensor,
-            im_start_id: torch.Tensor,
-            im_end_id: torch.Tensor,
-            slice_start_id: Optional[torch.Tensor] = None,
-            slice_end_id: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # All the images in the batch should share the same special image
-        # bound token ids.
-        start_cond = input_ids == im_start_id[0]
-        end_cond = input_ids == im_end_id[0]
-        if slice_start_id is not None:
-            start_cond |= (input_ids == slice_start_id[0])
-            end_cond |= (input_ids == slice_end_id[0])
-
-        image_start_tokens, = torch.where(start_cond)
-        image_start_tokens += 1
-        image_end_tokens, = torch.where(end_cond)
-        valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
-
-        if valid_image_nums == 0:
-            return torch.zeros((0, 2), device=input_ids.device)
-
-        return torch.hstack([
-            image_start_tokens[:valid_image_nums].unsqueeze(-1),
-            image_end_tokens[:valid_image_nums].unsqueeze(-1),
-        ])
-
-    def _parse_and_validate_inputs(
-        self,
-        input_ids: torch.Tensor,
+        modality: str,
         **kwargs: object,
     ) -> Optional[MiniCPMVImageInputs]:
-        pixel_values = kwargs.pop("pixel_values", [])
-        tgt_sizes = kwargs.pop("tgt_sizes", [])
-        im_start_id = kwargs.pop("im_start_id", None)
-        im_end_id = kwargs.pop("im_end_id", None)
-        slice_start_id = kwargs.pop("slice_start_id", None)
-        slice_end_id = kwargs.pop("slice_end_id", None)
+        pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+
+        image_token_id = kwargs.pop("image_token_id")
+        if image_token_id is not None:
+            assert isinstance(image_token_id, torch.Tensor)
+            self.mm_token_ids.add(image_token_id.flatten().unique().item())
+
+        embed_is_patch = kwargs.pop("embed_is_patch")
+        if not isinstance(embed_is_patch, (torch.Tensor, list)):
+            raise ValueError(
+                f"Incorrect type of embed_is_patch for {modality=}. "
+                f"Got type: {type(embed_is_patch)}")
+
+        embed_is_patch = flatten_bn(embed_is_patch)
 
         if image_embeds is not None:
             if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(f"Incorrect type of image embeds. "
-                                 f"Got type: {type(image_embeds)}")
-            if isinstance(image_embeds, list):
-                image_embeds = torch.concat(image_embeds)
+                raise ValueError(
+                    f"Incorrect type of image_embeds for {modality=}. "
+                    f"Got type: {type(image_embeds)}")
+
+            image_embeds_flat = flatten_bn(image_embeds)
 
             return MiniCPMVImageEmbeddingInputs(
-                image_bounds=self._get_image_bounds(input_ids, im_start_id,
-                                                    im_end_id, slice_start_id,
-                                                    slice_end_id),
-                data=image_embeds,
                 type="image_embeds",
+                image_embeds=image_embeds_flat,
+                embed_is_patch=embed_is_patch,
             )
 
         if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+            raise ValueError(
+                f"Incorrect type of pixel_values for {modality=}. "
+                f"Got type: {type(pixel_values)}")
 
+        tgt_sizes = kwargs.pop("tgt_sizes")
         if not isinstance(tgt_sizes, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of target sizes. "
+            raise ValueError(f"Incorrect type of tgt_sizes for {modality=}. "
                              f"Got type: {type(tgt_sizes)}")
 
-        if len(pixel_values) != len(tgt_sizes):
-            raise ValueError("Inconsistent batch lengths, found: "
-                             f"{len(pixel_values)} vs. {len(tgt_sizes)}")
+        num_slices = [[len(p) for p in ps] for ps in pixel_values]
+        num_slices_flat = flatten_bn(torch.tensor(num_slices))
 
-        pixel_values_flat: List[torch.Tensor] = []
-        tgt_sizes_flat: List[torch.Tensor] = []
-        for pixel_b, tgt_b in zip(pixel_values, tgt_sizes):
-            if len(pixel_b) != len(tgt_b):
-                raise ValueError("Inconsistent N lengths, found: "
-                                 f"{len(pixel_b)} vs {len(tgt_b)}")
+        pixel_values_flat = flatten_bn(flatten_2d_lists(pixel_values))
+        tgt_sizes_flat = flatten_bn(flatten_2d_lists(tgt_sizes), concat=True)
 
-            for pixel_n, tgt_n in zip(pixel_b, tgt_b):
-                pixel_values_flat += pixel_n
-                tgt_sizes_flat += tgt_n
-
-        # NOTE: Input IDs does not contain image tokens during memory profiling,
-        # so we allow it to be empty
         if len(pixel_values_flat) != len(tgt_sizes_flat):
             raise ValueError("Inconsistent flattened lengths, found: "
                              f"{len(pixel_values_flat)} vs. "
                              f"{len(tgt_sizes_flat)}")
 
-        if len(pixel_values_flat) == 0:
-            return None
-
-        if im_start_id is None:
-            return None
-
         return MiniCPMVImagePixelInputs(
-            image_bounds=self._get_image_bounds(input_ids, im_start_id,
-                                                im_end_id, slice_start_id,
-                                                slice_end_id),
-            data=pixel_values_flat,
-            tgt_sizes=torch.stack(tgt_sizes_flat),
             type="pixel_values",
+            pixel_values=pixel_values_flat,
+            tgt_sizes=tgt_sizes_flat,
+            embed_is_patch=embed_is_patch,
+            num_slices=num_slices_flat,
         )
+
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        modalities = {}
+
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if input_key in ("pixel_values",
+                             "image_embeds") and "images" not in modalities:
+                modalities["images"] = self._parse_and_validate_vision_input(
+                    "images", **kwargs)
+            if input_key in ("video_pixel_values",
+                             "video_embeds") and "videos" not in modalities:
+
+                def _image_key(video_key: str):
+                    if video_key == "video_token_id":
+                        return "image_token_id"
+
+                    return video_key.removeprefix("video_")
+
+                modalities["videos"] = self._parse_and_validate_vision_input(
+                    "videos", **{
+                        _image_key(k): v
+                        for k, v in kwargs.items()
+                    })
+
+        return modalities
+
+    def _process_vision_input(
+        self,
+        image_input: MiniCPMVImageInputs,
+    ) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor, ...]]:
+        if image_input["type"] == "image_embeds":
+            return image_input["image_embeds"]
+
+        image_features_flat = self.get_vision_hidden_states(image_input)
+
+        num_slices = image_input["num_slices"]
+        return [
+            e.flatten(0, 1)
+            for e in image_features_flat.split(num_slices.tolist())
+        ]
+
+    def _process_multimodal_inputs(self, modalities: dict):
+        # The result multimodal_embeddings is tuple of tensors, with each
+        # tensor correspoending to a multimodal data item (image or video).
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+
+        # NOTE: It is important to iterate over the keys in this dictionary
+        # to preserve the order of the modalities.
+        for modality in modalities:
+            if modality == "images":
+                image_input = modalities["images"]
+                image_features = self._process_vision_input(image_input)
+                multimodal_embeddings += tuple(
+                    scatter_patch_features(
+                        image_features,
+                        image_input["embed_is_patch"],
+                    ))
+            if modality == "videos":
+                video_input = modalities["videos"]
+                video_features = self._process_vision_input(video_input)
+                multimodal_embeddings += tuple(
+                    scatter_patch_features(
+                        video_features,
+                        video_input["embed_is_patch"],
+                    ))
+
+        return multimodal_embeddings
+
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not modalities:
+            return None
+
+        return self._process_multimodal_inputs(modalities)
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.llm.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            assert len(self.mm_token_ids) > 0
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                select_patch_features(multimodal_embeddings),
+                list(self.mm_token_ids),
+            )
+        return inputs_embeds
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         if intermediate_tensors is not None:
-            vlm_embeddings = None
-        else:
-            image_inputs = self._parse_and_validate_inputs(input_ids, **kwargs)
+            inputs_embeds = None
 
-            vlm_embeddings, _ = self.get_embedding(input_ids, image_inputs)
+        # NOTE: In v1, inputs_embeds is always generated at model runner from
+        # `get_multimodal_embeddings` and `get_input_embeddings`, this
+        # condition is only for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
 
-        # always pass the input via `inputs_embeds`
-        # to make sure the computation graph is consistent
-        # for `torch.compile` integration
-        input_ids = None
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
-        output = self.llm.model(
+        hidden_states = self.llm.model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
-            inputs_embeds=vlm_embeddings,
+            inputs_embeds=inputs_embeds,
         )
-        return output
+        return hidden_states
 
     def compute_logits(
         self,
@@ -625,16 +1055,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                        prefix: str = "") -> nn.Module:
         raise NotImplementedError
 
-    def get_vision_embedding(
-        self,
-        pixel_values: List[torch.Tensor],
-        patch_attn_mask: Optional[torch.Tensor] = None,
-        tgt_sizes: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        raise NotImplementedError
-
-    def get_vision_hidden_states(self,
-                                 data: MiniCPMVImageInputs) -> torch.Tensor:
+    def get_vision_hidden_states(
+            self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -657,7 +1079,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         quant_config: Optional[QuantizationConfig],
         prefix: str = "",
     ) -> nn.Module:
-        # TODO: refactor this vision model
+        # TODO: refactor vision model through timm wrapper from transformers
         try:
             import timm
         except ImportError:
@@ -683,9 +1105,6 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
 
         return model
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_tokens(input_ids)
-
     def init_resampler(self,
                        embed_dim: int,
                        vision_dim: int,
@@ -702,36 +1121,29 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                                    quant_config=quant_config,
                                    prefix=prefix)
 
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler.to(device=current_platform.device_type,
+                            dtype=torch.get_default_dtype())
 
-    def get_vision_embedding(
-        self,
-        pixel_values: List[torch.Tensor],
-        patch_attn_mask: Optional[torch.Tensor] = None,
-        tgt_sizes: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        res = []
-        dtype = self.vpm.pos_embed.data.dtype
+    def get_vision_hidden_states(
+            self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
+        pixel_values = data["pixel_values"]
+
+        P_h, P_w = self.vpm.patch_embed.patch_size
+        dtype: torch.dtype = self.vpm.pos_embed.data.dtype
+        num_prefix_tokens = getattr(self.vpm, "num_prefix_tokens", 0)
+
+        res = list[torch.Tensor]()
         for pixel_value in pixel_values:
             H, W = pixel_value[0].shape[-2:]
-            tgt_size = (
-                math.ceil(H / self.vpm.patch_embed.patch_size[0]),
-                math.ceil(W / self.vpm.patch_embed.patch_size[0]),
-            )
+            tgt_size = (math.ceil(H / P_h), math.ceil(W / P_w))
             vision_embedding = self.vpm.forward_features(
                 pixel_value.unsqueeze(0).type(dtype))
-            if (hasattr(self.vpm, "num_prefix_tokens")
-                    and self.vpm.num_prefix_tokens > 0):
-                vision_embedding = vision_embedding[:, self.vpm.
-                                                    num_prefix_tokens:]
+
+            if num_prefix_tokens > 0:
+                vision_embedding = vision_embedding[:, num_prefix_tokens:]
             res.append(self.resampler(vision_embedding, tgt_size))
+
         return torch.vstack(res)
-
-    def get_vision_hidden_states(self,
-                                 data: MiniCPMVImageInputs) -> torch.Tensor:
-        pixel_values = data["data"]
-
-        return self.get_vision_embedding(pixel_values)
 
 
 class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
@@ -746,33 +1158,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # vision encoder
-        "fc1",
-        "fc2",
-        "out_proj",
-        # language model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        # resampler
-        "kv_proj",
-    ]
-
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -811,47 +1196,44 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                                      quant_config=quant_config,
                                      prefix=prefix)
 
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler.to(device=current_platform.device_type,
+                            dtype=torch.get_default_dtype())
 
-    def get_vision_embedding(
-        self,
-        pixel_values: List[torch.Tensor],
-        patch_attn_mask: Optional[torch.Tensor] = None,
-        tgt_sizes: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        vision_embedding = self.vpm(pixel_values,
-                                    patch_attention_mask=patch_attn_mask)
-        vision_embedding = self.resampler(vision_embedding, tgt_sizes)
-        return vision_embedding
-
-    def get_vision_hidden_states(self,
-                                 data: MiniCPMVImageInputs) -> torch.Tensor:
-        pixel_values = data["data"]
+    def get_vision_hidden_states(
+            self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
+        pixel_values = data["pixel_values"]
         tgt_sizes = data["tgt_sizes"]
 
-        device = self.vpm.embeddings.position_embedding.weight.device
-        dtype = self.vpm.embeddings.position_embedding.weight.dtype
-        all_pixel_values_lst = [
-            i.flatten(end_dim=1).permute(1, 0) for i in pixel_values
-        ]
+        B = len(pixel_values)
+        P = pixel_values[0].shape[-2]
+        L = max(item.shape[-1] for item in pixel_values)
+        device = pixel_values[0].device
+        dtype = pixel_values[0].dtype
 
-        max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
+        all_pixel_values = torch.zeros((B, 3, P, L),
+                                       dtype=dtype,
+                                       device=device)
+        for i, pixel_values_item in enumerate(pixel_values):
+            L_item = pixel_values_item.shape[-1]
+            all_pixel_values[i, ..., :L_item] = pixel_values_item
+
+        num_patches = tgt_sizes.prod(-1)
+        max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
-        all_pixel_values = torch.nn.utils.rnn.pad_sequence(
-            all_pixel_values_lst, batch_first=True, padding_value=0.0)
-        B, L, _ = all_pixel_values.shape
-        all_pixel_values = all_pixel_values.permute(0, 2,
-                                                    1).reshape(B, 3, -1, L)
-
-        patch_attn_mask = torch.zeros((B, 1, max_patches),
+        patch_attn_mask = torch.zeros((B, max_patches),
                                       dtype=torch.bool,
                                       device=device)
-        for i in range(B):
-            patch_attn_mask[i, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
+        for i, num_patches_item in enumerate(num_patches):
+            patch_attn_mask[i, :num_patches_item] = True
 
-        return self.get_vision_embedding(all_pixel_values.type(dtype),
-                                         patch_attn_mask, tgt_sizes)
+        vision_embedding = self.vpm(
+            all_pixel_values,
+            patch_attention_mask=patch_attn_mask.unsqueeze(1),
+            tgt_sizes=None,
+        )
+
+        return self.resampler(vision_embedding, tgt_sizes)
 
 
 class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
@@ -866,33 +1248,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # vision encoder
-        "fc1",
-        "fc2",
-        "out_proj",
-        # language model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        # resampler
-        "kv_proj",
-    ]
-
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -932,49 +1287,40 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                                      quant_config=quant_config,
                                      prefix=prefix)
 
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler.to(device=current_platform.device_type,
+                            dtype=torch.get_default_dtype())
 
-    def get_vision_embedding(
-        self,
-        pixel_values: List[torch.Tensor],
-        patch_attn_mask: Optional[torch.Tensor] = None,
-        tgt_sizes: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        vision_embedding = self.vpm(
-            pixel_values,
-            patch_attention_mask=patch_attn_mask,
-            tgt_sizes=tgt_sizes,
-        )
-        return vision_embedding
-
-    def get_vision_hidden_states(self,
-                                 data: MiniCPMVImageInputs) -> torch.Tensor:
-        pixel_values = data["data"]
+    def get_vision_hidden_states(
+            self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
+        pixel_values = data["pixel_values"]
         tgt_sizes = data["tgt_sizes"]
 
-        device = self.vpm.embeddings.position_embedding.weight.device
-        dtype = self.vpm.embeddings.position_embedding.weight.dtype
-        all_pixel_values_lst = [
-            i.flatten(end_dim=1).permute(1, 0) for i in pixel_values
-        ]
+        B = len(pixel_values)
+        P = pixel_values[0].shape[-2]
+        L = max(item.shape[-1] for item in pixel_values)
+        device = pixel_values[0].device
+        dtype = pixel_values[0].dtype
 
-        max_patches = (tgt_sizes[:, 0] * tgt_sizes[:, 1]).max().item()
+        all_pixel_values = torch.zeros((B, 3, P, L),
+                                       dtype=dtype,
+                                       device=device)
+        for i, pixel_values_item in enumerate(pixel_values):
+            L_item = pixel_values_item.shape[-1]
+            all_pixel_values[i, ..., :L_item] = pixel_values_item
+
+        num_patches = tgt_sizes.prod(-1)
+        max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
-        all_pixel_values = torch.nn.utils.rnn.pad_sequence(
-            all_pixel_values_lst, batch_first=True, padding_value=0.0)
-        B, L, _ = all_pixel_values.shape
-        all_pixel_values = all_pixel_values.permute(0, 2,
-                                                    1).reshape(B, 3, -1, L)
-
-        patch_attn_mask = torch.zeros((B, 1, max_patches),
+        patch_attn_mask = torch.zeros((B, max_patches),
                                       dtype=torch.bool,
                                       device=device)
-        for i in range(B):
-            patch_attn_mask[i, 0, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
+        for i, num_patches_item in enumerate(num_patches):
+            patch_attn_mask[i, :num_patches_item] = True
+
         vision_embedding = self.vpm(
-            all_pixel_values.type(dtype),
-            patch_attention_mask=patch_attn_mask,
+            all_pixel_values,
+            patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
         )
 
@@ -984,26 +1330,20 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 _SUPPORT_VERSION = {
     (2, 0): MiniCPMV2_0,
     (2, 5): MiniCPMV2_5,
-    (2, 6): MiniCPMV2_6
+    (2, 6): MiniCPMV2_6,
 }
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_minicpmv)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_minicpmv_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_minicpmv)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_minicpmv)
-class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
+@MULTIMODAL_REGISTRY.register_processor(
+    MiniCPMVMultiModalProcessor,
+    info=MiniCPMVProcessingInfo,
+    dummy_inputs=MiniCPMVDummyInputsBuilder)
+class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
     """
     Different versions of MiniCPMV use different visual encoders and LLMs,
     which is not conducive to the current integration logic of LoRA and
     bitsandbytes in vLLM. Therefore, it is necessary to separate them.
     """
-    # Ensure that the LoRA support check passes when the class is not
-    # initialized, but set all these attributes to empty.
-    packed_modules_mapping = {}
-    supported_lora_modules = []
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
@@ -1016,8 +1356,14 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
             version = str(config.version).split(".")
             version = tuple([int(x) for x in version])
         # Dispatch class based on version
-        instance_class = _SUPPORT_VERSION.get(version)
-        if instance_class is None:
+        instance_cls = _SUPPORT_VERSION.get(version)
+        if instance_cls is None:
             raise ValueError(
                 "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")
-        return instance_class(vllm_config=vllm_config, prefix=prefix)
+
+        # quant_config references base class members,
+        # so update values before init is called
+        cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
+        cls.embedding_modules.update(instance_cls.embedding_modules)
+        cls.embedding_padding_modules += instance_cls.embedding_padding_modules
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)

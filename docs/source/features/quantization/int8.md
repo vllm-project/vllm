@@ -7,16 +7,16 @@ This quantization method is particularly useful for reducing model size while ma
 
 Please visit the HF collection of [quantized INT8 checkpoints of popular LLMs ready to use with vLLM](https://huggingface.co/collections/neuralmagic/int8-llms-for-vllm-668ec32c049dca0369816415).
 
-```{note}
-INT8 computation is supported on NVIDIA GPUs with compute capability > 7.5 (Turing, Ampere, Ada Lovelace, Hopper).
-```
+:::{note}
+INT8 computation is supported on NVIDIA GPUs with compute capability > 7.5 (Turing, Ampere, Ada Lovelace, Hopper, Blackwell).
+:::
 
 ## Prerequisites
 
 To use INT8 quantization with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
 
 ```console
-$ pip install llmcompressor
+pip install llmcompressor
 ```
 
 ## Quantization Process
@@ -30,14 +30,13 @@ The quantization process involves four main steps:
 
 ### 1. Loading the Model
 
-Use `SparseAutoModelForCausalLM`, which wraps `AutoModelForCausalLM`, for saving and loading quantized models:
+Load your model and tokenizer using the standard `transformers` AutoModel classes:
 
 ```python
-from llmcompressor.transformers import SparseAutoModelForCausalLM
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
-model = SparseAutoModelForCausalLM.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID, device_map="auto", torch_dtype="auto",
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -120,9 +119,9 @@ $ lm_eval --model vllm \
   --batch_size 'auto'
 ```
 
-```{note}
+:::{note}
 Quantized models can be sensitive to the presence of the `bos` token. Make sure to include the `add_bos_token=True` argument when running evaluations.
-```
+:::
 
 ## Best Practices
 
@@ -133,4 +132,4 @@ Quantized models can be sensitive to the presence of the `bos` token. Make sure 
 
 ## Troubleshooting and Support
 
-If you encounter any issues or have feature requests, please open an issue on the `vllm-project/llm-compressor` GitHub repository.
+If you encounter any issues or have feature requests, please open an issue on the [`vllm-project/llm-compressor`](https://github.com/vllm-project/llm-compressor) GitHub repository.

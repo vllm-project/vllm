@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Utilities for selecting and loading neuron models."""
 import copy
 import importlib

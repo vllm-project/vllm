@@ -95,6 +95,16 @@ __global__ void advance_step_flashinfer_kernel(
     long* input_positions_ptr, int* seq_lens_ptr, long* slot_mapping_ptr,
     int const* block_tables_ptr, int64_t const block_tables_stride,
     int* paged_kv_last_page_len_ptr, int* block_table_bound_ptr) {
+  int const n_pad = num_seqs - num_queries;
+  if (n_pad && blockIdx.x == 0) {
+    // Handle cuda graph padding
+    int const offset = num_queries;
+    for (int i = threadIdx.x; i < n_pad; i += blockDim.x) {
+      input_tokens_ptr[offset + i] = 0;
+      input_positions_ptr[offset + i] = 0;
+      slot_mapping_ptr[offset + i] = -1;
+    }
+  }
   int num_query_blocks = div_ceil(num_queries, num_threads);
 
   if (blockIdx.x < num_query_blocks) {
@@ -264,7 +274,7 @@ void advance_step_flashinfer(
   cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev);
   cudaDeviceGetAttribute(&threads, cudaDevAttrMaxThreadsPerBlock, dev);
 
-  int block_tables_stride = block_tables.stride(0);
+  [[maybe_unused]] int block_tables_stride = block_tables.stride(0);
   TORCH_CHECK((blocks * threads > num_queries),
               "multi-step: not enough threads to map to num_queries = ",
               num_queries, " block_tables.stride(0) = ", block_tables.stride(0),

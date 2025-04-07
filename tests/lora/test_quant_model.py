@@ -1,7 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/tests/lora/test_llama.py
 from dataclasses import dataclass
-from typing import List
 
 import pytest
 
@@ -17,7 +18,7 @@ class ModelWithQuantization:
     quantization: str
 
 
-MODELS: List[ModelWithQuantization]
+MODELS: list[ModelWithQuantization]
 #AWQ quantization is currently not supported in ROCm.
 if current_platform.is_rocm():
     MODELS = [
@@ -36,10 +37,18 @@ else:
     ]
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 def do_sample(llm: vllm.LLM,
               lora_path: str,
               lora_id: int,
-              max_tokens: int = 256) -> List[str]:
+              max_tokens: int = 256) -> list[str]:
     raw_prompts = [
         "Give me an orange-ish brown color",
         "Give me a neon pink color",
@@ -59,7 +68,7 @@ def do_sample(llm: vllm.LLM,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
         if lora_id else None)
     # Print the outputs.
-    generated_texts: List[str] = []
+    generated_texts: list[str] = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
@@ -72,7 +81,8 @@ def do_sample(llm: vllm.LLM,
 @pytest.mark.parametrize("tp_size", [1])
 def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
                           tp_size):
-    if num_gpus_available < tp_size:
+    if num_gpus_available < tp_size and \
+        tp_size > 1 and current_platform.is_cuda_alike():
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     llm = vllm.LLM(
@@ -168,7 +178,8 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
                                  model):
     if num_gpus_available < 2:
         pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
-
+    if model.quantization == "GPTQ":
+        pytest.skip("GPTQ lora outputs are just incredibly unstable")
     llm_tp1 = vllm.LLM(
         model=model.model_path,
         enable_lora=True,

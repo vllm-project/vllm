@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/qwen2/modeling_qwen2.py
 # Copyright 2024 The Qwen team.
@@ -21,13 +23,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import Qwen2Config
 
-from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -168,13 +170,11 @@ class Qwen2Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -231,8 +231,6 @@ class Qwen2DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -245,8 +243,6 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         # Fully Connected
@@ -256,7 +252,15 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
+        # otherwise (seq_len, ).
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    })
 class Qwen2Model(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -279,7 +283,7 @@ class Qwen2Model(nn.Module):
                              ))
 
         self.config = config
-        self.padding_idx = config.pad_token_id
+        self.quant_config = quant_config
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
@@ -317,8 +321,6 @@ class Qwen2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -332,13 +334,10 @@ class Qwen2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
@@ -363,6 +362,17 @@ class Qwen2Model(nn.Module):
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -408,26 +418,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ],
     }
 
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
-
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -466,13 +456,10 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
 
@@ -516,16 +503,6 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         ],
     }
 
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
-
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -561,12 +538,9 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, kv_caches, attn_metadata,
-                          intermediate_tensors)
+        return self.model(input_ids, positions, intermediate_tensors)
 
     def pooler(
         self,
