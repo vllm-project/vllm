@@ -233,9 +233,9 @@ See [this page](#generative-models) for more information on how to use generativ
   * `facebook/bart-base`, `facebook/bart-large-cnn`, etc.
   *
   *
-- * `ChatGLMModel`
+- * `ChatGLMModel`, `ChatGLMForConditionalGeneration`
   * ChatGLM
-  * `THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.
+  * `THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, `ShieldLM-6B-chatglm3`, etc.
   * ✅︎
   * ✅︎
 - * `CohereForCausalLM`, `Cohere2ForCausalLM`
