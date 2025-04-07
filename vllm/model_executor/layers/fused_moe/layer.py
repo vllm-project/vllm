@@ -185,7 +185,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             experts_per_token=moe.experts_per_token,
             rank=moe.ep_rank,
             world_size=moe.ep_size,
-            dp_size=moe.ep_size // moe.dp_size,
+            dp_size=moe.ep_size // moe.dp_size, # dp_size actually means TP.
             hidden_dim=moe.hidden_dim,
             hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
             hidden_dim_scale_bytes=0,
