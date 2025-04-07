@@ -107,6 +107,8 @@ def set_forward_context(attn_metadata: Any,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata)
 
+    # KVConnector: trigger (possibly async) load before forward.
+    # Each attn layer will block until the reading is complete.
     if has_kv_transfer_group() and attn_metadata is not None and \
             is_v1_kv_transfer_group():
         kv_connector = get_kv_transfer_group()
@@ -149,7 +151,8 @@ def set_forward_context(attn_metadata: Any,
                                  "(batchsize, count, median_time(ms)): %s"),
                                 forward_stats)
 
-        # Waiting for the save operation to finish
+        # KVConnector: each attn layer triggers (possibly async) save.
+        # Ensure all those operations complete before forward() is done.
         if has_kv_transfer_group() and attn_metadata is not None and \
                 is_v1_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
