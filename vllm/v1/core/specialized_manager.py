@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
+from typing import Sequence
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -32,7 +33,10 @@ class SpecializedManager(ABC):
 
     @abstractmethod
     def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+        self,
+        block_hashes: list[BlockHashType],
+        group_ids: Sequence[int],
+    ) -> list[dict[int, KVCacheBlock]]:
         """
         Get the longest cache hit prefix of the blocks. If no cache hit is 
         found, return an empty list.
@@ -69,20 +73,29 @@ class SpecializedManager(ABC):
 class FullAttentionManager(SpecializedManager):
 
     def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+        self,
+        block_hashes: list[BlockHashType],
+        group_ids: Sequence[int],
+    ) -> list[dict[int, KVCacheBlock]]:
         computed_blocks: list[KVCacheBlock] = []
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
-            if cached_block := self.block_pool.get_cached_block(block_hash):
-                computed_blocks.append(cached_block)
+            cached_blocks = self.block_pool.get_cached_block(block_hash)
+            if cached_blocks is None:
+                break
+            if all(group_id in cached_blocks for group_id in group_ids):
+                computed_blocks.append(cached_blocks)
             else:
                 break
         return computed_blocks
 
-    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int) -> list[KVCacheBlock]:
+    def remove_skipped_blocks(
+        self,
+        blocks: list[KVCacheBlock],
+        num_computed_tokens: int,
+    ) -> list[KVCacheBlock]:
         # No need to remove blocks for full attention.
         return []
 
@@ -100,30 +113,38 @@ class SlidingWindowManager(SpecializedManager):
         self._null_block = block_pool.null_block
 
     def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+        self,
+        block_hashes: list[BlockHashType],
+        group_ids: Sequence[int],
+    ) -> list[dict[int, KVCacheBlock]]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(len(block_hashes)) to
         # O(len(block_hashes) / sliding_window_contiguous_blocks +
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
-        computed_blocks = [self._null_block] * len(block_hashes)
+        null_block = {group_id: self._null_block for group_id in group_ids}
+        computed_blocks = [null_block] * len(block_hashes)
         num_contiguous_blocks = 0
 
         # Search from right to left and early stop when a match is found.
         for i in range(len(block_hashes) - 1, -1, -1):
-            if cached_block := self.block_pool.get_cached_block(
-                    block_hashes[i]):
-                computed_blocks[i] = cached_block
-                num_contiguous_blocks += 1
-                if (num_contiguous_blocks
-                        >= self.sliding_window_contiguous_blocks):
-                    # Trim the trailing blocks.
-                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-                    # when sliding_window_contiguous_blocks=2.
-                    del computed_blocks[i + num_contiguous_blocks:]
-                    return computed_blocks
-            else:
+            block_hash = block_hashes[i]
+            cached_blocks = self.block_pool.get_cached_block(block_hash)
+            if (cached_blocks is None or
+                any(group_id not in cached_blocks for group_id in group_ids)):
                 num_contiguous_blocks = 0
+                continue
+
+            computed_blocks[i] = cached_blocks
+            num_contiguous_blocks += 1
+            if (num_contiguous_blocks
+                    >= self.sliding_window_contiguous_blocks):
+                # Trim the trailing blocks.
+                # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
+                # when sliding_window_contiguous_blocks=2.
+                del computed_blocks[i + num_contiguous_blocks:]
+                return computed_blocks
+
         # The first `num_contiguous_blocks` is a cache hit even if
         # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
         del computed_blocks[num_contiguous_blocks:]
