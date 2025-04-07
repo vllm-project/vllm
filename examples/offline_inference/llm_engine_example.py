@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-
+"""
+This file demonstrates using the `LLMEngine`
+for processing prompts with various sampling parameters.
+"""
 import argparse
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
@@ -26,6 +29,7 @@ def process_requests(engine: LLMEngine,
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
 
+    print('-' * 50)
     while test_prompts or engine.has_unfinished_requests():
         if test_prompts:
             prompt, sampling_params = test_prompts.pop(0)
@@ -37,6 +41,7 @@ def process_requests(engine: LLMEngine,
         for request_output in request_outputs:
             if request_output.finished:
                 print(request_output)
+                print('-' * 50)
 
 
 def initialize_engine(args: argparse.Namespace) -> LLMEngine:
