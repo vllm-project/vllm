@@ -65,6 +65,7 @@ class LlamaMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         prefix: str = "",
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -79,6 +80,7 @@ class LlamaMLP(nn.Module):
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -469,7 +471,11 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "norm": "model.norm"
     }
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -478,7 +484,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
 
         self.model = self._init_model(vllm_config=vllm_config,
-                                      prefix=maybe_prefix(prefix, "model"))
+                                      prefix=maybe_prefix(prefix, "model"),
+                                      layer_type=layer_type)
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
@@ -513,8 +520,13 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def _init_model(self, vllm_config: VllmConfig, prefix: str = ""):
-        return LlamaModel(vllm_config=vllm_config, prefix=prefix)
+    def _init_model(self,
+                    vllm_config: VllmConfig,
+                    prefix: str = "",
+                    layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer):
+        return LlamaModel(vllm_config=vllm_config,
+                          prefix=prefix,
+                          layer_type=layer_type)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
