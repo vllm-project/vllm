@@ -589,6 +589,7 @@ class DeepseekV2Model(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        self.config = config
 
         self.vocab_size = config.vocab_size
 

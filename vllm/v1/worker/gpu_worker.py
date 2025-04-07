@@ -28,7 +28,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
 
 
 class Worker(WorkerBase):
@@ -83,9 +83,9 @@ class Worker(WorkerBase):
             "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes)
 
-    def wake_up(self) -> None:
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         allocator = CuMemAllocator.get_instance()
-        allocator.wake_up()
+        allocator.wake_up(tags)
 
     def init_device(self):
         if self.device_config.device.type == "cuda":
@@ -185,7 +185,7 @@ class Worker(WorkerBase):
 
         return int(available_kv_cache_memory)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
@@ -268,6 +268,20 @@ class Worker(WorkerBase):
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        from vllm.model_executor.model_loader.loader import ShardedStateLoader
+        ShardedStateLoader.save_model(
+            self.model_runner.model,
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
 
 
 def init_worker_distributed_environment(

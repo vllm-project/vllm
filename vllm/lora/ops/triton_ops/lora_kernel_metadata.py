@@ -17,6 +17,17 @@ class LoRAKernelMeta:
     num_tokens_per_lora: torch.Tensor
     lora_token_start_loc: torch.Tensor
 
+    # The V1 architecture uses the traced torch.compile graphs to execute
+    # a forward pass. Things to note about this process,
+    # 1. The tracing infers all python scalar datatype objects into a constant
+    # value.
+    # 2. The tracing cannot handle dynamic control flow. (dynamic control flow
+    # is an experimental feature in pytorch)
+    # 3. The internals of torch.ops functions are not traced.
+    # We disguise the "no_lora" flag as a cpu tensor and leverage point number 3
+    # to early exit from inside the lora_expand / lora_shrink torch operation.
+    no_lora_flag_cpu: torch.Tensor
+
     @staticmethod
     def make(max_loras: int, max_num_tokens: int,
              device: Union[torch.device, str]) -> "LoRAKernelMeta":
@@ -47,17 +58,24 @@ class LoRAKernelMeta:
         lora_token_start_loc = torch.zeros(max_loras + 2,
                                            dtype=torch.int32,
                                            device=device)
+
+        no_lora_flag_cpu = torch.tensor([False],
+                                        dtype=torch.bool,
+                                        device='cpu')
+
         return LoRAKernelMeta(
             token_lora_mapping=token_lora_mapping,
             token_indices_sorted_by_lora_ids=token_indices_sorted_by_lora_ids,
             active_lora_ids=active_lora_ids,
             num_tokens_per_lora=num_tokens_per_lora,
-            lora_token_start_loc=lora_token_start_loc)
+            lora_token_start_loc=lora_token_start_loc,
+            no_lora_flag_cpu=no_lora_flag_cpu)
 
     def _reset(self):
         self.active_lora_ids.fill_(-1)
         self.num_tokens_per_lora.fill_(0)
         self.lora_token_start_loc.fill_(0)
+        self.no_lora_flag_cpu.fill_(False)
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """
@@ -69,6 +87,14 @@ class LoRAKernelMeta:
         """
 
         self._reset()
+
+        # Check and record no-lora case.
+        no_lora = torch.all(token_lora_mapping == -1)
+        self.no_lora_flag_cpu[0] = no_lora
+
+        if no_lora:
+            # Early exit. LoRA kernels will not be run.
+            return
 
         num_tokens = token_lora_mapping.size(0)
 
@@ -85,7 +111,7 @@ class LoRAKernelMeta:
 
         # active_lora_ids, num_tokens_per_lora
         lora_ids, num_tokens_per_lora = torch.unique(token_lora_mapping,
-                                                     sorted=False,
+                                                     sorted=True,
                                                      return_counts=True)
         self.active_lora_ids[:lora_ids.size(0)].copy_(lora_ids,
                                                       non_blocking=True)
@@ -100,7 +126,7 @@ class LoRAKernelMeta:
     def meta_args(
         self, token_nums: int
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-               torch.Tensor]:
+               torch.Tensor, torch.Tensor]:
         """
         This function returns the kernel metadata required for the current
         forward pass execution of the kernel. The function returns all the
@@ -111,7 +137,11 @@ class LoRAKernelMeta:
             token_nums (int): Number of input tokens in the current forward
             pass. 
         """
-        return (self.token_lora_mapping[:token_nums],
-                self.token_indices_sorted_by_lora_ids[:token_nums],
-                self.num_tokens_per_lora, self.lora_token_start_loc,
-                self.active_lora_ids)
+        return (
+            self.token_lora_mapping[:token_nums],
+            self.token_indices_sorted_by_lora_ids[:token_nums],
+            self.num_tokens_per_lora,
+            self.lora_token_start_loc,
+            self.active_lora_ids,
+            self.no_lora_flag_cpu,
+        )

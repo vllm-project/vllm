@@ -29,6 +29,15 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message)
 ```
 
+:::{tip}
+vLLM supports some parameters that are not supported by OpenAI, `top_k` for example.
+You can pass these parameters to vLLM using the OpenAI client in the `extra_body` parameter of your requests, i.e. `extra_body={"top_k": 50}` for `top_k`.
+:::
+:::{important}
+By default, the server applies `generation_config.json` from the Hugging Face model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
+
+To disable this behavior, please pass `--generation-config vllm` when launching the server.
+:::
 ## Supported APIs
 
 We currently support the following OpenAI APIs:
@@ -179,6 +188,7 @@ For example:
 ```yaml
 # config.yaml
 
+model: meta-llama/Llama-3.1-8B-Instruct
 host: "127.0.0.1"
 port: 6379
 uvicorn-log-level: "info"
@@ -187,12 +197,13 @@ uvicorn-log-level: "info"
 To use the above config file:
 
 ```bash
-vllm serve SOME_MODEL --config config.yaml
+vllm serve --config config.yaml
 ```
 
 :::{note}
 In case an argument is supplied simultaneously using command line and the config file, the value from the command line will take precedence.
 The order of priorities is `command line > config file values > defaults`.
+e.g. `vllm serve SOME_MODEL --config config.yaml`, SOME_MODEL takes precedence over `model` in config file.
 :::
 
 ## API Reference
