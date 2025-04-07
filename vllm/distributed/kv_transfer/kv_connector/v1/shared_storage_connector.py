@@ -131,7 +131,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         # Get the metadata
         metadata: KVConnectorMetadata = \
-            self._get_connector_metadata()
+            self._get_connector_metadatata()
         assert isinstance(metadata, SharedStorageConnectorMetadata)
 
         if metadata is None:
@@ -200,7 +200,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
                                                                ...]
 
-        connector_metadata = self._get_connector_metadata()
+        connector_metadata = self._get_connector_metadatata()
         assert isinstance(connector_metadata, SharedStorageConnectorMetadata)
         for request in connector_metadata.requests:
             if request.is_store:
@@ -291,7 +291,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """Attach the connector metadata to the request object.
 
         This function should NOT modify other fields in the scheduler_output 
-        except the `kv_connector_metadata` field.
+        except the `kv_connector_metadatata` field.
         Also, calling this function will reset the state of the connector.
 
         Args:
@@ -308,7 +308,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # store and load status
                 if not self.found_match_for_request(request):
                     meta.add_request(request, self._block_size, is_store=True)
-        scheduler_output.kv_connector_metadata = meta
+        scheduler_output.kv_connector_metadatata = meta
 
         self._requests_need_load.clear()
         return scheduler_output

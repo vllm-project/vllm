@@ -1046,8 +1046,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Update the connector's state with the metadata in scheduler output.
         if has_kv_transfer_group():
-            get_kv_transfer_group().bind_connector_metadata(
-                scheduler_output.kv_connector_metadata)
+            get_kv_transfer_group().bind_connector_metadatata(
+                scheduler_output.kv_connector_metadatata)
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
@@ -1068,7 +1068,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Clear connector's state
         if has_kv_transfer_group():
-            get_kv_transfer_group().clear_connector_metadata()
+            get_kv_transfer_group().clear_connector_metadatata()
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
