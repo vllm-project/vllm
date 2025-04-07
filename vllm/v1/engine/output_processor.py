@@ -198,7 +198,6 @@ class RequestState:
             return PoolingRequestOutput(
                 request_id=request_id,
                 outputs=outputs[0],
-                prompt=self.prompt,
                 prompt_token_ids=self.prompt_token_ids,
                 finished=finished,
             )
