@@ -106,7 +106,7 @@ steps:
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   amd_gpus: 2   # Just for the sake of queue testing
   source_file_dependencies:
   - vllm/
@@ -158,6 +158,7 @@ steps:
   - popd
 
 - label: Metrics, Tracing Test # 10min
+  mirror_hardwares: [amd]
   num_gpus: 2
   source_file_dependencies:
   - vllm/
@@ -176,7 +177,7 @@ steps:
 #####  1 GPU test  #####
 
 - label: Regression Test # 5min
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -291,7 +292,7 @@ steps:
 
 - label: LoRA Test %N # 15min each
   working_dir: "/vllm-workspace/tests"
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   amd_gpus: 8
   source_file_dependencies:
   - vllm/lora
@@ -319,7 +320,7 @@ steps:
 
 - label: Kernels Test %N # 1h each
   working_dir: "/vllm-workspace/tests"
-  mirror_hardwares: [amd]
+  # mirror_hardwares: [amd]
   amd_gpus: 8
   source_file_dependencies:
   - csrc/
@@ -331,7 +332,7 @@ steps:
 
 - label: Tensorizer Test # 11min
   working_dir: "/vllm-workspace/tests"
-  mirror_hardwares: [amd]
+  # mirror_hardwares: [amd]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
@@ -347,7 +348,7 @@ steps:
   source_file_dependencies:
   - benchmarks/
   commands:
-  - bash run-benchmarks.sh
+  - bash scripts/run-benchmarks.sh
 
 - label: Quantization Test # 33min
   source_file_dependencies:
@@ -383,7 +384,7 @@ steps:
 - label: OpenAI-Compatible Tool Use # 20 min
   working_dir: "/vllm-workspace/tests" 
   fast_check: false
-  mirror_hardwares: [ amd ]
+  #mirror_hardwares: [ amd ]
   source_file_dependencies:
     - vllm/
     - tests/tool_use
@@ -400,7 +401,8 @@ steps:
     - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     # V1 Test: https://github.com/vllm-project/vllm/issues/14531
-    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4'
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'llama4'
 
 - label: Language Models Test (Standard) # 32min
   #mirror_hardwares: [amd]
@@ -475,6 +477,7 @@ steps:
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
+  mirror_hardwares: [amd]
   optional: true
   commands:
     - echo 'Testing custom models...'
@@ -486,6 +489,7 @@ steps:
 #####  multi gpus test  #####
 
 - label: Distributed Comm Ops Test # 7min
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:

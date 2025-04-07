@@ -133,3 +133,8 @@ class TpuPlatform(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on TPU is experimental
         return True
+
+    @classmethod
+    def supports_structured_output(cls) -> bool:
+        # Structured output is not supported on TPU.
+        return False
