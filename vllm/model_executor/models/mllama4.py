@@ -606,6 +606,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
         num_patches_per_chunk = self.info.get_patch_per_chunk(vision_config)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
+        img_patch_token = hf_processor.img_patch_token
 
         def get_replacement(item_idx: int):
             aspect_ratio = out_mm_kwargs["aspect_ratios"][item_idx]
@@ -615,7 +616,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
                 num_patches_per_chunk=num_patches_per_chunk,
             )
 
-            return PromptUpdateDetails.select_text(repl, image_token)
+            return PromptUpdateDetails.select_text(repl, img_patch_token)
 
         return [
             PromptReplacement(
