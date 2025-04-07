@@ -469,6 +469,9 @@ class Scheduler(SchedulerInterface):
             req_data.new_token_ids = new_token_ids
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
+            req_data.num_dropped_token_offsets = \
+                request.num_dropped_token_offsets
+            req_data.should_compress = request.should_compress
         else:
             req_data = CachedRequestData.from_request(request,
                                                       resumed_from_preemption,
@@ -572,6 +575,10 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
+            ## TODO: consume from global var
+            num_dropped_token_offset = -1
+            if num_dropped_token_offset != 0:
+                request.num_dropped_token_offsets.append(num_dropped_token_offset)
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
@@ -617,6 +624,10 @@ class Scheduler(SchedulerInterface):
             # to return empty token ids for the request.
             for num_new, output_token_id in enumerate(new_token_ids, 1):
                 request.append_output_token_ids(output_token_id)
+                ## TODO: we only compress in case of \n token
+                ## Figure out a way to identify \n as per token id
+                # request.should_compress = output_token_id == 50118
+                request.should_compress = True
 
                 # Check for stop and update request state.
                 # This must be called before we make the EngineCoreOutput.

@@ -414,6 +414,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
+            self.input_batch.num_dropped_token_offsets_cpu[req_index] = \
+                sum(req_data.num_dropped_token_offsets)
+            self.input_batch.should_compress[req_index] = \
+                req_data.should_compress
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
             # Add new_token_ids to token_ids_cpu.
@@ -512,6 +516,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
+
+        ## TODO: update slot mapping and pass should_compress to flash attention
+        print(self.input_batch.num_dropped_token_offsets_cpu[:5], self.input_batch.should_compress[:5])
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)

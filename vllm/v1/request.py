@@ -54,6 +54,9 @@ class Request:
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        ## For easier debugging, store all historical drops instead of a single accumulated value
+        self.num_dropped_token_offsets: list[int] = []
+        self.should_compress = False
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
