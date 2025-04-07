@@ -136,9 +136,11 @@ class Processor:
                                  f" != {engine_level_backend}")
         else:
             params.guided_decoding.backend = engine_level_backend
-        import vllm.platforms
-        if vllm.platforms.current_platform.is_tpu():
-            raise ValueError("Structured output is not supported on TPU.")
+
+        from vllm.platforms import current_platform
+        if not current_platform.supports_structured_output():
+            raise ValueError("Structured output is not supported on "
+                             f"{current_platform.device_name}.")
 
         # Request content validation
         if engine_level_backend.startswith("xgrammar"):
