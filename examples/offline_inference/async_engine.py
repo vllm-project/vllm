@@ -51,6 +51,7 @@ if __name__ == "__main__":
         futures.append(result)
 
     # Get the results from the futures.
+    # consider using ray.wait() in production
     for future in futures:
         output = ray.get(future)
         prompt = output.prompt
