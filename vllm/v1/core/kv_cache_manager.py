@@ -139,12 +139,20 @@ class KVCacheManager:
             # block hash from the block_hashes for find_longest_cache_hit
             # This limitation can potentially be removed in the future to
             # slightly improve the performance.
-            block_hashes.pop()
+            last_block_hash = block_hashes.pop()
+        else:
+            last_block_hash = None
 
         computed_blocks = (
             self.specialized_manager.find_longest_cache_hit(block_hashes))
         self.prefix_cache_stats.queries += len(block_hashes)
         self.prefix_cache_stats.hits += len(computed_blocks)
+
+        if last_block_hash is not None:
+            # Add back the last block hash if it was removed.
+            # NOTE: Because block_hashes is cached in req_to_block_hashes,
+            # we shouldn't modify it directly.
+            block_hashes.append(last_block_hash)
 
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
