@@ -17,6 +17,7 @@
 # limitations under the License.
 import math
 from collections.abc import Iterable, Mapping
+from functools import cached_property
 from itertools import tee
 from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
@@ -38,7 +39,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import _initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -52,7 +53,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llama4 import Llama4ForCausalLM
@@ -708,10 +708,9 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.config,
             None,
             prefix=maybe_prefix(prefix, "multi_modal_projector"))
-        language_model_vllm_config = vllm_config.with_hf_config(
-            config.text_config, architectures=["Llama4ForCausalLM"])
+
         self.language_model = _initialize_model(
-            vllm_config=language_model_vllm_config,
+            vllm_config=vllm_config.with_hf_config(config.text_config),
             prefix=maybe_prefix(prefix, "language_model"),
             model_class=Llama4ForCausalLM,
         )
@@ -719,7 +718,12 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-        self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+    @cached_property
+    def sampler(self):
+        if hasattr(self.language_model, "sampler"):
+            return self.language_model.sampler
+
+        return get_sampler()
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Llama4ImagePatchInputs]:

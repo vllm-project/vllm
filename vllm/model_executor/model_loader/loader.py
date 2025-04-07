@@ -111,7 +111,7 @@ def _initialize_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    model_class: Optional[nn.Module] = None,
+    model_class: Optional[type[nn.Module]] = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
