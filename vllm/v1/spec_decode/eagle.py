@@ -159,14 +159,6 @@ class EagleProposer:
                 batch_size,
                 self._draft_token_ids_buffer, 
                 self._draft_probs_buffer)
-            # draft_token_ids_list.append(draft_token_ids)
-            # draft_probs_list.append(probs)
-
-        # [batch_size, num_speculative_tokens]
-        # draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        # [batch_size, num_speculative_tokens, vocab_size]
-        # draft_probs = torch.stack(draft_probs_list, dim=1)
-        # return draft_token_ids, draft_probs
 
     @staticmethod
     def prepare_inputs(
@@ -255,12 +247,10 @@ def compute_probs_and_sample_next_token(
         # Therefore, we can just return the logits.
         draft_probs_buffer[:batch_size, speculative_token_idx, :] = logits
         draft_token_ids_buffer[:batch_size, speculative_token_idx] = logits.argmax(dim=-1)
-        # return next_token_ids, draft_probs
 
     is_greedy = sampling_metadata.temperature == -1
     temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
     logits.div_(temperature.view(-1, 1))
-    # probs = logits.softmax(dim=-1, dtype=torch.float32) # REMOVE
     draft_probs_buffer[:batch_size, speculative_token_idx, :] = logits.softmax(dim=-1, dtype=torch.float32)
 
     # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
