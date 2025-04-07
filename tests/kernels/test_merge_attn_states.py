@@ -7,12 +7,9 @@ from vllm.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton)
 from vllm.platforms import current_platform
 
-NUM_TOKENS = [512, 613, 1024, 1536, 4096, 8192]
-# NUM_TOKENS = [512]
+NUM_TOKENS = [256, 512, 613, 1024, 1536, 4096, 8192, 16384]
 NUM_QUERY_HEADS = [4, 8, 16, 32, 48, 64]
-# NUM_QUERY_HEADS = [16]
-HEAD_SIZES = [32, 48, 64, 96, 128, 256]
-# HEAD_SIZES = [128]
+HEAD_SIZES = [48, 64, 96, 128, 256]
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -118,13 +115,15 @@ def test_merge_attn_states(num_tokens: int, num_query_heads: int,
         total_time_kernel_cuda += start.elapsed_time(end)
 
     avg_time_kernel_cuda = total_time_kernel_cuda / repeat_times
+    performance_improved = avg_time_kernel / avg_time_kernel_cuda
     print(f"\nNUM_TOKENS:{NUM_TOKENS}, NUM_HEADS:{NUM_HEADS}, "
           f"HEAD_SIZE:{HEAD_SIZE}, "
           f"Device: {current_platform.get_device_name()}")
     print(f"Average time taken by Triton merge_attn_states "
-          f"kernel: {avg_time_kernel} ms")
+          f"kernel: {avg_time_kernel}ms")
     print(f"Average time taken by   CUDA merge_attn_states "
-          f"kernel: {avg_time_kernel_cuda} ms")
+          f"kernel: {avg_time_kernel_cuda}ms, "
+          f"Performance: {performance_improved:.5f}x")
     print("-" * 100)
 
     if not torch.allclose(output_ref, output_cuda, rtol=1e-3, atol=1e-3):
