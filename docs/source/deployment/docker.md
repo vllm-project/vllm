@@ -34,11 +34,11 @@ If you need to use those dependencies (having accepted the license terms),
 create a custom Dockerfile on top of the base image with an extra layer that installs them:
 
 ```Dockerfile
-FROM vllm/vllm-openai:v0.8.2
+FROM vllm/vllm-openai:v0.8.3
 
-# e.g. install the `audio` and `video` optional dependencies
+# e.g. install the `audio` optional dependencies
 # NOTE: Make sure the version of vLLM matches the base image!
-RUN uv pip install --system vllm[audio,video]==0.8.2
+RUN uv pip install --system vllm[audio]==0.8.3
 ```
 
 :::
