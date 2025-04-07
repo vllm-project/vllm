@@ -18,12 +18,11 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
                                                PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
@@ -425,27 +424,6 @@ class BertEmbeddingModel(nn.Module):
                                    inputs_embeds=inputs_embeds,
                                    intermediate_tensors=intermediate_tensors)
         return hidden_states
-
-    # TODO: Remove test scaffolding after pooling is implemented
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        print(f"{hidden_states=}")
-        logits = torch.zeros(
-            (hidden_states.shape[0], self.model.config.vocab_size),
-            dtype=torch.half,
-            device=hidden_states.device)
-        logits[:, 333] = 1.0
-
-        return logits
-
-    # TODO: Remove test scaffolding after pooling is implemented
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def pooler(
         self,

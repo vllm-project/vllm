@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
+from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -99,6 +100,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             or self.interleaved_sliding_window)
 
         self.is_multimodal_model = model_config.is_multimodal_model
+        self.is_pooling_model = model_config.pooler_config is not None
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
@@ -1460,7 +1462,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
-        return hidden_states[logit_indices]
+        return hidden_states, hidden_states[logit_indices], num_reqs
 
     @torch.inference_mode()
     def _dummy_sampler_run(
@@ -1535,6 +1537,43 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         return sampler_output
 
+    @torch.inference_mode()
+    def _dummy_pooler_run(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+
+        req_num_tokens = num_tokens // num_reqs
+
+        dummy_metadata = PoolingMetadata(
+            prompt_lens=torch.tensor([req_num_tokens] * num_reqs,
+                                     device=self.device),
+            prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
+                                         dtype=torch.int32,
+                                         device=self.device))
+        print(f"{num_tokens=}")
+        print(f"{num_reqs=}")
+        print(f"{req_num_tokens=}")
+        print(f"{hidden_states.shape=}")
+        print(f"{dummy_metadata.prompt_lens=}")
+        print(f"{dummy_metadata.prompt_token_ids=}")
+
+        try:
+            pooler_output = self.model.pooler(hidden_states=hidden_states,
+                                              pooling_metadata=dummy_metadata)
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                raise RuntimeError(
+                    "CUDA out of memory occurred when warming up pooler with "
+                    f"{num_reqs} dummy requests. Please try lowering "
+                    "`max_num_seqs` or `gpu_memory_utilization` when "
+                    "initializing the engine.") from e
+            else:
+                raise e
+        return pooler_output
+
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
         # TODO: handle encoder-decoder models once we support them.
@@ -1602,13 +1641,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-        hidden_states = self._dummy_run(self.max_num_tokens)
+        hidden_states, last_hidden_states, num_reqs = self._dummy_run(
+            self.max_num_tokens)
         if get_pp_group().is_last_rank:
-            sampler_output = self._dummy_sampler_run(hidden_states)
+            if self.is_pooling_model:
+                output = self._dummy_pooler_run(self.max_num_tokens, num_reqs,
+                                                hidden_states)
+            else:
+                output = self._dummy_sampler_run(last_hidden_states)
         else:
-            sampler_output = None
+            output = None
         torch.cuda.synchronize()
-        del hidden_states, sampler_output
+        del hidden_states, output
         self.encoder_cache.clear()
         gc.collect()
 
