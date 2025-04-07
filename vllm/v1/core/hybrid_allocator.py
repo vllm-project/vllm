@@ -61,6 +61,8 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
 
     For example, models like Gemma 2 (1:1 full/swa) and Gemma 3 (1:5 full/swa)
     use this allocator.
+
+    # TODO(woosuk): Extend this to Llama 4.
     """
 
     def __init__(
