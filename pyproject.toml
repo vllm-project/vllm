@@ -13,7 +13,7 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vllm"
+name = "vllm-emissary"
 authors = [{name = "vLLM Team"}]
 license = { "file"= "LICENSE" }
 readme = "README.md"
@@ -42,6 +42,8 @@ Slack="http://slack.vllm.ai/"
 vllm = "vllm.entrypoints.cli.main:main"
 
 [tool.setuptools_scm]
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"
 # no extra settings needed, presence enables setuptools-scm
 
 [tool.setuptools.packages.find]
