@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import json
+import os
 import threading
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
@@ -123,8 +124,9 @@ class EngineArgs:
     disable_sliding_window: bool = False
     disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
-    use_padding_aware_scheduling: bool = current_platform.is_hpu(
-    ) and not bool(envs.VLLM_USE_V1)
+    use_padding_aware_scheduling: bool = (
+        current_platform.is_hpu() and not bool(envs.VLLM_USE_V1)
+        and (os.environ.get('VLLM_MERGED_PREFILL', 'false').lower() != 'true'))
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90

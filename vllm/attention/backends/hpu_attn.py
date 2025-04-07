@@ -4,7 +4,6 @@
 # Copyright (C) 2024-2025 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -14,6 +13,7 @@ import vllm_hpu_extension.ops as ops
 from vllm_hpu_extension.flags import enabled_flags
 from vllm_hpu_extension.utils import Matmul, Softmax, VLLMKVCache
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType)
@@ -211,8 +211,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         value_cache = None
         if attn_metadata.is_prompt and self.attn_type \
                 is not AttentionType.ENCODER_ONLY \
-            and (attn_metadata.block_list is None
-                 if os.getenv("VLLM_USE_V1") == 1 else True):
+            and (attn_metadata.block_list is None if envs.VLLM_USE_V1
+                 else True):
             key = key.unflatten(0, (block_indices.size(0), -1))
             value = value.unflatten(0, (block_indices.size(0), -1))
         if kv_cache is not None and isinstance(kv_cache, tuple):

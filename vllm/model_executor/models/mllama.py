@@ -1084,7 +1084,7 @@ class MllamaTextModel(nn.Module):
 
         if is_hpu:
             for idx, decoder_layer in enumerate(self.layers):
-                if isinstance(decoder_layer, LlamaDecoderLayer):
+                if idx not in self.cross_attention_layers:
                     self.layers[idx].self_attn.rotary_emb.prepare_cos_sin(
                         positions)
         for idx, decoder_layer in enumerate(self.layers):

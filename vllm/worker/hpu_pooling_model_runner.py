@@ -164,12 +164,20 @@ class HPUPoolingModelRunner(
                 model_input.batch_size_padded is not None and \
                 model_input.attn_metadata.seq_lens_tensor is not None
 
-            prompt_offsets = [
-                i * model_input.input_tokens.shape[1]
-                for i in range(model_input.batch_size_padded)
-            ]
-            prompt_offsets_tensor = torch.tensor(prompt_offsets).to(
-                model_input.input_tokens.device)
+            if self.use_merged_prefill:
+                prompt_offsets_tensor = \
+                    model_input.attn_metadata.seq_lens_tensor
+                prompt_offsets_tensor = prompt_offsets_tensor.roll(shifts=1)
+                prompt_offsets_tensor[0] = 0
+                prompt_offsets_tensor = torch.cumsum(prompt_offsets_tensor,
+                                                     dim=0)
+            else:
+                prompt_offsets = [
+                    i * model_input.input_tokens.shape[1]
+                    for i in range(model_input.batch_size_padded)
+                ]
+                prompt_offsets_tensor = torch.tensor(prompt_offsets).to(
+                    model_input.input_tokens.device)
 
             pooling_metadata = self._prepare_pooling(
                 seq_group_metadata_list,
