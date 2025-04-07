@@ -43,6 +43,7 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
+HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar('_R')  # Return type for collective_rpc
 
@@ -324,43 +325,47 @@ class EngineCoreProc(EngineCore):
                                        zmq.DEALER,
                                        identity=identity,
                                        bind=False)
+        try:
+            # Register engine with front-end.
+            output_address = self.startup_handshake(
+                input_socket, on_head_node, vllm_config.parallel_config)
 
-        # Register engine with front-end.
-        output_address = self.startup_handshake(input_socket, on_head_node,
-                                                vllm_config.parallel_config)
+            # Set up data parallel environment.
+            self._init_data_parallel(vllm_config)
 
-        # Set up data parallel environment.
-        self._init_data_parallel(vllm_config)
+            # Initialize engine core and model.
+            super().__init__(vllm_config, executor_class, log_stats)
 
-        # Initialize engine core and model.
-        super().__init__(vllm_config, executor_class, log_stats)
+            self.step_fn = (self.step if self.batch_queue is None else
+                            self.step_with_batch_queue)
 
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
+            self.global_unfinished_reqs = False
 
-        self.global_unfinished_reqs = False
+            # Send ready message.
+            input_socket.send(
+                msgspec.msgpack.encode({
+                    "status": "READY",
+                    "local": on_head_node
+                }))
 
-        # Send ready message.
-        input_socket.send(
-            msgspec.msgpack.encode({
-                "status": "READY",
-                "local": on_head_node
-            }))
-
-        # Background Threads and Queues for IO. These enable us to
-        # overlap ZMQ socket IO with GPU since they release the GIL,
-        # and to overlap some serialization/deserialization with the
-        # model forward pass.
-        # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue: queue.Queue[tuple[EngineCoreRequestType,
-                                            Any]] = queue.Queue()
-        self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
-        threading.Thread(target=self.process_input_socket,
-                         args=(input_socket, ),
-                         daemon=True).start()
-        threading.Thread(target=self.process_output_socket,
-                         args=(output_address, engine_index),
-                         daemon=True).start()
+            # Background Threads and Queues for IO. These enable us to
+            # overlap ZMQ socket IO with GPU since they release the GIL,
+            # and to overlap some serialization/deserialization with the
+            # model forward pass.
+            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+            self.input_queue: queue.Queue[tuple[EngineCoreRequestType,
+                                                Any]] = queue.Queue()
+            self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
+            threading.Thread(target=self.process_input_socket,
+                             args=(input_socket, ),
+                             daemon=True).start()
+            input_socket = None
+            threading.Thread(target=self.process_output_socket,
+                             args=(output_address, engine_index),
+                             daemon=True).start()
+        finally:
+            if input_socket is not None:
+                input_socket.close(linger=0)
 
     @staticmethod
     def startup_handshake(input_socket: zmq.Socket, on_head_node: bool,
@@ -375,7 +380,10 @@ class EngineCoreProc(EngineCore):
 
         # Receive initialization message.
         logger.info("Waiting for init message from front-end.")
-        input_socket.poll(timeout=5 * 60 * 1000)
+        if not input_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60 * 1000):
+            raise RuntimeError("Did not receive response from front-end "
+                               f"process within {HANDSHAKE_TIMEOUT_MINS} "
+                               f"minutes")
         init_bytes = input_socket.recv()
         init_message = msgspec.msgpack.decode(init_bytes)
         logger.debug("Received init message: %s", init_message)

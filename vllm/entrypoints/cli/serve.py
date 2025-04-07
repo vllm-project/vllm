@@ -61,6 +61,13 @@ class ServeSubcommand(CLISubcommand):
             help="Run in headless mode. See multi-node data parallel "
             "documentation for more details.")
         serve_parser.add_argument(
+            '--data-parallel-start-rank',
+            '-dpr',
+            type=int,
+            default=0,
+            help='Starting data parallel rank for secondary '
+            'nodes.')
+        serve_parser.add_argument(
             "--config",
             type=str,
             default='',
@@ -105,7 +112,7 @@ def run_headless(args: argparse.Namespace):
     engine_manager = CoreEngineProcManager(
         target_fn=EngineCoreProc.run_engine_core,
         local_engine_count=local_engine_count,
-        start_index=engine_args.data_parallel_start_rank,
+        start_index=args.data_parallel_start_rank,
         local_start_index=0,
         vllm_config=vllm_config,
         on_head_node=False,

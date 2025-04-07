@@ -118,7 +118,6 @@ class EngineArgs:
     tensor_parallel_size: int = 1
     data_parallel_size: int = 1
     data_parallel_size_local: Optional[int] = None
-    data_parallel_start_rank: int = 0
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
     enable_expert_parallel: bool = False
@@ -450,12 +449,6 @@ class EngineArgs:
                             default=EngineArgs.data_parallel_size_local,
                             help='Number of data parallel replicas to run on '
                             'this node.')
-        parser.add_argument('--data-parallel-start-rank',
-                            '-dpr',
-                            type=int,
-                            default=EngineArgs.data_parallel_start_rank,
-                            help='Starting data parallel rank for secondary '
-                            'nodes.')
         parser.add_argument('--data-parallel-address',
                             '-dpa',
                             type=str,
