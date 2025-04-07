@@ -310,6 +310,12 @@ class GraniteSpeechAudioInputs(TypedDict):
     input_features: torch.Tensor
     """Shape: `(bsz, num_features, 160)`"""
 
+    input_features_mask: torch.Tensor
+    """Shape: `(bsz, num_features)`"""
+
+    audio_embed_sizes: list[int]
+    """List of length `bsz`"""
+
 
 class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
 
@@ -347,7 +353,10 @@ class GraniteSpeechMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(input_features=MultiModalFieldConfig.batched("audio"), )
+        return dict(
+            input_features=MultiModalFieldConfig.batched("audio"),
+            audio_embed_sizes=MultiModalFieldConfig.batched("audio"),
+        )
 
     def _get_prompt_updates(
         self,
@@ -386,12 +395,18 @@ class GraniteSpeechMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        res = super()._call_hf_processor(
+        processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
-        return res
+        audio_token_index = self.info.get_hf_config().audio_token_index
+        # Calculate the number of audio tokens per entry in the batch
+        processed_outputs["audio_embed_sizes"] = [
+            torch.sum(indices == audio_token_index).item()
+            for indices in processed_outputs["input_ids"]
+        ]
+        return processed_outputs
 
 
 class GraniteSpeechDummyInputsBuilder(
@@ -473,25 +488,29 @@ class GraniteSpeechForConditionalGeneration(
 
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> Optional[GraniteSpeechAudioInputs]:
-        input_features = kwargs.pop('input_features', None)
-        input_features_mask = kwargs.pop('input_features_mask', None)
+        input_features = kwargs.pop("input_features", None)
+        input_features_mask = kwargs.pop("input_features_mask", None)
+        audio_embed_sizes = kwargs.pop("audio_embed_sizes", None)
         if input_features is None:
             return None
+
+        # If we have a batch of variable feature length audio clips, we need
+        # to mask the features; usually we would get an input_features_mask
+        # from the processor, but we handle rebuilding it here since
+        # vLLM generally adds the components of the batch separately.
+        if input_features_mask is None:
+            input_features_mask = self._build_input_features_mask(
+                audio_embed_sizes)
 
         if not isinstance(input_features, (torch.Tensor, list)):
             raise ValueError("Incorrect type of audio input features. "
                              f"Got type: {type(input_features)}")
 
-        if input_features_mask and not isinstance(input_features_mask,
-                                                  (torch.Tensor, list)):
+        if input_features_mask is not None and not isinstance(
+                input_features_mask, torch.Tensor):
             raise ValueError("Incorrect type of audio input features mask. "
                              f"Got type: {type(input_features_mask)}")
 
-        input_features = self._resolve_masked_features(input_features,
-                                                       input_features_mask)
-        return GraniteSpeechAudioInputs(input_features=input_features)
-
-    def _resolve_masked_features(self, input_features, input_features_mask):
         # Granite speech currently only allows one audio token per instance,
         # and features are already unsqueezed in the processor, so one
         # instance will have shape [1, {num_features}, 160]. As such,
@@ -506,21 +525,58 @@ class GraniteSpeechForConditionalGeneration(
                     f"{input_features.shape}")
             input_features = input_features.to(
                 self.encoder.input_linear.weight.dtype)
-        # If we have a batch of variable feature length audio clips, we need
-        # to mask the features; usually we would get an input_features_mask
-        # from the processor, but we handle rebuilding it here since
-        # vLLM generally adds the components of the batch separately.
-        elif isinstance(input_features, list):
-            raise ValueError("TODO - fix variable length batch processing")
-        return input_features
 
-    def _process_audio_input(self, audio_input: GraniteSpeechAudioInputs):
+            return GraniteSpeechAudioInputs(
+                input_features=input_features,
+                input_features_mask=input_features_mask,
+                audio_embed_sizes=audio_embed_sizes.flatten().tolist(),
+            )
+
+        # pad the input features and stack into a single tensor
+        input_features = self._pad_and_stack_input_features(input_features).to(
+            self.encoder.input_linear.weight.dtype)
+
+        return GraniteSpeechAudioInputs(
+            input_features=input_features,
+            input_features_mask=input_features_mask,
+            audio_embed_sizes=audio_embed_sizes.flatten().tolist(),
+        )
+
+    def _build_input_features_mask(self, audio_embed_sizes: torch.Tensor):
+        most_audio_features = torch.max(audio_embed_sizes).item()
+        mask_indices = torch.arange(most_audio_features,
+                                    device=audio_embed_sizes.device)
+        input_features_mask = mask_indices.view(1,
+                                                -1) < audio_embed_sizes.view(
+                                                    -1, 1)
+        return input_features_mask
+
+    def _pad_and_stack_input_features(self,
+                                      input_features: list[torch.Tensor]):
+        # Input features are of shape [bsz, num_features, 160]
+        feat_lens = [feats.shape[1] for feats in input_features]
+        padding = [max(feat_lens) - length for length in feat_lens]
+        # TODO - Validate that it's okay to zero pad like this; in transformers,
+        # we zero pad prior to calculating the speech features, so the value is
+        # not zero and is dependent on the batched features.
+        padded = [
+            torch.nn.functional.pad(feats, (0, 0, 0, pad, 0, 0))
+            for feats, pad in zip(input_features, padding)
+        ]
+        stacked_features = torch.cat(padded, dim=0).to(input_features[0])
+        return stacked_features
+
+    def _process_audio_input(
+            self,
+            audio_input: GraniteSpeechAudioInputs) -> tuple[torch.Tensor]:
         # TODO - probably should handle audio embeddings
         # in addition to raw audio data, but for now we don't
-        # TODO - handle the features mask
         encoder_embeds = self.encoder(audio_input["input_features"])
+        # [2, <max feature size>, 4096]
         projected_embeds = self.projector(encoder_embeds)
-        return projected_embeds
+        masked_embeds = projected_embeds[audio_input["input_features_mask"]]
+        flattened_embed_shapes = audio_input["audio_embed_sizes"]
+        return torch.split(masked_embeds, flattened_embed_shapes)
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
