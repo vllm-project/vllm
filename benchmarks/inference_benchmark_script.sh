@@ -9,11 +9,22 @@ apt-get update && apt-get install -y google-cloud-sdk
 apt-get -y install jq
 export PJRT_DEVICE=TPU
 gc_path="$0"
-if [ -e "$gc_path" ]; then
-  python inference-benchmark/benchmark_serving.py --save-json-results --port=8009 --dataset=ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer=meta-llama/Meta-Llama-3-8B --request-rate=$1 --backend=vllm --num-prompts=300 --max-input-length=1024 --max-output-length=1024 --file-prefix=benchmark --models=meta-llama/Meta-Llama-3-8B --stream-request --output-bucket="$0"
+# inf
+arg=$1
+if [ "$arg" -eq 0 ]; then
+  if [ -e "$gc_path" ]; then
+    python inference-benchmark/benchmark_serving.py --save-json-results --port=8009 --dataset=ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer=meta-llama/Meta-Llama-3-8B --backend=vllm --num-prompts=300 --max-input-length=1024 --max-output-length=1024 --file-prefix=benchmark --models=meta-llama/Meta-Llama-3-8B --stream-request --output-bucket="$0"
+  else
+    python inference-benchmark/benchmark_serving.py --save-json-results --port=8009 --dataset=ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer=meta-llama/Meta-Llama-3-8B --backend=vllm --num-prompts=300 --max-input-length=1024 --max-output-length=1024 --file-prefix=benchmark --models=meta-llama/Meta-Llama-3-8B --stream-request --output-bucket="gs://manfei_public_experimental/scripts"
+  fi
 else
-  python inference-benchmark/benchmark_serving.py --save-json-results --port=8009 --dataset=ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer=meta-llama/Meta-Llama-3-8B --request-rate=$1 --backend=vllm --num-prompts=300 --max-input-length=1024 --max-output-length=1024 --file-prefix=benchmark --models=meta-llama/Meta-Llama-3-8B --stream-request --output-bucket="gs://manfei_public_experimental/scripts"
+  if [ -e "$gc_path" ]; then
+    python inference-benchmark/benchmark_serving.py --save-json-results --port=8009 --dataset=ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer=meta-llama/Meta-Llama-3-8B --request-rate=$1 --backend=vllm --num-prompts=300 --max-input-length=1024 --max-output-length=1024 --file-prefix=benchmark --models=meta-llama/Meta-Llama-3-8B --stream-request --output-bucket="$0"
+  else
+    python inference-benchmark/benchmark_serving.py --save-json-results --port=8009 --dataset=ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer=meta-llama/Meta-Llama-3-8B --request-rate=$1 --backend=vllm --num-prompts=300 --max-input-length=1024 --max-output-length=1024 --file-prefix=benchmark --models=meta-llama/Meta-Llama-3-8B --stream-request --output-bucket="gs://manfei_public_experimental/scripts"
+  fi
 fi
+
 ls
 
 # gsutil cp gs://ml-auto-solutions/output/pytorch_xla/vllm_benchmark_nightly/vllm-nightly-v6e-4-2025-03-26-21-42-04/metric_report.json .
