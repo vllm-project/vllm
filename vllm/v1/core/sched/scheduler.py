@@ -198,7 +198,7 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
-                    self.kv_cache_manager.free(preempted_req)
+                    self.kv_cache_manager.free(preempted_req.request_id)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
