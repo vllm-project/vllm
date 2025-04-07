@@ -139,7 +139,8 @@ class Processor:
 
         from vllm.platforms import current_platform
         if not current_platform.supports_structured_output():
-            return
+            raise ValueError("Structured output is not supported on "
+                             f"{current_platform.device_name}.")
 
         # Request content validation
         if engine_level_backend.startswith("xgrammar"):

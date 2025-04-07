@@ -136,5 +136,5 @@ class TpuPlatform(Platform):
 
     @classmethod
     def supports_structured_output(cls) -> bool:
-        logger.warning("Structured output is not supported on TPU.")
+        # Structured output is not supported on TPU.
         return False
