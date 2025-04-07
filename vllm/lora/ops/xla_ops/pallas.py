@@ -22,8 +22,7 @@ XLA_LIB.define(
 # be the outputs of a LoRA laned bgmv_shrink. This is not always the case when
 # we use bgmv_expand
 XLA_LIB.define(
-    "bgmv_expand(Tensor inputs, Tensor loras, Tensor idxs, bool enable_laning) \
-        -> Tensor")
+    "bgmv_expand(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor")
 """
 LoRA Laning Optimization for TPU Matrix Multiplication
 
@@ -412,13 +411,13 @@ def bgmv_expand_shape_function(idxs, inputs, loras):
 
 @impl(XLA_LIB, "bgmv_expand", "XLA")
 def bgmv_expand_xla(inputs: torch.Tensor, loras: torch.Tensor,
-                    idxs: torch.IntTensor, enable_laning: bool):
+                    idxs: torch.IntTensor):
     inputs = inputs.to(dtype=loras.dtype)
 
     if len(loras.shape) == 4:
         loras = loras.squeeze(axis=1)
 
-    T, _ = inputs.shape
+    T, DI = inputs.shape
     N, D, L = loras.shape
 
     TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
@@ -428,7 +427,7 @@ def bgmv_expand_xla(inputs: torch.Tensor, loras: torch.Tensor,
     # See if we can fit multiple LoRAs in a register. This would activate LoRA
     # laning
     N_LORA_LANES = math.ceil(DIM_BLOCK / D)
-    if enable_laning and N_LORA_LANES > 1 and N > 1:
+    if D != DI and N_LORA_LANES > 1 and N > 1:
         pad_N = next_multiple_of(N, N_LORA_LANES) - N
         new_N = N + pad_N
 
@@ -471,7 +470,7 @@ def bgmv_expand_xla(inputs: torch.Tensor, loras: torch.Tensor,
 
 @impl(XLA_LIB, "bgmv_expand", "CompositeExplicitAutograd")
 def bgmv_expand_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
-                        idxs: torch.IntTensor, enable_laning: bool):
+                        idxs: torch.IntTensor):
     T, _ = inputs.shape
 
     if len(loras.shape) == 4:

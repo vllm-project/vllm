@@ -11,12 +11,10 @@ def bgmv_expand(inputs: torch.Tensor,
                 lora_b_weights: torch.Tensor,
                 output_tensor: torch.Tensor,
                 lora_indices_tensor: torch.Tensor,
-                add_inputs: bool = True,
-                *,
-                enable_laning: bool = False):
+                add_inputs: bool = True):
 
     outputs = torch.ops.xla.bgmv_expand(inputs, lora_b_weights.transpose(2, 3),
-                                        lora_indices_tensor, enable_laning)
+                                        lora_indices_tensor)
 
     limit = output_tensor.shape[0]
     if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
@@ -47,11 +45,9 @@ def bgmv_expand_slice(inputs: torch.Tensor,
                       lora_indices_tensor: torch.Tensor,
                       slice_offset: int,
                       slice_size: int,
-                      add_inputs: bool = True,
-                      *,
-                      enable_laning: bool = False):
+                      add_inputs: bool = True):
     outputs = torch.ops.xla.bgmv_expand(inputs, lora_b_weights.transpose(2, 3),
-                                        lora_indices_tensor, enable_laning)
+                                        lora_indices_tensor)
 
     outputs = F.pad(outputs, (slice_offset, output_tensor.shape[1] -
                               (slice_offset + slice_size), 0, 0))

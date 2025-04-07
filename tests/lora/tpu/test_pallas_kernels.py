@@ -5,18 +5,12 @@ import torch
 # Required to register the custom ops
 import vllm.lora.ops.xla_ops.pallas  # noqa # pylint: disable=unused-import
 
-# N_TOKENS = [
-#     8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
-#     131072
-# ]
-# HIDDEN_SIZES = [128, 256, 512, 896, 1024, 2048, 4096, 8192, 8320]
+N_TOKENS = [8, 16, 64, 2048]
+HIDDEN_SIZES = [2048]
 
-# DTYPES = [torch.float16, torch.bfloat16]
-# NUM_LORA = [1, 2, 4, 8, 16, 32]
-# RANKS = [8, 16, 32, 64, 128]
-
-N_TOKENS = [2048]
-HIDDEN_SIZES = [4096]
+DTYPES = [torch.bfloat16]
+NUM_LORA = [1, 2, 4]
+RANKS = [32, 256]
 
 DTYPES = [torch.bfloat16]
 NUM_LORA = [1, 2, 4]
@@ -101,7 +95,7 @@ def test_lora_laning_correctness(T, D, L, N, dtype, seed):
     r2 = ref_bgmv(r1, loras_b, idxs)
 
     o1 = torch.ops.xla.bgmv_shrink(inputs, loras_a, idxs)
-    o2 = torch.ops.xla.bgmv_expand(o1, loras_b.transpose(2, 3), idxs, True)
+    o2 = torch.ops.xla.bgmv_expand(o1, loras_b.transpose(2, 3), idxs)
 
     # Compare with reference output
     assert torch.allclose(o2, r2, rtol=1e-2, atol=1e-2)
