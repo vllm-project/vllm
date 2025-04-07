@@ -318,7 +318,7 @@ class EngineCoreProc(EngineCore):
         engine_index: int = 0,
     ):
         # Create input socket.
-        input_ctx = zmq.Context()  # type: ignore[attr-defined]
+        input_ctx = zmq.Context()
         identity = engine_index.to_bytes(length=2, byteorder="little")
         input_socket = make_zmq_socket(input_ctx,
                                        input_address,
@@ -389,7 +389,7 @@ class EngineCoreProc(EngineCore):
         logger.debug("Received init message: %s", init_message)
 
         output_socket_address = init_message["output_socket_address"]
-        #TBD maybe replace IP with configured head node address
+        #TBD(nick) maybe replace IP with configured head node address
 
         received_parallel_config = init_message["parallel_config"]
         for key, value in received_parallel_config.items():
