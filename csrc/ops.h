@@ -144,6 +144,28 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
 torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 #endif
 
+torch::Tensor vptq_gemm(const torch::Tensor& input,
+                        const torch::Tensor& q_indice,
+                        const torch::Tensor& centroids,
+                        const torch::Tensor& weight_scale,
+                        const torch::Tensor& weight_bias,
+                        const std::vector<int64_t>& g_i_o,
+                        const c10::optional<torch::Tensor>& q_indice_residual,
+                        const c10::optional<torch::Tensor>& residual_centroids,
+                        const c10::optional<torch::Tensor>& q_indice_outliers,
+                        const c10::optional<torch::Tensor>& outliers_centroids,
+                        const c10::optional<torch::Tensor>& invperm,
+                        const c10::optional<torch::Tensor>& bias);
+torch::Tensor vptq_dequant(
+    const torch::Tensor& q_indice, const torch::Tensor& centroids,
+    const torch::Tensor& weight_scale, const torch::Tensor& weight_bias,
+    const std::vector<int64_t>& g_i_o,
+    const c10::optional<torch::Tensor>& q_indice_residual,
+    const c10::optional<torch::Tensor>& residual_centroids,
+    const c10::optional<torch::Tensor>& q_indice_outliers,
+    const c10::optional<torch::Tensor>& outliers_centroids,
+    const c10::optional<torch::Tensor>& invperm);
+
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n,
                               std::optional<at::ScalarType> const& dtype);

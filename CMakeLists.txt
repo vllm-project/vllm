@@ -283,6 +283,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
     "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
+    "csrc/quantization/vptq/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"

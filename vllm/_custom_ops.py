@@ -385,6 +385,38 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                            dtype=codebooks.dtype,
                            device=codebooks.device)
 
+    @register_fake("_C::vptq_gemm")
+    def _vptq_gemm_fake(input: torch.Tensor, indices: torch.Tensor,
+                        codebooks: torch.Tensor, weight_scale: torch.Tensor,
+                        weight_bias: torch.Tensor, g_i_o: List[int],
+                        res: torch.Tensor, res_codebooks: torch.Tensor,
+                        oi: torch.Tensor, oc: torch.Tensor,
+                        invperm: torch.Tensor,
+                        bias: torch.Tensor) -> torch.Tensor:
+        out_features = g_i_o[2]
+        flat_input = input.reshape((-1, input.size(-1)))
+        flat_output = torch.empty((flat_input.size(0), out_features),
+                                  dtype=input.dtype,
+                                  device=input.device)
+
+        output_sizes = list(input.shape)
+        output_sizes.pop()
+        output_sizes.append(-1)
+        return flat_output.reshape(tuple(output_sizes))
+
+    @register_fake("_C::vptq_dequant")
+    def _vptq_dequant_fake(indices: torch.Tensor, codebooks: torch.Tensor,
+                           weight_scale: torch.Tensor,
+                           weight_bias: torch.Tensor, g_i_o: List[int],
+                           res: torch.Tensor, res_codebooks: torch.Tensor,
+                           oi: torch.Tensor, oc: torch.Tensor,
+                           invperm: torch.Tensor) -> torch.Tensor:
+        in_features = g_i_o[1]
+        out_features = g_i_o[2]
+        return torch.empty((out_features, in_features),
+                           dtype=codebooks.dtype,
+                           device=codebooks.device)
+
     @register_fake("_C::fp8_marlin_gemm")
     def _fp8_marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
                               b_scales: torch.Tensor, workspace: torch.Tensor,
@@ -748,6 +780,34 @@ def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
                  codebook_partition_sizes: list[int]) -> torch.Tensor:
     return torch.ops._C.aqlm_dequant(codes, codebooks,
                                      codebook_partition_sizes)
+
+
+# vptq
+def vptq_gemm(input: torch.Tensor, indices: torch.Tensor,
+              codebooks: torch.Tensor, weight_scale: torch.Tensor,
+              weight_bias: torch.Tensor, g_i_o: List[int], res: torch.Tensor,
+              res_codebooks: torch.Tensor, oi: torch.Tensor, oc: torch.Tensor,
+              invperm: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.vptq_gemm(input, indices, codebooks, weight_scale,
+                                  weight_bias, g_i_o, res, res_codebooks, oi,
+                                  oc, invperm, bias)
+
+
+def vptq_dequant(
+    indices: torch.Tensor,
+    codebooks: torch.Tensor,
+    weight_scale: torch.Tensor,
+    weight_bias: torch.Tensor,
+    g_i_o: List[int],
+    res: torch.Tensor,
+    res_codebooks: torch.Tensor,
+    oi: torch.Tensor,
+    oc: torch.Tensor,
+    invperm: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.vptq_dequant(indices, codebooks, weight_scale,
+                                     weight_bias, g_i_o, res, res_codebooks,
+                                     oi, oc, invperm)
 
 
 # gptq_marlin
