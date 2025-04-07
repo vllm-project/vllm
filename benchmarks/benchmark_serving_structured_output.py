@@ -232,7 +232,8 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                 idx -= len_dataset
             schema = dataset["schema"][idx]
             prompt = tokenizer.apply_chat_template(dataset["prompt"][idx],
-                                                   tokenize=False)
+                                                   tokenize=False,
+                                                   add_generation_prompt=True)
             input_len = len(tokenizer(prompt).input_ids)
             completion = dataset["completion"][idx]
 
