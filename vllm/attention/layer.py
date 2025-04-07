@@ -217,14 +217,10 @@ class Attention(nn.Module):
                                   self_kv_cache,
                                   attn_metadata,
                                   output=output)
-                maybe_save_kv_layer_to_connector(self.layer_name,
-                                                 self.kv_cache)
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
-                maybe_save_kv_layer_to_connector(self.layer_name,
-                                                 self.kv_cache)
-            return output.view(-1, hidden_size)
+            output = output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
                 forward_context = get_forward_context()
@@ -232,15 +228,13 @@ class Attention(nn.Module):
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 output = self.impl.forward(self, query, key, value,
                                            self_kv_cache, attn_metadata)
-                maybe_save_kv_layer_to_connector(self.layer_name,
-                                                 self.kv_cache)
-                return output
             else:
                 output = torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
-                maybe_save_kv_layer_to_connector(self.layer_name,
-                                                 self.kv_cache)
-                return output
+        
+        maybe_save_kv_layer_to_connector(self.layer_name,
+                                         self.kv_cache)
+        return output
 
     def calc_kv_scales(self, query, key, value):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)

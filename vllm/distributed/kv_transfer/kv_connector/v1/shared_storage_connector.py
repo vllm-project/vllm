@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+import safetensors
 import torch
 
 from vllm.config import VllmConfig
@@ -71,7 +72,7 @@ class SharedStorageConnectorMetadata(KVConnectorMetadata):
 
 
 class SharedStorageConnector(KVConnectorBase_V1):
-    # NOTE: This is just a simple debug implementation of the KV connector.
+    # NOTE: This is Simple debug implementation of the KV connector.
     # It save / load the KV cache to / from the disk.
     # It does extra work which will overwrite the existing prefix-cache in GPU
     # - to remove the overhead, need to add some "mask" in the ReqMeta class
@@ -158,7 +159,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
                 filename = self.generate_filename_debug(
                     layer_name, request.token_ids)
-                kv_cache = torch.load(filename).cuda(
+                kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda(
                 )  # TODO: may need to handle the device here
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
                                      request.slot_mapping)
@@ -207,7 +208,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids)
                 kv_cache = extract_kv_cache_from_layer(kv_layer,
                                                        request.slot_mapping)
-                torch.save(kv_cache.cpu().detach(), filename)
+                tensors = {"kv_cache": kv_cache.cpu().detach()}
+                safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):
         return
@@ -353,7 +355,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """
         foldername = self.generate_foldername_debug(input_ids,
                                                     create_folder=True)
-        return os.path.join(foldername, f"{layer_name}.pt")
+        return os.path.join(foldername, f"{layer_name}.safetensors")
 
 
 def align_to_block_size(num_tokens: int, block_size) -> int:

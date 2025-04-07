@@ -114,6 +114,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
+        self.attention_chunk_size = model_config.attention_chunk_size
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -1256,11 +1257,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             end_idx = start_idx + num_sampled_ids
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             drafter_output = self.drafter.propose(
-                self.input_batch.token_ids_cpu[i, :end_idx],
-                self.speculative_config.prompt_lookup_min,
-                self.speculative_config.prompt_lookup_max,
-                self.speculative_config.num_speculative_tokens,
-            )
+                self.input_batch.token_ids_cpu[i, :end_idx])
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:
