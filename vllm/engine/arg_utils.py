@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import json
+import re
 import threading
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
@@ -372,7 +373,10 @@ class EngineArgs:
                             default=EngineArgs.max_model_len,
                             help='Model context length. If unspecified, will '
                             'be automatically derived from the model config. '
-                            'Supports k, M, G suffixes.')
+                            'Supports k/m/g+K/M/G in human-readable format.\n'
+                            'Examples:\n'
+                            '- 1k → 1000\n'
+                            '- 1K → 1024\n')
         parser.add_argument(
             '--guided-decoding-backend',
             type=str,
@@ -1741,18 +1745,38 @@ def _warn_or_fallback(feature_name: str) -> bool:
 
 
 def human_readable_int(value):
-    """Parse human-readable integers like '1k', '2M', etc."""
-    value = value.strip().lower()
+    """Parse human-readable integers like '1k', '2M', etc.
+    Including decimal values with decimal multipliers.
+    
+    Examples:
+    - '1k' -> 1,000
+    - '1K' -> 1,024
+    - '25.6k' -> 25,600
+    """
+    value = value.strip()
+    match = re.fullmatch(r'(\d+(?:\.\d+)?)([kKmMgGtT])', value)
+    if match:
+        decimal_multiplier = {
+            'k': 10**3,
+            'm': 10**6,
+            'g': 10**9,
+        }
+        binary_multiplier = {
+            'K': 2**10,
+            'M': 2**20,
+            'G': 2**30,
+        }
 
-    multipliers = {
-        'k': 1e3,
-        'm': 1e6,
-        'g': 1e9,
-    }
+        number, suffix = match.groups()
+        if suffix in decimal_multiplier:
+            mult = decimal_multiplier[suffix]
+            return int(float(number) * mult)
+        elif suffix in binary_multiplier:
+            mult = binary_multiplier[suffix]
+            # Do not allow decimals with binary multipliers
+            return int(number) * mult
 
-    if value[-1] in multipliers:
-        number = float(value[:-1])
-        return int(number * multipliers[value[-1]])
+    # Regular plain number.
     return int(value)
 
 
