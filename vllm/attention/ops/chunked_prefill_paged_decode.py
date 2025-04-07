@@ -13,10 +13,10 @@ from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     import triton
     import triton.language as tl
-from vllm.triton_utils import triton_jit_decorator
 
 from vllm import _custom_ops as ops
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
+from vllm.triton_utils import triton_jit_decorator
 
 from .prefix_prefill import context_attention_fwd
 
