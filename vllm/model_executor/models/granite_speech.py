@@ -308,6 +308,8 @@ class GraniteSpeechConformerDepthWiseConv1d(nn.Module):
 # === Audio Inputs === #
 class GraniteSpeechAudioInputs(TypedDict):
     input_features: torch.Tensor
+    """Shape: `(bsz, num_features, 160)`"""
+
     input_features_mask: torch.Tensor
     """Shape: `TODO`"""
 
@@ -483,12 +485,13 @@ class GraniteSpeechForConditionalGeneration(
             raise ValueError("Incorrect type of audio input features. "
                              f"Got type: {type(input_features)}")
 
-        # Granite speech features are already unsqueezed in the processor, so
-        # one instance will have shape [1, {num_features}, 160]; input features
-        # will usually be of shape[1, bsz, num_features, 160] as a result of
-        # MultiModalKwargs.batch, so we squeeze the extra dimension.
+        # Granite speech currently only allows one audio token per instance,
+        # and features are already unsqueezed in the processor, so one
+        # instance will have shape [1, {num_features}, 160]. As such,
+        # input features will usually be of shape[bsz, 1, num_features, 160],
+        # which we squeeze to [bsz, num_features, 160] here.
         if len(input_features.shape) == 4:
-            input_features = input_features.squeeze(0)
+            input_features = input_features.squeeze(1)
         if len(input_features.shape) != 3:
             raise ValueError(
                 "Squeezed input features should be 3D but are of shape "
