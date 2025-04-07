@@ -55,7 +55,7 @@ class Processor:
 
         # Prefix caching hash function.
         self.kv_block_hash_fn = get_hash_fn_by_name(
-            self.cache_config.prefix_caching_hash_fn)
+            self.cache_config.prefix_caching_hash_algo)
 
     def _validate_logprobs(
         self,
