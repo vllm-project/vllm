@@ -184,7 +184,8 @@ class UsageMessage:
                 self.tpu_type = xm.xla_device_hw(xm.xla_device())
                 self.tpu_memory_per_device = xm.get_memory_info().bytes_limit
             except ImportError:
-                logging.warning("torch_xla not found, skipping TPU usage statistics.")
+                logging.warning(
+                    "torch_xla not found, skipping TPU usage statistics.")
                 self.tpu_count = None
                 self.tpu_type = None
                 self.tpu_memory_per_device = None
