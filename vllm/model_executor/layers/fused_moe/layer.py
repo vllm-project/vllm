@@ -10,8 +10,6 @@ from typing import Callable, List, Optional, Tuple
 import pplx_kernels as pplx
 import torch
 import torch.nn.functional as F
-from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
-                                  nvshmem_get_unique_id, nvshmem_init)
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
@@ -27,13 +25,13 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import direct_register_custom_op, run_once
+from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda_alike():
-    #from .pplx_dispatch_combine import PplxDispatchCombine
     from .dispatch_combine import StandardDispatchCombine
     from .fused_moe import TritonExperts, fused_experts
     from .modular_kernel import FusedMoEModularKernel
+    from .pplx_dispatch_combine import PplxDispatchCombine
 else:
     fused_experts = None  # type: ignore
 if current_platform.is_tpu():
@@ -101,7 +99,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
-class AllToAllCache:
+class AllToAllCacheThreadSafe:
 
     def __init__(self):
         self._cache = {}
@@ -120,6 +118,7 @@ class AllToAllCache:
                 return instance
             else:
                 # Create new instance
+                print("CREATE AllToAll")
                 instance = pplx.AllToAll(**kwargs)
                 # Use a weakref.ref with a callback when reference is collected
                 refs = [
@@ -144,6 +143,25 @@ class AllToAllCache:
                     self._cache[key] = (instance, refs)
 
 
+class AllToAllCache:
+
+    def __init__(self):
+        self._cache = {}
+
+    def get_or_create(self, **kwargs):
+        # Create a hashable key from the kwargs
+        key = tuple(sorted((k, v) for k, v in kwargs.items()))
+
+        if key in self._cache:
+            return self._cache[key]
+        else:
+            # Create new instance
+            print("CREATE AllToAll")
+            instance = pplx.AllToAll(**kwargs)
+            self._cache[key] = instance
+            return instance
+
+
 # Global singleton
 _all_to_all_cache = AllToAllCache()
 
@@ -159,8 +177,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     def __init__(self, moe: MoEConfig):
-        pplx_init(moe.ep_rank, moe.ep_size)
-
         self.all_to_all = get_all_to_all(
             max_num_tokens=MOE_DP_CHUNK_SIZE // moe.dp_size,
             num_experts=moe.num_experts,
@@ -301,7 +317,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias=e_score_correction_bias)
 
         return fused_experts(
-            hidden_states=x,
+            a1=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             topk_weights=topk_weights,
@@ -466,16 +482,6 @@ def determine_expert_map(
     return (local_num_experts, expert_map)
 
 
-@run_once
-def pplx_init(rank, world_size):
-    print(f"PPLX_INIT {rank} {world_size}")
-    uid = nvshmem_get_unique_id(
-    ) if rank == 0 else nvshmem_alloc_empty_unique_id()
-    print(f"PPLX_INIT UID={uid}")
-    torch.distributed.broadcast(uid.cuda(), src=0)
-    nvshmem_init(uid, rank, world_size)
-
-
 class FusedMoE(torch.nn.Module):
     """FusedMoE layer for MoE models.
 
@@ -599,8 +605,6 @@ class FusedMoE(torch.nn.Module):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         if quant_config is None:
-            pplx_init(self.dp_rank, self.dp_size)
-
             moe = MoEConfig(
                 num_experts=self.global_num_experts,
                 experts_per_token=0,
