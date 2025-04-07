@@ -13,13 +13,17 @@ if not envs.VLLM_USE_V1:
 
 
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen2.5-1.5B-Instruct"])
+@pytest.mark.parametrize("disable_sampler", [False, True])
 @pytest.mark.skipif(not current_platform.is_tpu(),
                     reason="This test needs a TPU")
-def test_sampler_different(model_name: str):
+def test_sampler_different(model_name: str, disable_sampler: bool,
+                           monkeypatch):
     """
     Test significantly different sampling params to assert the model produces 
     different results.
     """
+    if disable_sampler:
+        monkeypatch.setenv("VLLM_TPU_DISABLE_SAMPLER_DEBUG", "1")
     llm = LLM(model_name,
               enforce_eager=False,
               max_num_seqs=1,
@@ -33,4 +37,8 @@ def test_sampler_different(model_name: str):
 
     sampling_params = SamplingParams(temperature=0.1, min_p=0.8, max_tokens=64)
     output2 = llm.generate(prompts, sampling_params)
-    assert output[0].outputs[0].text != output2[0].outputs[0].text
+    if disable_sampler:
+        # When sampler is off, params are accepted but ignored (argmax-only).
+        assert output[0].outputs[0].text == output2[0].outputs[0].text
+    else:
+        assert output[0].outputs[0].text != output2[0].outputs[0].text
