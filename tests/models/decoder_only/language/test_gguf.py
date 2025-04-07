@@ -14,6 +14,7 @@ from transformers import AutoTokenizer
 from tests.quantization.utils import is_quant_method_supported
 
 from ....conftest import VllmRunner
+from ....utils import fork_new_process_for_each_test, multi_gpu_test
 from ...utils import check_logprobs_close
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
@@ -81,34 +82,24 @@ MODELS = [
 ]
 
 
-@pytest.mark.skipif(not is_quant_method_supported("gguf"),
-                    reason="gguf is not supported on this GPU type.")
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("tp_size", [1, 2])
-def test_models(
-    num_gpus_available: int,
+def check_model_outputs(
     vllm_runner: type[VllmRunner],
-    example_prompts: list[str],
+    prompts: list[str],
     model: GGUFTestConfig,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
     tp_size: int,
-) -> None:
-    if num_gpus_available < tp_size:
-        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
-
+):
     tokenizer = AutoTokenizer.from_pretrained(model.original_model)
     if tokenizer.chat_template is not None:
         messages = [[{
             'role': 'user',
             'content': prompt
-        }] for prompt in example_prompts]
-        example_prompts = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True)
+        }] for prompt in prompts]
+        prompts = tokenizer.apply_chat_template(messages,
+                                                tokenize=False,
+                                                add_generation_prompt=True)
 
     # Run gguf model.
     with vllm_runner(model_name=model.gguf_model,
@@ -118,7 +109,7 @@ def test_models(
                      max_model_len=MAX_MODEL_LEN,
                      tensor_parallel_size=tp_size) as gguf_model:
         gguf_outputs = gguf_model.generate_greedy_logprobs(
-            example_prompts[:-1], max_tokens, num_logprobs)
+            prompts[:-1], max_tokens, num_logprobs)
 
     # Run unquantized model.
     with vllm_runner(
@@ -128,7 +119,7 @@ def test_models(
             max_model_len=MAX_MODEL_LEN,
             tensor_parallel_size=tp_size) as original_model:
         original_outputs = original_model.generate_greedy_logprobs(
-            example_prompts[:-1], max_tokens, num_logprobs)
+            prompts[:-1], max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=original_outputs,
@@ -136,3 +127,45 @@ def test_models(
         name_0="original",
         name_1="gguf",
     )
+
+
+@pytest.mark.skipif(not is_quant_method_supported("gguf"),
+                    reason="gguf is not supported on this GPU type.")
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("tp_size", [1])
+def test_models(
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+    model: GGUFTestConfig,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tp_size: int,
+) -> None:
+    check_model_outputs(vllm_runner, example_prompts, model, dtype, max_tokens,
+                        num_logprobs, tp_size)
+
+
+@pytest.mark.skipif(not is_quant_method_supported("gguf"),
+                    reason="gguf is not supported on this GPU type.")
+@pytest.mark.parametrize("model", [LLAMA_CONFIG])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [8])
+@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("tp_size", [2])
+@multi_gpu_test(num_gpus=2)
+@fork_new_process_for_each_test
+def test_distributed(
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+    model: GGUFTestConfig,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tp_size: int,
+) -> None:
+    check_model_outputs(vllm_runner, example_prompts, model, dtype, max_tokens,
+                        num_logprobs, tp_size)
