@@ -373,7 +373,7 @@ class EngineArgs:
                             default=EngineArgs.max_model_len,
                             help='Model context length. If unspecified, will '
                             'be automatically derived from the model config. '
-                            'Supports k/m/g+K/M/G in human-readable format.\n'
+                            'Supports k/m/g/K/M/G in human-readable format.\n'
                             'Examples:\n'
                             '- 1k → 1000\n'
                             '- 1K → 1024\n')
