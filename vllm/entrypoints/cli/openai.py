@@ -126,7 +126,8 @@ class ChatCommand(CLISubcommand):
             subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         chat_parser = subparsers.add_parser(
             "chat",
-            help="Generate chat completions via the running API server",
+            help="Generate chat completions via the running API server.",
+            description="Generate chat completions via the running API server.",
             usage="vllm chat [options]")
         _add_query_options(chat_parser)
         chat_parser.add_argument(
@@ -162,7 +163,9 @@ class CompleteCommand(CLISubcommand):
         complete_parser = subparsers.add_parser(
             "complete",
             help=("Generate text completions based on the given prompt "
-                  "via the running API server"),
+                  "via the running API server."),
+            description=("Generate text completions based on the given prompt "
+                         "via the running API server."),
             usage="vllm complete [options]")
         _add_query_options(complete_parser)
         return complete_parser
