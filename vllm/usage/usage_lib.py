@@ -179,8 +179,9 @@ class UsageMessage:
             self.cuda_runtime = torch.version.cuda
         if current_platform.is_tpu():
             try:
+                import torch_xla.runtime as xr
                 from torch_xla.core import xla_model as xm
-                self.tpu_count = xm.xrt_world_size()
+                self.tpu_count = xr.world_size()
                 self.tpu_type = xm.xla_device_hw(xm.xla_device())
                 self.tpu_memory_per_device = xm.get_memory_info().bytes_limit
             except ImportError:
