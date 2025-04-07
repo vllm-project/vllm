@@ -153,6 +153,9 @@ class KVCacheManager:
         self.prefix_cache_stats.hits += len(computed_blocks)
 
         if last_block_hash is not None:
+            # Add back the last block hash if it was removed.
+            # NOTE: Because block_hashes is cached in req_to_block_hashes,
+            # we shouldn't modify it directly.
             block_hashes.append(last_block_hash)
 
         # NOTE(woosuk): Since incomplete blocks are not eligible for
