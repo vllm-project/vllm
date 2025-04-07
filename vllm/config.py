@@ -2625,7 +2625,7 @@ def _get_and_verify_dtype(
             else:
                 torch_dtype = config_dtype
 
-            if config.model_type == "plamo":
+            if config.model_type == "plamo2":
                 logger.info(
                     "For PLaMo2, we cast models to bfloat16 instead of using "
                     "float16 by default. This is because float16 does not work."

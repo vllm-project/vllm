@@ -41,8 +41,8 @@ from vllm.utils import LayerBlockType
 
 
 # Only used for type hinting.
-class PlamoConfig(PretrainedConfig):  # type: ignore
-    model_type: str = "plamo"
+class Plamo2Config(PretrainedConfig):  # type: ignore
+    model_type: str = "plamo2"
 
     hidden_size: int
     num_hidden_layers: int
@@ -62,7 +62,7 @@ class PlamoConfig(PretrainedConfig):  # type: ignore
     vocab_size: int
 
 
-class PlamoPreTrainedModel(PreTrainedModel):  # type: ignore
+class Plamo2PreTrainedModel(PreTrainedModel):  # type: ignore
 
     def _init_weights(self, module: torch.nn.Module) -> None:
         std = 0.02
@@ -87,7 +87,7 @@ def get_initial_dt_bias(num_heads: int) -> torch.Tensor:
     return inv_dt
 
 
-def is_mamba(config: PlamoConfig, i: int) -> bool:
+def is_mamba(config: Plamo2Config, i: int) -> bool:
     assert config.mamba_step > 1
 
     if config.num_hidden_layers <= (config.mamba_step // 2):
@@ -120,7 +120,7 @@ class Plamo2MambaMixer(nn.Module):
     # TODO(Shinichi): Rebase on Mamba2 implementation.
 
     def __init__(self,
-                 config: PlamoConfig,
+                 config: Plamo2Config,
                  cache_config: CacheConfig,
                  quant_config: QuantizationConfig,
                  max_model_len: int,
@@ -323,7 +323,7 @@ class DenseMLP(nn.Module):
 
     def __init__(
         self,
-        config: PlamoConfig,
+        config: Plamo2Config,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -351,7 +351,7 @@ class DenseMLP(nn.Module):
 class Plamo2AttentionMixer(nn.Module):
 
     def __init__(self,
-                 config: PlamoConfig,
+                 config: Plamo2Config,
                  cache_config: CacheConfig,
                  quant_config: QuantizationConfig,
                  max_model_len: int | None = None,
@@ -538,7 +538,7 @@ class Plamo2Decoder(torch.nn.Module):
         return hidden_states, residual
 
 
-class Plamo2Model(PlamoPreTrainedModel):
+class Plamo2Model(Plamo2PreTrainedModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config.model_config.hf_config)
@@ -581,7 +581,7 @@ class Plamo2Model(PlamoPreTrainedModel):
         return hidden_states
 
 
-class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
+class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
                         SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -603,13 +603,6 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
         self.model_config = vllm_config.model_config
         self.scheduler_config = scheduler_config
 
-        # TODO(Shinichi): Remove this workaround.
-        # vllm.model_executor.models.interfaces.IsHybrid requires
-        # self.config.layers_block_type to be set.
-        self.config.layers_block_type = [
-            "mamba" if is_mamba(self.config, i) else "attention"
-            for i in range(self.config.num_hidden_layers)
-        ]
         # ModelConfig.get_head_size assumes head_dim is set or calculated as
         # hidden_size // num_attention_heads. However, this is not always
         # the case for PLaMo2, as indicated by the FIXME comment.
