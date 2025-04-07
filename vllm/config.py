@@ -2661,7 +2661,7 @@ def _get_and_verify_dtype(
                     "using float16 by default. Please specify `dtype` if you "
                     "want to use float16.")
                 torch_dtype = torch.bfloat16
-        elif dtype == "float16" and config.model_type == "plamo":
+        elif dtype == "float16" and config.model_type == "plamo2":
             logger.warning(
                 "For PLaMo2, using float16 is unstable and might cause "
                 "unexpected behavior. Please use bfloat16 or float32 instead.")

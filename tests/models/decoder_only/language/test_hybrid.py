@@ -91,7 +91,7 @@ def test_mamba_prefill_chunking_with_parallel_sampling(
     # chunked prefill forward pass (where we have both prefills
     # and decoding together )
 
-    if 'plamo' in model:
+    if 'plamo-2' in model:
         dtype = "float"  # use a different dtype for plamo
 
     sampling_params = SamplingParams(n=3,
@@ -129,7 +129,7 @@ def test_mamba_prefill_chunking(hf_runner, vllm_runner, example_prompts,
     elif "Zamba2" in model:
         example_prompts.pop(7)
         dtype = "half"
-    elif "plamo" in model:
+    elif "plamo-2-1b" in model:
         example_prompts.pop(7)
 
     with hf_runner(model, dtype=dtype) as hf_model:
