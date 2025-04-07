@@ -46,7 +46,7 @@ def search_embedding_all_reduce_rmsnorm(
         weight=arg3_1,
         epsilon=1e-5)
     
-    print(f"embedding pattern search, rmsnorm input = {all_reduce.shape}, output1 = {permute.shape}, output2 = {all_reduce.shape}")
+    print(f"embedding pattern search, rmsnorm input = {all_reduce.shape}, output1 = {rmsnorm[1].shape}, residual = {all_reduce.shape}")
 
     return rmsnorm[1], all_reduce
 
@@ -67,23 +67,23 @@ def replace_with_embedding_reduce_scatter_rmsnorm(
     reduce_scatter = torch.ops.vllm.reduce_scatter.default(
         where, dim=0, world_size=tp_size, group_name=tp.unique_name)
 
-    # rmsnorm_result = torch.empty_like(reduce_scatter)
+    rmsnorm_result = torch.empty_like(reduce_scatter)
     rmsnorm = torch.ops.higher_order.auto_functionalized(
         torch.ops._C.rms_norm.default,
-        result=permute,
+        result=rmsnorm_result,
         input=reduce_scatter,
         weight=arg3_1,
         epsilon=1e-5)
 
-    all_gather = torch.ops.vllm.all_gather.default(reduce_scatter,
+    all_gather = torch.ops.vllm.all_gather.default(rmsnorm[1],
                                                    dim=0,
                                                    world_size=tp_size,
                                                    group_name=tp.unique_name)
     
-    print(f"embedding pattern replace, rmsnorm input = {reduce_scatter.shape}, output1 = {rmsnorm[1]}, output2 = {all_gather.shape}")
+    print(f"embedding pattern replace, rmsnorm input = {reduce_scatter.shape}, output1 = {rmsnorm[1]}, output1 after all gather = {all_gather.shape}, residual = {reduce_scatter}")
 
 
-    return rmsnorm[1], all_gather
+    return all_gather, reduce_scatter
 
 
 def search_gemm_allreduce_rmsnorm(
