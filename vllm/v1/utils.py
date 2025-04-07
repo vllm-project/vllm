@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import multiprocessing
 import os
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
+from multiprocessing import Process
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
                     Union, overload)
 
@@ -112,12 +112,15 @@ class BackgroundProcHandle:
         process_kwargs["output_path"] = output_path
 
         # Run busy loop in background process.
-        self.proc = context.Process(target=target_fn,
-                                    kwargs=process_kwargs,
-                                    name=process_name)
+        self.proc: Process = context.Process(target=target_fn,
+                                             kwargs=process_kwargs,
+                                             name=process_name)
         self._finalizer = weakref.finalize(self, shutdown, self.proc,
                                            input_path, output_path)
         self.proc.start()
+
+    def fileno(self):
+        return self.proc.sentinel
 
     def shutdown(self):
         self._finalizer()
@@ -125,7 +128,7 @@ class BackgroundProcHandle:
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
+def shutdown(proc: Process, input_path: str, output_path: str):
     # Shutdown the process.
     if proc.is_alive():
         proc.terminate()
