@@ -502,11 +502,10 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
         vision_config = self.get_hf_config().vision_config
-        # image_start + local tiles * (patches + 1 x separator) +
-        # 1 global tile * (image x 1 + patches) + image_end
-        token_per_chunk = self.get_patch_per_chunk(vision_config) + 1
-        mm_max_tokens = (self.get_max_num_tiles() + 1) * token_per_chunk + 2
-        return {"image": mm_max_tokens}
+        patch_per_chunk = self.get_patch_per_chunk(vision_config)
+        num_patches = self.get_max_num_tiles()
+
+        return {"image": patch_per_chunk * num_patches}
 
     def get_image_size_with_most_features(self) -> ImageSize:
         vision_config = self.get_hf_config().vision_config
@@ -514,6 +513,14 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         # Result in the max possible feature size (h:w = 16:1)
         return ImageSize(height=self.get_max_num_tiles() * image_size,
                          width=image_size)
+
+    def get_max_image_tokens(self) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        return self.get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height,
+        )
 
 
 class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
