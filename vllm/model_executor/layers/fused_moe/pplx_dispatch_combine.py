@@ -103,6 +103,9 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         # TODO: optimize this?
         indices = rank_topk_ids.to(dtype=torch.uint32)
 
+        # TODO: optimize this?
+        rank_topk_ids = rank_topk_ids.to(dtype=torch.uint32)
+
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,
