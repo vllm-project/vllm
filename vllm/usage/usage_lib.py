@@ -181,8 +181,8 @@ class UsageMessage:
             try:
                 from torch_xla.core import xla_model as xm
                 self.tpu_count = xm.xrt_world_size()
-                self.tpu_type = xm.get_device_attributes(xm.xla_device()).get("type")
-                self.tpu_memory_per_device = xm.get_device_attributes(xm.xla_device()).get("memory")
+                self.tpu_type = xm.xla_device_hw(xm.xla_device())
+                self.tpu_memory_per_device = xm.get_memory_info().bytes_limit
             except ImportError:
                 logging.warning("torch_xla not found, skipping TPU usage statistics.")
                 self.tpu_count = None
