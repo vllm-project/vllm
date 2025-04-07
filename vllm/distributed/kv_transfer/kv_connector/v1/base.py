@@ -51,7 +51,7 @@ class KVConnectorBase_V1(ABC):
     def role(self) -> KVConnectorRole:
         return self._role
 
-    def bind_connector_metadatata(
+    def bind_connector_metadata(
             self, connector_metadata: KVConnectorMetadata) -> None:
         """Set the connector metadata from the scheduler.
 
@@ -64,7 +64,7 @@ class KVConnectorBase_V1(ABC):
         """
         self._connector_metadata = connector_metadata
 
-    def clear_connector_metadatata(self) -> None:
+    def clear_connector_metadata(self) -> None:
         """Clear the connector metadata.
 
         This function should be called by the model runner every time 
@@ -72,7 +72,7 @@ class KVConnectorBase_V1(ABC):
         """
         self._connector_metadata = KVConnectorMetadata()
 
-    def _get_connector_metadatata(self) -> KVConnectorMetadata:
+    def _get_connector_metadata(self) -> KVConnectorMetadata:
         """Get the connector metadata.
 
         This function should only be called inside the connector.
