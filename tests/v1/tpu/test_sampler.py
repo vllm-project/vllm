@@ -28,7 +28,10 @@ def test_sampler_different(model_name: str):
     prompts = [
         "Write a short story about a robot that dreams for the first time."
     ]
-    sampling_params = SamplingParams(temperature=0.9, min_p=0.2, max_tokens=64)
+    sampling_params = SamplingParams(temperature=0.9,
+                                     min_p=0.2,
+                                     max_tokens=64,
+                                     seed=42)
     output = llm.generate(prompts, sampling_params)
 
     sampling_params = SamplingParams(temperature=0.1, min_p=0.8, max_tokens=64)

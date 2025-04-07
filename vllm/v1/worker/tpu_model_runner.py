@@ -268,10 +268,8 @@ class TPUModelRunner:
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
             if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
-                generator = torch.Generator(device=self.device)
-                generator.manual_seed(sampling_params.seed)
-            else:
-                generator = None
+                logger.warning("Torch XLA does not support per-request seed."
+                               "Seed {sampling_params.seed} will be ignored")
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
@@ -280,7 +278,7 @@ class TPUModelRunner:
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
-                generator=generator,
+                generator=None,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
