@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import threading
+import weakref
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -105,6 +107,58 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         activation: str = "silu",
     ) -> torch.Tensor:
         raise NotImplementedError
+
+
+class AllToAllCache:
+
+    def __init__(self):
+        self._cache = {}
+        self._lock = threading.RLock()  # Reentrant lock for thread safety
+
+    def get_or_create(self, **kwargs):
+        # Create a hashable key from the kwargs
+        key = tuple(sorted((k, v) for k, v in kwargs.items()))
+
+        with self._lock:
+            if key in self._cache:
+                instance, refs = self._cache[key]
+                new_ref = weakref.ref(object(),
+                                      lambda _: self._decrement_ref_count(key))
+                refs.append(new_ref)
+                return instance
+            else:
+                # Create new instance
+                instance = pplx.AllToAll(**kwargs)
+                # Use a weakref.ref with a callback when reference is collected
+                refs = [
+                    weakref.ref(object(),
+                                lambda _: self._decrement_ref_count(key))
+                ]
+                self._cache[key] = (instance, refs)
+                return instance
+
+    def _decrement_ref_count(self, key):
+        with self._lock:
+            if key in self._cache:
+                instance, refs = self._cache[key]
+                # Remove dead references
+                refs = [ref for ref in refs if ref() is not None]
+                if not refs:
+                    # No more references, clean up the instance
+                    instance.destroy()
+                    del self._cache[key]
+                else:
+                    # Update refs
+                    self._cache[key] = (instance, refs)
+
+
+# Global singleton
+_all_to_all_cache = AllToAllCache()
+
+
+# Factory function as a cleaner interface
+def get_all_to_all(**kwargs):
+    return _all_to_all_cache.get_or_create(**kwargs)
 
 
 #TODO: Every change in this class is a broken hack!!
@@ -428,9 +482,11 @@ def determine_expert_map(
 
 @run_once
 def pplx_init(rank, world_size):
+    print(f"PPLX_INIT {rank} {world_size}")
     uid = nvshmem_get_unique_id(
     ) if rank == 0 else nvshmem_alloc_empty_unique_id()
-    torch.distributed.broadcast(uid, src=0)
+    print(f"PPLX_INIT UID={uid}")
+    torch.distributed.broadcast(uid.cuda(), src=0)
     nvshmem_init(uid, rank, world_size)
 
 
