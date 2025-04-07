@@ -158,7 +158,7 @@ class RequestState:
         pooling_output: Optional[torch.Tensor],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
-    ) -> Optional[Union[RequestOutput | PoolingRequestOutput]]:
+    ) -> Optional[Union[RequestOutput, PoolingRequestOutput]]:
 
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -191,7 +191,7 @@ class RequestState:
         request_id: str,
         outputs: Union[list[CompletionOutput], list[PoolingOutput]],
         finished: bool,
-    ) -> RequestOutput | PoolingRequestOutput:
+    ) -> Union[RequestOutput, PoolingRequestOutput]:
 
         if isinstance(outputs[0], PoolingOutput):
             assert len(outputs) == 1
@@ -346,7 +346,7 @@ class OutputProcessor:
         **********************************************************
         """
 
-        request_outputs: list[RequestOutput | PoolingRequestOutput] = []
+        request_outputs: list[Union[RequestOutput, PoolingRequestOutput]] = []
         reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
