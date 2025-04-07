@@ -283,7 +283,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `tiiuae/falcon-mamba-7b`, `tiiuae/falcon-mamba-7b-instruct`, etc.
   * ✅︎
   * ✅︎
-- * `FalconMamba2ForCausalLM`
+- * `FalconH1ForCausalLM`
   * FalconMamba
   * `tiiuae/Falcon-Mamba2-7b`, etc.
   * ✅︎

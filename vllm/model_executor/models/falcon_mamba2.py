@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Inference-only FalconMamba2 model."""
+"""Inference-only FalconH1 model."""
 # Added by the IBM Team, 2024
 from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
-from transformers import FalconMamba2Config
+from transformers import FalconH1Config
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
@@ -41,10 +41,10 @@ from .utils import (is_pp_missing_parameter,
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class FalconMamba2MLP(nn.Module):
+class FalconH1MLP(nn.Module):
     def __init__(
         self,
-        config: FalconMamba2Config,
+        config: FalconH1Config,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
     ) -> None:
@@ -80,10 +80,10 @@ class FalconMamba2MLP(nn.Module):
         return x
 
 
-class FalconMamba2SSMDecoderLayer(nn.Module):
+class FalconH1SSMDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: FalconMamba2Config,
+        config: FalconH1Config,
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -159,10 +159,10 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class FalconMamba2AttentionDecoderLayer(nn.Module):
+class FalconH1AttentionDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: FalconMamba2Config,
+        config: FalconH1Config,
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -265,20 +265,20 @@ class FalconMamba2AttentionDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class FalconMamba2ParallelHybrid(nn.Module):
+class FalconH1ParallelHybrid(nn.Module):
     """
-    A hybrid decoder layer for FalconMamba2 where the input is processed
+    A hybrid decoder layer for FalconH1 where the input is processed
     in parallel through both the self-attention branch and the SSM (Mamba)
     branch. Their outputs are then summed to produce the final hidden state.
 
     This layer uses:
-      - FalconMamba2AttentionDecoderLayer for the multi-head self-attention branch.
-      - FalconMamba2SSMDecoderLayer for the state-space (Mamba) branch.
+      - FalconH1AttentionDecoderLayer for the multi-head self-attention branch.
+      - FalconH1SSMDecoderLayer for the state-space (Mamba) branch.
     """
 
     def __init__(
         self,
-        config: FalconMamba2Config,  # FalconMamba2Config instance
+        config: FalconH1Config,  # FalconH1Config instance
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -286,7 +286,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
     ) -> None:
         super().__init__()
         # Instantiate the attention branch
-        self.self_attn = FalconMamba2AttentionDecoderLayer(
+        self.self_attn = FalconH1AttentionDecoderLayer(
             config=config,
             layer_idx=layer_idx,
             cache_config=cache_config,
@@ -294,7 +294,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
             prefix=prefix,
         )
         # Instantiate the SSM branch
-        self.mamba = FalconMamba2SSMDecoderLayer(
+        self.mamba = FalconH1SSMDecoderLayer(
             config=config,
             layer_idx=layer_idx,
             cache_config=cache_config,
@@ -307,7 +307,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
         self.attention_in_multiplier = config.attention_in_multiplier
         self.attn_out_multiplier = config.attention_out_multiplier
 
-        self.feed_forward = FalconMamba2MLP(config)
+        self.feed_forward = FalconH1MLP(config)
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -325,7 +325,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Process input through the attention branch.
-        # FalconMamba2AttentionDecoderLayer expects positions, hidden_states,
+        # FalconH1AttentionDecoderLayer expects positions, hidden_states,
         # kv_cache, attn_metadata, and residual.
         attn_hidden, _ = self.self_attn(
             positions=positions,
@@ -335,7 +335,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
         )
 
         # Process input through the SSM branch.
-        # FalconMamba2SSMDecoderLayer expects hidden_states, attn_metadata, 
+        # FalconH1SSMDecoderLayer expects hidden_states, attn_metadata, 
         # residual, mamba_cache_params, and sequence_idx.
         ssm_hidden, _ = self.mamba(
             hidden_states=hidden_states * self.ssm_in_multiplier,
@@ -360,7 +360,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
         return hidden_states, residual
 
 
-class FalconMamba2Model(nn.Module):
+class FalconH1Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -386,7 +386,7 @@ class FalconMamba2Model(nn.Module):
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
-            layer_class = FalconMamba2ParallelHybrid
+            layer_class = FalconH1ParallelHybrid
             return layer_class(
                 config,
                 layer_idx,
@@ -463,7 +463,7 @@ class FalconMamba2Model(nn.Module):
         return hidden_states
 
 
-class FalconMamba2ForCausalLM(
+class FalconH1ForCausalLM(
     nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid
 ):
     packed_modules_mapping = {
@@ -502,7 +502,7 @@ class FalconMamba2ForCausalLM(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.model = FalconMamba2Model(
+        self.model = FalconH1Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.unpadded_vocab_size = config.vocab_size
