@@ -126,38 +126,39 @@ class KVCacheManager:
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         self.prefix_cache_stats.requests += 1
-        if request.sampling_params.prompt_logprobs is None:
-            if len(block_hashes) * self.block_size == request.num_tokens:
-                # When prompt length is divisible by the block size and all
-                # blocks are cached, we need to recompute the last token. This
-                # have to be achieved by re-computing an entire block because
-                # allocate_slots() assumes num_computed_tokens is always a
-                # multiple of the block size. To achieve this, remove the last
-                # block hash from the block_hashes for find_longest_cache_hit
-                # This limitation can potentially be removed in the future to
-                # slightly improve the performance.
-                last_block_hash = block_hashes.pop()
-            else:
-                last_block_hash = None
-
-            computed_blocks = (
-                self.specialized_manager.find_longest_cache_hit(block_hashes))
-
-            if last_block_hash is not None:
-                # Add back the last block hash if it was removed.
-                block_hashes.append(last_block_hash)
-
-            self.prefix_cache_stats.queries += len(block_hashes)
-            self.prefix_cache_stats.hits += len(computed_blocks)
-
-            # NOTE(woosuk): Since incomplete blocks are not eligible for
-            # sharing, `num_computed_tokens` is always a multiple of
-            # `block_size`.
-            num_computed_tokens = len(computed_blocks) * self.block_size
-            return computed_blocks, num_computed_tokens
-        else:
-            # Skip cache hits for prompt logprobs
+        # When the request requires prompt logprobs, we skip prefix caching.
+        if request.sampling_params.prompt_logprobs is not None:
             return [], 0
+
+        if len(block_hashes) * self.block_size == request.num_tokens:
+            # When prompt length is divisible by the block size and all
+            # blocks are cached, we need to recompute the last token. This
+            # have to be achieved by re-computing an entire block because
+            # allocate_slots() assumes num_computed_tokens is always a
+            # multiple of the block size. To achieve this, remove the last
+            # block hash from the block_hashes for find_longest_cache_hit
+            # This limitation can potentially be removed in the future to
+            # slightly improve the performance.
+            last_block_hash = block_hashes.pop()
+        else:
+            last_block_hash = None
+
+        computed_blocks = (
+            self.specialized_manager.find_longest_cache_hit(block_hashes))
+        self.prefix_cache_stats.queries += len(block_hashes)
+        self.prefix_cache_stats.hits += len(computed_blocks)
+
+        if last_block_hash is not None:
+            # Add back the last block hash if it was removed.
+            # NOTE: Because block_hashes is cached in req_to_block_hashes,
+            # we shouldn't modify it directly.
+            block_hashes.append(last_block_hash)
+
+        # NOTE(woosuk): Since incomplete blocks are not eligible for
+        # sharing, `num_computed_tokens` is always a multiple of
+        # `block_size`.
+        num_computed_tokens = len(computed_blocks) * self.block_size
+        return computed_blocks, num_computed_tokens
 
     def allocate_slots(
         self,
