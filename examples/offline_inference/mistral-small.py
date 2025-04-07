@@ -52,6 +52,7 @@ from vllm.sampling_params import SamplingParams
 # Lower max_model_len and/or max_num_seqs on low-VRAM GPUs.
 # These scripts have been tested on 2x L40 GPUs
 
+
 def run_simple_demo(args: argparse.Namespace):
     model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
     sampling_params = SamplingParams(max_tokens=8192)
