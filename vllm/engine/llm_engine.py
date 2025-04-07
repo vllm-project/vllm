@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
-                         PromptType)
+                         PromptType, SingletonInputs)
 from vllm.inputs.parse import is_token_prompt, split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -2029,29 +2029,44 @@ class LLMEngine:
                                lora_request: Optional[LoRARequest]):
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
-        # For encoder-decoder multimodal models, the max_prompt_len
-        # restricts the decoder prompt length
-        if self.model_config.is_multimodal_model:
-            prompt_inputs = decoder_inputs
-        else:
-            prompt_inputs = encoder_inputs or decoder_inputs
+        if encoder_inputs is not None:
+            self._validate_model_input(encoder_inputs,
+                                       lora_request,
+                                       prompt_type="encoder")
 
+        self._validate_model_input(decoder_inputs,
+                                   lora_request,
+                                   prompt_type="decoder")
+
+    def _validate_model_input(
+        self,
+        prompt_inputs: SingletonInputs,
+        lora_request: Optional[LoRARequest],
+        *,
+        prompt_type: str,
+    ):
         prompt_ids = prompt_inputs["prompt_token_ids"]
 
-        if prompt_ids is None or len(prompt_ids) == 0:
-            raise ValueError("Prompt cannot be empty")
+        if not prompt_ids:
+            raise ValueError(f"The {prompt_type} cannot be empty")
 
-        if self.model_config.is_multimodal_model:
-            max_prompt_len = self.model_config.max_model_len
-
-            if len(prompt_ids) > max_prompt_len:
-                raise ValueError(
-                    f"The prompt (total length {len(prompt_ids)}) is too long "
-                    f"to fit into the model (context length {max_prompt_len}). "
+        max_prompt_len = self.model_config.max_model_len
+        if len(prompt_ids) >= max_prompt_len:
+            if self.model_config.is_multimodal_model:
+                suggestion = (
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
                     "of images, and possibly their aspect ratios as well.")
+            else:
+                suggestion = (
+                    "Make sure that `max_model_len` is no smaller than the "
+                    "number of text tokens.")
+
+            raise ValueError(
+                f"The {prompt_type} prompt (length {len(prompt_ids)}) is "
+                f"longer than the maximum model length of {max_prompt_len}. "
+                f"{suggestion}")
 
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
