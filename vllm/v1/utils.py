@@ -211,4 +211,4 @@ class BlockHashType(NamedTuple):
     # Token IDs in the block.
     token_ids: tuple[int, ...]
     # Extra keys for the block.
-    extra_keys: Optional[Any] = None
+    extra_keys: Optional[tuple[Any, ...]] = None
