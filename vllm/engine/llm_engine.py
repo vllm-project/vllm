@@ -230,6 +230,9 @@ class LLMEngine:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config  # noqa
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
+        
+        with (open('block_size.log', 'w') as f):
+            f.write(f'Each block contains {self.vllm_config.cache_config.block_size}\n')
 
         logger.info(
             "Initializing a V0 LLM engine (v%s) with config: %s, "

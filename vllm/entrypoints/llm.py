@@ -1414,7 +1414,8 @@ class LLM:
 
         print(f'process speed input: {last_speed_report[0]:.2f} toks/s, output: {last_speed_report[1]:.2f} toks')
         factor, in_count, out_count, in_spd, out_spd, swap_in_count, swap_out_count = get_stats()
-        with open('debug.log', 'r') as d, open('stats.log', 'a') as f:
+        with open('debug.log', 'r') as d, open('stats.log', 'a') as f, open('num_blocks.log', 'a') as n:
+            n.write(f'average sequence length: {get_avg_size()}\n')
             in_spd, out_spd = last_speed_report
             f.write(f'{factor:.1f},{in_count},{out_count},{swap_in_count},{swap_out_count},{in_spd:.2f},{out_spd:.2f}\n')
     

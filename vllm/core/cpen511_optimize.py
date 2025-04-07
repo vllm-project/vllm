@@ -11,6 +11,16 @@ factor = 0
 lock = threading.Lock()
 last_speed_report = (0, 0)
 
+size_counter = []
+
+def add_size(size):
+    global size_counter
+    size_counter.append(size)
+    
+def get_avg_size():
+    global size_counter
+    return sum(size_counter) / len(size_counter)
+
 def increment_sequence_count(num_blocks):
     global running_sequence_count, in_count, out_count, swap_in_count, swap_out_count
     with lock:

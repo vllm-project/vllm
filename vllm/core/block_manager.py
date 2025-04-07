@@ -284,6 +284,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         
         # log the freeing with the logger
         logger.debug(f"Freed block for sequence {seq_id} at {block_ids}")
+        add_size(len(block_ids))
         decrement_sequence_count(0) # no swap out blocks for freeing
 
     def free_cross(self, seq_group: SequenceGroup) -> None:
