@@ -92,8 +92,7 @@ class P2pNcclPipe:
                 return sock, self.comms[remote_address]
 
             unique_id = self.nccl.ncclGetUniqueId()
-            unique_id_obj = msgpack.dumps(unique_id)
-            data = {"cmd": "NEW", "unique_id": unique_id_obj}
+            data = {"cmd": "NEW", "unique_id": bytes(unique_id.internal)}
             sock.send(msgpack.dumps(data))
 
             with torch.cuda.device(self.device):
@@ -148,7 +147,7 @@ class P2pNcclPipe:
         data = msgpack.loads(message)
         if data["ret"] == 0:
             tensor = torch.empty(data["shape"],
-                                 dtype=data["dtype"],
+                                 dtype=getattr(torch, data["dtype"]),
                                  device=self.device)
             self._recv(comm, tensor, rank ^ 1)
             return tensor
@@ -164,7 +163,7 @@ class P2pNcclPipe:
                 logger.debug("Received message from %s, data: %s",
                              remote_address.decode(), data)
                 if data["cmd"] == "NEW":
-                    unique_id = msgpack.loads(data["unique_id"])
+                    unique_id = self.nccl.unique_id_from_bytes(bytes(data["unique_id"]))
                     with torch.cuda.device(self.device):
                         rank = 1
                         comm: ncclComm_t = self.nccl.ncclCommInitRank(
@@ -177,7 +176,7 @@ class P2pNcclPipe:
                     tensor_id = data["tensor_id"]
                     self.router_socket.send_multipart([remote_address, b"0"])
                     tensor = torch.empty(data["shape"],
-                                         dtype=data["dtype"],
+                                         dtype=getattr(torch, data["dtype"]),
                                          device=self.device)
                     comm, rank = self.comms[remote_address.decode()]
                     self._recv(comm, tensor, rank ^ 1)
@@ -197,7 +196,7 @@ class P2pNcclPipe:
                                 data = {
                                     "ret": 0,
                                     "shape": tensor.shape,
-                                    "dtype": tensor.dtype
+                                    "dtype": str(tensor.dtype).replace("torch.", "")
                                 }
                             else:
                                 data = {"ret": 1}
@@ -230,7 +229,7 @@ class P2pNcclPipe:
                     "cmd": "PUT",
                     "tensor_id": tensor_id,
                     "shape": tensor.shape,
-                    "dtype": tensor.dtype
+                    "dtype": str(tensor.dtype).replace("torch.", "")
                 }
                 sock.send(msgpack.dumps(data))
 

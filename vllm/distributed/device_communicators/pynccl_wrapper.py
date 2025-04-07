@@ -271,6 +271,26 @@ class NCCLLibrary:
             ctypes.byref(unique_id)))
         return unique_id
 
+    def unique_id_from_bytes(self, data: bytes) -> ncclUniqueId:
+        """
+        Reconstructs an `ncclUniqueId` object from bytes data.
+
+        Args:
+            data: Must be a 128-byte data block (matching NCCL's unique_id format).
+
+        Returns:
+            ncclUniqueId: The reconstructed NCCL Unique ID object.
+
+        Raises:
+            ValueError: If the input data length is not 128 bytes.
+        """
+        if len(data) != 128:
+            raise ValueError(f"Expected 128 bytes for ncclUniqueId, got {len(data)} bytes")
+
+        unique_id = ncclUniqueId()
+        ctypes.memmove(ctypes.addressof(unique_id.internal), data, 128)
+        return unique_id
+
     def ncclCommInitRank(self, world_size: int, unique_id: ncclUniqueId,
                          rank: int) -> ncclComm_t:
         comm = ncclComm_t()
