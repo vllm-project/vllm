@@ -9,9 +9,7 @@ from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
-from vllm.v1.core.specialized_manager import (FullAttentionManager,
-                                              SlidingWindowManager,
-                                              SpecializedManager)
+from vllm.v1.core.hybrid_allocator import HybridMemoryAllocator
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -59,11 +57,7 @@ class KVCacheManager:
 
         self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching)
 
-        self.specialized_managers: list[SpecializedManager] = [
-            FullAttentionManager(kv_cache_spec, self.block_pool),
-            SlidingWindowManager(kv_cache_spec, self.block_pool),
-        ]
-        self.group_ids = [(1, ), (0, )]
+        self.allocator = HybridMemoryAllocator()
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -106,7 +100,7 @@ class KVCacheManager:
     def get_computed_blocks(
         self,
         request: Request,
-    ) -> tuple[list[KVCacheBlock], int]:
+    ) -> tuple[list[dict[int, KVCacheBlock]], int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -148,7 +142,8 @@ class KVCacheManager:
         else:
             last_block_hash = None
 
-        computed_blocks = self.find_longest_cache_hit(block_hashes)
+        computed_blocks = self.allocator.find_longest_cache_hit(
+            block_hashes)
         self.prefix_cache_stats.queries += len(block_hashes)
         self.prefix_cache_stats.hits += len(computed_blocks)
 
@@ -164,40 +159,12 @@ class KVCacheManager:
         num_computed_tokens = len(computed_blocks) * self.block_size
         return computed_blocks, num_computed_tokens
 
-    def find_longest_cache_hit(
-        self,
-        block_hashes: list[BlockHashType],
-    ):
-        # First, try full attention.
-        full_attn_manager = self.specialized_managers[0]
-        full_attn_computed_blocks = full_attn_manager.find_longest_cache_hit(
-            block_hashes, self.group_ids[0])
-        if full_attn_computed_blocks:
-            # Truncate the block hashes to the length of the cache hit.
-            # TODO: Optimize.
-            block_hashes = block_hashes[:len(full_attn_computed_blocks)]
-            # Then, try sliding window.
-            swa_attn_manager = self.specialized_managers[1]
-            swa_attn_computed_blocks = swa_attn_manager.find_longest_cache_hit(
-                block_hashes, self.group_ids[1])
-        else:
-            swa_attn_computed_blocks = []
-
-        num_blocks = len(swa_attn_computed_blocks)
-        if num_blocks > 0:
-            del full_attn_computed_blocks[num_blocks:]
-        else:
-            full_attn_computed_blocks = []
-
-        computed_blocks = full_attn_computed_blocks + swa_attn_computed_blocks
-        return computed_blocks
-
     def allocate_slots(
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[list[KVCacheBlock]] = None
-    ) -> Optional[list[KVCacheBlock]]:
+        new_computed_blocks: Optional[list[dict[int, KVCacheBlock]]] = None,
+    ) -> Optional[list[dict[int, KVCacheBlock]]]:
         """Add slots for a request with new tokens to append.
 
         Args:
@@ -235,7 +202,7 @@ class KVCacheManager:
         # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
-        removed_blocks = self.specialized_manager.remove_skipped_blocks(
+        removed_blocks = self.allocator.remove_skipped_blocks(
             req_blocks, request.num_computed_tokens)
         self.block_pool.free_blocks(removed_blocks)
 

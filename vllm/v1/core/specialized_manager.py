@@ -53,8 +53,12 @@ class SpecializedManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int) -> list[KVCacheBlock]:
+    def remove_skipped_blocks(
+        self,
+        blocks: list[dict[int, KVCacheBlock]],
+        group_ids: Sequence[int],
+        num_computed_tokens: int,
+    ) -> list[dict[int, KVCacheBlock]]:
         """
         Remove the blocks that are no longer needed from `blocks`. The removed 
         blocks should be replaced by null_block. Return the removed blocks in 
@@ -93,10 +97,11 @@ class FullAttentionManager(SpecializedManager):
 
     def remove_skipped_blocks(
         self,
-        blocks: list[KVCacheBlock],
+        blocks: list[dict[int, KVCacheBlock]],
+        group_ids: Sequence[int],
         num_computed_tokens: int,
-    ) -> list[KVCacheBlock]:
-        # No need to remove blocks for full attention.
+    ) -> list[dict[int, KVCacheBlock]]:
+        # Full attention skips no blocks.
         return []
 
 
@@ -150,22 +155,34 @@ class SlidingWindowManager(SpecializedManager):
         del computed_blocks[num_contiguous_blocks:]
         return computed_blocks
 
-    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int) -> list[KVCacheBlock]:
+    def remove_skipped_blocks(
+        self,
+        blocks: list[dict[int, KVCacheBlock]],
+        group_ids: Sequence[int],
+        num_computed_tokens: int,
+    ) -> list[dict[int, KVCacheBlock]]:
         # Remove the blocks that are no longer be in the sliding window and
         # skipped during the attention computation.
         last_useful_token = num_computed_tokens - self.sliding_window + 1
         last_useful_block = last_useful_token // self.block_size
 
-        removed_blocks: list[KVCacheBlock] = []
+        removed_blocks: list[dict[int, KVCacheBlock]] = []
         for i in range(last_useful_block - 1, -1, -1):
-            if blocks[i] == self._null_block:
-                # If the block is already a null block, the blocks before it
-                # should also have been set to null blocks by the previous calls
-                # to this function.
+            removed_block: dict[int, KVCacheBlock] = {}
+            is_null = False
+            for group_id in group_ids:
+                block = blocks[i][group_id]
+                if block == self._null_block:
+                    # If the block is already a null block, the blocks before it
+                    # should also have been set to null blocks by the previous
+                    # calls to this function.
+                    is_null = True
+                    break
+                removed_block[group_id] = block
+                blocks[i][group_id] = self._null_block
+            if is_null:
                 break
-            removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
+            removed_blocks.append(removed_block)
         return removed_blocks
 
 
