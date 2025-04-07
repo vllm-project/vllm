@@ -1002,14 +1002,6 @@ def _parse_chat_message_content_part(
     # Handle structured dictionary parts
     part_type, content = _parse_chat_message_content_mm_part(part)
 
-    # if part_type is text/refusal/image_url/audio_url/video_url/input_audio but
-    # content is empty, log a warning and skip
-    if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
-        logger.warning(
-            "Skipping multimodal part (type: '%s') "
-            "with empty / unparsable content.", part_type)
-        return None
-
     if part_type in ("text", "refusal"):
         str_content = cast(str, content)
         if wrap_dicts:
