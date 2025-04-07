@@ -115,6 +115,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
+        self.attention_chunk_size = model_config.attention_chunk_size
 
         self.attn_backend = get_attn_backend(
             self.head_size,
