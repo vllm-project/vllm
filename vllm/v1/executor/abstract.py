@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from concurrent.futures import Future
+from collections import defaultdict
 from typing import Union
+
 
 import torch
 import torch.distributed as dist
@@ -20,6 +22,19 @@ class Executor(ExecutorBase):
     """
     Abstract class for v1 executors, mainly define some methods for v1.
     For methods shared by v0 and v1, define them in ExecutorBase"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        # P/D: NIXL notifies that a transfer is done (per rank).
+        # NOTE: in the future this could be per layer per rank.
+        self._nixl_transfers_done = defaultdict(
+            -self.parallel_config.tensor_parallel_size)
+
+        # P/D: NIXL notifies that D worker has KVs ready.
+        # NOTE: in the future this could be per layer per rank.
+        self._nixl_notify_ready = defaultdict(
+            -self.parallel_config.tensor_parallel_size)
 
     @staticmethod
     def get_class(vllm_config: VllmConfig) -> type["Executor"]:

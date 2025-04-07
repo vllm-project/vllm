@@ -687,6 +687,9 @@ class Scheduler(SchedulerInterface):
             self.scheduled_req_ids.remove(req_id)
             if not stopped:
                 new_running.append(request)
+        
+        for req_id, cnt in model_runner_output.nixl_transfer_done_counter.values():
+            self._transfer_done_counter[req_id] += cnt
 
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(

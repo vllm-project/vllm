@@ -100,6 +100,10 @@ class ModelRunnerOutput:
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
 
+    # P/D: notifications for completion of NIXL ops.
+    transfer_done: list[str] = []
+    remote_prefill_ready: list[str] = []
+
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
     req_ids=[],

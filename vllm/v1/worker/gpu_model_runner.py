@@ -3,6 +3,7 @@
 import gc
 import time
 import weakref
+from collections import defaultdict
 from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
@@ -13,7 +14,8 @@ import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
-from vllm.distributed.parallel_state import get_pp_group, graph_capture
+from vllm.distributed.parallel_state import (get_pp_group, get_tp_group,
+                                             graph_capture)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -72,6 +74,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+
+        # TODO: make the class
+        self.nixl_connector = None
+        self._transfer_done_counter = defaultdict(
+            -self.parallel_config.tensor_parallel_size)
+        self._remote_prefill_ready_counter = defaultdict(
+            -self.parallel_config.tensor_parallel_size)
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
@@ -1212,6 +1221,44 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # TODO(woosuk): Cache draft_probs and use it for rejection sampling
             # in the next step.
             del draft_probs
+        
+        # P/D: PWorker requests finished pushing to NIXL.
+        transfer_done: list[str] = []
+        # P/D: DWorker requests finished recv from NIXL.
+        remote_prefill_ready: list[str] = []
+        if self.nixl_connector is not None:
+            # PWorker: occurs *after* KVs are sent to remote by NIXL.
+            # TODO(rob): document why we can run without sync.
+            for req_id in self.nixl_connector.get_done_tranfers():
+                self._transfer_done_counter[req_id] += 1
+                if self._transfer_done_counter[req_id] > -1:
+                    transfer_done.append(req_id)
+    
+            for req_id in transfer_done:
+                del self._transfer_done_counter[req_id]
+            
+            # DWorker: notifies occurs *after* KVs written by NIXL.
+            # Rank 0 collects notifies from the other ranks.
+            new_notifs = self.nixl_connector.get_new_notifs()
+            rank = get_tp_group().rank
+            all_new_notifs = [new_notifs]
+            if rank > 0:
+                get_tp_group().send_object(new_notifs, dst=0)
+            else:
+                for i in range(1, get_tp_group().world_size):
+                    all_new_notifs.append(get_tp_group().recv_object(src=i))
+
+                for notifs in all_new_notifs:
+                    for req_ids in notifs.values():
+                        for req_id in req_ids:
+                            self._remote_prefill_ready_counter[req_id] += 1
+                            if self._remote_prefill_ready_counter[req_id] > -1:
+                                remote_prefill_ready.append(req_id)
+            
+                # Cleanup.
+                for req_id in remote_prefill_ready:
+                    del self._remote_prefill_ready_counter[req_id]
+
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1220,6 +1267,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            transfer_done=transfer_done,
+            remote_prefill_ready=remote_prefill_ready,
         )
 
     def generate_draft_token_ids(
