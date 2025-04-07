@@ -186,8 +186,10 @@ class Attention(nn.Module):
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
+            output_dtype = (query.dtype if fp8_out_scale is None else
+                            current_platform.fp8_dtype())
             output = torch.empty(output_shape,
-                                 dtype=query.dtype,
+                                 dtype=output_dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
             # We skip reshaping query, key and value tensors for the MLA

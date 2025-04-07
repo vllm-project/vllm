@@ -175,6 +175,8 @@ class TritonAttentionImpl(AttentionImpl):
             v_scale=layer._v_scale,
             alibi_slopes=self.alibi_slopes,
             sliding_window=self.sliding_window[0],
-            sm_scale=self.scale)
+            sm_scale=self.scale,
+            fp8_out_scale=fp8_out_scale,
+        )
 
         return output

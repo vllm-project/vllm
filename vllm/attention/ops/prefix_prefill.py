@@ -29,6 +29,7 @@ if triton.__version__ >= "2.1.0":
         sm_scale,
         k_scale,
         v_scale,
+        out_scale,
         B_Start_Loc,
         B_Seqlen,
         block_size,
@@ -65,6 +66,7 @@ if triton.__version__ >= "2.1.0":
         BLOCK_N: tl.constexpr,
         SLIDING_WINDOW: tl.constexpr,
         SKIP_DECODE: tl.constexpr,
+        USE_FP8: tl.constexpr,
     ):
 
         cur_batch = tl.program_id(0)
@@ -263,6 +265,8 @@ if triton.__version__ >= "2.1.0":
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs +
             cur_head * stride_oh + offs_d[None, :] * stride_od)
         out_ptrs = Out + off_o
+        if USE_FP8:
+            acc = acc / tl.load(out_scale)
         tl.store(out_ptrs,
                  acc,
                  mask=dim_mask[None, :] &
@@ -732,7 +736,8 @@ if triton.__version__ >= "2.1.0":
                               alibi_slopes=None,
                               sliding_window=None,
                               sm_scale=None,
-                              skip_decode=False):
+                              skip_decode=False,
+                              fp8_out_scale=None):
 
         q_dtype_is_f32 = q.dtype is torch.float32
         # need to reduce num. blocks when using fp32
@@ -852,6 +857,7 @@ if triton.__version__ >= "2.1.0":
             sm_scale,
             k_scale,
             v_scale,
+            fp8_out_scale,
             b_start_loc,
             b_seq_len,
             v_cache.shape[3],
@@ -890,6 +896,7 @@ if triton.__version__ >= "2.1.0":
             BLOCK_N=BLOCK,
             SLIDING_WINDOW=sliding_window,
             SKIP_DECODE=skip_decode,
+            USE_FP8=fp8_out_scale is not None,
             num_warps=NUM_WARPS,
             num_stages=1,
         )

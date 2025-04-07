@@ -205,8 +205,7 @@ class LlamaAttention(nn.Module):
         use_fp8 = isinstance(
             quant_config, Fp8Config) or (isinstance(quant_config, QuarkConfig)
                                          and quant_config.is_fp8_w8a8())
-        self.attn_fp8_out = (not envs.VLLM_USE_V1
-                             and envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT
+        self.attn_fp8_out = (envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT
                              and current_platform.is_fp8_fnuz() and use_fp8)
 
         self.attn = Attention(
