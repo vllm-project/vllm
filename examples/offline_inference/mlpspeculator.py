@@ -14,7 +14,7 @@ from vllm import LLM, SamplingParams
 
 
 def time_generation(llm: LLM, prompts: list[str],
-                    sampling_params: SamplingParams, print_str: str):
+                    sampling_params: SamplingParams, title: str):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     # Warmup first
@@ -24,7 +24,7 @@ def time_generation(llm: LLM, prompts: list[str],
     outputs = llm.generate(prompts, sampling_params)
     end = time.time()
     print("-" * 50)
-    print(print_str)
+    print(title)
     print("time: ",
           (end - start) / sum([len(o.outputs[0].token_ids) for o in outputs]))
     # Print the outputs.
