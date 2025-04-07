@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BartTokenizer, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -825,6 +825,18 @@ class Florence2MultiModalProcessor(
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         return [self.info.get_hf_config().eos_token_id]
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        hf_processor = self.info.get_hf_processor()
+        tokenizer: BartTokenizer = hf_processor.tokenizer
+        prompt_text = tokenizer.decode(prompt_tokens)
+        # convert task tokens to prompt
+        prompt_text = hf_processor._construct_prompts([prompt_text])[0]
+        prompt_tokens = tokenizer.encode(prompt_text, add_special_tokens=False)
+        return prompt_tokens
 
     def _call_hf_processor(
         self,
