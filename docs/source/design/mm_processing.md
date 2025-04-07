@@ -8,7 +8,7 @@ Here are the main features of {class}`~vllm.multimodal.processing.BaseMultiModal
 
 ## Prompt Update Detection
 
-One of the main responsibilies of HF processor is to update the prompt with placeholder tokens. For example:
+One of the main responsibilities of HF processor is to update the prompt with placeholder tokens. For example:
 
 - Insert feature placeholder tokens (e.g. `<image><image>...<image>`, the number of which equals to the feature size) at the start of the string.
 - Replace existing input placeholder tokens (e.g. `<image>` for a single image) with feature placeholder tokens (e.g. `<image><image>...<image>`, the number of which equals to the feature size).
