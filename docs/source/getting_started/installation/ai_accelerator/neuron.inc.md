@@ -132,7 +132,7 @@ Currently, there are no pre-built Neuron images.
 
 See <project:#deployment-docker-build-image-from-source> for instructions on building the Docker image.
 
-Make sure to use <gh-file:Dockerfile.neuron> in place of the default Dockerfile.
+Make sure to use <gh-file:docker/Dockerfile.neuron> in place of the default Dockerfile.
 
 ## Extra information
 
