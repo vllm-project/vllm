@@ -6,8 +6,12 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -18,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton_jit_decorator
 from vllm.utils import direct_register_custom_op
 
 from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
@@ -27,7 +32,7 @@ from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
 logger = init_logger(__name__)
 
 
-@triton.jit
+@triton_jit_decorator
 def write_zeros_to_output(c_ptr, stride_cm, stride_cn, pid_n, N, offs_token,
                           token_mask, BLOCK_SIZE_M, BLOCK_SIZE_N,
                           compute_type):
@@ -39,7 +44,7 @@ def write_zeros_to_output(c_ptr, stride_cm, stride_cn, pid_n, N, offs_token,
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@triton.jit
+@triton_jit_decorator
 def fused_moe_kernel_gptq_awq(
         # Pointers to matrices
         a_ptr,
@@ -249,7 +254,7 @@ def fused_moe_kernel_gptq_awq(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@triton.jit
+@triton_jit_decorator
 def fused_moe_kernel(
         # Pointers to matrices
         a_ptr,
