@@ -315,7 +315,6 @@ class GraniteSpeechAudioInputs(TypedDict):
 class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        # For now, we only allow one audio per input for granite speech models.
         return {"audio": 1}
 
     def get_mm_max_tokens_per_item(
@@ -456,7 +455,7 @@ class GraniteSpeechForConditionalGeneration(
         self.cache_config = cache_config
         self.sampler = get_sampler()
 
-        # this should be a granite causal LM, but written generically for now
+        # Usually this is a granite causal LM
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
@@ -480,9 +479,22 @@ class GraniteSpeechForConditionalGeneration(
         if input_features is None:
             return None
 
-        if not isinstance(input_features, (torch.Tensor, list)):
+        if not isinstance(input_features, torch.Tensor):
             raise ValueError("Incorrect type of audio input features. "
                              f"Got type: {type(input_features)}")
+
+        # Granite speech features are already unsqueezed in the processor, so
+        # one instance will have shape [1, {num_features}, 160]; input features
+        # will usually be of shape[1, bsz, num_features, 160] as a result of
+        # MultiModalKwargs.batch, so we squeeze the extra dimension.
+        if len(input_features.shape) == 4:
+            input_features = input_features.squeeze(0)
+        if len(input_features.shape) != 3:
+            raise ValueError(
+                "Squeezed input features should be 3D but are of shape "
+                f"{input_features.shape}")
+        input_features = input_features.to(
+            self.encoder.input_linear.weight.dtype)
 
         if input_features_mask and not isinstance(input_features_mask,
                                                   (torch.Tensor, list)):
@@ -498,14 +510,7 @@ class GraniteSpeechForConditionalGeneration(
         # TODO - probably should handle audio embeddings
         # in addition to raw audio data, but for now we don't
         # TODO - handle the features mask
-        # TODO - fix dtype hacking here
-        # TODO - fix squeezed dim here - seems like something somewhere
-        # may not be stackin properly / is creating an extra dimension
-        # unnecessarily (probably the view() in the processor)
-        #           should be 1, 50000, 160
-        input_features = audio_input["input_features"].to(
-            torch.bfloat16).squeeze(0)
-        encoder_embeds = self.encoder(input_features)
+        encoder_embeds = self.encoder(audio_input["input_features"])
         projected_embeds = self.projector(encoder_embeds)
         return projected_embeds
 
