@@ -1774,7 +1774,12 @@ def human_readable_int(value):
         elif suffix in binary_multiplier:
             mult = binary_multiplier[suffix]
             # Do not allow decimals with binary multipliers
-            return int(number) * mult
+            try:
+                return int(number) * mult
+            except ValueError as e:
+                raise argparse.ArgumentTypeError("Decimals are not allowed " \
+                f"with binary suffixes like {suffix}. Did you mean to use " \
+                f"{number}{suffix.lower()} instead?") from e
 
     # Regular plain number.
     return int(value)
