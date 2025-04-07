@@ -318,21 +318,25 @@ class RandomDataset(BenchmarkDataset):
         input_high = int(input_len * range_ratio) + 1
         if input_low >= input_high:
             input_low = max(1, input_high - 1)
-        input_lens = np.random.randint(input_low, input_high, size=num_requests)
+        input_lens = np.random.randint(input_low,
+                                       input_high,
+                                       size=num_requests)
 
         # Fix output length range
         output_low = max(1, int(output_len / range_ratio))
         output_high = int(output_len * range_ratio) + 1
         if output_low >= output_high:
             output_low = max(1, output_high - 1)
-        output_lens = np.random.randint(output_low, output_high, size=num_requests)
+        output_lens = np.random.randint(output_low,
+                                        output_high,
+                                        size=num_requests)
 
         offsets = np.random.randint(0, vocab_size, size=num_requests)
 
         requests = []
         for i in range(num_requests):
             inner_seq = ((offsets[i] + i + np.arange(input_lens[i])) %
-                        vocab_size).tolist()
+                         vocab_size).tolist()
             token_sequence = prefix_token_ids + inner_seq
             prompt = tokenizer.decode(token_sequence)
             total_input_len = prefix_len + int(input_lens[i])
@@ -806,4 +810,3 @@ class AIMODataset(HuggingFaceDataset):
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
-    
