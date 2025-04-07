@@ -67,11 +67,11 @@ class BlockPool:
         Returns:
             The cached block if it exists, or None.
         """
-        if block_hash in self.cached_block_hash_to_block:
-            first_block_id = list(
-                self.cached_block_hash_to_block[block_hash].keys())[0]
-            return self.cached_block_hash_to_block[block_hash][first_block_id]
-        return None
+        cached_blocks = self.cached_block_hash_to_block.get(block_hash)
+        if not cached_blocks:
+            return None
+        first_block_id = next(iter(cached_blocks))
+        return cached_blocks[first_block_id]
 
     def cache_full_blocks(
         self,
