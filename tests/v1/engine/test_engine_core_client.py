@@ -285,4 +285,4 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
             log_stats=True,
         )
 
-        assert "Engine core initialization failed" in str(e_info.value)
+    assert "Engine core initialization failed" in str(e_info.value)
