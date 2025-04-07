@@ -211,7 +211,7 @@ class LLMEngine:
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
-    def step(self) -> list[RequestOutput | PoolingRequestOutput]:
+    def step(self) -> list[Union[RequestOutput, PoolingRequestOutput]]:
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False

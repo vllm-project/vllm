@@ -116,7 +116,7 @@ class BertEncoder(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        for i, layer in enumerate(self.layer):
+        for layer in self.layer:
             hidden_states = layer(hidden_states)
         return hidden_states
 

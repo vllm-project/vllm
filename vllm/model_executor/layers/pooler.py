@@ -197,7 +197,7 @@ class StepPool(SimplePooler):
                 for i, num in enumerate(pooling_metadata.prompt_lens)
             ]
         return [
-            seq_data_i.prompt_token_ids
+            torch.tensor(seq_data_i.prompt_token_ids)
             for seq_data_i in pooling_metadata.seq_data.values()
         ]
 

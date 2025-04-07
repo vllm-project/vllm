@@ -132,7 +132,8 @@ class RequestState:
             logprobs_processor = None
             detokenizer = None
             max_tokens_param = None
-            output_kind = RequestOutputKind.FINAL_ONLY
+            assert request.pooling_params is not None
+            output_kind = request.pooling_params.output_kind
 
         return cls(
             request_id=request.request_id,
