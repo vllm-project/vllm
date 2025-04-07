@@ -34,7 +34,8 @@ class ServeSubcommand(CLISubcommand):
             subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
             "serve",
-            help="Start the vLLM OpenAI Compatible API server",
+            help="Start the vLLM OpenAI Compatible API server.",
+            description="Start the vLLM OpenAI Compatible API server.",
             usage="vllm serve [model_tag] [options]")
         serve_parser.add_argument("model_tag",
                                   type=str,
