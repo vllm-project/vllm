@@ -389,7 +389,8 @@ steps:
     - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     # V1 Test: https://github.com/vllm-project/vllm/issues/14531
-    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4'
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'llama4'
 
 - label: Language Models Test (Standard) # 32min
   #mirror_hardwares: [amd]

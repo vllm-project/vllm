@@ -47,7 +47,7 @@ def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         max_model_len=4096,
-        max_num_seqs=5,
+        max_num_seqs=2,
         limit_mm_per_prompt={"audio": audio_count},
     )
 

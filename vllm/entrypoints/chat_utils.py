@@ -500,7 +500,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                               "internvl_chat", "skywork_chat", "NVLM_D",
                               "h2ovl_chat", "idefics3"):
                 return "<image>"
-            if model_type == "mllama":
+            if model_type in ("mllama", "llama4"):
                 return "<|image|>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
