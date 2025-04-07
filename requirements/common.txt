@@ -1,12 +1,13 @@
 cachetools
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
-numpy < 2.0.0
+numpy
 requests >= 2.26.0
 tqdm
 blake3
 py-cpuinfo
-transformers >= 4.48.2, < 4.49  # Required for Bamba model and Transformers backend.
+transformers >= 4.50.3
+huggingface-hub[hf_xet] >= 0.30.0  # Required for Xet downloads.
 tokenizers >= 0.19.1  # Required for Llama 3.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
@@ -18,10 +19,10 @@ pillow  # Required for image processing
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer >= 0.10.11, < 0.11
-llguidance >= 0.7.2, < 0.8.0; platform_machine == "x86_64" or platform_machine == "arm64" or platform_machine == "aarch64"
+llguidance >= 0.7.9, < 0.8.0; platform_machine == "x86_64" or platform_machine == "arm64" or platform_machine == "aarch64"
 outlines == 0.1.11
 lark == 1.2.2
-xgrammar == 0.1.16; platform_machine == "x86_64" or platform_machine == "aarch64"
+xgrammar == 0.1.17; platform_machine == "x86_64" or platform_machine == "aarch64"
 typing_extensions >= 4.10
 filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
 partial-json-parser # used for parsing partial JSON outputs
@@ -30,6 +31,7 @@ msgspec
 gguf == 0.10.0
 importlib_metadata
 mistral_common[opencv] >= 1.5.4
+opencv-python-headless >= 4.11.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
 setuptools>=74.1.1; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12

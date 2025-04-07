@@ -30,7 +30,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.13"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -86,6 +86,7 @@ exclude = [
 "vllm/triton_utils/**/*.py" = ["UP006", "UP035"]
 "vllm/vllm_flash_attn/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
+"vllm/utils.py" = ["UP006", "UP035"]
 
 [tool.ruff.lint]
 select = [

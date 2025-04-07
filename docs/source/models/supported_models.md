@@ -1,55 +1,28 @@
 (supported-models)=
 
-# List of Supported Models
+# Supported Models
 
-vLLM supports generative and pooling models across various tasks.
+vLLM supports [generative](generative-models) and [pooling](pooling-models) models across various tasks.
 If a model supports more than one task, you can set the task via the `--task` argument.
 
 For each task, we list the model architectures that have been implemented in vLLM.
 Alongside each architecture, we include some popular models that use it.
 
-## Loading a Model
+## Model Implementation
 
-### HuggingFace Hub
+### vLLM
 
-By default, vLLM loads models from [HuggingFace (HF) Hub](https://huggingface.co/models).
+If vLLM natively supports a model, its implementation can be found in <gh-file:vllm/model_executor/models>.
 
-To determine whether a given model is natively supported, you can check the `config.json` file inside the HF repository.
-If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
+These models are what we list in <project:#supported-text-models> and <project:#supported-mm-models>.
 
-Models do not _need_ to be natively supported to be used in vLLM.
-The <project:#transformers-fallback> enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
+(transformers-backend)=
 
-:::{tip}
-The easiest way to check if your model is really supported at runtime is to run the program below:
+### Transformers
 
-```python
-from vllm import LLM
+vLLM also supports model implementations that are available in Transformers. This does not currently work for all models, but most decoder language models are supported, and vision language model support is planned!
 
-# For generative models (task=generate) only
-llm = LLM(model=..., task="generate")  # Name or path of your model
-output = llm.generate("Hello, my name is")
-print(output)
-
-# For pooling models (task={embed,classify,reward,score}) only
-llm = LLM(model=..., task="embed")  # Name or path of your model
-output = llm.encode("Hello, my name is")
-print(output)
-```
-
-If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
-:::
-
-Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
-Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
-
-(transformers-fallback)=
-
-### Transformers fallback
-
-vLLM can fallback to model implementations that are available in Transformers. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
-
-To check if the backend is Transformers, you can simply do this:
+To check if the modeling backend is Transformers, you can simply do this:
 
 ```python 
 from vllm import LLM
@@ -57,10 +30,10 @@ llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
 ```
 
-If it is `TransformersModel` then it means it's based on Transformers!
+If it is `TransformersForCausalLM` then it means it's based on Transformers!
 
 :::{tip}
-You can force the use of `TransformersModel` by setting `model_impl="transformers"` for <project:#offline-inference> or `--model-impl transformers` for the <project:#openai-compatible-server>.
+You can force the use of `TransformersForCausalLM` by setting `model_impl="transformers"` for <project:#offline-inference> or `--model-impl transformers` for the <project:#openai-compatible-server>.
 :::
 
 :::{note}
@@ -69,16 +42,15 @@ vLLM may not fully optimise the Transformers implementation so you may see degra
 
 #### Supported features
 
-The Transformers fallback explicitly supports the following features:
+The Transformers modeling backend explicitly supports the following features:
 
 - <project:#quantization-index> (except GGUF)
 - <project:#lora-adapter>
-- <project:#distributed-serving> (pipeline parallel coming soon <gh-pr:12832>!)
+- <project:#distributed-serving>
 
-#### Remote code
+#### Remote Code
 
-Earlier we mentioned that the Transformers fallback enables you to run remote code models directly in vLLM.
-If you are interested in this feature, this section is for you!
+If your model is neither supported natively by vLLM or Transformers, you can still run it in vLLM!
 
 Simply set `trust_remote_code=True` and vLLM will run any model on the Model Hub that is compatible with Transformers.
 Provided that the model writer implements their model in a compatible way, this means that you can run new models before they are officially supported in Transformers or vLLM!
@@ -89,7 +61,7 @@ llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of
 llm.apply_model(lambda model: print(model.__class__))
 ```
 
-To make your model compatible with the Transformers fallback, it needs:
+To make your model compatible with the Transformers backend, it needs:
 
 ```{code-block} python
 :caption: modeling_my_model.py
@@ -119,9 +91,11 @@ Here is what happens in the background:
 
 1. The config is loaded
 2. `MyModel` Python class is loaded from the `auto_map`, and we check that the model `_supports_attention_backend`.
-3. The `TransformersModel` backend is used. See <gh-file:vllm/model_executor/models/transformers.py>, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`.
+3. The `TransformersForCausalLM` backend is used. See <gh-file:vllm/model_executor/models/transformers.py>, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`.
 
-To make your model compatible with tensor parallel, it needs:
+That's it!
+
+For your model to be compatible with vLLM's tensor parallel and/or pipeline parallel features, you must add `base_model_tp_plan` and/or `base_model_pp_plan` to your model's config class:
 
 ```{code-block} python
 :caption: configuration_my_model.py
@@ -130,20 +104,65 @@ from transformers import PretrainedConfig
 
 class MyConfig(PretrainedConfig):
   base_model_tp_plan = {
-    "layers.*.self_attn.q_proj": "colwise",
-    ...
+    "layers.*.self_attn.k_proj": "colwise",
+    "layers.*.self_attn.v_proj": "colwise",
+    "layers.*.self_attn.o_proj": "rowwise",
+    "layers.*.mlp.gate_proj": "colwise",
+    "layers.*.mlp.up_proj": "colwise",
+    "layers.*.mlp.down_proj": "rowwise",
+  }
+  base_model_pp_plan = {
+    "embed_tokens": (["input_ids"], ["inputs_embeds"]),
+    "layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
+    "norm": (["hidden_states"], ["hidden_states"]),
   }
 ```
 
+- `base_model_tp_plan` is a `dict` that maps fully qualified layer name patterns to tensor parallel styles (currently only `"colwise"` and `"rowwise"` are supported).
+- `base_model_pp_plan` is a `dict` that maps direct child layer names to `tuple`s of `list`s of `str`s:
+  * You only need to do this for layers which are not present on all pipeline stages
+  * vLLM assumes that there will be only one `nn.ModuleList`, which is distributed across the pipeline stages
+  * The `list` in the first element of the `tuple` contains the names of the input arguments
+  * The `list` in the last element of the `tuple` contains the names of the variables the layer outputs to in your modeling code
+
+## Loading a Model
+
+### Hugging Face Hub
+
+By default, vLLM loads models from [Hugging Face (HF) Hub](https://huggingface.co/models).
+
+To determine whether a given model is natively supported, you can check the `config.json` file inside the HF repository.
+If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
+
+Models do not _need_ to be natively supported to be used in vLLM.
+The [Transformers backend](#transformers-backend) enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
+
 :::{tip}
-`base_model_tp_plan` is a `dict` that maps fully qualified layer name patterns to tensor parallel styles (currently only `"colwise"` and `"rowwise"` are supported).
+The easiest way to check if your model is really supported at runtime is to run the program below:
+
+```python
+from vllm import LLM
+
+# For generative models (task=generate) only
+llm = LLM(model=..., task="generate")  # Name or path of your model
+output = llm.generate("Hello, my name is")
+print(output)
+
+# For pooling models (task={embed,classify,reward,score}) only
+llm = LLM(model=..., task="embed")  # Name or path of your model
+output = llm.encode("Hello, my name is")
+print(output)
+```
+
+If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 :::
 
-That's it!
+Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
+Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
 ### ModelScope
 
-To use models from [ModelScope](https://www.modelscope.cn) instead of HuggingFace Hub, set an environment variable:
+To use models from [ModelScope](https://www.modelscope.cn) instead of Hugging Face Hub, set an environment variable:
 
 ```shell
 export VLLM_USE_MODELSCOPE=True
@@ -164,6 +183,8 @@ print(output)
 output = llm.encode("Hello, my name is")
 print(output)
 ```
+
+(supported-text-models)=
 
 ## List of Text-only Language Models
 
@@ -197,6 +218,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc.
   * ✅︎
   * ✅︎
+- * `BambaForCausalLM`
+  * Bamba
+  * `ibm-ai-platform/Bamba-9B-fp8`, `ibm-ai-platform/Bamba-9B`
+  *
+  *
 - * `BloomForCausalLM`
   * BLOOM, BLOOMZ, BLOOMChat
   * `bigscience/bloom`, `bigscience/bloomz`, etc.
@@ -224,7 +250,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `DeciLMForCausalLM`
   * DeciLM
-  * `Deci/DeciLM-7B`, `Deci/DeciLM-7B-instruct`, etc.
+  * `nvidia/Llama-3_3-Nemotron-Super-49B-v1`, etc.
   *
   * ✅︎
 - * `DeepseekForCausalLM`
@@ -452,6 +478,16 @@ See [this page](#generative-models) for more information on how to use generativ
   * `Qwen/Qwen1.5-MoE-A2.7B`, `Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc.
   *
   * ✅︎
+- * `Qwen3ForCausalLM`
+  * Qwen3
+  * `Qwen/Qwen3-8B`, etc.
+  * ✅︎
+  * ✅︎
+- * `Qwen3MoeForCausalLM`
+  * Qwen3MoE
+  * `Qwen/Qwen3-MoE-15B-A2B`, etc.
+  * ✅︎
+  * ✅︎
 - * `StableLmForCausalLM`
   * StableLM
   * `stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc.
@@ -481,6 +517,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * XVERSE
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
   * ✅︎
+  * ✅︎
+- * `MiniMaxText01ForCausalLM`
+  * MiniMax-Text
+  * `MiniMaxAI/MiniMax-Text-01`, etc.
+  *
   * ✅︎
 - * `Zamba2ForCausalLM`
   * Zamba2
@@ -545,7 +586,7 @@ you should explicitly specify the task type to ensure that the model is used in 
   *
 - * `XLMRobertaModel`
   * XLM-RoBERTa-based
-  * `intfloat/multilingual-e5-large`, etc.
+  * `intfloat/multilingual-e5-large`, `jinaai/jina-reranker-v2-base-multilingual`, etc.
   *
   *
 :::
@@ -732,6 +773,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `AyaVisionForConditionalGeneration`
+  * Aya Vision
+  * T + I<sup>+</sup>
+  * `CohereForAI/aya-vision-8b`, `CohereForAI/aya-vision-32b`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `Blip2ForConditionalGeneration`
   * BLIP-2
   * T + I<sup>E</sup>
@@ -836,14 +884,21 @@ See [this page](#generative-models) for more information on how to use generativ
   * `openbmb/MiniCPM-o-2_6`, etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `MiniCPMV`
   * MiniCPM-V
   * T + I<sup>E+</sup> + V<sup>E+</sup>
   * `openbmb/MiniCPM-V-2` (see note), `openbmb/MiniCPM-Llama3-V-2_5`, `openbmb/MiniCPM-V-2_6`, etc.
   * ✅︎
   * ✅︎
+  * ✅︎
+- * `Mistral3ForConditionalGeneration`
+  * Mistral3
+  * T + I<sup>+</sup>
+  * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
   *
+  * ✅︎
+  * ✅︎
 - * `MllamaForConditionalGeneration`
   * Llama 3.2
   * T + I<sup>+</sup>
@@ -853,7 +908,7 @@ See [this page](#generative-models) for more information on how to use generativ
   *
 - * `MolmoForCausalLM`
   * Molmo
-  * T + I
+  * T + I<sup>+</sup>
   * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-7B-O-0924`, etc.
   * ✅︎
   * ✅︎
@@ -919,6 +974,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * T + I<sup>E+</sup> + V<sup>E+</sup>
   * `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc.
   * ✅︎
+  * ✅︎
+  * ✅︎
+- * `SkyworkR1VChatModel`
+  * Skywork-R1V-38B
+  * T + I
+  * `Skywork/Skywork-R1V-38B`
+  *
   * ✅︎
   * ✅︎
 - * `UltravoxModel`
@@ -1059,7 +1121,7 @@ At vLLM, we are committed to facilitating the integration and support of third-p
 2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
 
     :::{tip}
-    When comparing the output of `model.generate` from HuggingFace Transformers with the output of `llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
+    When comparing the output of `model.generate` from Hugging Face Transformers with the output of `llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
     :::
 
 3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies. Note: for bugfix PRs, it is good etiquette to inform the original author to seek their feedback.
@@ -1076,5 +1138,5 @@ We have the following levels of testing for models:
 
 1. **Strict Consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. Please refer to [models tests](https://github.com/vllm-project/vllm/blob/main/tests/models) for the models that have passed this test.
 2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
-3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](gh-dir:tests) and [examples](gh-dir:main/examples) for the models that have passed this test.
+3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](gh-dir:tests) and [examples](gh-dir:examples) for the models that have passed this test.
 4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.

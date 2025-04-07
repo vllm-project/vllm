@@ -19,6 +19,12 @@ except ImportError:
 
 
 class TopKTopPSampler(nn.Module):
+    """
+    Module that performs optional top-k and top-p filtering followed by
+    weighted random sampling of logits.
+
+    Implementations may update the logits tensor in-place.
+    """
 
     def __init__(self):
         super().__init__()
@@ -84,7 +90,11 @@ class TopKTopPSampler(nn.Module):
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """PyTorch-native implementation of top-k and top-p sampling."""
+        """
+        PyTorch-native implementation of top-k and top-p sampling.
+
+        The logits tensor may be updated in-place.
+        """
         logits = apply_top_k_top_p(logits, k, p)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators)
@@ -112,21 +122,46 @@ class TopKTopPSampler(nn.Module):
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        # If only top-k is specified, use pytorch's builtin topk op. This leads
-        # to significant speed up on TPU compared to using apply_top_k_top_p.
-        if k is not None and p is None:
-            topk_values, topk_indices = torch.topk(logits, k, dim=-1)
-
-            mask = torch.ones_like(logits, dtype=torch.bool)
-            mask.scatter_(-1, topk_indices, False)
-            logits.masked_fill_(mask, float('-inf'))
-        else:
-            # TODO Placeholder for TPU optimized topp kernel
-            # logits = apply_top_k_top_p(logits, k, p)
-            pass
-
+        logits = apply_top_k_top_p_tpu(logits, k, p)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators)
+
+
+def apply_top_k_top_p_tpu(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+    p: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Apply top-k and top-p optimized for TPU.
+
+    This algorithm avoids using torch.scatter which is extremely slow on TPU.
+    This is achieved by finding a "cut-off" element in the original logit, and
+    after thresholding the logit using this cut-off, the remaining elements
+    shall constitute the top-p set.
+
+    Note: in the case of tie (i.e. multipple cut-off elements present in the
+    logit), all tie elements are included in the top-p set. In other words,
+    this function does not break ties. Instead, these tie tokens have equal
+    chance of being chosen during final sampling, so we can consider the tie
+    being broken then.
+    """
+    if k is not None:
+        logits = apply_top_k_only(logits, k)
+
+    if p is not None:
+        probs = logits.softmax(dim=-1)
+        probs_sort, _ = probs.sort(dim=-1, descending=False)
+        cumprob = torch.cumsum(probs_sort, dim=-1)
+        top_p_mask = cumprob <= 1 - p.unsqueeze(dim=1)
+        top_p_mask[:, -1] = False  # at least one
+
+        top_p_count = top_p_mask.sum(dim=-1).unsqueeze(1)
+        top_p_cutoff = probs_sort.gather(-1, top_p_count)
+        elements_to_discard = probs < top_p_cutoff
+        logits.masked_fill_(elements_to_discard, -float("inf"))
+
+    return logits
 
 
 def apply_top_k_top_p(
@@ -136,10 +171,18 @@ def apply_top_k_top_p(
 ) -> torch.Tensor:
     """Apply top-k and top-p masks to the logits.
 
-    This function sorts the logits tensor, which can be slow for large batches.
+    If a top-p is used, this function will sort the logits tensor,
+    which can be slow for large batches.
+
+    The logits tensor may be updated in-place.
     """
-    if k is None and p is None:
-        return logits
+    if p is None:
+        if k is None:
+            return logits
+
+        # Avoid sorting vocab for top-k only case.
+        return apply_top_k_only(logits, k)
+
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     if k is not None:
@@ -153,7 +196,7 @@ def apply_top_k_top_p(
     if p is not None:
         # Apply top-p.
         probs_sort = logits_sort.softmax(dim=-1)
-        probs_sum = probs_sort.cumsum(dim=-1)
+        probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
         top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
         # at least one
         top_p_mask[:, -1] = False
@@ -161,6 +204,31 @@ def apply_top_k_top_p(
 
     # Re-sort the probabilities.
     logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
+    return logits
+
+
+def apply_top_k_only(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Apply top-k mask to the logits.
+
+    This implementation doesn't involve sorting the entire vocab.
+
+    The logits tensor may be updated in-place.
+    """
+    no_top_k_mask = k == logits.shape[1]
+    # Set non-top-k rows to 1 so that we can gather.
+    k = k.masked_fill(no_top_k_mask, 1)
+    max_top_k = k.max()
+    # topk.values tensor has shape [batch_size, max_top_k].
+    # Convert top k to 0-based index in range [0, max_top_k).
+    k_index = k.sub_(1).unsqueeze(1).expand(logits.shape[0], 1)
+    top_k_mask = logits.topk(max_top_k, dim=1).values.gather(1, k_index.long())
+    # Handle non-topk rows.
+    top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
+    logits.masked_fill_(logits < top_k_mask, -float("inf"))
     return logits
 
 

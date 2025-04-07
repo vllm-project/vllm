@@ -212,7 +212,7 @@ def _run_test(
     with vllm_runner(model,
                      dtype=dtype,
                      max_model_len=4096,
-                     max_num_seqs=2,
+                     max_num_seqs=3,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
@@ -447,7 +447,6 @@ def test_bnb_regression(
         max_model_len=4096,
         max_num_seqs=2,
         quantization="bitsandbytes",
-        load_format="bitsandbytes",
     )
     sampling_params = SamplingParams(
         temperature=0,

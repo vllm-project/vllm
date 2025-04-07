@@ -12,7 +12,6 @@ from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
 import torch
-from cachetools import LRUCache
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
@@ -21,7 +20,7 @@ from vllm.jsontree import json_map_leaves, json_reduce_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
-from vllm.utils import GiB_bytes, flatten_2d_lists, full_groupby
+from vllm.utils import GiB_bytes, LRUCache, flatten_2d_lists, full_groupby
 
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -1654,6 +1653,10 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         this prompt during profiling and generation.
         """
         raise NotImplementedError
+
+    @property
+    def pad_dummy_encoder_prompt(self) -> bool:
+        return False
 
     def create_decoder_prompt(
         self,

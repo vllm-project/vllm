@@ -65,7 +65,7 @@ QUANT_TYPES = [
 
 
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
-@pytest.mark.parametrize("dtype", [torch.half])
+@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_type", QUANT_TYPES)
 @torch.inference_mode()
 def test_dequantize(hidden_size: int, dtype: torch.dtype,
@@ -78,7 +78,7 @@ def test_dequantize(hidden_size: int, dtype: torch.dtype,
         ref_output = torch.tensor(dequantize(tensor.data, quant_type),
                                   device="cuda").to(dtype)
         output = ops.ggml_dequantize(torch.tensor(tensor.data, device="cuda"),
-                                     quant_type, *list(shape)).to(dtype)
+                                     quant_type, *list(shape), dtype)
 
         torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=4e-2)
 

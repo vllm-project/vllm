@@ -4,11 +4,9 @@ import time
 from collections.abc import Mapping
 from typing import Optional, Union
 
-import vllm.platforms
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
-                         PromptType, SingletonInputsAdapter)
-from vllm.inputs.parse import is_encoder_decoder_inputs
+from vllm.inputs import ProcessorInputs, PromptType
+from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
@@ -20,7 +18,10 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.structured_output.utils import validate_structured_output_request
+from vllm.v1.structured_output.backend_guidance import (
+    validate_guidance_grammar)
+from vllm.v1.structured_output.utils import (
+    validate_structured_output_request_xgrammar)
 
 
 class Processor:
@@ -29,7 +30,6 @@ class Processor:
         self,
         vllm_config: VllmConfig,
         tokenizer: BaseTokenizerGroup,
-        input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
@@ -120,7 +120,10 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = ["xgrammar", "xgrammar:disable-any-whitespace"]
+        supported_backends = [
+            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
+            "guidance:disable-any-whitespace", "auto"
+        ]
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
             raise ValueError(f"Only {supported_backends} structured output is "
@@ -134,10 +137,36 @@ class Processor:
         else:
             params.guided_decoding.backend = engine_level_backend
 
-        if vllm.platforms.current_platform.is_tpu():
-            raise ValueError("Structured output is not supported on TPU.")
+        from vllm.platforms import current_platform
+        if not current_platform.supports_structured_output():
+            raise ValueError("Structured output is not supported on "
+                             f"{current_platform.device_name}.")
 
-        validate_structured_output_request(params)
+        # Request content validation
+        if engine_level_backend.startswith("xgrammar"):
+            # xgrammar with no fallback
+            validate_structured_output_request_xgrammar(params)
+            params.guided_decoding.backend = engine_level_backend
+        elif engine_level_backend == "auto":
+            # "auto" is an opt-in to opinionated behavior where we try to
+            # choose a backend based on request contents. This is not the
+            # default as it is less predictable and subject to change
+            # between releases as feature support changes.
+            try:
+                validate_structured_output_request_xgrammar(params)
+                params.guided_decoding.backend = "xgrammar"
+            except ValueError:
+                # The request includes some jsonschema feature(s) that
+                # are not supported in xgrammar. Fall back to guidance.
+                params.guided_decoding.backend = "guidance"
+
+        if engine_level_backend.startswith("guidance"):
+            # TODO ideally we would have the LLTokenizer here as Lark syntax
+            # allows <|special_token|> and similar, see
+            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
+            # Without tokenizer these are disallowed in grammars.
+            validate_guidance_grammar(params, tokenizer=None)
+            params.guided_decoding.backend = engine_level_backend
 
     def process_inputs(
         self,
@@ -181,14 +210,7 @@ class Processor:
 
         self._validate_model_inputs(processed_inputs, lora_request)
 
-        if is_encoder_decoder_inputs(processed_inputs):
-            decoder_inputs = SingletonInputsAdapter(
-                processed_inputs["decoder"])
-            encoder_inputs = SingletonInputsAdapter(
-                processed_inputs["encoder"])
-        else:
-            decoder_inputs = SingletonInputsAdapter(processed_inputs)
-            encoder_inputs = None
+        encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
         # TODO: Impl encoder-decoder
         if encoder_inputs is not None:
@@ -199,8 +221,9 @@ class Processor:
         sampling_params = params.clone()
         # If unset max tokens, then generate up to the max_model_len.
         if sampling_params.max_tokens is None:
-            sampling_params.max_tokens = (self.model_config.max_model_len -
-                                          len(decoder_inputs.prompt_token_ids))
+            sampling_params.max_tokens = (
+                self.model_config.max_model_len -
+                len(decoder_inputs["prompt_token_ids"]))
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
         sampling_params.update_from_tokenizer(
@@ -210,57 +233,46 @@ class Processor:
         sorted_mm_inputs: Optional[list[MultiModalKwargs]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
-        if (decoder_mm_inputs := decoder_inputs.multi_modal_data):
-            assert isinstance(decoder_mm_inputs, MultiModalKwargs)
-
-            # The output of merged multi-modal processor (`decoder_mm_inputs`)
-            # contains the kwargs for all items from all modalities.
-            # This code separates them so that there is one set of kwargs
-            # per item per modality.
-            individual_mm_inputs = [
-                MultiModalKwargs.from_items([item])
-                for modality in decoder_mm_inputs.modalities
-                for item in decoder_mm_inputs.get_items(modality)
-            ]
+        if decoder_inputs["type"] == "multimodal":
+            decoder_mm_inputs = decoder_inputs["mm_kwargs"]
 
             # Merge and flatten multimodal placeholders, hashes and inputs
             # from dictionaries to lists, and sort them by each item's position
             # in the input sequence.
-            # NOTE: interleaved modalities are not supported.
             (
-                sorted_modalities,
+                sorted_item_modalities,
                 sorted_mm_positions,
                 sorted_mm_hashes,
             ) = merge_and_sort_multimodal_metadata(
-                decoder_inputs.multi_modal_placeholders,
-                decoder_inputs.multi_modal_hashes if self.use_hash else None,
+                decoder_inputs["mm_placeholders"],
+                decoder_inputs["mm_hashes"] if self.use_hash else None,
             )
 
-            # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
-            # modalities involved.
-            if len(sorted_modalities) > 1:
-                modality_order_dict = {
-                    modality: order
-                    for order, modality in enumerate(sorted_modalities)
-                }
-
-                # Sanity check to make sure each multimodal input has only one
-                # modality key.
-                for mm_input in individual_mm_inputs:
-                    assert len(mm_input.modalities) == 1
-
-                # Sort MultiModalKwargs to match sorted_mm_positions
-                sorted_mm_inputs = sorted(
-                    individual_mm_inputs,
-                    key=lambda mm_input: modality_order_dict[list(
-                        mm_input.modalities)[0]])
+            # The output of merged multi-modal processor (`decoder_mm_inputs`)
+            # is a single MultiModalKwargs for all items from all modalities.
+            # This code flattens kwargs for individual items in a list and
+            # sorts them by each item's position in the input sequence if there
+            # are multiple modalities.
+            unique_modalities = set(sorted_item_modalities)
+            if len(unique_modalities) > 1:
+                sorted_mm_inputs = []
+                used_indices = {modality: 0 for modality in unique_modalities}
+                for modality in sorted_item_modalities:
+                    items = decoder_mm_inputs.get_items(modality)
+                    item = items[used_indices[modality]]
+                    sorted_mm_inputs.append(MultiModalKwargs.from_items([item
+                                                                         ]))
+                    used_indices[modality] += 1
             else:
-                sorted_mm_inputs = individual_mm_inputs
+                sorted_mm_inputs = [
+                    MultiModalKwargs.from_items([item]) for item in
+                    decoder_mm_inputs.get_items(sorted_item_modalities[0])
+                ]
 
         return EngineCoreRequest(
             request_id=request_id,
-            prompt=decoder_inputs.prompt,
-            prompt_token_ids=decoder_inputs.prompt_token_ids,
+            prompt=decoder_inputs.get("prompt"),
+            prompt_token_ids=decoder_inputs["prompt_token_ids"],
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
             mm_placeholders=sorted_mm_positions,
@@ -273,15 +285,16 @@ class Processor:
     def _validate_model_inputs(self,
                                inputs: ProcessorInputs,
                                lora_request: Optional[LoRARequest] = None):
-        if is_encoder_decoder_inputs(inputs):
-            # For encoder-decoder multimodal models, the max_prompt_len
-            # restricts the decoder prompt length
-            prompt_inputs = inputs["decoder" if self.model_config.
-                                   is_multimodal_model else "encoder"]
-        else:
-            prompt_inputs = inputs
+        encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
-        prompt_ids = SingletonInputsAdapter(prompt_inputs).prompt_token_ids
+        # For encoder-decoder multimodal models, the max_prompt_len
+        # restricts the decoder prompt length
+        if self.model_config.is_multimodal_model:
+            prompt_inputs = decoder_inputs
+        else:
+            prompt_inputs = encoder_inputs or decoder_inputs
+
+        prompt_ids = prompt_inputs["prompt_token_ids"]
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")

@@ -17,5 +17,6 @@ gptqmodel
 int4
 int8
 fp8
+quark
 quantized_kvcache
 :::
