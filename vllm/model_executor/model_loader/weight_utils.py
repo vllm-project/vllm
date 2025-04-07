@@ -149,6 +149,10 @@ def get_quant_config(model_config: ModelConfig,
     if model_config.quantization == "gguf":
         return quant_cls.from_config({})
 
+    if model_config.quantization == "torchao":
+        return quant_cls.from_config(
+            {"torchao_config": model_config.torchao_config})
+
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)
@@ -162,6 +166,7 @@ def get_quant_config(model_config: ModelConfig,
                                   None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
+
     # In case of bitsandbytes/QLoRA, get quant config from the adapter model.
     if model_config.quantization == "bitsandbytes":
         if (not load_config.model_loader_extra_config
