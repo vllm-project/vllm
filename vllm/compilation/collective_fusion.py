@@ -45,6 +45,8 @@ def search_embedding_all_reduce_rmsnorm(
         input=all_reduce,
         weight=arg3_1,
         epsilon=1e-5)
+    
+    print(f"embedding pattern search, rmsnorm input = {all_reduce.shape}, output1 = {permute.shape}, output2 = {all_reduce.shape}")
 
     return rmsnorm[1], all_reduce
 
@@ -77,6 +79,9 @@ def replace_with_embedding_reduce_scatter_rmsnorm(
                                                    dim=0,
                                                    world_size=tp_size,
                                                    group_name=tp.unique_name)
+    
+    print(f"embedding pattern replace, rmsnorm input = {reduce_scatter.shape}, output1 = {rmsnorm[1]}, output2 = {all_gather.shape}")
+
 
     return rmsnorm[1], all_gather
 
@@ -111,14 +116,11 @@ def replace_with_gemm_rs_ag_rmsnorm(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     tp = get_tp_group()
     tp_size = get_tensor_model_parallel_world_size()
-    slice_shape = residual_slice_shape(residual)
-
-    start_idx = tp.rank * slice_shape
-    end_idx = (tp.rank + 1) * slice_shape
-    residual = residual[start_idx:end_idx, :]
-
-    # residual_chunk = torch.ops.aten.split.Tensor(residual, slice_shape)
-    # residual = residual_chunk[tp.rank_in_group]
+    
+    # slice_shape = residual_slice_shape(residual)
+    # start_idx = tp.rank * slice_shape
+    # end_idx = (tp.rank + 1) * slice_shape
+    # residual = residual[start_idx:end_idx, :]
 
     gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
@@ -150,7 +152,7 @@ def replace_with_gemm_rs_ag_rmsnorm(
                                                    group_name=tp.unique_name)
 
     new_residual = rmsnorm[2]
-    new_residual = new_residual.repeat(tp_size, 1)
+    # new_residual = new_residual.repeat(tp_size, 1)
 
     return normalized, new_residual
 
@@ -225,17 +227,17 @@ class CollectiveFusionPass(VllmInductorPass):
             "CollectiveFusionPass singleton instance already exists"
         super().__init__(config)
 
-        # self.embedding_ag_rmsnorm_pattern = PatternMatcherPass()
+        self.embedding_ag_rmsnorm_pattern = PatternMatcherPass()
         self.gemm_rs_ag_gemm_pattern = PatternMatcherPass()
         self.final_ar_rmsnorm_pattern = PatternMatcherPass()
         self.matches: List[Match] = []
 
-        # inputs_for_embedding_rmsnorm = prepare_inputs_for_embedding_rmsnorm()
-        # register_replacement(search_embedding_all_reduce_rmsnorm,
-        #                      replace_with_embedding_reduce_scatter_rmsnorm,
-        #                      inputs_for_embedding_rmsnorm,
-        #                      fwd_only, [self.embedding_ag_rmsnorm_pattern],
-        #                      extra_check=lambda m: self.record_match(m))
+        inputs_for_embedding_rmsnorm = prepare_inputs_for_embedding_rmsnorm()
+        register_replacement(search_embedding_all_reduce_rmsnorm,
+                             replace_with_embedding_reduce_scatter_rmsnorm,
+                             inputs_for_embedding_rmsnorm,
+                             fwd_only, [self.embedding_ag_rmsnorm_pattern],
+                             extra_check=lambda m: self.record_match(m))
 
         x = torch.empty([4, 4], device='cuda', dtype=torch.float16)
         w = torch.empty([4, 4], device='cuda', dtype=torch.float16)
@@ -261,10 +263,10 @@ class CollectiveFusionPass(VllmInductorPass):
             print(f"before graph {graph}")
 
         self.dump_graph(graph, "before_collective_fusion")
-        # embedding_match_cnt = self.embedding_ag_rmsnorm_pattern.apply(graph)
+        embedding_match_cnt = self.embedding_ag_rmsnorm_pattern.apply(graph)
         match_cnt = self.gemm_rs_ag_gemm_pattern.apply(graph)
-        logger.info("all match count = %d, fused gemm match cnt = %d",
-                    len(self.matches), match_cnt)
+        logger.info("all match count = %d, embedding_match_cnt = %d, fused gemm match cnt = %d",
+                    len(self.matches), embedding_match_cnt, match_cnt)
 
         if rank == 0:
             print(f"after graph {graph}")
