@@ -478,6 +478,16 @@ See [this page](#generative-models) for more information on how to use generativ
   * `Qwen/Qwen1.5-MoE-A2.7B`, `Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc.
   *
   * ✅︎
+- * `Qwen3ForCausalLM`
+  * Qwen3
+  * `Qwen/Qwen3-8B`, etc.
+  * ✅︎
+  * ✅︎
+- * `Qwen3MoeForCausalLM`
+  * Qwen3MoE
+  * `Qwen/Qwen3-MoE-15B-A2B`, etc.
+  * ✅︎
+  * ✅︎
 - * `StableLmForCausalLM`
   * StableLM
   * `stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc.
