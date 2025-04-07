@@ -1,8 +1,3 @@
-
-# pip install --user --upgrade pytest pytest-xdist
-# PYTHONPATH=/opt/tiger/open_verl torchrun --standalone --nnodes=1 --nproc_per_node=4 $(which pytest) -s test_vllm_spmd.py
-
-
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from
