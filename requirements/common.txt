@@ -28,7 +28,7 @@ filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/31
 partial-json-parser # used for parsing partial JSON outputs
 pyzmq
 msgspec
-gguf == 0.10.0
+gguf >= 0.13.0
 importlib_metadata
 mistral_common[opencv] >= 1.5.4
 opencv-python-headless >= 4.11.0    # required for video IO
