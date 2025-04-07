@@ -164,9 +164,9 @@ def make_local_attention_virtual_batches(
     attn_chunk_size: int,
     query_start_loc_np: np.ndarray,
     seq_lens_np: np.ndarray,
-    block_table: torch.tensor,
+    block_table: torch.Tensor,
     page_size: int = 0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, torch.tensor]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, torch.Tensor]:
     q_seqlens = query_start_loc_np[1:] - query_start_loc_np[:-1]
     actual_batch_size = seq_lens_np.shape[0]
 

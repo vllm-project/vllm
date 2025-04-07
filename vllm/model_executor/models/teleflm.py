@@ -22,8 +22,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Type
-
 import torch
 
 from vllm.config import VllmConfig
@@ -39,7 +37,7 @@ class TeleFLMModel(LlamaModel):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer,
+        layer_type: type[LlamaDecoderLayer] = LlamaDecoderLayer,
     ):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,

@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -329,7 +329,7 @@ class Llama4Model(LlamaModel):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 layer_type: Type[Llama4DecoderLayer] = Llama4DecoderLayer):
+                 layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer):
         self.num_experts = vllm_config.model_config.hf_config.num_local_experts
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
@@ -484,7 +484,7 @@ class Llama4ForCausalLM(LlamaForCausalLM):
     def _init_model(self,
                     vllm_config: VllmConfig,
                     prefix: str = "",
-                    layer_type: Type[Llama4DecoderLayer] = Llama4DecoderLayer):
+                    layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer):
         return Llama4Model(vllm_config=vllm_config,
                            prefix=prefix,
                            layer_type=layer_type)

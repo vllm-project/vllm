@@ -19,7 +19,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Iterable, Set, Tuple, Type
+from typing import Iterable, Set, Tuple
 
 import torch
 
@@ -124,7 +124,7 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
     def _init_model(self,
                     vllm_config: VllmConfig,
                     prefix: str = "",
-                    layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer):
+                    layer_type: type[LlamaDecoderLayer] = LlamaDecoderLayer):
         return TeleChat2Model(vllm_config=vllm_config, prefix=prefix)
 
     def load_weights(self, weights: Iterable[Tuple[str,
