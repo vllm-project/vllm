@@ -163,7 +163,8 @@ class P2pNcclPipe:
                 logger.debug("Received message from %s, data: %s",
                              remote_address.decode(), data)
                 if data["cmd"] == "NEW":
-                    unique_id = self.nccl.unique_id_from_bytes(bytes(data["unique_id"]))
+                    unique_id = self.nccl.unique_id_from_bytes(
+                        bytes(data["unique_id"]))
                     with torch.cuda.device(self.device):
                         rank = 1
                         comm: ncclComm_t = self.nccl.ncclCommInitRank(
@@ -173,20 +174,33 @@ class P2pNcclPipe:
                             "ncclCommInitRank Success, %s 👈 %s, MyRank: %s",
                             self.zmq_address, remote_address.decode(), rank)
                 elif data["cmd"] == "PUT":
-                    tensor_id = data["tensor_id"]
-                    self.router_socket.send_multipart([remote_address, b"0"])
-                    tensor = torch.empty(data["shape"],
-                                         dtype=getattr(torch, data["dtype"]),
-                                         device=self.device)
-                    comm, rank = self.comms[remote_address.decode()]
-                    self._recv(comm, tensor, rank ^ 1)
-                    with self.recv_store_cv:
-                        self.recv_store[tensor_id] = tensor
-                        self.recv_store_cv.notify()
-                    logger.info(
-                        "Recv Tensor, %s 👈 %s, rank: %s, data: %s, tensor: %s",
-                        self.zmq_address, remote_address.decode(), rank, data,
-                        tensor.shape)
+                    try:
+                        tensor = torch.empty(data["shape"],
+                                             dtype=getattr(
+                                                 torch, data["dtype"]),
+                                             device=self.device)
+
+                        self.router_socket.send_multipart(
+                            [remote_address, b"0"])
+                        comm, rank = self.comms[remote_address.decode()]
+                        self._recv(comm, tensor, rank ^ 1)
+
+                        tensor_id = data["tensor_id"]
+                        with self.recv_store_cv:
+                            self.recv_store[tensor_id] = tensor
+                            self.recv_store_cv.notify()
+                        logger.info(
+                            "Recv Tensor, %s 👈 %s, rank: %s, data: %s, "
+                            "tensor: %s", self.zmq_address,
+                            remote_address.decode(), rank, data, tensor.shape)
+
+                    except torch.cuda.OutOfMemoryError:
+                        self.router_socket.send_multipart(
+                            [remote_address, b"1"])
+                        logger.warning(
+                            "Recv Tensor, Out Of Memory, %s 👈 %s, data: %s",
+                            self.zmq_address, remote_address.decode(), data)
+
                 elif data["cmd"] == "GET":
                     tensor_id = data["tensor_id"]
                     with self.send_store_cv:
@@ -194,9 +208,12 @@ class P2pNcclPipe:
                             _tensor_id, _remote_address, tensor = item
                             if tensor_id == _tensor_id:
                                 data = {
-                                    "ret": 0,
-                                    "shape": tensor.shape,
-                                    "dtype": str(tensor.dtype).replace("torch.", "")
+                                    "ret":
+                                    0,
+                                    "shape":
+                                    tensor.shape,
+                                    "dtype":
+                                    str(tensor.dtype).replace("torch.", "")
                                 }
                             else:
                                 data = {"ret": 1}
@@ -234,8 +251,15 @@ class P2pNcclPipe:
                 sock.send(msgpack.dumps(data))
 
                 response = sock.recv()
-                if response != b"0" or tensor is None:
-                    return
+                if response != b"0":
+                    self.send_store.append([tensor_id, remote_address, tensor])
+                    logger.warning(
+                        "Send Tensor, Peer Out Of Memory, %s 👉 %s, "
+                        "MyRank: %s, data: %s, tensor: %s, size: %fGB",
+                        self.zmq_address, remote_address, rank, data,
+                        tensor.shape,
+                        tensor.element_size() * tensor.numel() / 1024**3)
+                    continue
 
                 self._send(comm, tensor.to(self.device), rank ^ 1)
                 logger.info(

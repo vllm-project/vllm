@@ -276,7 +276,7 @@ class NCCLLibrary:
         Reconstructs an `ncclUniqueId` object from bytes data.
 
         Args:
-            data: Must be a 128-byte data block (matching NCCL's unique_id format).
+            data: Must be a 128-byte data block (matching NCCL's unique_id).
 
         Returns:
             ncclUniqueId: The reconstructed NCCL Unique ID object.
@@ -285,7 +285,8 @@ class NCCLLibrary:
             ValueError: If the input data length is not 128 bytes.
         """
         if len(data) != 128:
-            raise ValueError(f"Expected 128 bytes for ncclUniqueId, got {len(data)} bytes")
+            raise ValueError(
+                f"Expected 128 bytes for ncclUniqueId, got {len(data)} bytes")
 
         unique_id = ncclUniqueId()
         ctypes.memmove(ctypes.addressof(unique_id.internal), data, 128)
