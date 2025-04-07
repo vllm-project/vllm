@@ -42,7 +42,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import (direct_register_custom_op, resolve_obj_by_qualname,
-                        supports_custom_op)
+                        run_once, supports_custom_op)
 
 
 @dataclass
@@ -936,6 +936,20 @@ def init_distributed_environment(
             "world group already initialized with a different world size")
 
 
+@run_once
+def pplx_init(rank, world_size):
+    from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
+                                      nvshmem_get_unique_id, nvshmem_init)
+    print(f"PPLX_INIT {rank} {world_size}")
+    uid = nvshmem_get_unique_id(
+    ) if rank == 0 else nvshmem_alloc_empty_unique_id()
+    uid_gpu = uid.cuda()
+    get_world_group().broadcast(uid_gpu, src=0)
+    print(f"PPLX_INIT UID={uid_gpu}")
+    uid = uid_gpu.to(device='cpu')
+    nvshmem_init(uid, rank, world_size)
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -1040,6 +1054,8 @@ def initialize_model_parallel(
         "DP rank %s, PP rank %s, TP rank %s, EP rank %s", rank, world_size,
         _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
         _EP.rank_in_group)
+
+    pplx_init(rank, world_size)
 
 
 def ensure_model_parallel_initialized(
