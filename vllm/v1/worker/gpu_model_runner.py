@@ -1071,14 +1071,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states=hidden_states,
                 pooling_metadata=self.input_batch.pooling_metadata)
 
+            # any token will do because max tokens is 1
+            sampled_tokens = [[0]] * self.input_batch.num_reqs
+
             return ModelRunnerOutput(
                 req_ids=self.input_batch.req_ids,
                 req_id_to_index=self.input_batch.req_id_to_index,
-                sampled_token_ids=[],
-                spec_token_ids=[],
+                sampled_token_ids=sampled_tokens,
+                spec_token_ids=None,
                 logprobs=None,
                 prompt_logprobs_dict={},
-                pooler_output=pooler_output,
+                pooler_output=[
+                    o.data.to("cpu") for o in pooler_output.outputs
+                ],
             )
 
         logits = self.model.compute_logits(sample_hidden_states, None)

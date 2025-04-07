@@ -9,7 +9,7 @@ import torch
 
 from vllm.outputs import (CompletionOutput, PoolingOutput,
                           PoolingRequestOutput, RequestOutput)
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -80,8 +80,8 @@ class RequestState:
         output_kind: RequestOutputKind,
         prompt: Optional[str],
         prompt_token_ids: list[int],
-        logprobs_processor: LogprobsProcessor,
-        detokenizer: IncrementalDetokenizer,
+        logprobs_processor: Optional[LogprobsProcessor],
+        detokenizer: Optional[IncrementalDetokenizer],
         max_tokens_param: Optional[int],
         arrival_time: float,
         queue: Optional[RequestOutputCollector],
@@ -115,11 +115,24 @@ class RequestState:
         log_stats: bool,
     ) -> "RequestState":
 
-        sampling_params = request.sampling_params \
-            if request.sampling_params \
-                else SamplingParams.from_optional()
-        if not sampling_params.detokenize:
-            tokenizer = None
+        if sampling_params := request.sampling_params:
+            if not sampling_params.detokenize:
+                tokenizer = None
+            output_kind = sampling_params.output_kind
+            logprobs_processor = LogprobsProcessor.from_new_request(
+                tokenizer=tokenizer,
+                request=request,
+            )
+            detokenizer = IncrementalDetokenizer.from_new_request(
+                tokenizer=tokenizer,
+                request=request,
+            )
+            max_tokens_param = sampling_params.max_tokens
+        else:
+            logprobs_processor = None
+            detokenizer = None
+            max_tokens_param = None
+            output_kind = RequestOutputKind.FINAL_ONLY
 
         return cls(
             request_id=request.request_id,
@@ -127,19 +140,12 @@ class RequestState:
             request_index=request_index,
             lora_name=(request.lora_request.name
                        if request.lora_request is not None else None),
-            output_kind=sampling_params.output_kind,
+            output_kind=output_kind,
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
-            logprobs_processor=LogprobsProcessor.from_new_request(
-                tokenizer=tokenizer,
-                request=request,
-            ),
-            detokenizer=IncrementalDetokenizer.from_new_request(
-                tokenizer=tokenizer,
-                request=request,
-            ),
-            max_tokens_param=(sampling_params.max_tokens
-                              if sampling_params is not None else None),
+            logprobs_processor=logprobs_processor,
+            detokenizer=detokenizer,
+            max_tokens_param=max_tokens_param,
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
@@ -161,7 +167,7 @@ class RequestState:
             return None
 
         request_id = self.request_id
-        if pooling_output:
+        if pooling_output is not None:
             return self._new_request_output(
                 request_id, [self._new_pooling_output(pooling_output)],
                 finished)
@@ -195,6 +201,7 @@ class RequestState:
                 prompt_token_ids=self.prompt_token_ids,
                 finished=finished,
             )
+        assert self.logprobs_processor is not None
         if self.output_kind == RequestOutputKind.DELTA:
             # Side effect: logprobs processor forgets prompt logprobs
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
@@ -217,6 +224,8 @@ class RequestState:
         stop_reason: Union[int, str, None],
     ) -> CompletionOutput:
 
+        assert self.detokenizer is not None
+        assert self.logprobs_processor is not None
         finished = finish_reason is not None
         delta = self.output_kind == RequestOutputKind.DELTA
 
@@ -358,7 +367,9 @@ class OutputProcessor:
 
             req_state.is_prefilling = False
 
-            if not pooling_output:
+            if pooling_output is None:
+                assert req_state.detokenizer is not None
+                assert req_state.logprobs_processor is not None
                 # 2) Detokenize the token ids into text and perform stop checks.
                 stop_string = req_state.detokenizer.update(
                     new_token_ids, finish_reason == FinishReason.STOP)

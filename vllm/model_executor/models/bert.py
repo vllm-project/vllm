@@ -452,7 +452,6 @@ class BertEmbeddingModel(nn.Module):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        print(f"{hidden_states[-1]=}")
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):

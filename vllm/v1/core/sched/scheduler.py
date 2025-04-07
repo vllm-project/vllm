@@ -555,6 +555,7 @@ class Scheduler(SchedulerInterface):
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         spec_decoding_stats = SpecDecodingStats() if self.log_stats else None
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        pooler_outputs = model_runner_output.pooler_output
 
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
@@ -652,6 +653,7 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                        pooling_output=pooler_outputs[req_index],
                         stop_reason=request.stop_reason,
                         events=request.take_events()))
             else:

@@ -22,7 +22,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
@@ -187,11 +187,12 @@ class AsyncLLM(EngineClient):
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
-        assert isinstance(params, SamplingParams), \
-            "Pooling is not supported in V1"
+        is_pooling = isinstance(params, PoolingParams)
 
         # Create a new output collector for the request.
-        queue = RequestOutputCollector(output_kind=params.output_kind)
+        queue = RequestOutputCollector(
+            output_kind=params.output_kind \
+                if not is_pooling else RequestOutputKind.FINAL_ONLY)
 
         # Convert Input --> Request.
         request = self.processor.process_inputs(request_id, prompt, params,
@@ -200,7 +201,7 @@ class AsyncLLM(EngineClient):
                                                 prompt_adapter_request,
                                                 priority)
 
-        if params.n == 1:
+        if is_pooling or params.n == 1:
             await self._add_request(request, None, 0, queue)
             return queue
 
@@ -300,6 +301,7 @@ class AsyncLLM(EngineClient):
 
         try:
             while True:
+
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
                 num_outputs = len(outputs.outputs)

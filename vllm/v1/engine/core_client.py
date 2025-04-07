@@ -623,7 +623,8 @@ class AsyncMPClient(MPClient):
     async def get_output_async(self) -> EngineCoreOutputs:
         self._ensure_output_queue_task()
         assert self.outputs_queue is not None
-        return await self.outputs_queue.get()
+        result = await self.outputs_queue.get()
+        return result
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: Any) -> None:
