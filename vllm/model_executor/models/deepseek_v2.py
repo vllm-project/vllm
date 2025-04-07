@@ -1,3 +1,8 @@
+
+# pip install --user --upgrade pytest pytest-xdist
+# PYTHONPATH=/opt/tiger/open_verl torchrun --standalone --nnodes=1 --nproc_per_node=4 $(which pytest) -s test_vllm_spmd.py
+
+
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from
@@ -22,7 +27,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union, Callable
 
 import torch
 from torch import nn
@@ -782,7 +787,11 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = param.weight_loader
+
+                    if hasattr(param, 'weight_loader'):
+                        weight_loader = param.weight_loader
+                    else:
+                        weight_loader = get_fusedmoe_weight_loader(self.model, name)
                     weight_loader(param,
                                   loaded_weight,
                                   name,
@@ -813,6 +822,20 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
 class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
     pass
 
+
+import re
+def get_layer_index(layer_name: str) -> Optional[int]:
+    pattern = r"layers\.(\d+)"
+    match = re.search(pattern, layer_name)
+    if match:
+        return int(match.group(1))
+    return None
+
+def get_fusedmoe_weight_loader(model: DeepseekV2ForCausalLM, 
+                          name: str) -> Optional[Callable]:
+    layer_idx = get_layer_index(name)
+    weight_loader = model.layers[layer_idx].mlp.experts.weight_loader
+    return weight_loader
 
 def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
                                         weight_name: str) -> Optional[int]:
