@@ -257,6 +257,7 @@ def _test_processing_correctness_mistral(
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
     "HuggingFaceM4/Idefics3-8B-Llama3",
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -280,7 +281,6 @@ def _test_processing_correctness_mistral(
     "Skywork/Skywork-R1V-38B",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     "openai/whisper-large-v3",
-    "meta-llama/Llama-4-Scout-17B-16E-Instruct",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
