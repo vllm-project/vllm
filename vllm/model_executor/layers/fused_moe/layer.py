@@ -177,7 +177,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     def __init__(self, moe: MoEConfig):
-        self.all_to_all = get_all_to_all(
+        super().__init__()
+        self._moe = moe
+        self._all_to_all = get_all_to_all(
             max_num_tokens=MOE_DP_CHUNK_SIZE // moe.dp_size,
             num_experts=moe.num_experts,
             experts_per_token=moe.experts_per_token,
