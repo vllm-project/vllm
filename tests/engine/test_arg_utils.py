@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from argparse import ArgumentTypeError
+from argparse import ArgumentError, ArgumentTypeError
 
 import pytest
 
@@ -142,3 +142,39 @@ def test_composite_arg_parser(arg, expected, option):
     else:
         args = parser.parse_args([f"--{option}", arg])
     assert getattr(args, option.replace("-", "_")) == expected
+
+
+def test_human_readable_model_len():
+    # `exit_on_error` disabled to test invalid values below
+    parser = EngineArgs.add_cli_args(
+        FlexibleArgumentParser(exit_on_error=False))
+
+    args = parser.parse_args([])
+    assert args.max_model_len is None
+
+    args = parser.parse_args(["--max-model-len", "1024"])
+    assert args.max_model_len == 1024
+
+    # Lower
+    args = parser.parse_args(["--max-model-len", "1m"])
+    assert args.max_model_len == 1_000_000
+    args = parser.parse_args(["--max-model-len", "10k"])
+    assert args.max_model_len == 10_000
+
+    # Capital
+    args = parser.parse_args(["--max-model-len", "3K"])
+    assert args.max_model_len == 1024 * 3
+    args = parser.parse_args(["--max-model-len", "10M"])
+    assert args.max_model_len == 2**20 * 10
+
+    # Decimal values
+    args = parser.parse_args(["--max-model-len", "10.2k"])
+    assert args.max_model_len == 10200
+    # ..truncated to the nearest int
+    args = parser.parse_args(["--max-model-len", "10.212345k"])
+    assert args.max_model_len == 10212
+
+    # Invalid (do not allow decimals with binary multipliers)
+    for invalid in ["1a", "pwd", "10.24", "1.23M"]:
+        with pytest.raises(ArgumentError):
+            args = parser.parse_args(["--max-model-len", invalid])
