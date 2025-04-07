@@ -12,6 +12,7 @@ from vllm.sequence import SampleLogprobs
 
 from ....conftest import HfRunner, VllmRunner
 from ....utils import RemoteOpenAIServer
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
@@ -106,6 +107,10 @@ def run_test(
     **kwargs,
 ):
     """Inference result should be the same between hf and vllm."""
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
@@ -156,6 +161,10 @@ def run_multi_audio_test(
     num_logprobs: int,
     **kwargs,
 ):
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
     with vllm_runner(model,
                      dtype=dtype,
                      enforce_eager=True,
