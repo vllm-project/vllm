@@ -419,9 +419,9 @@ class KVCacheManager:
 
     def end_schedule_step(self) -> None:
         """A callback hook that is called when a scheduling step ends."""
-        self.step_d2h_swap_map.clear()
-        self.step_h2d_swap_map.clear()
-        self.step_cpu_block_in_use.clear()
+        self.step_d2h_swap_map = {}
+        self.step_h2d_swap_map = {}
+        self.step_cpu_block_in_use = set()
 
     def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
         """Get new blocks from the free block pool.
