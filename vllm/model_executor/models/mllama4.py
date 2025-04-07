@@ -503,7 +503,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
     ) -> Mapping[str, int]:
         vision_config = self.get_hf_config().vision_config
         patch_per_chunk = self.get_patch_per_chunk(vision_config)
-        num_patches = self.get_max_num_tiles()
+        num_patches = self.get_max_num_tiles() + 1
 
         return {"image": patch_per_chunk * num_patches}
 
