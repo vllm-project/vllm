@@ -23,6 +23,7 @@
 # limitations under the License.
 
 import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -37,7 +38,7 @@ class TeleFLMModel(LlamaModel):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        layer_type: type[LlamaDecoderLayer] = LlamaDecoderLayer,
+        layer_type: type[nn.Module] = LlamaDecoderLayer,
     ):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,

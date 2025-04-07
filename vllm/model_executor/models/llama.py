@@ -294,7 +294,7 @@ class LlamaModel(nn.Module):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 layer_type: type[LlamaDecoderLayer] = LlamaDecoderLayer):
+                 layer_type: type[nn.Module] = LlamaDecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -475,7 +475,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 layer_type: type[LlamaDecoderLayer] = LlamaDecoderLayer):
+                 layer_type: type[nn.Module] = LlamaDecoderLayer):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -523,7 +523,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def _init_model(self,
                     vllm_config: VllmConfig,
                     prefix: str = "",
-                    layer_type: type[LlamaDecoderLayer] = LlamaDecoderLayer):
+                    layer_type: type[nn.Module] = LlamaDecoderLayer):
         return LlamaModel(vllm_config=vllm_config,
                           prefix=prefix,
                           layer_type=layer_type)

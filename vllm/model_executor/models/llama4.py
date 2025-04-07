@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .llama import LlamaDecoderLayer, LlamaForCausalLM, LlamaMLP, LlamaModel
+from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index,
                     is_pp_missing_parameter)
 
@@ -247,7 +247,7 @@ class Llama4Attention(nn.Module):
         return output
 
 
-class Llama4DecoderLayer(LlamaDecoderLayer):
+class Llama4DecoderLayer(nn.Module):
 
     def __init__(
         self,
@@ -256,8 +256,9 @@ class Llama4DecoderLayer(LlamaDecoderLayer):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
+        super().__init__()
+
         self.layer_idx = extract_layer_index(prefix)
-        nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
         rope_theta = config.rope_theta
         rope_scaling = config.rope_scaling
@@ -476,10 +477,10 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         gen_config.update(vllm_config.model_config.override_generation_config)
         vllm_config.model_config.hf_config.attn_temperature_tuning \
             = gen_config.get("attn_temperature_tuning", False)
-        LlamaForCausalLM.__init__(self,
-                                  vllm_config=vllm_config,
-                                  prefix=prefix,
-                                  layer_type=Llama4DecoderLayer)
+
+        super().__init__(vllm_config=vllm_config,
+                         prefix=prefix,
+                         layer_type=Llama4DecoderLayer)
 
     def _init_model(self,
                     vllm_config: VllmConfig,

@@ -22,6 +22,7 @@
 from typing import Iterable, Set, Tuple
 
 import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -124,7 +125,7 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
     def _init_model(self,
                     vllm_config: VllmConfig,
                     prefix: str = "",
-                    layer_type: type[LlamaDecoderLayer] = LlamaDecoderLayer):
+                    layer_type: type[nn.Module] = LlamaDecoderLayer):
         return TeleChat2Model(vllm_config=vllm_config, prefix=prefix)
 
     def load_weights(self, weights: Iterable[Tuple[str,
