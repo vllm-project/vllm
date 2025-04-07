@@ -9,12 +9,13 @@ from typing import NamedTuple
 
 import pytest
 from huggingface_hub import hf_hub_download
+from pytest import MarkDecorator
 from transformers import AutoTokenizer
 
 from tests.quantization.utils import is_quant_method_supported
 
 from ....conftest import VllmRunner
-from ....utils import fork_new_process_for_each_test, multi_gpu_test
+from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
@@ -26,6 +27,7 @@ class GGUFTestConfig(NamedTuple):
     original_model: str
     gguf_repo: str
     gguf_filename: str
+    marks: list[MarkDecorator] = []
 
     @property
     def gguf_model(self):
@@ -36,6 +38,7 @@ LLAMA_CONFIG = GGUFTestConfig(
     original_model="meta-llama/Llama-3.2-1B-Instruct",
     gguf_repo="bartowski/Llama-3.2-1B-Instruct-GGUF",
     gguf_filename="Llama-3.2-1B-Instruct-IQ4_XS.gguf",
+    marks=[pytest.mark.quant_model],
 )
 
 QWEN2_CONFIG = GGUFTestConfig(
@@ -112,12 +115,14 @@ def check_model_outputs(
             prompts[:-1], max_tokens, num_logprobs)
 
     # Run unquantized model.
+    # Should run with tp=1, otherwise the test will stuck at
+    # nccl initialization.
     with vllm_runner(
             model_name=model.original_model,
             enforce_eager=True,  # faster tests
             dtype=dtype,
             max_model_len=MAX_MODEL_LEN,
-            tensor_parallel_size=tp_size) as original_model:
+            tensor_parallel_size=1) as original_model:
         original_outputs = original_model.generate_greedy_logprobs(
             prompts[:-1], max_tokens, num_logprobs)
 
@@ -131,7 +136,10 @@ def check_model_outputs(
 
 @pytest.mark.skipif(not is_quant_method_supported("gguf"),
                     reason="gguf is not supported on this GPU type.")
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model", [
+    pytest.param(test_config, marks=test_config.marks)
+    for test_config in MODELS
+])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -157,7 +165,6 @@ def test_models(
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tp_size", [2])
 @multi_gpu_test(num_gpus=2)
-@fork_new_process_for_each_test
 def test_distributed(
     vllm_runner: type[VllmRunner],
     example_prompts: list[str],
