@@ -29,7 +29,7 @@ class NixlMetadata(
     num_blocks: int
 
 
-class DynamoNixlConnector:
+class NixlConnector:
     def __init__(self, vllm_config: VllmConfig, engine_id: str, rank: int):
         self.vllm_config = vllm_config
         if NixlWrapper is None:

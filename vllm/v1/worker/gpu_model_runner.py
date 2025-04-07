@@ -16,6 +16,7 @@ from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import (get_pp_group, get_tp_group,
                                              graph_capture)
+from vllm.distributed.device_communicators.nixl import NixlConnector
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
