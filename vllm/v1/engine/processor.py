@@ -137,11 +137,6 @@ class Processor:
         else:
             params.guided_decoding.backend = engine_level_backend
 
-        from vllm.platforms import current_platform
-        if not current_platform.supports_structured_output():
-            raise ValueError("Structured output is not supported on "
-                             f"{current_platform.device_name}.")
-
         # Request content validation
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback

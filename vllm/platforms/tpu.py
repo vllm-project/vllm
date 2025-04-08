@@ -142,11 +142,6 @@ class TpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_structured_output(cls) -> bool:
-        # Structured output is not supported on TPU.
-        return False
-
-    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,
