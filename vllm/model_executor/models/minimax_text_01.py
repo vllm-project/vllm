@@ -3,7 +3,7 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
 
 import torch
 import torch.distributed
@@ -1057,8 +1057,9 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         })
 
     def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> None:
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
 
         def which_layer(name: str) -> int:
             if "layers" in name:
@@ -1122,6 +1123,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                               weight_name,
                               expert_id=expert_id,
                               shard_id=shard_id)
+                loaded_params.add(name)
                 break
             else:
                 if is_pp_missing_parameter(name, self):
@@ -1131,6 +1133,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                         default_weight_loader)
                 weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight)
+                loaded_params.add(name)
             return
 
         def is_shared_mlp_weight(name: str) -> bool:
@@ -1168,6 +1171,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 else:
                     raise AssertionError(
                         "MLP weight not in [gate_up_proj, down_proj]")
+            loaded_params.add(name)
             return
 
         def is_mha_weight(name: str) -> bool:
@@ -1184,6 +1188,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 MiniMaxText01LinearAttention.weight_direct_load)
             weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
             return
 
         def load_flash_attn_weight(name: str, loaded_weight: torch.Tensor,
@@ -1208,6 +1213,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                         default_weight_loader)
                 weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 break
             else:
                 if is_pp_missing_parameter(name, self):
@@ -1218,6 +1224,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                         default_weight_loader)
                 weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight)
+                loaded_params.add(name)
             return
 
         def is_layer_norm_weight(name: str) -> bool:
@@ -1233,6 +1240,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                     default_weight_loader)
             weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
             return
 
         def load_basic_weight(name: str, loaded_weight: torch.Tensor,
@@ -1244,6 +1252,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                     default_weight_loader)
             weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
             return
 
         for name, loaded_weight in weights:
@@ -1272,4 +1281,4 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 continue
 
             load_basic_weight(name, loaded_weight, self)
-        return
+        return loaded_params
