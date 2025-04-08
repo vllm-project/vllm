@@ -18,7 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
@@ -84,6 +84,12 @@ class TPUWorker:
 
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
+        # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
+        # ring, the xla tpu compiler flag
+        # `xla_tpu_force_1d_allreduce_at_chunk_count` is a temporary solution to
+        # fix this. It will be removed after the bug in XLA compiler is fixed.
+        os.environ["LIBTPU_INIT_ARGS"] = (
+            "--xla_tpu_force_1d_allreduce_at_chunk_count=1")
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
@@ -105,8 +111,8 @@ class TPUWorker:
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
-        # NOTE(woosuk): Usually, we compile 10-15 graphs for prefill and
-        # 30-40 graphs for decode. 128 is an arbitrary safe number.
+        # TODO (NickLucche) On gsm we compile 80+ graphs.
+        # Re-evaluate limit, with MM we may get close to this limit.
         torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): Set per-rank cache path since different ranks
@@ -131,17 +137,18 @@ class TPUWorker:
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         for layer_name, layer_spec in kv_cache_spec.items():
-            if isinstance(layer_spec, FullAttentionSpec):
+            if isinstance(layer_spec, AttentionSpec):
                 dtype = layer_spec.dtype
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                tpu_k_cache = torch.tensor([], dtype=dtype, device=self.device)
-                tpu_v_cache = torch.tensor([], dtype=dtype, device=self.device)
-
-                kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                tpu_kv_cache = torch.tensor([],
+                                            dtype=dtype,
+                                            device=self.device)
+                kv_caches[layer_name] = tpu_kv_cache
             else:
-                raise NotImplementedError
+                raise NotImplementedError(
+                    f"Unsupported KV cache spec '{type(layer_spec)}'")
 
         runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(
@@ -150,18 +157,30 @@ class TPUWorker:
             runner_kv_caches)
 
         self.model_runner._dummy_run(
-            runner_kv_caches,
-            num_tokens=self.scheduler_config.max_num_batched_tokens,
-        )
+            self.scheduler_config.max_num_batched_tokens)
 
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
+
+        # During the profiling run, the model runs without KV cache. After
+        # the profiling run, the model always runs with KV cache. Here we clear
+        # the dynamo cache and cached bytecode to ensure the model always has
+        # one compiled bytecode. Having one FX graph/cached bytecode per
+        # compiled model is required for `support_torch_compile` decorator to
+        # skip dynamo guard.
+        self.model_runner.reset_dynamo_cache()
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
-        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
+        current_mem = m["bytes_used"]
+        # Ideally we would use profiled = m["peak_bytes_used"] to
+        # get weights + activations. But there is memory used during
+        # compilation / weight loading that impacts the peak and
+        # there is no way to reset peak memory in XLA, So we
+        # use the heuristic of 2% of weights.
+        profiled = current_mem * 1.02
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *

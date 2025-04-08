@@ -19,7 +19,7 @@ pull_request_rules:
       - files~=\.buildkite/
       - files~=^cmake/
       - files=CMakeLists.txt
-      - files~=^Dockerfile
+      - files~=^docker/Dockerfile
       - files~=^requirements.*\.txt
       - files=setup.py
   actions:
