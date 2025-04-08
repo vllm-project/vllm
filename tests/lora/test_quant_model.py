@@ -185,7 +185,6 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
         enable_lora=True,
         max_num_seqs=16,
         max_loras=4,
-        tensor_parallel_size=1,
         gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
         trust_remote_code=True,
