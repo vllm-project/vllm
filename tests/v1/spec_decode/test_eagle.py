@@ -50,7 +50,8 @@ def test_compute_probs_and_sample_seed_determinism():
         for i in range(batch_size)
     }
     metadata1 = create_minimal_metadata(generators_dict=generators1)
-    tokens1, _ = compute_probs_and_sample_next_token(logits.clone(), metadata1)
+    tokens1, probs1 = compute_probs_and_sample_next_token(
+        logits.clone(), metadata1)
 
     # --- Run 2: Seed 42 (Again) ---
     generators2 = {
@@ -58,7 +59,8 @@ def test_compute_probs_and_sample_seed_determinism():
         for i in range(batch_size)
     }
     metadata2 = create_minimal_metadata(generators_dict=generators2)
-    tokens2, _ = compute_probs_and_sample_next_token(logits.clone(), metadata2)
+    tokens2, probs2 = compute_probs_and_sample_next_token(
+        logits.clone(), metadata2)
 
     # --- Run 3: Seed 123 (Different) ---
     seed3 = 123
@@ -67,10 +69,13 @@ def test_compute_probs_and_sample_seed_determinism():
         for i in range(batch_size)
     }
     metadata3 = create_minimal_metadata(generators_dict=generators3)
-    tokens3, _ = compute_probs_and_sample_next_token(logits.clone(), metadata3)
+    tokens3, probs3 = compute_probs_and_sample_next_token(
+        logits.clone(), metadata3)
 
     # 1. Same seed should yield same results
     assert torch.equal(tokens1, tokens2)
+    assert torch.equal(probs1, probs2)
 
     # 2. Different seeds should yield different results (highly likely)
     assert not torch.equal(tokens1, tokens3)
+    assert not torch.equal(probs1, probs3)
