@@ -159,8 +159,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
                 filename = self.generate_filename_debug(
                     layer_name, request.token_ids)
-                kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda(
-                )  # TODO: may need to handle the device here
+                kv_cache = safetensors.torch.load_file(
+                    filename)["kv_cache"].cuda()
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
                                      request.slot_mapping)
 
