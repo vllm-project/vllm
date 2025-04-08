@@ -162,9 +162,9 @@ class ChameleonMultiModalProcessor(
             PromptReplacement(
                 modality="image",
                 target=[image_token_id],
-                replacement=PromptUpdateDetails(
-                    full=([image_start_id] + image_tokens + [image_end_id]),
-                    features=image_tokens,
+                replacement=PromptUpdateDetails.select_token_id(
+                    [image_start_id] + image_tokens + [image_end_id],
+                    embed_token_id=image_token_id,
                 ),
             )
         ]
