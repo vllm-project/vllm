@@ -70,9 +70,7 @@ class TPUSupportedSamplingMetadata:
 
         `InputBatch._make_sampling_metadata` causes recompilation on XLA as it 
         slices dynamic shapes on device tensors. This impl moves the dynamic 
-        ops to CPU and produces tensors of fixed `padded_num_reqs` size. It 
-        also reuses the on-device persistent tensors managed in `input_batch`
-        to reduce waste.
+        ops to CPU and produces tensors of fixed `padded_num_reqs` size.
 
         Args:
             input_batch: The input batch containing sampling parameters.
@@ -91,7 +89,6 @@ class TPUSupportedSamplingMetadata:
         num_reqs = input_batch.num_reqs
 
         def fill_slice(cpu_tensor: torch.Tensor, fill_val) -> torch.Tensor:
-            # Copy slice from CPU to corresponding TPU pre-allocated tensor.
             # Pad value is the default one.
             cpu_tensor[num_reqs:padded_num_reqs] = fill_val
 

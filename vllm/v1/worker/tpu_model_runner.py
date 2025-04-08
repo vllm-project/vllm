@@ -996,8 +996,6 @@ class TPUModelRunner:
         separately from `forward` for lighter compilation overhead.
         """
         logits = self.model.compute_logits(sample_hidden_states, None)
-        # Optimized greedy sampling branch, tracing both paths in a single pass
-        # NOTE all_greedy is a scalar, this is just an optimized if/else.
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
         else:
