@@ -197,9 +197,9 @@ async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
 
     decoded_responses_base64_data = []
     for data in responses_base64.data:
-        decoded_embedding = np.frombuffer(base64.b64decode(data.embedding),
-                                          dtype=np.float32).tolist()
-        decoded_responses_base64_data.append(decoded_embedding)
+        decoded_responses_base64_data.append(
+            np.frombuffer(base64.b64decode(data.embedding),
+                          dtype="float32").tolist())
 
     assert len(responses_float.data) == len(decoded_responses_base64_data)
     assert np.allclose(responses_float.data[0].embedding,
