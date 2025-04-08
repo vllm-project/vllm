@@ -2704,6 +2704,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
 
                 if use_delayed_sampling:
                     fake_output = self._delayed_sampler_outputs(model_input)
+                elif model_input.async_callback is not None:
+                    model_input.async_callback()
 
                 with self.profiler.record_event(
                         'internal', ('sample_'
@@ -2725,7 +2727,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         self.cached_step_outputs.append(output)
                         self.cached_step_inputs.append(model_input)
                 htorch.core.mark_step()
-                if model_input.async_callback is not None:
+                if use_delayed_sampling \
+                   and model_input.async_callback is not None:
                     model_input.async_callback()
                 if i < num_steps - 1:
                     if i == 0:
