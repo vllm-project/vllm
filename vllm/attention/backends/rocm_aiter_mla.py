@@ -507,9 +507,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             return_lse=has_context,
         )
 
-        if not has_context:
-            output = output[0]
-
         if has_context:
             suffix_output, suffix_lse = output
             context_output, context_lse = self._compute_prefill_context( \
