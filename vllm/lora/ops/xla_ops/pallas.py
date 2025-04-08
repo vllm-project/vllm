@@ -145,6 +145,8 @@ the Shrink operation, we can skip both shuffles.
 
 """
 
+LORA_RANK_BLOCK_SIZE = 256
+
 
 def _bgmv_shrink_kernel(bT: int, bL: int, n_lora_lanes: int, lane_size: int,
                         max_num_loras: int, idx_ref, inp_ref, lora_ref,
@@ -257,7 +259,7 @@ def bgmv_shrink_xla(inputs: torch.Tensor, loras: torch.Tensor,
     N, L, D = loras.shape
 
     TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
-    LORA_BLOCK = 256
+    LORA_BLOCK = LORA_RANK_BLOCK_SIZE
     DIM_BLOCK = largest_divisor(D, [256, 512, 1024])
 
     # See if we can fit multiple LoRAs in a register. This would activate LoRA
@@ -314,7 +316,7 @@ def bgmv_shrink_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
 
     N, L, _ = loras.shape
 
-    LORA_BLOCK = 256
+    LORA_BLOCK = LORA_RANK_BLOCK_SIZE
     N_LORA_LANES = math.ceil(LORA_BLOCK / L)
     if N_LORA_LANES > 1 and N > 1:
         L = LORA_BLOCK
@@ -422,7 +424,7 @@ def bgmv_expand_xla(inputs: torch.Tensor, loras: torch.Tensor,
 
     TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
     LORA_BLOCK = largest_divisor(L, [256, 512, 1024])
-    DIM_BLOCK = 256
+    DIM_BLOCK = LORA_RANK_BLOCK_SIZE
 
     # See if we can fit multiple LoRAs in a register. This would activate LoRA
     # laning

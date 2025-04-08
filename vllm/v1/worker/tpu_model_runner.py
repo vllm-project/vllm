@@ -18,6 +18,7 @@ from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.ops.xla_ops import LORA_RANK_BLOCK_SIZE
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -1084,15 +1085,13 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
 
 
 def _get_padded_lora_rank(max_lora_rank: int, max_num_loras: int) -> int:
-    LORA_BLOCK_SIZE = 256  # Same as in the pallas kernel
-
     max_num_loras += 1
 
     # If we have enough LoRAs to use laning without padding
-    if max_lora_rank * max_num_loras >= LORA_BLOCK_SIZE:
+    if max_lora_rank * max_num_loras >= LORA_RANK_BLOCK_SIZE:
         return max_lora_rank
 
-    return 1 << (LORA_BLOCK_SIZE // max_num_loras).bit_length()
+    return 1 << (LORA_RANK_BLOCK_SIZE // max_num_loras).bit_length()
 
 
 def _create_dummy_scheduled_tokens(total_tokens: int,

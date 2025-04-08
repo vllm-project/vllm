@@ -7,7 +7,8 @@ import torch
 import torch.nn.functional as F
 import torch_xla.core.xla_model as xm
 
-from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+from vllm.lora.ops.xla_ops import (LORA_RANK_BLOCK_SIZE, bgmv_expand,
+                                   bgmv_expand_slice, bgmv_shrink)
 from vllm.lora.punica_wrapper.utils import convert_mapping
 
 if TYPE_CHECKING:
@@ -98,14 +99,14 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
         """
+        torch.ops.xla.dynamo_set_buffer_donor_(y, True)
         x = x.view(-1, x.shape[-1])
 
-        new_y = []
         for slice_idx in range(len(lora_a_stacked)):
             lora_s = lora_a_stacked[slice_idx]
             y_s = self.shrink(x, lora_s, scale)
-            new_y.append(y_s)
-        return tuple(new_y)
+            y[slice_idx, :, :] = y_s
+        return y
 
     def add_expand(self,
                    y: torch.Tensor,
@@ -215,13 +216,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                                  output_slices, lora_bias_stacked)
 
         if buffer is None:
-            r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default, consistent with the
-            # triton op
+            r = max(lora_b_stacked[0].size(-1), LORA_RANK_BLOCK_SIZE)
             T = x.size(0)
             buffer = torch.zeros(
                 (len(output_slices), T, r),
-                dtype=torch.float32,
+                dtype=x.dtype,
                 device=x.device,
             )
         buffer = self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
