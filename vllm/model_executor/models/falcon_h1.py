@@ -187,7 +187,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = config.hidden_size // self.total_num_heads if getattr(config, "head_dim", None) is None else config.head_dim // tp_size
+        self.head_dim = config.hidden_size // self.total_num_heads if getattr(config, "head_dim", None) is None else config.head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim ** -0.5
