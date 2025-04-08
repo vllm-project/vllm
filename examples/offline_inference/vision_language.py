@@ -556,7 +556,7 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     # The configuration below has been confirmed to launch on a single L40 GPU.
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
@@ -1089,14 +1089,18 @@ def main(args):
         start_time = time.time()
         outputs = llm.generate(inputs, sampling_params=sampling_params)
         elapsed_time = time.time() - start_time
+        print("-" * 50)
         print("-- generate time = {}".format(elapsed_time))
+        print("-" * 50)
 
     else:
         outputs = llm.generate(inputs, sampling_params=sampling_params)
 
+    print("-" * 50)
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+        print("-" * 50)
 
 
 if __name__ == "__main__":
