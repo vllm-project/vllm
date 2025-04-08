@@ -675,11 +675,11 @@ class TPUModelRunner:
             inputs_embeds = self.model.get_input_embeddings(self.input_ids)
 
             if mm_embeds:
-                is_embed: torch.Tensor = ...  # TODO
+                is_mm_embeds: torch.Tensor = ...  # TODO
 
                 _merge_multimodal_embeddings(
                     inputs_embeds,
-                    is_embed,
+                    is_mm_embeds,
                     mm_embeds,
                 )
 
