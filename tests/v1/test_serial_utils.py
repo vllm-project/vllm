@@ -41,17 +41,18 @@ def test_encode_decode():
 
     assert_equal(decoded, obj)
 
+    # Test encode_into case
+
     preallocated = bytearray()
 
-    # Test encode_into case
-    encoded = encoder.encode_into(obj, preallocated)
+    encoded2 = encoder.encode_into(obj, preallocated)
 
-    assert len(encoded) == 5
-    assert encoded[0] is preallocated
+    assert len(encoded2) == 5
+    assert encoded2[0] is preallocated
 
-    decoded: MyType = decoder.decode(encoded)
+    decoded2: MyType = decoder.decode(encoded2)
 
-    assert_equal(decoded, obj)
+    assert_equal(decoded2, obj)
 
 
 def assert_equal(obj1: MyType, obj2: MyType):
