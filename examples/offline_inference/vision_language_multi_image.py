@@ -644,9 +644,11 @@ def run_generate(model, question: str, image_urls: list[str],
         },
         sampling_params=sampling_params)
 
+    print("-" * 50)
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+        print("-" * 50)
 
 
 def run_chat(model: str, question: str, image_urls: list[str],
@@ -687,9 +689,11 @@ def run_chat(model: str, question: str, image_urls: list[str],
         chat_template=req_data.chat_template,
     )
 
+    print("-" * 50)
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+        print("-" * 50)
 
 
 def main(args: Namespace):
