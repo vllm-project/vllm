@@ -24,7 +24,7 @@ vLLM also supports model implementations that are available in Transformers. Thi
 
 To check if the modeling backend is Transformers, you can simply do this:
 
-```python 
+```python
 from vllm import LLM
 llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
@@ -55,7 +55,7 @@ If your model is neither supported natively by vLLM or Transformers, you can sti
 Simply set `trust_remote_code=True` and vLLM will run any model on the Model Hub that is compatible with Transformers.
 Provided that the model writer implements their model in a compatible way, this means that you can run new models before they are officially supported in Transformers or vLLM!
 
-```python 
+```python
 from vllm import LLM
 llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of your model
 llm.apply_model(lambda model: print(model.__class__))
@@ -233,9 +233,9 @@ See [this page](#generative-models) for more information on how to use generativ
   * `facebook/bart-base`, `facebook/bart-large-cnn`, etc.
   *
   *
-- * `ChatGLMModel`
+- * `ChatGLMModel`, `ChatGLMForConditionalGeneration`
   * ChatGLM
-  * `THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.
+  * `THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, `ShieldLM-6B-chatglm3`, etc.
   * ✅︎
   * ✅︎
 - * `CohereForCausalLM`, `Cohere2ForCausalLM`
@@ -477,6 +477,16 @@ See [this page](#generative-models) for more information on how to use generativ
   * Qwen2MoE
   * `Qwen/Qwen1.5-MoE-A2.7B`, `Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc.
   *
+  * ✅︎
+- * `Qwen3ForCausalLM`
+  * Qwen3
+  * `Qwen/Qwen3-8B`, etc.
+  * ✅︎
+  * ✅︎
+- * `Qwen3MoeForCausalLM`
+  * Qwen3MoE
+  * `Qwen/Qwen3-MoE-15B-A2B`, etc.
+  * ✅︎
   * ✅︎
 - * `StableLmForCausalLM`
   * StableLM
@@ -837,6 +847,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
   * `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
+  *
+  * ✅︎
+  * ✅︎
+- * `Llama4ForConditionalGeneration`
+  * Llama-4-17B-Omni-Instruct
+  * T + I<sup>+</sup>
+  * `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc.
   *
   * ✅︎
   * ✅︎
