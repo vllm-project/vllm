@@ -839,8 +839,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
-            share_fusion=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS,
+            num_share_fusion_replicas=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS,
             routed_scaling_factor=routed_scaling_factor,)
+        
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501

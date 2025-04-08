@@ -590,7 +590,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=torch.uint32 if self.moe.use_pplx_kernels else None,
-            share_fusion=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS,
+            num_share_fusion_replicas=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS,
             routed_scaling_factor=routed_scaling_factor,
         )
         if self.rocm_aiter_moe_enabled:
@@ -1274,7 +1274,7 @@ class FusedMoE(torch.nn.Module):
                        scoring_func: str = "softmax",
                        e_score_correction_bias: Optional[torch.Tensor] = None,
                        indices_type: Optional[torch.dtype] = None,
-                       share_fusion: int = 0,
+                       num_share_fusion_replicas: int = 0,
                        routed_scaling_factor: float = None):
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
         # DeekSeekv2 uses grouped_top_k
@@ -1290,7 +1290,7 @@ class FusedMoE(torch.nn.Module):
                 topk_group=topk_group,
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
-                share_fusion=share_fusion,
+                num_share_fusion_replicas=num_share_fusion_replicas,
                 routed_scaling_factor=routed_scaling_factor)
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
