@@ -114,7 +114,7 @@ class LlamaModel(nn.Module):
         return loaded_params
 
 
-class LlamaForCausalLMEagle(LlamaForCausalLM):
+class EagleLlamaForCausalLM(LlamaForCausalLM):
 
     def __init__(self, *, model_config: ModelConfig, start_layer_id: int = 0):
         nn.Module.__init__(self)

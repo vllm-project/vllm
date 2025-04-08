@@ -45,7 +45,7 @@ class EAGLEConfig(PretrainedConfig):
         if not envs.VLLM_USE_V1:
             kwargs["architectures"] = ["EAGLEModel"]
         else:
-            kwargs["architectures"] = ["LlamaForCausalLMEagle"]
+            kwargs["architectures"] = ["EagleLlamaForCausalLM"]
 
         super().__init__(**kwargs)
 
