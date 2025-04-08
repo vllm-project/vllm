@@ -216,20 +216,47 @@ class Llama4Attention(nn.Module):
 
         return attn_scale.unsqueeze(-1)
 
+    def _apply_rotary_emb_and_qk_norm(
+        self,
+        positions: torch.Tensor,
+        qk: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        q, k = qk.split([self.q_size, self.kv_size], dim=-1)
+        # If rotary embedding is not used or applied in place, 
+        # then we can fuse the norm on q and k in one op.
+        single_qk_norm = True
+        
+        if self.rotary_emb is not None:    
+            new_q, new_k = self.rotary_emb(positions, q, k)
+            if new_q is not q:
+                single_qk_norm = False
+            if new_k is not k:
+                single_qk_norm = False
+            q = new_q
+            k = new_k
+
+        if self.q_norm is not None:
+            assert self.k_norm is not None
+            if single_qk_norm:
+                qk = qk.reshape(-1, self.head_dim).contiguous()
+                qk = self.q_norm(qk.float()).to(qk.dtype)
+                qk = qk.reshape(-1, self.q_size + self.kv_size)
+                q, k = qk.split([self.q_size, self.kv_size], dim=-1)
+            else:
+                q = self.q_norm(q.float()).to(q.dtype)
+                k = self.k_norm(k.float()).to(k.dtype)
+
+        return q, k
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        qk, v = qkv.split([self.q_size + self.kv_size, self.kv_size], dim=-1)
 
-        if self.rotary_emb is not None:
-            q, k = self.rotary_emb(positions, q, k)
-        if self.q_norm is not None:
-            q = self.q_norm(q.float()).to(q.dtype)
-        if self.k_norm is not None:
-            k = self.k_norm(k.float()).to(k.dtype)
+        q, k = self._apply_rotary_emb_and_qk_norm(positions, qk)
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
         # to NoPE layers, where the inference-time temperature tuning function
