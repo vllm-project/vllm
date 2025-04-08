@@ -444,6 +444,7 @@ pytest==8.3.3
     #   pytest-mock
     #   pytest-rerunfailures
     #   pytest-shard
+    #   pytest-timeout
 pytest-asyncio==0.24.0
     # via -r requirements/test.in
 pytest-forked==1.6.0
@@ -453,6 +454,8 @@ pytest-mock==3.14.0
 pytest-rerunfailures==14.0
     # via -r requirements/test.in
 pytest-shard==0.1.2
+    # via -r requirements/test.in
+pytest-timeout==2.3.1
     # via -r requirements/test.in
 python-dateutil==2.9.0.post0
     # via
@@ -645,7 +648,7 @@ tqdm==4.66.6
     #   transformers
 tqdm-multiprocess==0.0.11
     # via lm-eval
-transformers==4.50.3
+transformers==4.51.0
     # via
     #   -r requirements/test.in
     #   genai-perf

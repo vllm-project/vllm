@@ -505,8 +505,8 @@ class Scheduler(SchedulerInterface):
         assert mm_positions is not None
         assert len(mm_positions) > 0
         for i, pos_info in enumerate(mm_positions):
-            start_pos = pos_info["offset"]
-            num_encoder_tokens = pos_info["length"]
+            start_pos = pos_info.offset
+            num_encoder_tokens = pos_info.length
 
             # The encoder output is needed if the two ranges overlap:
             # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
@@ -564,11 +564,11 @@ class Scheduler(SchedulerInterface):
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
-        spec_decoding_stats = SpecDecodingStats() if self.log_stats else None
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
+        spec_decoding_stats: Optional[SpecDecodingStats] = None
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -596,11 +596,10 @@ class Scheduler(SchedulerInterface):
                 num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
                                        len(generated_token_ids))
                 request.num_computed_tokens -= num_tokens_rejected
-
-                if spec_decoding_stats is not None:
-                    spec_decoding_stats.observe(
-                        num_draft_tokens=len(scheduled_spec_token_ids),
-                        num_accepted_tokens=len(generated_token_ids) - 1)
+                spec_decoding_stats = self.make_spec_decoding_stats(
+                    spec_decoding_stats,
+                    num_draft_tokens=len(scheduled_spec_token_ids),
+                    num_accepted_tokens=len(generated_token_ids) - 1)
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
@@ -608,8 +607,8 @@ class Scheduler(SchedulerInterface):
             if cached_encoder_input_ids:
                 for input_id in list(cached_encoder_input_ids):
                     mm_positions = request.mm_positions[input_id]
-                    start_pos = mm_positions["offset"]
-                    num_tokens = mm_positions["length"]
+                    start_pos = mm_positions.offset
+                    num_tokens = mm_positions.length
                     if start_pos + num_tokens <= request.num_computed_tokens:
                         # The encoder output is already processed and stored
                         # in the decoder's KV cache.
@@ -755,3 +754,17 @@ class Scheduler(SchedulerInterface):
             prefix_cache_stats=self.kv_cache_manager.make_prefix_cache_stats(),
             spec_decoding_stats=spec_decoding_stats,
         )
+
+    def make_spec_decoding_stats(
+        self,
+        spec_decoding_stats: Optional[SpecDecodingStats],
+        num_draft_tokens: int,
+        num_accepted_tokens: int,
+    ) -> Optional[SpecDecodingStats]:
+        if not self.log_stats:
+            return None
+        if spec_decoding_stats is None:
+            spec_decoding_stats = SpecDecodingStats()
+        spec_decoding_stats.observe(num_draft_tokens=num_draft_tokens,
+                                    num_accepted_tokens=num_accepted_tokens)
+        return spec_decoding_stats
