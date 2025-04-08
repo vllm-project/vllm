@@ -14,8 +14,8 @@ from ...utils import build_model_context
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img"),
     [
-        ({"size": {"longest_edge": 384}}, 169),
-        ({"size": {"longest_edge": 728}}, 169 * (2**2 + 1)),
+        ({"max_image_size": {"longest_edge": 384}}, 169),
+        ({"max_image_size": {"longest_edge": 728}}, 169 * (2**2 + 1)),
     ])
 # yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
