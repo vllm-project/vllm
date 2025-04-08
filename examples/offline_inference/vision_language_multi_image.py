@@ -641,6 +641,7 @@ model_example_map = {
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
     "qwen2_5_vl": load_qwen2_5_vl,
+    "smolvlm": load_smolvlm,
 }
 
 
