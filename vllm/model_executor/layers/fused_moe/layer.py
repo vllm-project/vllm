@@ -211,7 +211,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            share_fusion=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS,
+            num_share_fusion_replicas=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS,
             routed_scaling_factor=routed_scaling_factor,
         )
 
@@ -805,7 +805,7 @@ class FusedMoE(torch.nn.Module):
                        custom_routing_function: Optional[Callable] = None,
                        scoring_func: str = "softmax",
                        e_score_correction_bias: Optional[torch.Tensor] = None,
-                       share_fusion: int = 0,
+                       num_share_fusion_replicas: int = 0,
                        routed_scaling_factor: Optional[float] = None):
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_topk, grouped_topk)
@@ -823,7 +823,7 @@ class FusedMoE(torch.nn.Module):
                 topk_group=topk_group,
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
-                share_fusion=share_fusion,
+                num_share_fusion_replicas=num_share_fusion_replicas,
                 routed_scaling_factor=routed_scaling_factor)
         elif custom_routing_function is None:
             topk_weights, topk_ids = fused_topk(hidden_states=hidden_states,
