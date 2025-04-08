@@ -186,6 +186,9 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     if topk > E:
         pytest.skip(f"Skipping test; topk={topk} > E={E}")
     if E == 258:
+        # This block is to test out the following kernel:
+        # sgl_moe_align_block_size_fuse_share_kernel,
+        # defined at csrc/moe/moe_align_sum_kernels.cu
         os.environ['VLLM_SHARED_EXPERT_FUSION_REPLICAS'] = "2"
     torch.manual_seed(seed)
     factor_for_scale = 1e-2

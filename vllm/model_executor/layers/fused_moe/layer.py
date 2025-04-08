@@ -536,7 +536,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-        routed_scaling_factor: float = 2.5,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         return self.forward(
             x=x,
@@ -575,7 +575,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-        routed_scaling_factor: float = 2.5,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
 
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -589,8 +589,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            indices_type=torch.uint32 if self.moe.use_pplx_kernels else None)
-
+            indices_type=torch.uint32 if self.moe.use_pplx_kernels else None,
+            share_fusion=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS,
+            routed_scaling_factor=routed_scaling_factor,
+        )
         if self.rocm_aiter_moe_enabled:
             assert expert_map is None
             return self.rocm_aiter_fused_experts(
@@ -812,7 +814,7 @@ class FusedMoE(torch.nn.Module):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-        routed_scaling_factor: float = 2.5,
+        routed_scaling_factor: Optional[float] = None,
     ):
         super().__init__()
 
@@ -1273,7 +1275,7 @@ class FusedMoE(torch.nn.Module):
                        e_score_correction_bias: Optional[torch.Tensor] = None,
                        indices_type: Optional[torch.dtype] = None,
                        share_fusion: int = 0,
-                       routed_scaling_factor: float = 2.5):
+                       routed_scaling_factor: float = None):
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
         # DeekSeekv2 uses grouped_top_k
         if use_grouped_topk:

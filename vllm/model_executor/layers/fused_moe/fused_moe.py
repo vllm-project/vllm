@@ -905,16 +905,16 @@ def fused_topk(
 # This is used by the Deepseek-V2 and Deepseek-V3 model
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def grouped_topk(
-        hidden_states: torch.Tensor,
-        gating_output: torch.Tensor,
-        topk: int,
-        renormalize: bool,
-        num_expert_group: int = 0,
-        topk_group: int = 0,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        share_fusion: int = 0,
-        routed_scaling_factor: float = 2.5
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int = 0,
+    topk_group: int = 0,
+    scoring_func: str = "softmax",
+    e_score_correction_bias: Optional[torch.Tensor] = None,
+    share_fusion: int = 0,
+    routed_scaling_factor: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
@@ -959,6 +959,8 @@ def grouped_topk(
                                             sorted=False)
 
     if share_fusion > 0:
+        assert routed_scaling_factor is not None, \
+        "With share_fusion!=0, routed_scaling_factor need to be provided"
         topk_ids[:, -1] = torch.randint(low=num_experts,
                                         high=num_experts + share_fusion,
                                         size=(topk_ids.size(0), ),
