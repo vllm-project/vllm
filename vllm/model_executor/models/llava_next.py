@@ -294,30 +294,17 @@ class LlavaNextMultiModalProcessor(
                                         info=LlavaNextProcessingInfo,
                                         dummy_inputs=LlavaDummyInputsBuilder)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
+                                                  if not isinstance(image_sizes, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of image sizes. "
+                                 f"Got type: {type(image_sizes)}")
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
-
-        vision_feature_layer = config.vision_feature_layer
-        # Determine the layer up to which we will initialize the vision tower
-        if isinstance(vision_feature_layer, int):
-            vision_hidden_size = config.vision_config.hidden_size
-            self.feature_sample_layers = None
-        # Used for multimodal granite models to control encoder outputs
-        elif isinstance(vision_feature_layer, (list, tuple)):
-            vision_hidden_size = config.vision_config.hidden_size * len(
-                vision_feature_layer)
-            self.feature_sample_layers = vision_feature_layer
-        else:
-            raise TypeError(
-                f"vision_layer_feature type: {type(vision_feature_layer)}"
-                " is not supported")
-
-        self.config = config
+            return LlavaNextImagePixelInputs(
+                type="pixel_values",
+                pixel_values=self._validate_pixel_values(
+                    flatten_bn(pixel_values)),
+                image_sizes=self._validate_image_sizes(
+                    flatten_bn(image_sizes, concat=True)),
+ = config
         self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.

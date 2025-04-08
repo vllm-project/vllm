@@ -265,8 +265,6 @@ class MiniMaxVL01Processor(ProcessorMixin):
             **kwargs,
         )
 
-        images = None
-
         if images is not None:
             image_inputs = self.image_processor(images, **output_kwargs["images_kwargs"])
         else:
