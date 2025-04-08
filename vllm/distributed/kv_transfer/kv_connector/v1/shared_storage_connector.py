@@ -188,7 +188,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
             **kwargs: additional arguments for the save operation.
         """
 
-        def extract_kv_cache_from_layer(
+        def extract_kv_from_layer(
             layer: torch.Tensor,
             slot_mapping: torch.Tensor,
         ) -> torch.Tensor:
@@ -206,8 +206,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
             if request.is_store:
                 filename = self.generate_filename_debug(
                     layer_name, request.token_ids)
-                kv_cache = extract_kv_cache_from_layer(kv_layer,
-                                                       request.slot_mapping)
+                kv_cache = extract_kv_from_layer(kv_layer,
+                                                 request.slot_mapping)
                 tensors = {"kv_cache": kv_cache.cpu().detach()}
                 safetensors.torch.save_file(tensors, filename)
 
