@@ -447,18 +447,6 @@ def _attn_fwd_inner(
     return acc, l_i, m_i
 
 
-def is_cdna():
-    return current_platform.is_rocm(
-    ) and triton.runtime.driver.active.get_current_target().arch in (
-        'gfx940', 'gfx941', 'gfx942', 'gfx90a', 'gfx908')
-
-
-def is_rdna():
-    return current_platform.is_rocm(
-    ) and triton.runtime.driver.active.get_current_target().arch in (
-        "gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
-
-
 def get_cdna_autotune_configs():
     return [
         triton.Config(
@@ -632,9 +620,9 @@ def get_general_autotune_configs():
 
 
 def get_autotune_configs():
-    if is_rdna():
+    if current_platform.is_rocm_rdna():
         return get_rdna_autotune_configs()
-    elif is_cdna():
+    elif current_platform.is_rocm_cdna():
         return get_cdna_autotune_configs()
     else:
         return get_general_autotune_configs()

@@ -120,6 +120,12 @@ class Platform:
     def is_rocm(self) -> bool:
         return self._enum == PlatformEnum.ROCM
 
+    def is_rocm_cdna(self) -> bool:
+        return self.is_rocm() and self.has_cdna_target()
+
+    def is_rocm_rdna(self) -> bool:
+        return self.is_rocm() and self.has_rdna_target()
+
     def is_tpu(self) -> bool:
         return self._enum == PlatformEnum.TPU
 
@@ -180,6 +186,22 @@ class Platform:
             return current_capability >= capability
 
         return current_capability.to_int() >= capability
+
+    @classmethod
+    def has_rdna_target(cls):
+        import triton
+        ROCM_RDNA_TARGETS = [
+            "gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201"
+        ]
+        return triton.runtime.driver.active.get_current_target(
+        ).arch in ROCM_RDNA_TARGETS
+
+    @classmethod
+    def has_cdna_target(cls):
+        import triton
+        ROCM_CDNA_TARGETS = ["gfx940", "gfx941", "gfx942", "gfx90a", "gfx908"]
+        return triton.runtime.driver.active.get_current_target(
+        ).arch in ROCM_CDNA_TARGETS
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
