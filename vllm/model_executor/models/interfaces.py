@@ -57,6 +57,15 @@ class SupportsMultiModal(Protocol):
         ...
 
     def get_language_model(self) -> torch.nn.Module:
+        """
+        Returns the underlying language model used for text generation.
+
+        This is typically the `torch.nn.Module` instance responsible for 
+        processing the merged multimodal embeddings and producing hidden states
+
+        Returns:
+            torch.nn.Module: The core language model component.
+        """
         ...
 
     # Only for models that support v0 chunked prefill

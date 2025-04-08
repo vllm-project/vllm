@@ -597,7 +597,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         return self.transformer.vision(pixel_values)
 
     def get_language_model(self) -> torch.nn.Module:
-        return self.transformer.encoder
+        return self.transformer
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

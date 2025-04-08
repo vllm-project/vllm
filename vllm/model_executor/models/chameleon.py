@@ -989,7 +989,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
 
     def get_language_model(self) -> torch.nn.Module:
-        return self.model.layers
+        return self.model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
