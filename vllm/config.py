@@ -358,6 +358,8 @@ class ModelConfig:
         self.hf_config = hf_config
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.attention_chunk_size = getattr(self.hf_text_config,
+                                            "attention_chunk_size", None)
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=hf_token, revision=revision)
@@ -1718,6 +1720,14 @@ class SchedulerConfig:
     policy: str = "fcfs"
 
     chunked_prefill_enabled: bool = field(init=False)
+
+    # If set to true and chunked prefill is enabled, we do not want to
+    # partially schedule a multimodal item. Only used in V1
+    # This ensures that if a request has a mixed prompt
+    # (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
+    # some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
+    # it will be scheduled as TTTT in one step and IIIIIIIIII in the next.
+    disable_chunked_mm_input: bool = False
 
     # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
     # or "mod.custom_class".

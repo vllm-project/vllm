@@ -487,8 +487,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|endoftext10|>"  # 200010 (see vocab.json in hf model)
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
-            if model_type in ("blip-2", "fuyu", "paligemma", "pixtral",
-                              "mistral3"):
+            if model_type in ("blip-2", "florence2", "fuyu", "paligemma",
+                              "pixtral", "mistral3"):
                 # These models do not use image tokens in the prompt
                 return None
             if model_type == "qwen":
@@ -500,7 +500,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                               "internvl_chat", "skywork_chat", "NVLM_D",
                               "h2ovl_chat", "idefics3"):
                 return "<image>"
-            if model_type == "mllama":
+            if model_type in ("mllama", "llama4"):
                 return "<|image|>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
@@ -872,19 +872,19 @@ MM_PARSER_MAP: dict[
     Callable[[ChatCompletionContentPartParam], _ContentPart],
 ] = {
     "text":
-    lambda part: _TextParser(part).get("text", ""),
+    lambda part: _TextParser(part).get("text", None),
     "image_url":
-    lambda part: _ImageParser(part).get("image_url", {}).get("url", ""),
+    lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
-    lambda part: _ImageEmbedsParser(part).get("image_embeds", {}),
+    lambda part: _ImageEmbedsParser(part).get("image_embeds", None),
     "audio_url":
-    lambda part: _AudioParser(part).get("audio_url", {}).get("url", ""),
+    lambda part: _AudioParser(part).get("audio_url", {}).get("url", None),
     "input_audio":
-    lambda part: _InputAudioParser(part).get("input_audio", {}),
+    lambda part: _InputAudioParser(part).get("input_audio", None),
     "refusal":
-    lambda part: _RefusalParser(part).get("refusal", ""),
+    lambda part: _RefusalParser(part).get("refusal", None),
     "video_url":
-    lambda part: _VideoParser(part).get("video_url", {}).get("url", ""),
+    lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
 }
 
 
@@ -1003,11 +1003,11 @@ def _parse_chat_message_content_part(
     part_type, content = _parse_chat_message_content_mm_part(part)
 
     # if part_type is text/refusal/image_url/audio_url/video_url/input_audio but
-    # content is empty, log a warning and skip
-    if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
+    # content is None, log a warning and skip
+    if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and content is None:
         logger.warning(
-            "Skipping multimodal part (type: '%s') "
-            "with empty / unparsable content.", part_type)
+            "Skipping multimodal part '%s' (type: '%s') "
+            "with empty / unparsable content.", part, part_type)
         return None
 
     if part_type in ("text", "refusal"):
