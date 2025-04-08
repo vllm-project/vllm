@@ -2,13 +2,15 @@
 # ruff: noqa: E501
 """Compare the scoring outputs of HF and vLLM models.
 
-Run `pytest tests/models/embedding/language/test_jina_reranker_v2.py`.
+Run `pytest tests/models/embedding/language/test_jina.py`.
 """
 import math
 
 import pytest
 
-MODELS = [
+from tests.models.embedding.utils import check_embeddings_close
+
+SCORING_MODELS = [
     "jinaai/jina-reranker-v2-base-multilingual",  # Roberta
 ]
 
@@ -27,8 +29,21 @@ TEXTS_2 = [
     "新しいメイクのトレンドは鮮やかな色と革新的な技術に焦点を当てています",
 ]
 
+EMBEDDING_MODELS = [
+    "jinaai/jina-embeddings-v3",
+]
 
-@pytest.fixture(scope="module", params=MODELS)
+EMBEDDING_PROMPTS = [
+    "Follow the white rabbit.",  # English
+    "Sigue al conejo blanco.",  # Spanish
+    "Suis le lapin blanc.",  # French
+    "跟着白兔走。",  # Chinese
+    "اتبع الأرنب الأبيض.",  # Arabic
+    "Folge dem weißen Kaninchen.",  # German
+]
+
+
+@pytest.fixture(scope="module", params=SCORING_MODELS)
 def model_name(request):
     yield request.param
 
@@ -68,3 +83,46 @@ def test_llm_1_to_N(vllm_runner, hf_runner, model_name, dtype: str):
 
     assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
     assert math.isclose(hf_outputs[1], vllm_outputs[1], rel_tol=0.01)
+
+
+@pytest.fixture(scope="module", params=EMBEDDING_MODELS)
+def emb_model_name(request):
+    yield request.param
+
+
+def test_is_matryoshka(vllm_runner, emb_model_name):
+    with vllm_runner(emb_model_name, task="embed",
+                     max_model_len=None) as vllm_model:
+        assert vllm_model.model.llm_engine.model_config.is_matryoshka
+
+
+@pytest.mark.parametrize("model", EMBEDDING_MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+def test_embeddings(
+    hf_runner,
+    vllm_runner,
+    model,
+    dtype: str,
+    monkeypatch,
+) -> None:
+
+    example_prompts = EMBEDDING_PROMPTS
+
+    with hf_runner(
+            model,
+            dtype=dtype,
+            is_sentence_transformer=True,
+    ) as hf_model:
+        hf_outputs = hf_model.encode(example_prompts, task="text-matching")
+
+    with vllm_runner(model, task="embed", dtype=dtype,
+                     max_model_len=None) as vllm_model:
+        vllm_outputs = vllm_model.encode(example_prompts)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
