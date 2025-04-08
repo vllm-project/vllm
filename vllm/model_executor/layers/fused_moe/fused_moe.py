@@ -461,20 +461,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                             use_int4_w4a16: bool,
                             block_shape: Optional[List[int]] = None) -> None:
     assert topk_weights is not None or not mul_routed_weight
-    if current_platform.is_rocm() and topk_weights is not None:
-        # This is to handle the bug https://github.com/ROCm/pytorch/issues/2020
-        # where the In the HIPGraph, it could occur that the `topk_weights`
-        # tensor has the following properties:
-        # .shape: ([1024, 1])
-        # .is_contiguous(): True
-        # .stride() : [1,1024]
-        # .is_contiguous(memory_format=torch.channels_last) is False
-        # .is_contiguous(memory_format=torch.contiguous_format) is True
-        # This only happens when using V1 Engine on ROCm with HIPGraph
-        # with torch.compile Dynamo.
-        # V1 Engine on ROCm with eager mode is fine.
-        # V0 Engine on ROCm with HIPGraph is fine.
-        topk_weights = topk_weights.view(-1).reshape(topk_weights.shape)
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
@@ -1016,6 +1002,7 @@ direct_register_custom_op(
     op_func=inplace_fused_experts,
     mutates_args=["hidden_states"],
     fake_impl=inplace_fused_experts_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
 
@@ -1074,6 +1061,7 @@ direct_register_custom_op(
     op_func=outplace_fused_experts,
     mutates_args=[],
     fake_impl=outplace_fused_experts_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
 
