@@ -26,7 +26,7 @@ def test_full_cudagraph(monkeypatch):
 
         piecewise_responses = run_model(compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
-            use_cudagraph=False,
+            use_cudagraph=True,
         ))
 
         assert full_cudagraph_responses[0].outputs[
