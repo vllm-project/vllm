@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import enum
 import platform
 import random
@@ -9,10 +8,14 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import torch
 
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.lora.request import LoRARequest
+    from vllm.pooling_params import PoolingParams
+    from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
 else:
     ModelConfig = None
@@ -392,6 +395,15 @@ class Platform:
         Returns if custom allreduce is supported on the current platform
         """
         return False
+
+    @classmethod
+    def validate_request(
+        cls,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        lora_request: Optional[LoRARequest] = None,
+    ) -> None:
+        """Raises if this request is unsupported on this platform"""
 
 
 class UnspecifiedPlatform(Platform):
