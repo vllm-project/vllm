@@ -155,9 +155,7 @@ class DeepseekV2MoE(nn.Module):
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
-
         router_logits, _ = self.gate(hidden_states.type(torch.float32))
-
         if hidden_states.dtype != torch.float16:
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
@@ -166,7 +164,6 @@ class DeepseekV2MoE(nn.Module):
             # This is a special case to avoid FP16 overflow
             final_hidden_states = self.experts(hidden_states=hidden_states,
                                                router_logits=router_logits)
-
         if shared_output is not None:
             if hidden_states.dtype != torch.float16:
                 final_hidden_states = final_hidden_states + shared_output

@@ -866,13 +866,6 @@ def fused_topk(
         gating_output.type(torch.float32),
     )
     del token_expert_indicies  # Not used. Will be used in the future.
-
-    topk_func = dispatch_topk_func()
-    topk_weights, topk_ids = topk_func(topk_weights, topk_ids,
-                                       token_expert_indicies,
-                                       gating_output_float, renormalize)
-
-    del token_expert_indicies  # Not used. Will be used in the future.
     return topk_weights, topk_ids
 
 
