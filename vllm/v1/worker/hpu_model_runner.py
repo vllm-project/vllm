@@ -879,7 +879,6 @@ class HPUModelRunner:
 
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
-
         return batch_changed
 
     def get_model(self) -> torch.nn.Module:
@@ -1752,6 +1751,7 @@ class HPUModelRunner:
             )
 
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
+        seqs_to_discard = []
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             req_state = self.requests[req_id]
 
@@ -1768,7 +1768,7 @@ class HPUModelRunner:
                 self.input_batch.num_tokens[i] += 1
                 req_state.output_token_ids.append(token_id)
             else:
-                sampled_token_ids_list[i] = 0
+                seqs_to_discard.append(i)
         ################## RETURN ##################
         # Create output.
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
@@ -1780,12 +1780,16 @@ class HPUModelRunner:
         #    prompt_logprobs_dict[req_id] = None
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
 
-        # in spec decode, multiple tokens can be returned, and I suspect
+        # in spec decode, multiple tokens can be returned, so
         # scheduler expects a list of tokens per seq here
+        postprocessed_sampled_token_ids = [
+            ([tok] if i not in seqs_to_discard else [])
+            for i, tok in enumerate(sampled_token_ids_list)
+        ]
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=[[i] for i in sampled_token_ids_list],
+            sampled_token_ids=postprocessed_sampled_token_ids,
             logprobs=logprobs,
             spec_token_ids=None,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
