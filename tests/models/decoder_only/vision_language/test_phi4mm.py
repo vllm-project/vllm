@@ -5,11 +5,11 @@ import re
 from collections.abc import Sequence
 from typing import Optional
 
+import librosa
 import pytest
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
-from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import rescale_image_size
@@ -34,6 +34,8 @@ model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
 # we have to manually specify the path of the lora weights.
 vision_lora_path = os.path.join(model_path, "vision-lora")
 speech_lora_path = os.path.join(model_path, "speech-lora")
+speech_question = os.path.join(model_path, "examples",
+                               "what_is_shown_in_this_image.wav")
 models = [model_path]
 
 
@@ -263,7 +265,6 @@ def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
     )
 
 
-# FIXME(Isotr0py): This test can't stll pass yet.
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_model_len", [12800])
@@ -273,8 +274,9 @@ def test_vision_speech_models(hf_runner, vllm_runner, model, dtype: str,
                               max_model_len: int, max_tokens: int,
                               num_logprobs: int) -> None:
 
-    audio = AudioAsset("mary_had_lamb").audio_and_sample_rate
-    image = ImageAsset("stop_sign").pil_image.convert("RGB")
+    # use the example speech question so that the model outputs are reasonable
+    audio = librosa.load(speech_question, sr=None)
+    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
     inputs_vision_speech = [
         (
