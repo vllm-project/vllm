@@ -221,9 +221,13 @@ def compute_probs_and_sample_next_token(
     # could degrade the acceptance rate, it does not affect the distribution
     # of the generated tokens after rejection sampling.
 
-    # TODO(woosuk): Consider seeds.
+    # Use generators from sampling_metadata for reproducible randomness
     q = torch.empty_like(probs)
-    q.exponential_()
+    batch_size = probs.size(0)
+    for i in range(batch_size):
+        generator = sampling_metadata.generators.get(i, None)
+        q[i].exponential_(generator=generator)
+
     next_token_ids = probs.div_(q).argmax(dim=-1).view(-1)
     if not sampling_metadata.all_random:
         greedy_token_ids = probs.argmax(dim=-1)
