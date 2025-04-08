@@ -983,6 +983,7 @@ model_example_map = {
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
     "skywork_chat": run_skyworkr1v,
+    "smolvlm": run_smolvlm,
 }
 
 
