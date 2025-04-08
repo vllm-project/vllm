@@ -314,7 +314,7 @@ class Processor:
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
                 if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check
+                    return  # Skip encoder length check for Whisper
 
         prompt_ids = prompt_inputs["prompt_token_ids"]
 
