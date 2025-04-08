@@ -771,7 +771,7 @@ def get_pp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
-# TODO: once we deprecate V0 KV transer, we can move this to
+# TODO: once we deprecate V0 KV transfer, we can move this to
 # be a non-global object.
 _KV_CONNECTOR_AGENT: Union[KVConnectorBase, KVConnectorBase_V1, None] = None
 
