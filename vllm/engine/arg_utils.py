@@ -22,6 +22,7 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          TokenizerPoolConfig, VllmConfig, get_attr_docs)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
+from vllm.model_executor.guided_decoding import SUPPORTED_GUIDED_DECODING_V1
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
@@ -29,7 +30,6 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, StoreBoolean, is_in_ray_actor
-from vllm.v1.engine.processor import SUPPORTED_GUIDED_DECODING
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -1424,7 +1424,9 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
+        # remove backend options when doing this check
+        if self.guided_decoding_backend.split(':')[0] \
+            not in SUPPORTED_GUIDED_DECODING_V1:
             _raise_or_fallback(feature_name="--guided-decoding-backend",
                                recommend_to_remove=False)
             return False

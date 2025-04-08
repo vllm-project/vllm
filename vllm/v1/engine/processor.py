@@ -25,14 +25,6 @@ from vllm.v1.structured_output.backend_guidance import (
 from vllm.v1.structured_output.utils import (
     validate_structured_output_request_xgrammar)
 
-# Xgrammar and Guidance are supported.
-SUPPORTED_GUIDED_DECODING = [
-    "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-    "guidance:disable-any-whitespace", "guidance:no-additional-properties",
-    "guidance:no-additional-properties,disable-any-whitespace",
-    "guidance:disable-any-whitespace,no-additional-properties", "auto"
-]
-
 
 class Processor:
 
@@ -133,10 +125,6 @@ class Processor:
             return
 
         engine_level_backend = self.decoding_config.guided_decoding_backend
-        if engine_level_backend not in SUPPORTED_GUIDED_DECODING:
-            raise ValueError(
-                f"Only {SUPPORTED_GUIDED_DECODING} structured output is "
-                "supported in V1.")
         if params.guided_decoding.backend:
             if params.guided_decoding.backend != engine_level_backend:
                 raise ValueError("Request-level structured output backend "

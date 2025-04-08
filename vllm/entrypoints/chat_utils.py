@@ -7,8 +7,8 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Iterable
 from functools import cache, lru_cache, partial
 from pathlib import Path
-from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
-                    cast)
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, Optional,
+                    TypeVar, Union, cast)
 
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
@@ -33,12 +33,14 @@ from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
                           ProcessorMixin)
 from typing_extensions import Required, TypeAlias, TypedDict
 
-from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -447,7 +449,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     maximum per prompt.
     """
 
-    def __init__(self, model_config: ModelConfig, tokenizer: AnyTokenizer):
+    def __init__(self, model_config: "ModelConfig", tokenizer: AnyTokenizer):
         super().__init__()
 
         self._model_config = model_config
@@ -458,7 +460,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._items_by_modality = defaultdict[str, list[_T]](list)
 
     @property
-    def model_config(self) -> ModelConfig:
+    def model_config(self) -> "ModelConfig":
         return self._model_config
 
     @property
@@ -1103,7 +1105,7 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
 
 def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
-    model_config: ModelConfig,
+    model_config: "ModelConfig",
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[list[ConversationMessage], Optional[MultiModalDataDict]]:
@@ -1126,7 +1128,7 @@ def parse_chat_messages(
 
 def parse_chat_messages_futures(
     messages: list[ChatCompletionMessageParam],
-    model_config: ModelConfig,
+    model_config: "ModelConfig",
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[list[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
