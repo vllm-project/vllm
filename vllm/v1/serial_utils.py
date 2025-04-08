@@ -89,9 +89,7 @@ def custom_enc_hook(obj: Any) -> Any:
             return msgpack.Ext(CUSTOM_TYPE_TENSORDICT, pickle.dumps(adict))
         except TypeError as err:
             # fall back to pickle serializer.
-            logger.warning(
-                f"Unable to serialize MultiModalKwargs : {err}, falling back to pickle"
-            )
+            logger.warning("Unable to convert MultiModalKwargs (%s), fall back to pickle", err)
             pass
 
     if isinstance(obj, FunctionType):
