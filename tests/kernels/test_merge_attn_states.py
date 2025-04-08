@@ -19,7 +19,7 @@ def merge_attn_states_torch(
         suffix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
         suffix_lse: torch.Tensor,  # [NUM_HEADS, NUM_TOKENS]
         output_lse: Optional[torch.Tensor] = None,  # [NUM_HEADS, NUM_TOKENS]
-) -> list[torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     p_lse = prefix_lse
     s_lse = suffix_lse
     # inf -> -inf
