@@ -19,7 +19,7 @@ outputs = llm.generate(
 print(outputs[0].outputs[0].text)
 
 # Guided decoding by Regex
-guided_decoding_params = GuidedDecodingParams(regex="\w+@\w+\.com\n")
+guided_decoding_params = GuidedDecodingParams(regex=r"\w+@\w+\.com\n")
 sampling_params = SamplingParams(guided_decoding=guided_decoding_params,
                                  stop=["\n"])
 prompt = ("Generate an email address for Alan Turing, who works in Enigma."
@@ -57,17 +57,12 @@ print(outputs[0].outputs[0].text)
 
 # Guided decoding by Grammar
 simplified_sql_grammar = """
-    ?start: select_statement
-
-    ?select_statement: "SELECT " column_list " FROM " table_name
-
-    ?column_list: column_name ("," column_name)*
-
-    ?table_name: identifier
-
-    ?column_name: identifier
-
-    ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
+root ::= select_statement
+select_statement ::= "SELECT " column " from " table " where " condition
+column ::= "col_1 " | "col_2 "
+table ::= "table_1 " | "table_2 "
+condition ::= column "= " number
+number ::= "1 " | "2 "
 """
 guided_decoding_params = GuidedDecodingParams(grammar=simplified_sql_grammar)
 sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
