@@ -36,6 +36,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -62,10 +63,12 @@ class ModelExecutionError(RuntimeError):
         
     """
     scheduler_output: SchedulerOutput
+    scheduler_stats: SchedulerStats
 
-    def __init__(self, *args, scheduler_output=None):
+    def __init__(self, *args, scheduler_output=None, scheduler_stats=None):
         super().__init__(*args)
         self.scheduler_output = scheduler_output
+        self.scheduler_stats = scheduler_stats
 
     def __reduce__(self):
         # To avoid pickle errors.
@@ -237,13 +240,14 @@ class EngineCore:
             output = self.model_executor.execute_model(scheduler_output)
         except BaseException as err:
             # NOTE: ensure we can log extra info without risking raises
-            # raises unexpected errors during logging
+            # unexpected errors during logging
             with contextlib.suppress(BaseException):
-                err = ModelExecutionError(
+                model_err = ModelExecutionError(
                     f"Model execution failure,"
                     f"reason: {repr(err)}",
-                    scheduler_output=scheduler_output)
-                dump_engine_exception(err, self.vllm_config)
+                    scheduler_output=scheduler_output,
+                    scheduler_stats=self.scheduler.make_stats())
+                dump_engine_exception(model_err, self.vllm_config)
             # Re-raise exception
             raise err
 

@@ -11,7 +11,6 @@ import pytest
 
 from vllm import LLM
 from vllm.platforms import current_platform
-from vllm.v1.engine.core import ModelExecutionError
 from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 
 from ..conftest import VllmRunner
@@ -165,13 +164,17 @@ def test_models_distributed(
 
 def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
 
+    from vllm.envs import VLLM_USE_V1
+
+    if not VLLM_USE_V1:
+        pytest.skip("Skipping V0 test, dump input not supported")
+
+    # Needed to mock an error in the same process
     monkeypatch.setenv('VLLM_ENABLE_V1_MULTIPROCESSING', '0')
-    # Create model
+
     with vllm_runner('facebook/opt-125m', enforce_eager=True) as vllm_model:
         if isinstance(vllm_model.model.llm_engine, LLMEngineV1):
             v1_test_failed_model_execution(vllm_model)
-        else:  # V0
-            pytest.skip("Skipping V0 test")
 
 
 def v1_test_failed_model_execution(vllm_model):
@@ -190,6 +193,5 @@ def v1_test_failed_model_execution(vllm_model):
             "The future of AI is",
         ]
         vllm_model.generate_greedy(prompts, 200, use_tqdm=False)
-    assert isinstance(exc_info.value, ModelExecutionError)
-    assert exc_info.value.scheduler_output is not None
+    assert isinstance(exc_info.value, RuntimeError)
     assert "Mocked Critical Error" in str(exc_info.value)

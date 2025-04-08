@@ -59,14 +59,15 @@ def dump_engine_exception(err: BaseException, config: VllmConfig):
         config,
     )
 
-    # TODO: Have stats for V1
-
     from vllm.v1.engine.core import ModelExecutionError
     if isinstance(err, ModelExecutionError):
         try:
-            dump_obj = prepare_object_to_dump(err.scheduler_output)
-            logger.error("Dumping scheduler output for model execution:")
-            logger.error(dump_obj)
+            if err.scheduler_output is not None:
+                dump_obj = prepare_object_to_dump(err.scheduler_output)
+                logger.error("Dumping scheduler output for model execution:")
+                logger.error(dump_obj)
+            if err.scheduler_stats is not None:
+                logger.error(err.scheduler_stats)
         except BaseException as exception:
             logger.error("Error preparing object to dump")
             logger.error(repr(exception))
