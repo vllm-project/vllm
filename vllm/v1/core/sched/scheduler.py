@@ -505,8 +505,8 @@ class Scheduler(SchedulerInterface):
         assert mm_positions is not None
         assert len(mm_positions) > 0
         for i, pos_info in enumerate(mm_positions):
-            start_pos = pos_info["offset"]
-            num_encoder_tokens = pos_info["length"]
+            start_pos = pos_info.offset
+            num_encoder_tokens = pos_info.length
 
             # The encoder output is needed if the two ranges overlap:
             # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
@@ -596,8 +596,8 @@ class Scheduler(SchedulerInterface):
             if cached_encoder_input_ids:
                 for input_id in list(cached_encoder_input_ids):
                     mm_positions = request.mm_positions[input_id]
-                    start_pos = mm_positions["offset"]
-                    num_tokens = mm_positions["length"]
+                    start_pos = mm_positions.offset
+                    num_tokens = mm_positions.length
                     if start_pos + num_tokens <= request.num_computed_tokens:
                         # The encoder output is already processed and stored
                         # in the decoder's KV cache.

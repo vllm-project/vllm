@@ -19,7 +19,8 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -36,7 +37,8 @@ from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from .utils import sanity_check_mm_encoder_outputs
+from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
+                    scatter_mm_placeholders)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -507,19 +509,46 @@ class TPUModelRunner:
         logits_indices = logits_indices.to(self.device)
         return attn_metadata, logits_indices
 
-    def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
+    def _scatter_placeholders(
+        self,
+        embeds: torch.Tensor,
+        is_embed: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if is_embed is None:
+            return embeds
+
+        placeholders = embeds.new_full(
+            (is_embed.shape[0], embeds.shape[-1]),
+            fill_value=torch.nan,
+        )
+        placeholders[is_embed] = embeds
+        return placeholders
+
+    def _gather_placeholders(
+        self,
+        placeholders: torch.Tensor,
+        is_embed: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if is_embed is None:
+            return placeholders
+
+        return placeholders[is_embed]
+
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
 
         # Batch the multi-modal inputs.
-        mm_inputs: list[MultiModalKwargs] = []
-        req_input_ids: list[tuple[str, int]] = []
+        mm_inputs = list[MultiModalKwargs]()
+        req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
-            for input_id in encoder_input_ids:
-                mm_inputs.append(req_state.mm_inputs[input_id])
-                req_input_ids.append((req_id, input_id))
+
+            for mm_input_id in encoder_input_ids:
+                mm_inputs.append(req_state.mm_inputs[mm_input_id])
+                req_ids_pos.append(
+                    (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -555,16 +584,23 @@ class TPUModelRunner:
                 encoder_outputs.append(output)
 
         # Cache the encoder outputs.
-        for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
+        for (req_id, input_id, pos_info), output in zip(
+                req_ids_pos,
+                encoder_outputs,
+        ):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
-            self.encoder_cache[req_id][input_id] = output
 
-    def _gather_encoder_outputs(
+            self.encoder_cache[req_id][input_id] = scatter_mm_placeholders(
+                output,
+                is_embed=pos_info.is_embed,
+            )
+
+    def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> list[torch.Tensor]:
-        encoder_outputs: list[torch.Tensor] = []
+        mm_embeds: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -572,8 +608,8 @@ class TPUModelRunner:
             num_computed_tokens = req_state.num_computed_tokens
             mm_positions = req_state.mm_positions
             for i, pos_info in enumerate(mm_positions):
-                start_pos = pos_info["offset"]
-                num_encoder_tokens = pos_info["length"]
+                start_pos = pos_info.offset
+                num_encoder_tokens = pos_info.length
 
                 # The encoder output is needed if the two ranges overlap:
                 # [num_computed_tokens,
@@ -595,8 +631,16 @@ class TPUModelRunner:
                 assert req_id in self.encoder_cache
                 assert i in self.encoder_cache[req_id]
                 encoder_output = self.encoder_cache[req_id][i]
-                encoder_outputs.append(encoder_output[start_idx:end_idx])
-        return encoder_outputs
+
+                if (is_embed := pos_info.is_embed) is not None:
+                    is_embed = is_embed[start_idx:end_idx]
+
+                mm_embeds_item = gather_mm_placeholders(
+                    encoder_output[start_idx:end_idx],
+                    is_embed=is_embed,
+                )
+                mm_embeds.append(mm_embeds_item)
+        return mm_embeds
 
     @torch.no_grad()
     def execute_model(
@@ -612,10 +656,10 @@ class TPUModelRunner:
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
-            self._execute_encoder(scheduler_output)
-            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+            self._execute_mm_encoder(scheduler_output)
+            mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
-            encoder_outputs = []
+            mm_embeds = []
 
         # Prepare inputs
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
@@ -623,9 +667,9 @@ class TPUModelRunner:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            if encoder_outputs:
+            if mm_embeds:
                 inputs_embeds = self.model.get_input_embeddings(
-                    self.input_ids, encoder_outputs)
+                    self.input_ids, mm_embeds)
             else:
                 inputs_embeds = self.model.get_input_embeddings(self.input_ids)
             input_ids = None
