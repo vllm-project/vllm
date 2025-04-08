@@ -1427,8 +1427,10 @@ class EngineArgs:
         # remove backend options when doing this check
         if self.guided_decoding_backend.split(':')[0] \
             not in SUPPORTED_GUIDED_DECODING_V1:
-            _raise_or_fallback(feature_name="--guided-decoding-backend",
-                               recommend_to_remove=False)
+            _raise_or_fallback(
+                feature_name=
+                f"--guided-decoding-backend={self.guided_decoding_backend}",
+                recommend_to_remove=False)
             return False
 
         # Need at least Ampere for now (FA support required).
