@@ -422,6 +422,8 @@ class MiniMaxText01LinearAttention(nn.Module):
                                attn_metadata):
         hidden = []
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
+            if _prefill_idx >= len(attn_metadata.query_start_loc):
+                break
             _start = attn_metadata.query_start_loc[_prefill_idx]
             _end = attn_metadata.query_start_loc[_prefill_idx + 1]
             slot_id = state_indices_tensor[_prefill_idx]
