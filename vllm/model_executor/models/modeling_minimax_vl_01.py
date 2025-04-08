@@ -580,6 +580,15 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         pixel_values = inputs["pixel_values"]
 
         if isinstance(pixel_values, torch.Tensor):
+            # 检查张量维度
+            if len(pixel_values.shape) == 3:  # 如果是3维的 (c, h, w)
+                # 添加批次和补丁维度
+                pixel_values = pixel_values.unsqueeze(0).unsqueeze(0)  # 变成 (1, 1, c, h, w)
+            
+            # # 确保有5个维度
+            # if len(pixel_values.shape) != 5:
+            #     raise ValueError(f"Expected pixel_values to have 5 dimensions (b, num_patches, c, h, w), but got shape {pixel_values.shape}")
+                
             b, num_patches, c, h, w = pixel_values.shape
             stacked_pixel_values = pixel_values.view(b * num_patches, c, h, w)
             stacked_image_features = self._image_pixels_to_features(
