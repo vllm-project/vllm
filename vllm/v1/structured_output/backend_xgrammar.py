@@ -35,9 +35,10 @@ class XgrammarBackend(StructuredOutputBackend):
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
         tokenizer_group.ping()
 
+        self.disable_any_whitespace = False
         backend_options = GuidedDecodingParams(
             backend=vllm_config.decoding_config.guided_decoding_backend
-        ).backend_options
+        ).backend_options()
         for option in backend_options:
             if option == "disable-any-whitespace":
                 self.disable_any_whitespace = True

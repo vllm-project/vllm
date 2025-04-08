@@ -42,9 +42,10 @@ class GuidanceBackend(StructuredOutputBackend):
         self.vllm_config = vllm_config
         self.vocab_size = vllm_config.model_config.get_vocab_size()
 
+        self.disable_any_whitespace = False
         backend_options = GuidedDecodingParams(
             backend=vllm_config.decoding_config.guided_decoding_backend
-        ).backend_options
+        ).backend_options()
         for option in backend_options:
             if option == "disable-any-whitespace":
                 self.disable_any_whitespace = True
