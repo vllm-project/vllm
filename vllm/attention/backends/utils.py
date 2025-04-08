@@ -147,7 +147,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool):
+            chunked_prefill_enabled: bool, prefix_cache_hit: bool):
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
 
@@ -180,7 +180,9 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             # only allowing multiple of block_size chunk size.
             # NOTE: This only works for oooooooxxx style attention.
             block_table = []
-            if inter_data.prefix_cache_hit:
+            if (prefix_cache_hit
+                    or (block_tables and self.input_builder.runner.
+                        model_config.is_omni_thinker_model())):
                 block_table = block_tables[seq_id]
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
@@ -197,7 +199,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                                        context_len,
                                                        self.sliding_window)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
-                                 seq_len, context_len, start_idx,
+                                 curr_seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
@@ -211,9 +213,14 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
         """
+        prefix_cache_hit = any([
+            inter_data.prefix_cache_hit
+            for inter_data in self.input_builder.inter_data_list
+        ])
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
-                                self.input_builder.chunked_prefill_enabled)
+                                self.input_builder.chunked_prefill_enabled,
+                                prefix_cache_hit)
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1

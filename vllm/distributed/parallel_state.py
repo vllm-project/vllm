@@ -118,15 +118,14 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     return torch.empty_like(tensor)
 
 
-if supports_custom_op():
-    from vllm.platforms import current_platform
-    direct_register_custom_op(
-        op_name="all_reduce",
-        op_func=all_reduce,
-        mutates_args=[],
-        fake_impl=all_reduce_fake,
-        dispatch_key=current_platform.dispatch_key,
-    )
+from vllm.platforms import current_platform
+direct_register_custom_op(
+    op_name="all_reduce",
+    op_func=all_reduce,
+    mutates_args=[],
+    fake_impl=all_reduce_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 
 class GroupCoordinator:

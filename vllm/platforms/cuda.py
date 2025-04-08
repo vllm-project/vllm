@@ -256,7 +256,10 @@ class CudaPlatformBase(Platform):
         # installed.
         if target_backend == _Backend.FLASH_ATTN:
             try:
-                import vllm.vllm_flash_attn  # noqa: F401
+                try:
+                    import vllm.vllm_flash_attn  # noqa: F401
+                except (ImportError, ModuleNotFoundError):
+                    import vllm_flash_attn  # noqa: F401
                 from vllm.attention.backends.flash_attn import (  # noqa: F401
                     FlashAttentionBackend, flash_attn_supports_fp8)
 

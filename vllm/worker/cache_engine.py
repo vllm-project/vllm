@@ -88,6 +88,16 @@ class CacheEngine:
             # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases
             # when entry_shape is higher than 1D
             kv_cache.append(layer_kv_cache)
+
+        if self.cache_config.enable_hidden_state_caching:
+            hidden_state_cache_shape = (num_blocks, self.block_size,
+                                        self.model_config.get_hidden_size())
+            kv_cache.append(
+                torch.zeros(hidden_state_cache_shape,
+                            dtype=self.dtype,
+                            pin_memory=pin_memory,
+                            device=device))
+
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
@@ -126,6 +136,10 @@ class CacheEngine:
         value_cache_entry = key_cache_entry if not model_config.use_mla else 0
         total = num_attention_layers * cache_config.block_size * \
             (key_cache_entry + value_cache_entry)
+
+        # take the hidden state cache into account
+        if cache_config.enable_hidden_state_caching:
+            total += cache_config.block_size * model_config.get_hidden_size()
 
         dtype_size = get_dtype_size(dtype)
         return dtype_size * total

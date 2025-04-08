@@ -20,6 +20,9 @@ class TextPrompt(TypedDict):
     prompt: str
     """The input text to be tokenized before passing to the model."""
 
+    prompt_embeds: NotRequired[torch.Tensor]
+    """The embeddings of the prompt, if available."""
+
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
@@ -40,6 +43,9 @@ class TokensPrompt(TypedDict):
 
     prompt_token_ids: list[int]
     """A list of token IDs to pass to the model."""
+
+    prompt_embeds: NotRequired[torch.Tensor]
+    """The embeddings of the prompt, if available."""
 
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
@@ -147,6 +153,9 @@ class TokenInputs(TypedDict):
     The original prompt text corresponding to the token IDs, if available.
     """
 
+    prompt_embeds: NotRequired[torch.Tensor]
+    """The embeddings of the prompt, if available."""
+
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
@@ -182,6 +191,7 @@ def token_inputs(
     prompt_token_ids: list[int],
     token_type_ids: Optional[list[int]] = None,
     prompt: Optional[str] = None,
+    prompt_embeds: Optional[torch.Tensor] = None,
     multi_modal_data: Optional["MultiModalDataDict"] = None,
     multi_modal_inputs: Optional["MultiModalKwargs"] = None,
     multi_modal_hashes: Optional[list[str]] = None,
@@ -193,6 +203,8 @@ def token_inputs(
 
     if prompt is not None:
         inputs["prompt"] = prompt
+    if prompt_embeds is not None:
+        inputs["prompt_embeds"] = prompt_embeds
     if token_type_ids is not None:
         inputs["token_type_ids"] = token_type_ids
     if multi_modal_data is not None:
@@ -277,7 +289,7 @@ class SingletonInputsAdapter:
         inputs = self.inputs
 
         if inputs["type"] == "token" or inputs["type"] == "multimodal":
-            return None
+            return inputs.get("prompt_embeds")
 
         assert_never(inputs)  # type: ignore[arg-type]
 

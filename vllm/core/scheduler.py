@@ -699,6 +699,7 @@ class Scheduler:
 
         running_queue = self.running
         assert len(self._async_stopped) == 0
+        leftover_running: Deque[SequenceGroup] = deque()
         while running_queue:
             seq_group = running_queue[0]
             # We discard the cached tokens info here because we don't need it
@@ -723,6 +724,15 @@ class Scheduler:
                 break
 
             running_queue.popleft()
+
+            if seq_group.resumable:
+                if not seq_group.ready_to_resume:
+                    # The sequence group is not ready to resume. Stop here.
+                    leftover_running.appendleft(seq_group)
+                    continue
+                else:
+                    # Wait for the next round the resumption.
+                    seq_group.ready_to_resume = False
 
             # With async postprocessor, an extra decode run is done
             # to process the final tokens. The check below avoids this extra
@@ -813,6 +823,7 @@ class Scheduler:
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
 
+        self.running.extendleft(leftover_running)
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
 
@@ -1197,6 +1208,10 @@ class Scheduler:
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
+            if seq_group.resumable:
+                # Wait for the next round the resumption.
+                seq_group.ready_to_resume = False
+                seq_group.prefetch_preempted = False
             budget.add_num_batched_tokens(
                 seq_group.request_id,
                 num_batched_tokens=num_new_tokens_uncached,

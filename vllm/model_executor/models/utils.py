@@ -443,7 +443,8 @@ def merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
     placeholder_token_id: Union[int, List[int]],
-) -> torch.Tensor:
+    seq_data=None,
+    modality=None) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
     positions in ``inputs_embeds`` corresponding to placeholder tokens in
@@ -480,7 +481,7 @@ def merge_multimodal_embeddings(
 
     return _merge_multimodal_embeddings(
         inputs_embeds,
-        (input_ids == placeholder_token_id),
+        torch.isin(input_ids, placeholder_token_id),
         multimodal_embeddings,
     )
 

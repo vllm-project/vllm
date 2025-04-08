@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
-                         PromptType)
+                         PromptType, TokensPrompt)
 from vllm.inputs.parse import is_token_prompt, split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -418,6 +418,13 @@ class LLMEngine:
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
 
+        if self.model_config.is_omni_talker_model():
+            # token for user message start/end
+            self.im_start_user_tokens = self.tokenizer.encode(
+                "<|im_start|>user")
+        else:
+            self.im_start_user_tokens = None
+
         # Flag to set when an input fails to process and the engine should run
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
@@ -586,6 +593,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        resumable: Optional[bool] = False,
     ) -> Optional[SequenceGroup]:
         """Add a processed request to the engine's request pool.
         return the created sequence group.
@@ -601,6 +609,7 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
+                resumable=resumable,
             )
             return None
 
@@ -630,7 +639,8 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
-                priority=priority)
+                priority=priority,
+                resumable=resumable)
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
                 request_id,
@@ -640,7 +650,8 @@ class LLMEngine:
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
-                priority=priority)
+                priority=priority,
+                resumable=resumable)
         else:
             raise ValueError(
                 "Either SamplingParams or PoolingParams must be provided.")
@@ -669,6 +680,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        resumable: Optional[bool] = False,
     ) -> None:
         ...
 
@@ -685,6 +697,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        resumable: Optional[bool] = False,
     ) -> None:
         ...
 
@@ -702,6 +715,7 @@ class LLMEngine:
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            resumable: Optional[bool] = False,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
@@ -754,6 +768,17 @@ class LLMEngine:
             prompt = inputs
         assert prompt is not None and params is not None
 
+        if isinstance(prompt, dict):
+            if prompt.get("prompt_embeds", None) is not None:
+                prompt["prompt_embeds"] = prompt["prompt_embeds"].to(
+                    self.device_config.device)
+
+            # Avoid the empty mm data in the input_processor
+            if prompt.get("multi_modal_data", None) is not None:
+                for key in list(prompt["multi_modal_data"].keys()):
+                    if not prompt["multi_modal_data"][key]:
+                        del prompt["multi_modal_data"][key]
+
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
@@ -772,17 +797,43 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
+        if isinstance(prompt, dict) and prompt.get("prompt_embeds",
+                                                   None) is not None:
+            if not prompt.get("prompt_token_ids", None):
+                prompt["prompt_token_ids"] = [
+                    0
+                ] * prompt["prompt_embeds"].shape[0]
+
         if self.tokenizer is not None:
             self._validate_token_prompt(
                 prompt,
                 tokenizer=self.get_tokenizer(lora_request=lora_request))
+
+        if (isinstance(prompt, dict)
+                and not prompt.get("prompt_token_ids", None)
+                and prompt.get("prompt", None)):
+            prompt["prompt_token_ids"] = self.tokenizer.encode(
+                prompt["prompt"])
+
+        # For omni-talker model: remove the multi-round conversation history
+        self._prune_omni_talker_input(prompt)
+
+        use_audio_in_video = None
+        if isinstance(prompt, dict) and prompt.get("multi_modal_data", None):
+            use_audio_in_video = prompt["multi_modal_data"].pop(
+                "use_audio_in_video", None)
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
+        self._prune_omni_talker_prompt_embed(preprocessed_inputs)
         processed_inputs = self.input_processor(preprocessed_inputs)
+
+        if "mm_kwargs" in processed_inputs and use_audio_in_video is not None:
+            processed_inputs["mm_kwargs"][
+                "use_audio_in_video"] = use_audio_in_video
 
         self._add_processed_request(
             request_id=request_id,
@@ -793,7 +844,124 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
             priority=priority,
+            resumable=resumable,
         )
+
+    def _find_first_im_start_user(
+        self,
+        prompt_token_ids: List[int],
+    ):
+        for i in range(len(prompt_token_ids) - 1):
+            if prompt_token_ids[i] == self.im_start_user_tokens[0] and \
+                    prompt_token_ids[i + 1] == self.im_start_user_tokens[1]:
+                return i
+        return -1
+
+    def _find_last_im_start_user(
+        self,
+        prompt_token_ids: List[int],
+    ):
+        for i in range(len(prompt_token_ids) - 1, 1, -1):
+            if prompt_token_ids[i] == self.im_start_user_tokens[1] and \
+                    prompt_token_ids[i - 1] == self.im_start_user_tokens[0]:
+                return i - 1
+        return -1
+
+    def _prune_omni_talker_input(
+        self,
+        prompt: TokensPrompt,
+    ):
+        if not self.model_config.is_omni_talker_model():
+            return
+        if not isinstance(prompt, dict):
+            return
+
+        prompt_token_ids = prompt["prompt_token_ids"]
+        multi_modal_data = prompt.get('multi_modal_data')
+
+        first_user_start = self._find_first_im_start_user(prompt_token_ids)
+        last_user_start = self._find_last_im_start_user(prompt_token_ids)
+
+        if first_user_start == -1 or last_user_start == -1 or first_user_start == last_user_start:
+            return
+
+        logger.info("Pruning user message %d (%d, %d) tokens",
+                    last_user_start - first_user_start, first_user_start,
+                    last_user_start)
+
+        # remove user message start/end tokens
+        prompt_token_ids = prompt_token_ids[:
+                                            first_user_start] + prompt_token_ids[
+                                                last_user_start:]
+
+        hf_config = self.model_config.hf_config
+        if hasattr(hf_config, 'thinker_config'):
+            hf_config = hf_config.thinker_config
+
+        # count existing videos and audios
+        mm_counts = {
+            "audio": prompt_token_ids.count(hf_config.audio_token_id),
+            "video": prompt_token_ids.count(hf_config.video_token_id),
+            "image": prompt_token_ids.count(hf_config.image_token_id),
+        }
+
+        if multi_modal_data:
+            for key, data in multi_modal_data.items():
+                if key not in ["audio", "video", "image"]:
+                    continue
+                if mm_counts[key] == 0:
+                    multi_modal_data[key] = []
+                else:
+                    multi_modal_data[key] = data[-mm_counts[key]:]
+
+        prompt["prompt_token_ids"] = prompt_token_ids
+        prompt["multi_modal_data"] = multi_modal_data
+
+    def _prune_omni_talker_prompt_embed(
+        self,
+        preprocess_inputs: ProcessorInputs,
+    ):
+        if not self.model_config.is_omni_talker_model():
+            return
+
+        prompt_token_ids = preprocess_inputs["prompt_token_ids"]
+        prompt_embed = preprocess_inputs.get("prompt_embeds", None)
+        if prompt_embed is None:
+            return
+
+        first_user_start = self._find_first_im_start_user(prompt_token_ids)
+        if first_user_start == -1:
+            return
+        last_user_start = first_user_start + prompt_embed.size(0) - len(
+            prompt_token_ids)
+
+        if first_user_start == last_user_start:
+            return
+
+        logger.info("Pruning user message hidden states %d (%d, %d) tokens",
+                    last_user_start - first_user_start, first_user_start,
+                    last_user_start)
+
+        prompt_embed = torch.cat([
+            prompt_embed[:first_user_start],
+            prompt_embed[last_user_start:],
+        ],
+                                 dim=0)
+        preprocess_inputs["prompt_embeds"] = prompt_embed
+
+    def resume_request(
+        self,
+        request_id: str,
+        *,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        forever: Optional[bool] = False,
+    ) -> bool:
+        for scheduler in self.scheduler:
+            for seq_group in scheduler.running:
+                if seq_group.request_id == request_id:
+                    seq_group.resume_request(prompt_embeds, forever)
+                    return True
+        return False
 
     def _validate_token_prompt(self, prompt: PromptType,
                                tokenizer: AnyTokenizer):
@@ -812,7 +980,8 @@ class LLMEngine:
                 # Empty prompt check is handled later
                 return
             max_input_id = max(prompt_ids)
-            if max_input_id > tokenizer.max_token_id:
+            if not self.model_config.is_omni_talker_model(
+            ) and max_input_id > tokenizer.max_token_id:
                 raise ValueError(
                     "Token id {} is out of vocabulary".format(max_input_id))
 
@@ -827,6 +996,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
         priority: int = 0,
+        resumable: Optional[bool] = False,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -862,6 +1032,7 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
             priority=priority,
+            resumable=resumable,
             draft_size=draft_size)
 
         return seq_group
@@ -876,6 +1047,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         encoder_seq: Optional[Sequence] = None,
         priority: int = 0,
+        resumable: Optional[bool] = False,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
         # Defensive copy of PoolingParams, which are used by the pooler
@@ -889,8 +1061,59 @@ class LLMEngine:
             pooling_params=pooling_params,
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
-            priority=priority)
+            priority=priority,
+            resumable=resumable)
         return seq_group
+
+    def _inline_embeddings_and_hidden_states(
+        self,
+        outputs: List[SamplerOutput],
+    ):
+        if len(outputs) == 0:
+            return
+
+        if not self.model_config.is_omni_thinker_model():
+            return
+
+        # assume single-step execution (without sps)
+        output = outputs[0]
+
+        if output.prefill_hidden_states is not None:
+            assert len(output.outputs) == 1
+
+            output.outputs[0].prompt_embeds = output.prefill_hidden_states
+        else:
+            # assume chunked prefill is not enabled
+            for i in range(len(output.outputs)):
+                output.outputs[i].prompt_embeds = output.hidden_states[i:i + 1]
+
+    def _satisfied_chunked_return(
+        self,
+        seq_group: SequenceGroup,
+    ) -> bool:
+        if not seq_group.sampling_params.chunked_return:
+            return True
+        if seq_group.is_finished():
+            return True
+        if seq_group.resumable:  # the execution of talker is driven by thinker
+            return True
+        output_len = max(seq.get_output_len() for seq in seq_group.get_seqs())
+        return (seq_group.sampling_params.chunked_return_first_size == 0
+                or (output_len -
+                    seq_group.sampling_params.chunked_return_first_size) %
+                seq_group.sampling_params.chunked_return_size == 0)
+
+    def _prune_omni_talker_outputs(
+        self,
+        output: RequestOutput,
+    ):
+        if not self.model_config.is_omni_talker_model():
+            return
+
+        # reduce the overhead of zmq communication
+        output.prompt = ""
+        output.prompt_token_ids = []
+        output.multi_modal_placeholders = None
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
@@ -1035,6 +1258,9 @@ class LLMEngine:
              is_last_step, is_first_step_output,
              skip) = ctx.output_queue.popleft()
 
+        # Associate the embeddings and hidden states tensor with the sequence groups
+        self._inline_embeddings_and_hidden_states(outputs)
+
         # Sanity check
         assert len(seq_group_metadata_list) == len(
             scheduler_outputs.scheduled_seq_groups)
@@ -1149,6 +1375,10 @@ class LLMEngine:
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
 
             seq_group = scheduled_seq_group.seq_group
+
+            if not self._satisfied_chunked_return(seq_group):
+                continue
+
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)
@@ -1157,6 +1387,7 @@ class LLMEngine:
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs)
             if request_output:
+                self._prune_omni_talker_outputs(request_output)
                 ctx.request_outputs.append(request_output)
 
         # When we process a single request, we skip it for the next time,
@@ -1193,6 +1424,10 @@ class LLMEngine:
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
 
             seq_group = scheduled_seq_group.seq_group
+
+            if not self._satisfied_chunked_return(seq_group):
+                continue
+
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill():
                 seq_group.set_last_token_time(now)
@@ -1201,6 +1436,7 @@ class LLMEngine:
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs)
             if request_output:
+                self._prune_omni_talker_outputs(request_output)
                 ctx.request_outputs.append(request_output)
 
         # For multi-step with streaming, create outputs each iteration

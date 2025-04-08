@@ -74,6 +74,11 @@ class Worker(LocalOrDistributedWorkerBase):
                 not in ("medusa", "mlp_speculator", "eagle", "deepseek_mtp")) \
                     else {"return_hidden_states": True}
 
+        model_runner_args = {}
+        if model_config.is_omni_thinker_model():
+            model_runner_args["return_hidden_states"] = True
+        model_runner_args.update(speculative_args)
+
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_config.runner_type == "pooling":
             ModelRunnerClass = PoolingModelRunner
@@ -83,7 +88,7 @@ class Worker(LocalOrDistributedWorkerBase):
             vllm_config=self.vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
-            **speculative_args,
+            **model_runner_args,
         )
         if model_runner_cls is not None:
             self.model_runner = model_runner_cls(self.model_runner)

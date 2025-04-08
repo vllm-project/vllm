@@ -267,10 +267,14 @@ class BaseMultiModalField(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
+    def _reduce_data(self,
+                     batch: list[NestedTensors],
+                     key: str = None) -> NestedTensors:
         raise NotImplementedError
 
-    def reduce_data(self, elems: list[MultiModalFieldElem]) -> NestedTensors:
+    def reduce_data(self,
+                    elems: list[MultiModalFieldElem],
+                    key: str = None) -> NestedTensors:
         """
         Merge the data from multiple instances of :class:`MultiModalFieldElem`.
 
@@ -280,7 +284,7 @@ class BaseMultiModalField(ABC):
         if len(set(field_types)) > 1:
             raise ValueError(f"Cannot merge different {field_types=}")
 
-        return self._reduce_data([item.data for item in elems])
+        return self._reduce_data([item.data for item in elems], key=key)
 
 
 @dataclass(frozen=True)
@@ -299,7 +303,9 @@ class MultiModalBatchedField(BaseMultiModalField):
         field_factory = self._field_factory(modality=modality, key=key)
         return [field_factory(item) for item in data]
 
-    def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
+    def _reduce_data(self,
+                     batch: list[NestedTensors],
+                     key: str = None) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
             if len(batch) == 1:
                 # An optimization when `batch` contains only one tensor:
@@ -321,6 +327,7 @@ class MultiModalFlatField(BaseMultiModalField):
         :func:`MultiModalFieldConfig.flat_from_sizes`
     """
     slices: Sequence[slice]
+    dim: Optional[int] = 0
 
     def build_elems(
         self,
@@ -331,7 +338,9 @@ class MultiModalFlatField(BaseMultiModalField):
         field_factory = self._field_factory(modality=modality, key=key)
         return [field_factory(data[s]) for s in self.slices]
 
-    def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
+    def _reduce_data(self,
+                     batch: list[NestedTensors],
+                     key: str = None) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
             if len(batch) == 1:
                 # An optimization when `batch` contains only one tensor:
@@ -339,8 +348,12 @@ class MultiModalFlatField(BaseMultiModalField):
                 # - will achieve zero-copy if the tensor is contiguous
                 return batch[0].contiguous()
             first_shape = batch[0].shape
-            if all(elem.shape[1:] == first_shape[1:] for elem in batch):
-                return torch.concat(batch)
+            if key == "input_audio_features":
+                if all(elem.shape[0] == first_shape[0] for elem in batch):
+                    return torch.concat(batch, dim=1)
+            else:
+                if all(elem.shape[1:] == first_shape[1:] for elem in batch):
+                    return torch.concat(batch)
 
         return [e for elem in batch for e in elem]
 
@@ -362,7 +375,9 @@ class MultiModalSharedField(BaseMultiModalField):
         field_factory = self._field_factory(modality=modality, key=key)
         return [field_factory(data)] * self.batch_size
 
-    def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
+    def _reduce_data(self,
+                     batch: list[NestedTensors],
+                     key: str = None) -> NestedTensors:
         return batch[0]
 
 
@@ -398,7 +413,7 @@ class MultiModalFieldConfig:
         )
 
     @staticmethod
-    def flat(modality: str, slices: Sequence[slice]):
+    def flat(modality: str, slices: Sequence[slice], dim: Optional[int] = 0):
         """
         Defines a field where an element in the batch is obtained by
         slicing along the first dimension of the underlying data.
@@ -425,12 +440,14 @@ class MultiModalFieldConfig:
                     Element 3: [CC]
         """
         return MultiModalFieldConfig(
-            field=MultiModalFlatField(slices=slices),
+            field=MultiModalFlatField(slices=slices, dim=dim),
             modality=modality,
         )
 
     @staticmethod
-    def flat_from_sizes(modality: str, size_per_item: torch.Tensor):
+    def flat_from_sizes(modality: str,
+                        size_per_item: torch.Tensor,
+                        dim: int = 0):
         """
         Defines a field where an element in the batch is obtained by
         slicing along the first dimension of the underlying data.
@@ -440,6 +457,7 @@ class MultiModalFieldConfig:
                 keyword argument.
             slices: For each multi-modal item, the size of the slice that
                 is used to extract the data corresponding to it.
+            dim: The dimension to slice, default to 0.
 
         Example:
 
@@ -460,17 +478,16 @@ class MultiModalFieldConfig:
             :func:`MultiModalFieldConfig.flat`
         """
 
-        if size_per_item.ndim != 1:
-            raise ValueError("size_per_item should be a 1-D tensor, "
+        if size_per_item.ndim > 2:
+            raise ValueError("size_per_item should be a 1/2-D tensor, "
                              f"but found shape: {size_per_item.shape}")
 
         slice_idxs = [0, *accumulate(size_per_item)]
-        slices = [
-            slice(slice_idxs[i], slice_idxs[i + 1])
-            for i in range(len(size_per_item))
-        ]
+        slices = [(slice(None, None, None), ) * dim +
+                  (slice(slice_idxs[i], slice_idxs[i + 1]), )
+                  for i in range(len(size_per_item))]
 
-        return MultiModalFieldConfig.flat(modality, slices)
+        return MultiModalFieldConfig.flat(modality, slices, dim=dim)
 
     @staticmethod
     def shared(modality: str, batch_size: int):
@@ -592,7 +609,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
                 elems_by_key[key].append(elem)
 
         data = {
-            key: elems[0].field.reduce_data(elems)
+            key: elems[0].field.reduce_data(elems, key=key)
             for key, elems in elems_by_key.items() if len(elems) > 0
         }
 
@@ -762,6 +779,9 @@ class MultiModalInputs(TypedDict):
 
     prompt_token_ids: list[int]
     """The processed token IDs which includes placeholder tokens."""
+
+    prompt_embeds: NotRequired[torch.Tensor]
+    """The embeddings of the prompt."""
 
     token_type_ids: NotRequired[list[int]]
     """The token type IDs of the prompt."""

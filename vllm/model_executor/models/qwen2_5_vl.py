@@ -45,6 +45,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
@@ -214,10 +215,13 @@ class Qwen2_5_VisionAttention(nn.Module):
         self.num_attention_heads_per_partition = dist_utils.divide(
             num_heads, self.tp_size)
 
-        self.qkv = ColumnParallelLinear(input_size=embed_dim,
-                                        output_size=3 * projection_size,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.qkv")
+        self.qkv = QKVParallelLinear(hidden_size=embed_dim,
+                                     head_size=self.hidden_size_per_attention_head,
+                                     total_num_heads=num_heads,
+                                     total_num_kv_heads=num_heads,
+                                     bias=True,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.qkv")
         self.proj = RowParallelLinear(input_size=projection_size,
                                       output_size=embed_dim,
                                       quant_config=quant_config,
@@ -483,6 +487,23 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
         return self._freqs_cached[:seqlen]
 
 
+class Qwen2RMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+
+
 class Qwen2_5_VisionTransformer(nn.Module):
 
     def __init__(
@@ -515,7 +536,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             hidden_size=self.hidden_size,
         )
 
-        norm_layer = partial(RMSNorm, eps=norm_eps)
+        norm_layer = partial(Qwen2RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
@@ -697,6 +718,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
+            ("attn.qkv.", "attn.q.", "q"),
+            ("attn.qkv.", "attn.k.", "k"),
+            ("attn.qkv.", "attn.v.", "v"),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()

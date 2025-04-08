@@ -34,7 +34,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
-                                         RPCUProfileRequest, RPCWakeUpRequest)
+                                         RPCUProfileRequest, RPCWakeUpRequest,
+                                         RPCResumeRequest)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
@@ -447,6 +448,7 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        resumable: Optional[bool] = False,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
 
@@ -462,6 +464,7 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        resumable: Optional[bool] = False,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
 
@@ -478,6 +481,7 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        resumable: Optional[bool] = False,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -507,7 +511,23 @@ class MQLLMEngineClient(EngineClient):
 
         return self._process_request(prompt, sampling_params, request_id,
                                      lora_request, trace_headers,
-                                     prompt_adapter_request, priority)
+                                     prompt_adapter_request, priority,
+                                     resumable=resumable)
+
+
+    async def resume_request(
+        self,
+        request_id: str,
+        prompt_embeds: Any,
+        forever: bool = False,
+    ):
+        await self._send_one_way_rpc_request(request=RPCResumeRequest(
+            request_id=request_id,
+            prompt_embeds=prompt_embeds,
+            forever=forever,
+        ),
+                                             socket=self.input_socket)
+
 
     @overload
     def encode(
@@ -591,6 +611,7 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        resumable: Optional[bool] = False,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
             PoolingRequestOutput, None]]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
@@ -645,6 +666,7 @@ class MQLLMEngineClient(EngineClient):
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
+                    resumable=resumable,
                 ))
 
             # 3) Send the RPCGenerateRequest to the MQLLMEngine.

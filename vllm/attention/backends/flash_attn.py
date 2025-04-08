@@ -25,8 +25,12 @@ from vllm.attention.backends.utils import (
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
-from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                  flash_attn_with_kvcache)
+try:
+    from vllm.vllm_flash_attn import (flash_attn_varlen_func,
+                                      flash_attn_with_kvcache)
+except (ImportError, ModuleNotFoundError):
+    from vllm_flash_attn import (flash_attn_varlen_func,
+                                 flash_attn_with_kvcache)
 from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version)
 
@@ -443,7 +447,9 @@ class FlashAttentionMetadataBuilder(
             # only allowing multiple of block_size chunk size.
             # NOTE: This only works for oooooooxxx style attention.
             block_table = []
-            if prefix_cache_hit:
+            if (prefix_cache_hit
+                    or (block_tables and self.input_builder.runner.
+                        model_config.is_omni_thinker_model())):
                 # NOTE(woosuk): For flash-attn, the block table should
                 # include the entries for the incoming prefill tokens.
                 block_table = block_tables[seq_id]
@@ -462,7 +468,7 @@ class FlashAttentionMetadataBuilder(
                                                        context_len,
                                                        self.sliding_window)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
-                                 seq_len, context_len, start_idx,
+                                 curr_seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
 
     def _get_graph_runner_block_tables(

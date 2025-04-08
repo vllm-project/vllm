@@ -906,6 +906,28 @@ def _parse_chat_message_content_mm_part(
     """
     assert isinstance(
         part, dict)  # This is needed to avoid mypy errors: part.get() from str
+
+    if 'text' in part and 'type' not in part:
+        part['type'] = 'text'
+    if part['type'] == 'audio' or part['type'] == 'audio_url':
+        audio = part.pop("audio", part.pop("audio_url", None))
+        if isinstance(audio, str):
+            audio = {"url": audio}
+        part["audio_url"] = audio
+        part["type"] = "audio_url"
+    if part['type'] == 'video' or part['type'] == 'video_url':
+        video = part.pop("video", part.pop("video_url", None))
+        if isinstance(video, str):
+            video = {"url": video}
+        part["video_url"] = video
+        part["type"] = "video_url"
+    if part['type'] == 'image' or part['type'] == 'image_url':
+        image = part.pop("image", part.pop("image_url", None))
+        if isinstance(image, str):
+            image = {"url": image}
+        part["image_url"] = image
+        part["type"] = "image_url"
+
     part_type = part.get("type", None)
 
     if isinstance(part_type, str) and part_type in MM_PARSER_MAP:

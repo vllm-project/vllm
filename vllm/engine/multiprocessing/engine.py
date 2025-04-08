@@ -25,7 +25,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
-                                         RPCUProfileRequest, RPCWakeUpRequest)
+                                         RPCUProfileRequest, RPCWakeUpRequest,
+                                         RPCResumeRequest)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -277,6 +278,8 @@ class MQLLMEngine:
                     self.wake_up(request.tags)
                 elif isinstance(request, RPCIsSleepingRequest):
                     self._handle_is_sleeping_request(request)
+                elif isinstance(request, RPCResumeRequest):
+                    self._handle_resume_request(request)
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -304,7 +307,8 @@ class MQLLMEngine:
                 lora_request=request.lora_request,
                 trace_headers=request.trace_headers,
                 prompt_adapter_request=request.prompt_adapter_request,
-                priority=request.priority)
+                priority=request.priority,
+                resumable=request.resumable)
 
             if self.log_requests:
                 logger.info("Added request %s.", request.request_id)
@@ -323,6 +327,12 @@ class MQLLMEngine:
 
             # Remove request from the engine.
             self.engine.abort_request(request_id)
+
+    def _handle_resume_request(self, request: RPCResumeRequest):
+        self.engine.resume_request(request.request_id,
+                                   prompt_embeds=request.prompt_embeds.to(
+                                       self.engine.device_config.device),
+                                   forever=request.forever)
 
     def _handle_abort_request(self, request: RPCAbortRequest):
         self.engine.abort_request(request.request_id)

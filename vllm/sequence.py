@@ -166,6 +166,8 @@ class SequenceData(msgspec.Struct,
     _output_token_ids: array = msgspec.field(
         default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
 
+    _prompt_embeds: Optional[torch.Tensor] = None
+
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
     _prompt_token_ids_tuple: tuple[int,
@@ -248,7 +250,10 @@ class SequenceData(msgspec.Struct,
 
     @prompt_token_ids.setter
     def prompt_token_ids(self, new_prompt_token_ids) -> None:
-        raise NotImplementedError
+        self._prompt_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                       new_prompt_token_ids)
+        self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
+        self._update_cached_all_tokens()
 
     @property
     def prompt_token_ids_array(self) -> array:
@@ -258,6 +263,14 @@ class SequenceData(msgspec.Struct,
         with torch.long (2 bytes vs 4 bytes). So beware of the usage.
         """
         return self._prompt_token_ids
+
+    @property
+    def prompt_embeds(self) -> Optional[torch.Tensor]:
+        return self._prompt_embeds
+
+    @prompt_embeds.setter
+    def prompt_embeds(self, prompt_embeds: torch.Tensor) -> None:
+        self._prompt_embeds = prompt_embeds
 
     @property
     def output_token_ids(self) -> tuple[int, ...]:
@@ -305,6 +318,9 @@ class SequenceData(msgspec.Struct,
 
     def get_token_ids(self) -> list[int]:
         return self._cached_all_token_ids
+
+    def set_token_ids(self, token_ids: list[int]) -> None:
+        self._cached_all_token_ids = token_ids
 
     def get_prefix_token_ids(
             self, num_tokens: int
@@ -426,6 +442,7 @@ class Sequence:
         self.prompt_adapter_request = prompt_adapter_request
 
         self.data = SequenceData.from_seqs(self.prompt_token_ids)
+        self.data.prompt_embeds = self.inputs.prompt_embeds
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -651,6 +668,8 @@ class SequenceGroup:
                     model; equal to max number of tokens a step can generate
                     for single-draft speculative decoding but larger than 
                     that for multi-draft SD (currently not supported).
+        resumable: User-defined flag to indicate that the request
+                   can be resumed with extra inputs.
     """
 
     def __init__(self,
@@ -665,7 +684,8 @@ class SequenceGroup:
                  trace_headers: Optional[Mapping[str, str]] = None,
                  prompt_adapter_request: Optional[PromptAdapterRequest] = None,
                  priority: int = 0,
-                 draft_size: int = 1) -> None:
+                 draft_size: int = 1,
+                 resumable: bool = False) -> None:
         self.request_id = request_id
         self.seqs = seqs
         self.first_seq = seqs[0]
@@ -691,6 +711,8 @@ class SequenceGroup:
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
         self.priority = priority
+        self.resumable = resumable
+        self.ready_to_resume = True
 
         self.cached_request_output = None
 
@@ -745,6 +767,10 @@ class SequenceGroup:
         elif self.encoder_seq is not None:
             return self.encoder_seq.mm_processor_kwargs
         return {}
+
+    @property
+    def is_multi_modal(self) -> bool:
+        return bool(self.first_seq.multi_modal_data)
 
     @property
     def lora_int_id(self) -> int:
@@ -893,6 +919,17 @@ class SequenceGroup:
 
     def is_prefill(self) -> bool:
         return self.first_seq.is_prefill()
+
+    def resume_request(
+        self,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        forever: Optional[bool] = False,
+    ) -> None:
+        if forever:
+            self.resumable = False
+        if prompt_embeds is not None:
+            self.first_seq.data.prompt_embeds = prompt_embeds
+        self.ready_to_resume = True
 
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "
@@ -1093,6 +1130,9 @@ class CompletionSequenceGroupOutput(
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
     step_index: Optional[int] = 0
+
+    # embeddings and hidden states tensor
+    prompt_embeds: Optional[torch.Tensor] = None
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "

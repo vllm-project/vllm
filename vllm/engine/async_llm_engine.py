@@ -480,6 +480,15 @@ class _AsyncLLMEngine(LLMEngine):
             prompt = inputs
         assert prompt is not None and params is not None
 
+        if isinstance(prompt, dict):
+            if prompt.get("prompt_embeds", None) is not None:
+                prompt["prompt_embeds"] = prompt["prompt_embeds"].to(
+                    self.device_config.device)
+            if prompt.get("multi_modal_data", None) is not None:
+                for key in list(prompt["multi_modal_data"].keys()):
+                    if not prompt["multi_modal_data"][key]:
+                        del prompt["multi_modal_data"][key]
+
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
@@ -493,12 +502,30 @@ class _AsyncLLMEngine(LLMEngine):
             tokenizer = await self.get_tokenizer_async(lora_request)
             self._validate_token_prompt(prompt, tokenizer=tokenizer)
 
+        if (isinstance(prompt, dict)
+                and not prompt.get("prompt_token_ids", None)
+                and prompt.get("prompt", None)):
+            tokenizer = await self.get_tokenizer_async(lora_request)
+            prompt["prompt_token_ids"] = tokenizer.encode(prompt["prompt"])
+
+        self._prune_omni_talker_input(prompt)
+
+        use_audio_in_video = None
+        if isinstance(prompt, dict) and prompt.get("multi_modal_data", None):
+            use_audio_in_video = prompt["multi_modal_data"].pop(
+                "use_audio_in_video", None)
+
         preprocessed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
+        self._prune_omni_talker_prompt_embed(preprocessed_inputs)
         processed_inputs = self.input_processor(preprocessed_inputs)
+
+        if "mm_kwargs" in processed_inputs and use_audio_in_video is not None:
+            processed_inputs["mm_kwargs"][
+                "use_audio_in_video"] = use_audio_in_video
 
         if isinstance(params, SamplingParams) and \
             params.guided_decoding is not None:

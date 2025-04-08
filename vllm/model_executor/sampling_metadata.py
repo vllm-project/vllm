@@ -430,7 +430,7 @@ class SamplingTensors:
             if not do_penalties and (abs(p) >= _SAMPLING_EPS
                                      or abs(f) >= _SAMPLING_EPS
                                      or abs(r - 1.0) >= _SAMPLING_EPS):
-                do_penalties = True
+                do_penalties = sampling_params.do_penalties
 
             is_prompt = seq_group.is_prompt
             if is_prompt and sampling_params.prompt_logprobs is not None:

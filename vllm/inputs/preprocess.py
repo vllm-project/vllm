@@ -333,6 +333,7 @@ class InputPreprocessor:
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
+                prompt_embeds=parsed.get("prompt_embeds"),
             )
 
         if parsed["type"] == "tokens":
@@ -344,16 +345,19 @@ class InputPreprocessor:
             mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
 
             if multi_modal_data is not None and self._can_process_multimodal():
-                return self._process_multimodal(
+                inputs = self._process_multimodal(
                     prompt_token_ids,
                     multi_modal_data,
                     mm_processor_kwargs,
                     lora_request=lora_request,
                     return_mm_hashes=return_mm_hashes,
                 )
+                inputs["prompt_embeds"] = tokens_content.get("prompt_embeds")
+                return inputs
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
+                prompt_embeds=tokens_content.get("prompt_embeds"),
                 token_type_ids=token_type_ids,
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,
@@ -367,13 +371,15 @@ class InputPreprocessor:
             mm_processor_kwargs = text_content.get("mm_processor_kwargs")
 
             if multi_modal_data is not None and self._can_process_multimodal():
-                return self._process_multimodal(
+                inputs = self._process_multimodal(
                     prompt_text,
                     multi_modal_data,
                     mm_processor_kwargs,
                     lora_request=lora_request,
                     return_mm_hashes=return_mm_hashes,
                 )
+                inputs["prompt_embeds"] = tokens_content.get("prompt_embeds")
+                return inputs
 
             prompt_token_ids = self._tokenize_prompt(
                 prompt_text,
@@ -382,6 +388,7 @@ class InputPreprocessor:
 
             return token_inputs(
                 prompt=prompt_text,
+                prompt_embeds=text_content.get("prompt_embeds"),
                 prompt_token_ids=prompt_token_ids,
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,
@@ -408,6 +415,7 @@ class InputPreprocessor:
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
+                prompt_embeds=parsed.get("prompt_embeds"),
             )
 
         if parsed["type"] == "tokens":
@@ -418,16 +426,19 @@ class InputPreprocessor:
             mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
 
             if multi_modal_data is not None and self._can_process_multimodal():
-                return await self._process_multimodal_async(
+                inputs = await self._process_multimodal_async(
                     prompt_token_ids,
                     multi_modal_data,
                     mm_processor_kwargs,
                     lora_request=lora_request,
                     return_mm_hashes=return_mm_hashes,
                 )
+                inputs["prompt_embeds"] = tokens_content.get("prompt_embeds")
+                return inputs
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
+                prompt_embeds=tokens_content.get("prompt_embeds"),
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,
             )
@@ -440,13 +451,15 @@ class InputPreprocessor:
             mm_processor_kwargs = text_content.get("mm_processor_kwargs")
 
             if multi_modal_data is not None and self._can_process_multimodal():
-                return await self._process_multimodal_async(
+                inputs = await self._process_multimodal_async(
                     prompt_text,
                     multi_modal_data,
                     mm_processor_kwargs,
                     lora_request=lora_request,
                     return_mm_hashes=return_mm_hashes,
                 )
+                inputs["prompt_embeds"] = text_content.get("prompt_embeds")
+                return inputs
 
             prompt_token_ids = await self._tokenize_prompt_async(
                 prompt_text,
@@ -456,6 +469,7 @@ class InputPreprocessor:
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
+                prompt_embeds=text_content.get("prompt_embeds"),
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,
             )

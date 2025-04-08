@@ -11,6 +11,8 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
 
+import torch
+
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.config import CompilationConfig
@@ -282,6 +284,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         *,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -298,6 +301,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         list[SamplingParams]]] = None,
         prompt_token_ids: Optional[list[int]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -314,6 +318,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         list[SamplingParams]]] = None,
         prompt_token_ids: Optional[list[list[int]]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -331,6 +336,7 @@ class LLM:
                                         list[SamplingParams]]] = None,
         *,
         prompt_token_ids: list[int],
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -348,6 +354,7 @@ class LLM:
                                         list[SamplingParams]]] = None,
         *,
         prompt_token_ids: list[list[int]],
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -363,6 +370,7 @@ class LLM:
         prompts: None,
         sampling_params: None,
         prompt_token_ids: Union[list[int], list[list[int]]],
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -383,6 +391,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -446,6 +455,9 @@ class LLM:
         else:
             parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
                                   prompts)
+
+        if prompt_embeds is not None:
+            parsed_prompts.prompt_embeds = prompt_embeds
 
         if isinstance(guided_options_request, dict):
             if len(guided_options_request) > 1:

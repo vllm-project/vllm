@@ -56,8 +56,11 @@ class Qwen2AudioInputs(TypedDict):
     input_features: torch.Tensor
     """Shape: `(num_audios, num_mel_bins, 3000)`"""
 
-    feature_attention_mask: torch.Tensor
+    feature_attention_mask: torch.Tensor = None
     """Shape: `(num_audios, 3000)`"""
+
+    audio_feature_lengths: Optional[torch.Tensor] = None
+    """Shape: `(num_audios,)`"""
 
 
 # === Audio Encoder === #
@@ -208,10 +211,15 @@ class Qwen2AudioMultiModalProcessor(
         audio_bos_id = vocab[audio_bos_token]
         audio_eos_id = vocab[audio_eos_token]
 
+        audio_feature_lengths = out_mm_kwargs.get("audio_feature_lengths")
         feature_attention_mask = out_mm_kwargs.get("feature_attention_mask")
-        if feature_attention_mask is None:
+        if audio_feature_lengths is None and feature_attention_mask is None:
             audio_output_lengths = []
-        else:
+        elif audio_feature_lengths is not None:
+            _, audio_output_lens = _get_feat_extract_output_lengths(
+                audio_feature_lengths)
+            audio_output_lengths = audio_output_lens.tolist()
+        elif feature_attention_mask is not None:
             assert isinstance(feature_attention_mask, torch.Tensor)
             _, audio_output_lens = _get_feat_extract_output_lengths(
                 feature_attention_mask.sum(-1))

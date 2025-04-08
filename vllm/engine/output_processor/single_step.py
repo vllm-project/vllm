@@ -120,6 +120,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         seq = seq_group.first_seq
         if not is_async:
             seq.append_token_id(sample.output_token, sample.logprobs)
+        # bind the prompt embeds if in both async and non-async mode
+        if outputs.prompt_embeds is not None:
+            seq.data.prompt_embeds = outputs.prompt_embeds
         if sampling_params.detokenize and self.detokenizer:
             new_char_count = self.detokenizer.decode_sequence_inplace(
                 seq, sampling_params)

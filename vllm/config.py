@@ -122,6 +122,7 @@ class ModelConfig:
             available, "slow" will always use the slow tokenizer,
             "mistral" will always use the tokenizer from `mistral_common`, and
             "custom" will use --tokenizer to select the preregistered tokenizer.
+        processor: Name or path of the huggingface processor to use.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
         allowed_local_media_path: Allowing API requests to read local images or
@@ -236,6 +237,7 @@ class ModelConfig:
         task: Union[TaskOption, Literal["draft"]],
         tokenizer: str,
         tokenizer_mode: str,
+        processor: str,
         trust_remote_code: bool,
         dtype: Union[str, torch.dtype],
         seed: int,
@@ -273,6 +275,7 @@ class ModelConfig:
     ) -> None:
         self.model = maybe_model_redirect(model)
         self.tokenizer = maybe_model_redirect(tokenizer)
+        self.processor = processor
 
         self.hf_config_path = hf_config_path
         if isinstance(hf_config_path, str):
@@ -450,6 +453,24 @@ class ModelConfig:
     @property
     def architectures(self) -> list[str]:
         return getattr(self.hf_config, "architectures", [])
+
+    def is_omni_model(self) -> bool:
+        return self.is_omni_thinker_model() or self.is_omni_talker_model()
+
+    def is_omni_thinker_model(self) -> bool:
+        return self.architectures and self.architectures[0] in [
+            "Qwen2OmniThinkerForConditionalGeneration",
+            "Qwen2OmniNaViTThinkerForConditionalGeneration",
+            "Qwen2_5OmniModel",
+            'Qwen2_5OmniThinkerModel',
+        ]
+
+    def is_omni_talker_model(self) -> bool:
+        return self.architectures and self.architectures[0] in [
+            "Qwen2OmniTalkerForConditionalGeneration",
+            "Qwen2OmniNaViTTalkerForConditionalGeneration",
+            "Qwen2_5OmniTalkerModel",
+        ]
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
@@ -1180,6 +1201,7 @@ class CacheConfig:
         prefix_caching_hash_algo: str = "builtin",
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
+        enable_hidden_state_caching: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -1192,6 +1214,7 @@ class CacheConfig:
         self.prefix_caching_hash_algo = prefix_caching_hash_algo
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
+        self.enable_hidden_state_caching = enable_hidden_state_caching
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -2147,6 +2170,7 @@ class SpeculativeConfig:
                     task="draft",
                     tokenizer=self.target_model_config.tokenizer,
                     tokenizer_mode=self.target_model_config.tokenizer_mode,
+                    processor=self.target_model_config.processor,
                     trust_remote_code=self.target_model_config.
                     trust_remote_code,
                     allowed_local_media_path=self.target_model_config.

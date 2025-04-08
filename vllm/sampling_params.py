@@ -169,6 +169,7 @@ class SamplingParams(
             always return the log probability of the sampled token, so there
             may be up to `logprobs+1` elements in the response.
         prompt_logprobs: Number of log probabilities to return per prompt token.
+        do_penalties: Whether to apply penalties to the logits. Defaults to True.
         detokenize: Whether to detokenize the output. Defaults to True.
         skip_special_tokens: Whether to skip special tokens in the output.
         spaces_between_special_tokens: Whether to add spaces between special
@@ -209,6 +210,7 @@ class SamplingParams(
     min_tokens: int = 0
     logprobs: Optional[int] = None
     prompt_logprobs: Optional[int] = None
+    do_penalties: Optional[bool] = True
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
@@ -236,6 +238,11 @@ class SamplingParams(
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
+
+    # Chunked return: don't return request output every time
+    chunked_return: bool = False
+    chunked_return_first_size: Optional[int] = None
+    chunked_return_size: Optional[int] = None
 
     @staticmethod
     def from_optional(
@@ -268,6 +275,9 @@ class SamplingParams(
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
+        chunked_return: bool = False,
+        chunked_return_first_size: Optional[int] = None,
+        chunked_return_size: Optional[int] = None,
         extra_args: Optional[dict[str, Any]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
@@ -310,6 +320,9 @@ class SamplingParams(
             guided_decoding=guided_decoding,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
+            chunked_return=chunked_return,
+            chunked_return_first_size=chunked_return_first_size,
+            chunked_return_size=chunked_return_size,
             extra_args=extra_args,
         )
 
@@ -373,6 +386,10 @@ class SamplingParams(
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
 
+        if not self.chunked_return:
+            self.chunked_return_first_size = None
+            self.chunked_return_size = None
+
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
             raise ValueError(f"n must be an int, but is of "
@@ -432,6 +449,12 @@ class SamplingParams(
         if self.best_of != self._real_n and self.output_kind == (
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
+
+        if self.chunked_return:
+            if self.chunked_return_first_size is None:
+                self.chunked_return_first_size = 1
+            if self.chunked_return_size is None:
+                self.chunked_return_size = 4
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:

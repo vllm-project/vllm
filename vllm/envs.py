@@ -4,6 +4,7 @@ import hashlib
 import os
 import sys
 import tempfile
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
@@ -707,6 +708,28 @@ def __getattr__(name: str):
     if name in environment_variables:
         return environment_variables[name]()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Allow __setattr__ and __delattr__ to be defined, see also: PEP-0726.
+class ModifiableModule(ModuleType):
+
+    def __setattr__(self, name, value):
+        if name in environment_variables:
+            if isinstance(value, bool):
+                os.environ[name] = "1" if value else "0"
+            else:
+                os.environ[name] = str(value)
+            environment_variables[name] = lambda: value
+        else:
+            raise AttributeError(
+                f"module {__name__!r} has no attribute {name!r}")
+
+    def __delattr__(self, name):
+        raise AttributeError(
+            'attribute {name!r} cannot be deleted from module {__name__!r}')
+
+
+sys.modules[__name__].__class__ = ModifiableModule
 
 
 def __dir__():

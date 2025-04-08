@@ -220,8 +220,60 @@ def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
+def patch_vision_tokens(config: PretrainedConfig) -> None:
+    """Provide backwards compatibility for vision tokens."""
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        patch_vision_tokens(text_config)
+
+    if hasattr(config,
+               'audio_token_index') and not hasattr(config, 'audio_token_id'):
+        config.audio_token_id = config.audio_token_index
+    if hasattr(config,
+               'image_token_index') and not hasattr(config, 'image_token_id'):
+        config.image_token_id = config.image_token_index
+    if hasattr(config,
+               'video_token_index') and not hasattr(config, 'video_token_id'):
+        config.video_token_id = config.video_token_index
+
+    if hasattr(config, 'thinker_config'):
+        if hasattr(config.thinker_config, 'audio_token_index') and not hasattr(
+                config.thinker_config, 'audio_token_id'):
+            config.thinker_config.audio_token_id = config.thinker_config.audio_token_index
+        if hasattr(config.thinker_config, 'image_token_index') and not hasattr(
+                config.thinker_config, 'image_token_id'):
+            config.thinker_config.image_token_id = config.thinker_config.image_token_index
+        if hasattr(config.thinker_config, 'video_token_index') and not hasattr(
+                config.thinker_config, 'video_token_id'):
+            config.thinker_config.video_token_id = config.thinker_config.video_token_index
+
+    if hasattr(config, 'spatial_merge_size') and (
+            not hasattr(config, 'vision_config')
+            or not hasattr(config.vision_config, 'spatial_merge_size')):
+        if not hasattr(config, 'vision_config'):
+            config.vision_config = PretrainedConfig()
+        config.vision_config.spatial_merge_size = config.spatial_merge_size
+
+
+def omni_thinker_uses_mrope(config: PretrainedConfig) -> bool:
+    """Detect if the model contains a thinker config and it uses M-ROPE."""
+    thinker_config = getattr(config, "thinker_config", None)
+    if thinker_config is None:
+        return False
+
+    thinker_config = getattr(thinker_config, "text_config", thinker_config)
+    rope_scaling = getattr(thinker_config, "rope_scaling", None)
+    if rope_scaling is None:
+        return False
+
+    return "mrope_section" in rope_scaling
+
+
 def uses_mrope(config: PretrainedConfig) -> bool:
     """Detect if the model with this config uses M-ROPE."""
+    if omni_thinker_uses_mrope(config):
+        return True
+
     rope_scaling = getattr(config, "rope_scaling", None)
     if rope_scaling is None:
         return False
@@ -347,6 +399,7 @@ def get_config(
         config.update({"architectures": [model_type]})
 
     patch_rope_scaling(config)
+    patch_vision_tokens(config)
 
     if trust_remote_code:
         maybe_register_config_serialize_by_value()
@@ -738,6 +791,16 @@ def get_hf_text_config(config: PretrainedConfig):
         # if transformers config doesn't align with this assumption.
         assert hasattr(config.text_config, "num_attention_heads")
         return config.text_config
+    elif hasattr(config, "thinker_config"):
+        # TODO(suyang.fy): Refactor code.
+        #  For Qwen2.5-Omni, change hf_text_config to thinker_config.
+        return getattr(config.thinker_config, 'text_config',
+                       config.thinker_config)
+    elif hasattr(config, "talker_config"):
+        # TODO(suyang.fy): Refactor code.
+        #  For Qwen2.5-Omni, change hf_text_config to talker_config.
+        return getattr(config.talker_config, 'text_config',
+                       config.talker_config)
     else:
         return config
 

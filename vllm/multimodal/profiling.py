@@ -129,8 +129,10 @@ class MultiModalProfiler(Generic[_I]):
         supported_mm_limits = self.processing_info.get_supported_mm_limits()
 
         mm_limits = {
-            modality: mm_config.get_limit_per_prompt(modality)
-            for modality in supported_mm_limits
+            modality:
+            1 if limit is None else min(limit,
+                                        mm_config.get_limit_per_prompt(modality))
+            for modality, limit in supported_mm_limits.items()
         }
 
         for modality, supported_limit in supported_mm_limits.items():

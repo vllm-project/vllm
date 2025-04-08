@@ -104,7 +104,7 @@ class MediaConnector:
         if url_spec.scheme == "data":
             return self._load_data_url(url_spec, media_io)
 
-        if url_spec.scheme == "file":
+        if url_spec.scheme == "file" or url_spec.scheme == "":
             return self._load_file_url(url_spec, media_io)
 
         msg = "The URL must be either a HTTP, data or file URL."

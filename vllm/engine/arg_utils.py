@@ -99,6 +99,7 @@ class EngineArgs:
     task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
+    processor: Optional[str] = None
     trust_remote_code: bool = False
     allowed_local_media_path: str = ""
     download_dir: Optional[str] = None
@@ -213,9 +214,14 @@ class EngineArgs:
     reasoning_parser: Optional[str] = None
     use_tqdm_on_load: bool = True
 
+    # anable hidden state caching for the model
+    enable_hidden_state_caching: bool = False
+
     def __post_init__(self):
         if not self.tokenizer:
             self.tokenizer = self.model
+        if not self.processor:
+            self.processor = self.tokenizer
 
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -251,6 +257,12 @@ class EngineArgs:
             type=nullable_str,
             default=EngineArgs.tokenizer,
             help='Name or path of the huggingface tokenizer to use. '
+            'If unspecified, model name or path will be used.')
+        parser.add_argument(
+            '--processor',
+            type=nullable_str,
+            default=EngineArgs.processor,
+            help='Name or path of the huggingface processor to use. '
             'If unspecified, model name or path will be used.')
         parser.add_argument(
             "--hf-config-path",
@@ -460,7 +472,7 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32, 64, 128],
+                            choices=[8, 16, 32, 64, 128, 256],
                             help='Token block size for contiguous chunks of '
                             'tokens. This is ignored on neuron devices and '
                             'set to ``--max-model-len``. On CUDA devices, '
@@ -1017,6 +1029,14 @@ class EngineArgs:
             "Note that even if this is set to False, cascade attention will be "
             "only used when the heuristic tells that it's beneficial.")
 
+        parser.add_argument(
+            "--enable-hidden-state-caching",
+            action=StoreBoolean,
+            default=EngineArgs.enable_hidden_state_caching,
+            help=
+            "Enable hidden state caching, only on worker 0 to reduce overhead."
+        )
+
         return parser
 
     @classmethod
@@ -1046,6 +1066,7 @@ class EngineArgs:
             # We know this is not None because we set it in __post_init__
             tokenizer=cast(str, self.tokenizer),
             tokenizer_mode=self.tokenizer_mode,
+            processor=cast(str, self.processor),
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,
@@ -1190,6 +1211,7 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            enable_hidden_state_caching=self.enable_hidden_state_caching,
         )
 
         # Get the current placement group if Ray is initialized and
