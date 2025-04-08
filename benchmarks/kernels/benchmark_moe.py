@@ -442,8 +442,13 @@ class BenchmarkWorker:
                                                    hidden_size, search_space,
                                                    is_fp16, topk)
 
-        with torch.cuda.device(self.device_id) if current_platform.is_rocm(
-        ) else nullcontext():
+        need_device_guard = False
+        if current_platform.is_rocm():
+            visible_device = os.environ.get("ROCR_VISIBLE_DEVICES", None)
+            if visible_device != f"{self.device_id}":
+                need_device_guard = True
+
+        with torch.cuda.device(self.device_id) if need_device_guard else nullcontext():
             for config in tqdm(search_space):
                 try:
                     kernel_time = benchmark_config(
