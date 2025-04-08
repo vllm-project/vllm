@@ -143,8 +143,10 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
         "multi_modal_data": mm_data,
     })
 
+    print("-" * 50)
     for output in outputs:
         print(output.outputs.embedding)
+        print("-" * 50)
 
 
 def main(args: Namespace):

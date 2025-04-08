@@ -1089,14 +1089,18 @@ def main(args):
         start_time = time.time()
         outputs = llm.generate(inputs, sampling_params=sampling_params)
         elapsed_time = time.time() - start_time
+        print("-" * 50)
         print("-- generate time = {}".format(elapsed_time))
+        print("-" * 50)
 
     else:
         outputs = llm.generate(inputs, sampling_params=sampling_params)
 
+    print("-" * 50)
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+        print("-" * 50)
 
 
 if __name__ == "__main__":
