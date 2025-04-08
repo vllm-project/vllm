@@ -30,7 +30,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.configuration_minimax_text_01 import MiniMaxText01Config
 from .image_processer import ImageProcessor, resize_multiple_of, _convert_image_to_rgb
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from .clip import CLIPVisionModel
@@ -314,18 +313,18 @@ class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=0)
+                                   num_images=num_images)
         }
 
         return ProcessorInputs(
-            prompt_text="<image>" * 0,
+            prompt_text="<image>" * num_images,
             mm_data=mm_data,
         )
 
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaNextMultiModalProcessor,
     info=LlavaNextProcessingInfo,
-    dummy_inputs=MiniMaxVLDummyInputsBuilder)
+    dummy_inputs=LlavaDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
