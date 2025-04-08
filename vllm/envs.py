@@ -706,7 +706,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XGRAMMAR_CACHE_MB":
     lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
 
-    ## Enable Share Expert Fusion
+    # Enable Share Expert Fusion by setting this > 0, disable by setting = 0
+    # The value here will be the Shared Expert relicas copied into MoE
+    # Set a larger value will consume more GPU memory
+    # but a better loading-balance thus potentially faster inference
     "VLLM_SHARED_EXPERT_FUSION_REPLICAS":
     lambda: int(os.environ["VLLM_SHARED_EXPERT_FUSION_REPLICAS"])
     if "VLLM_SHARED_EXPERT_FUSION_REPLICAS" in os.environ else 0

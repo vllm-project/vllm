@@ -780,6 +780,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        routed_scaling_factor: float = 2.5,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -794,7 +795,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            share_fusion=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS)
+            share_fusion=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS,
+            routed_scaling_factor=routed_scaling_factor,
+        )
 
         return fused_experts(
             x,
