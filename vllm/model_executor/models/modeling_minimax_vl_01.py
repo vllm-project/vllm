@@ -31,7 +31,7 @@ from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.configuration_minimax_text_01 import MiniMaxText01Config
-from .image_processer import ImageProcessor, resize_multiple_of
+from .image_processer import ImageProcessor, resize_multiple_of, _convert_image_to_rgb
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -206,57 +206,98 @@ class LlavaNextMultiModalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _process_image_input(self, images: List[Image.Image], **kwargs) -> Dict[str, Any]:
-        """Process image inputs without relying on LlavaNextProcessor."""
-        all_images = []
-        image_sizes = []
-        
-        for image in images:
-            # Get original size
-            ori_w, ori_h = image.size
-            image_sizes.append([ori_h, ori_w])
-            
-            # Resize image
-            if self.process_image_mode == 'resize':
-                resized_image = image.resize(self.size, Image.BICUBIC)
+    def _process_image_input(
+        self,
+        image_input: LlavaNextImageInputs,
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        if image_input["type"] == "image_embeds":
+            return [image_input["data"]]
+
+        patch_embeddings = self._process_image_pixels(image_input)
+
+        image_sizes = image_input.get("image_sizes")
+        if image_sizes is None:
+            batch_size = len(image_input["data"])
+            vision_config = self.config.vision_config
+            default_height = default_width = vision_config.image_size
+            image_sizes = torch.as_tensor([[default_height, default_width]
+                                           for _ in range(batch_size)])
+
+        return [
+            self._merge_image_patch_embeddings(image_sizes[i],
+                                               patch_features_batch,
+                                               strategy="spatial_unpad")
+            for i, patch_features_batch in enumerate(patch_embeddings)
+        ]
+
+    def _merge_image_patch_embeddings(self, image_size: torch.Tensor,
+                                      patch_embeddings: torch.Tensor, *,
+                                      strategy: str) -> torch.Tensor:
+        if strategy == "flat":
+            return patch_embeddings.flatten(0, 1)
+
+        if strategy.startswith("spatial"):
+            height = width = self.config.vision_config.image_size \
+                // self.config.vision_config.patch_size
+
+            base_patch_embeds = patch_embeddings[0]
+            if height * width != base_patch_embeds.shape[0]:
+                raise ValueError(
+                    "The number of patches is not consistent with the "
+                    "image size.")
+
+            if patch_embeddings.shape[0] > 1:
+                other_patch_embeds = patch_embeddings[1:]
+
+                # Move to CPU to avoid floating-point errors
+                orig_height, orig_width = image_size.tolist()
+
+                # image_aspect_ratio == "anyres"
+                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+                    (orig_height, orig_width),
+                    self.config.image_grid_pinpoints,
+                    self.config.vision_config.image_size,
+                )
+                num_patches = num_patch_height * num_patch_width
+
+                # Image patches might be padded for batch processing
+                other_patch_embeds = other_patch_embeds[:num_patches] \
+                    .view(num_patch_height, num_patch_width, height, width, -1)
+
+                if "unpad" in strategy:
+                    other_patch_embeds = other_patch_embeds \
+                        .permute(4, 0, 2, 1, 3).contiguous() \
+                        .flatten(1, 2).flatten(2, 3)
+                    other_patch_embeds = unpad_image(other_patch_embeds,
+                                                     (orig_height, orig_width))
+                    other_patch_embeds = torch.cat((
+                        other_patch_embeds,
+                        self.image_newline[:, None, None] \
+                            .expand(*other_patch_embeds.shape[:-1], 1) \
+                            .to(other_patch_embeds.device),
+                    ), dim=-1)
+                    other_patch_embeds = other_patch_embeds \
+                        .flatten(1, 2).transpose(0, 1)
+                else:
+                    other_patch_embeds = other_patch_embeds \
+                        .permute(0, 2, 1, 3, 4).contiguous() \
+                        .flatten(0, 3)
+
+                merged_patch_embeddings = torch.cat(
+                    (base_patch_embeds, other_patch_embeds), dim=0)
             else:
-                resized_image = resize_multiple_of(image, self.patch_size, max_size=self.size)
-            
-            # Convert to tensor and normalize
-            transform_img = self._transform(resized_image)
-            img_array = to_numpy_array(transform_img)
-            img_array = to_channel_dimension_format(img_array, ChannelDimension.FIRST)
-            all_images.append(img_array)
+                if "unpad" in strategy:
+                    merged_patch_embeddings = torch.cat(
+                        (base_patch_embeds,
+                         self.image_newline[None] \
+                            .to(base_patch_embeds.device)
+                    ), dim=0)
+                else:
+                    merged_patch_embeddings = base_patch_embeds
 
-        return {
-            "pixel_values": all_images,
-            "image_sizes": image_sizes
-        }
+            return merged_patch_embeddings
 
-    def _transform(self, image):
-        """Convert PIL image to tensor and normalize."""
-        image = _convert_image_to_rgb(image)
-        image = ToTensor()(image)
-        image = Normalize(mean=self.image_mean, std=self.image_std)(image)
-        return image
-
-    def batch_decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to tokenizer's [`~PreTrainedTokenizer.batch_decode`].
-        """
-        return self.tokenizer.batch_decode(*args, **kwargs)
-
-    def decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to tokenizer's [`~PreTrainedTokenizer.decode`].
-        """
-        return self.tokenizer.decode(*args, **kwargs)
-
-    @property
-    def model_input_names(self):
-        tokenizer_input_names = self.tokenizer.model_input_names
-        image_processor_input_names = self.image_processor.model_input_names
-        return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
+        raise ValueError(f"Unexpected patch merge strategy: {strategy}")
 
 _I = TypeVar("_I", bound=LlavaNextProcessingInfo)
 class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
