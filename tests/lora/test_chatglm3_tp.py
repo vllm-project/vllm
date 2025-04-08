@@ -3,10 +3,9 @@
 import pytest
 
 import vllm
-from tests.utils import fork_new_process_for_each_test
 from vllm.lora.request import LoRARequest
 
-from ..utils import multi_gpu_test
+from ..utils import create_new_process_for_each_test, multi_gpu_test
 
 MODEL_PATH = "THUDM/chatglm3-6b"
 
@@ -17,6 +16,14 @@ EXPECTED_LORA_OUTPUT = [
     "SELECT avg(age) ,  min(age) ,  max(age) FROM singer WHERE country  =  'France'",  # noqa: E501
     "SELECT name ,  country ,  age FROM singer ORDER BY age",
 ]
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
 
 
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
@@ -47,15 +54,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
@@ -75,7 +74,7 @@ def test_chatglm3_lora(chatglm3_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_chatglm3_lora_tp4(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
@@ -96,7 +95,7 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,

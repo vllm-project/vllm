@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import os
 
 import neuronxcc.nki.language as nl
 import pytest
@@ -99,6 +98,7 @@ def ref_block_tables_transform(
 )
 @torch.inference_mode()
 def test_load_and_transform_block_tables(
+    monkeypatch: pytest.MonkeyPatch,
     num_tiles,
     num_blocks_per_tile,
     q_head_per_kv_head,
@@ -108,46 +108,46 @@ def test_load_and_transform_block_tables(
 
     device = xm.xla_device()
 
-    compiler_flags = [
+    compiler_flags_str = " ".join([
         "-O1",
         "--retry_failed_compilation",
-    ]
-    compiler_flags_str = " ".join(compiler_flags)
-    os.environ["NEURON_CC_FLAGS"] = compiler_flags_str
+    ])
+    with monkeypatch.context() as m:
+        m.setenv("NEURON_CC_FLAGS", compiler_flags_str)
 
-    torch.manual_seed(10000)
-    torch.set_printoptions(sci_mode=False)
+        torch.manual_seed(10000)
+        torch.set_printoptions(sci_mode=False)
 
-    # On Neuron, we need B_P_SIZE = 128 blocks to make DMA efficient
-    B_P_SIZE = 128
-    if num_blocks_per_tile < B_P_SIZE:
-        assert B_P_SIZE % num_blocks_per_tile == 0
-        block_size_tiling_factor = B_P_SIZE // num_blocks_per_tile
-    else:
-        block_size_tiling_factor = 1
-    max_num_blocks = 100000
-    block_tables = torch.randint(
-        0,
-        max_num_blocks,
-        (num_tiles * num_blocks_per_tile, ),
-        dtype=torch.int32,
-    )
-    nki_out = nki.jit(nki_load_and_transform_block_tables)[1, 1](
-        block_tables.to(device=device),
-        num_tiles,
-        num_blocks_per_tile,
-        q_head_per_kv_head,
-        head_id,
-        block_size_tiling_factor,
-    ).cpu()
-    ref_out = ref_block_tables_transform(
-        block_tables,
-        num_tiles,
-        num_blocks_per_tile,
-        q_head_per_kv_head,
-        head_id,
-        block_size_tiling_factor,
-    )
-    assert (nki_out.shape == ref_out.shape
-            ), f"{nki_out.shape=} != {ref_out.shape=}"
-    assert torch.all(nki_out == ref_out)
+        # On Neuron, we need B_P_SIZE = 128 blocks to make DMA efficient
+        B_P_SIZE = 128
+        if num_blocks_per_tile < B_P_SIZE:
+            assert B_P_SIZE % num_blocks_per_tile == 0
+            block_size_tiling_factor = B_P_SIZE // num_blocks_per_tile
+        else:
+            block_size_tiling_factor = 1
+        max_num_blocks = 100000
+        block_tables = torch.randint(
+            0,
+            max_num_blocks,
+            (num_tiles * num_blocks_per_tile, ),
+            dtype=torch.int32,
+        )
+        nki_out = nki.jit(nki_load_and_transform_block_tables)[1, 1](
+            block_tables.to(device=device),
+            num_tiles,
+            num_blocks_per_tile,
+            q_head_per_kv_head,
+            head_id,
+            block_size_tiling_factor,
+        ).cpu()
+        ref_out = ref_block_tables_transform(
+            block_tables,
+            num_tiles,
+            num_blocks_per_tile,
+            q_head_per_kv_head,
+            head_id,
+            block_size_tiling_factor,
+        )
+        assert (nki_out.shape == ref_out.shape
+                ), f"{nki_out.shape=} != {ref_out.shape=}"
+        assert torch.all(nki_out == ref_out)

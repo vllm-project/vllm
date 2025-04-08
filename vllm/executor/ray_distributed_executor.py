@@ -79,7 +79,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
             # For TPU, avoid compiling NVIDIA's NCCL
             if current_platform.is_tpu():
-                os.environ["VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL"] = "0"
+                os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
 
         # If the env var is set, it uses the Ray's compiled DAG API
         # which optimizes the control plane overhead.
@@ -340,6 +340,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
             and v not in self.non_carry_over_env_vars
         ]
 
+        env_vars_to_copy.extend(current_platform.additional_env_vars)
+
         # Copy existing env vars to each worker's args
         for args in all_args_to_update_environment_variables:
             # TODO: refactor platform-specific env vars
@@ -544,10 +546,11 @@ class RayDistributedExecutor(DistributedExecutorBase):
                              "Run `pip install ray[cgraph]` to install it.")
 
         cupy_spec = importlib.util.find_spec("cupy")
-        if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
+        if (cupy_spec is None
+                and envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE == "nccl"):
             raise ValueError(
                 "cupy is not installed but required since "
-                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set. "
+                "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE is set to 'nccl'. "
                 "Run `pip install ray[cgraph]` and check cupy installation.")
 
     def _compiled_ray_dag(self, enable_asyncio: bool):
@@ -555,10 +558,26 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self._check_ray_cgraph_installation()
         from ray.dag import InputNode, MultiOutputNode
 
-        logger.info("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL = %s",
-                    envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
+        logger.info("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE = %s",
+                    envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE)
         logger.info("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM = %s",
                     envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
+
+        channel_type = envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE
+        if channel_type not in ("auto", "nccl", "shm"):
+            raise ValueError(
+                "Invalid value for VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: "
+                f"{channel_type}. Valid values are: 'auto', 'nccl', or 'shm'.")
+
+        # Enlarge the default value of "RAY_CGRAPH_get_timeout" to 300 seconds
+        # (it is 10 seconds by default). This is a Ray environment variable to
+        # control the timeout of getting result from a compiled graph execution,
+        # i.e., the distributed execution that includes model forward runs and
+        # intermediate tensor communications, in the case of vllm.
+        os.environ.setdefault("RAY_CGRAPH_get_timeout", "300")  # noqa: SIM112
+        logger.info("RAY_CGRAPH_get_timeout is set to %s",
+                    os.environ["RAY_CGRAPH_get_timeout"])  # noqa: SIM112
+
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
             #
@@ -594,13 +613,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     ]
 
                 last_pp_rank = len(self.pp_tp_workers) - 1
-                if pp_rank < last_pp_rank:
+                if (pp_rank < last_pp_rank and
+                        envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE != "shm"):
                     # Specify how intermediate tensors should be passed
                     # between pp stages, no need to specify for the last
-                    # pp stage.
-                    transport = "nccl" \
-                        if envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL \
-                        else "auto"
+                    # pp stage or when using shared memory (the default).
+                    transport = envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE
                     outputs = [
                         output.with_tensor_transport(transport=transport)
                         for output in outputs

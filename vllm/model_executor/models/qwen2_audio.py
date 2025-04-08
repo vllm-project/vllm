@@ -37,8 +37,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -47,7 +46,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -161,7 +160,7 @@ class Qwen2AudioMultiModalProcessor(
         mm_kwargs: Mapping[str, Any],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
-        if not mm_data or not mm_data.get("audios", []):
+        if not mm_data.get("audios", []):
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
@@ -223,10 +222,10 @@ class Qwen2AudioMultiModalProcessor(
             num_features = audio_output_lengths[item_idx]
             if num_features == 0:
                 audios = mm_items.get_items("audio", AudioProcessorItems)
-                audio = audios.get(item_idx)
-                raise ValueError(
-                    f"The audio {audio} (len={len(audio)}) is too short "
-                    "to be represented inside the model")
+                audio_len = audios.get_audio_length(item_idx)
+
+                raise ValueError(f"The audio (len={audio_len}) is too short "
+                                 "to be represented inside the model")
 
             audio_tokens = [audio_token_id] * num_features
 
@@ -357,8 +356,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                            audio_output_lengths.flatten().tolist())
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return None
@@ -368,7 +366,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:

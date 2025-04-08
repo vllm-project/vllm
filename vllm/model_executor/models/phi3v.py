@@ -14,6 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import Any, List, Literal, Optional, Set, Tuple, TypedDict, Union
@@ -31,8 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 # yapf conflicts with isort for this block
@@ -48,7 +48,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP, SupportsQuant
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
+                         SupportsQuant)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -428,10 +429,6 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
 
-        tokenizer = self.info.get_tokenizer()
-        bos_token_id = tokenizer.bos_token_id
-        assert isinstance(bos_token_id, int)
-
         def get_replacement_phi3v(item_idx: int):
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems))
@@ -449,7 +446,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
 
             return PromptUpdateDetails(
-                full=image_tokens + [bos_token_id],
+                full=image_tokens,
                 features=image_tokens,
             )
 
@@ -469,6 +466,40 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         mm_prompt_updates: Mapping[str, Sequence[BoundPromptUpdate]],
         mm_item_counts: Mapping[str, int],
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        # align to hf behavior when there are images
+        if len(mm_item_counts):
+            tokenizer = self.info.get_tokenizer()
+            # to decode token_ids to the original text, we need to
+            # 1. remove the first bos token
+            # 2. remove space after each special token
+            #    introduced by the tokenizer
+            if len(token_ids) and token_ids[0] == tokenizer.bos_token_id:
+                token_ids = token_ids[1:]
+            text = tokenizer.decode(token_ids)
+            for special_tokens in tokenizer.special_tokens_map.values():
+                if isinstance(special_tokens, str):
+                    text = text.replace(f"{special_tokens} ", special_tokens)
+                elif isinstance(special_tokens, list):
+                    for special_token in special_tokens:
+                        text = text.replace(f"{special_token} ", special_token)
+            # perform hf behavior
+            # https://huggingface.co/microsoft/Phi-3.5-vision-instruct/blob/64f88b6/processing_phi3_v.py#L407
+            pattern = r"<\|image_\d+\|>"
+            prompt_chunks = [
+                tokenizer(chunk).input_ids
+                for chunk in re.split(pattern, text)
+            ]
+            image_tags = [
+                tokenizer(chunk, add_special_tokens=False).input_ids
+                for chunk in re.findall(pattern, text)
+            ]
+            if len(prompt_chunks) > len(image_tags):
+                image_tags.append([])
+            token_ids = [
+                e for sublist in zip(prompt_chunks, image_tags)
+                for ele in sublist for e in ele
+            ]
+
         token_ids, text, placeholders = super()._apply_prompt_updates(
             token_ids=token_ids,
             mm_prompt_updates=mm_prompt_updates,
@@ -649,8 +680,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         return image_embeds
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -660,7 +690,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
         if multimodal_embeddings is not None:

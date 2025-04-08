@@ -5,14 +5,14 @@ from typing import Optional
 import numpy as np
 import pytest
 import pytest_asyncio
-from transformers import AutoModel, AutoTokenizer, BatchEncoding
+from transformers import AutoModel, AutoTokenizer
 
 from vllm.multimodal.audio import resample_audio
 from vllm.sequence import SampleLogprobs
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import HfRunner, VllmRunner
 from ....utils import RemoteOpenAIServer
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
@@ -56,7 +56,10 @@ def server(request, audio_assets):
         for key, value in request.param.items()
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME,
+                            args,
+                            env_dict={"VLLM_AUDIO_FETCH_TIMEOUT":
+                                      "30"}) as remote_server:
         yield remote_server
 
 
@@ -107,7 +110,9 @@ def run_test(
     **kwargs,
 ):
     """Inference result should be the same between hf and vllm."""
-    torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
@@ -124,15 +129,7 @@ def run_test(
             for vllm_prompt, _, audio in prompts_and_audios
         ]
 
-    def process(hf_inputs: BatchEncoding, **kwargs):
-        hf_inputs["audio_values"] = hf_inputs["audio_values"] \
-            .to(torch_dtype)  # type: ignore
-        return hf_inputs
-
-    with hf_runner(model,
-                   dtype=dtype,
-                   postprocess_inputs=process,
-                   auto_cls=AutoModel) as hf_model:
+    with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
         hf_outputs_per_audio = [
             hf_model.generate_greedy_logprobs_limit(
                 [hf_prompt],
@@ -167,6 +164,10 @@ def run_multi_audio_test(
     num_logprobs: int,
     **kwargs,
 ):
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
     with vllm_runner(model,
                      dtype=dtype,
                      enforce_eager=True,

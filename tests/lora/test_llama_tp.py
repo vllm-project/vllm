@@ -4,10 +4,9 @@ import pytest
 import ray
 
 import vllm
-from tests.utils import fork_new_process_for_each_test
 from vllm.lora.request import LoRARequest
 
-from ..utils import multi_gpu_test
+from ..utils import create_new_process_for_each_test, multi_gpu_test
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
@@ -27,6 +26,14 @@ EXPECTED_LORA_OUTPUT = [
     "  SELECT pick FROM table_name_60 WHERE former_wnba_team = 'Minnesota Lynx' ",  # noqa: E501
     "  SELECT womens_doubles FROM table_28138035_4 WHERE mens_singles = 'Werner Schlager' "  # noqa: E501
 ]
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
 
 
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
@@ -72,30 +79,24 @@ def generate_and_test(llm, sql_lora_files):
     print("removing lora")
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_llama_lora(sql_lora_files):
 
-    llm = vllm.LLM(MODEL_PATH,
-                   enable_lora=True,
-                   max_num_seqs=16,
-                   max_loras=4,
-                   tensor_parallel_size=1,
-                   enable_chunked_prefill=True)
+    llm = vllm.LLM(
+        MODEL_PATH,
+        enable_lora=True,
+        # also test odd max_num_seqs
+        max_num_seqs=13,
+        max_loras=4,
+        tensor_parallel_size=1,
+        enable_chunked_prefill=True)
     generate_and_test(llm, sql_lora_files)
 
 
 # Skipping for v1 as v1 doesn't have a good way to expose the num_gpu_blocks
 # used by the engine yet.
 @pytest.mark.skip_v1
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_llama_lora_warmup(sql_lora_files):
     """Test that the LLM initialization works with a warmup LORA path and
     is more conservative"""
@@ -124,7 +125,7 @@ def test_llama_lora_warmup(sql_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_llama_lora_tp4(sql_lora_files):
 
     llm = vllm.LLM(
@@ -139,7 +140,7 @@ def test_llama_lora_tp4(sql_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
 
     llm = vllm.LLM(
@@ -149,23 +150,6 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
         max_loras=4,
         tensor_parallel_size=4,
         fully_sharded_loras=True,
-        enable_chunked_prefill=True,
-    )
-    generate_and_test(llm, sql_lora_files)
-
-
-@multi_gpu_test(num_gpus=4)
-@fork_new_process_for_each_test
-def test_llama_lora_tp4_fully_sharded_enable_bias(sql_lora_files):
-
-    llm = vllm.LLM(
-        MODEL_PATH,
-        enable_lora=True,
-        max_num_seqs=16,
-        max_loras=4,
-        tensor_parallel_size=4,
-        fully_sharded_loras=True,
-        enable_lora_bias=True,
         enable_chunked_prefill=True,
     )
     generate_and_test(llm, sql_lora_files)

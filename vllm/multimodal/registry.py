@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
 
-from vllm.envs import VLLM_MM_INPUT_CACHE_SIZE
+from vllm.envs import VLLM_MM_INPUT_CACHE_GIB
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
@@ -21,7 +21,8 @@ from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          ProcessingCache)
-from .profiling import BaseDummyInputsBuilder, MultiModalProfiler
+from .profiling import (BaseDummyInputsBuilder, DummyDecoderData,
+                        DummyEncoderData, MultiModalProfiler)
 from .video import VideoPlugin
 
 if TYPE_CHECKING:
@@ -119,7 +120,7 @@ class MultiModalRegistry:
 
         self._limits_by_model = _MultiModalLimits()
 
-        self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_SIZE)
+        self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """
@@ -256,10 +257,7 @@ class MultiModalRegistry:
         on underlying model configuration.
         """
         if self.has_processor(model_config):
-            tokenizer = cached_tokenizer_from_config(model_config)
-            processor = self.create_processor(model_config,
-                                              tokenizer,
-                                              disable_cache=True)
+            processor = self.create_processor(model_config, disable_cache=True)
             seq_len = model_config.max_model_len
             mm_limits = self.get_mm_limits_per_prompt(model_config)
             return processor.info.get_mm_max_tokens_per_item(
@@ -373,10 +371,7 @@ class MultiModalRegistry:
             This should be called after :meth:`init_mm_limits_per_prompt`.
         """
         if self.has_processor(model_config):
-            tokenizer = cached_tokenizer_from_config(model_config)
-            processor = self.create_processor(model_config,
-                                              tokenizer,
-                                              disable_cache=True)
+            processor = self.create_processor(model_config, disable_cache=True)
             profiler = MultiModalProfiler(processor)
             return profiler.get_mm_limits()
 
@@ -436,8 +431,8 @@ class MultiModalRegistry:
     def create_processor(
         self,
         model_config: "ModelConfig",
-        tokenizer: AnyTokenizer,
         *,
+        tokenizer: Optional[AnyTokenizer] = None,
         disable_cache: Optional[bool] = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
@@ -446,6 +441,8 @@ class MultiModalRegistry:
         See also:
             :ref:`mm-processing`
         """
+        if tokenizer is None:
+            tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
             disable_cache = model_config.disable_mm_preprocessor_cache
 
@@ -456,3 +453,51 @@ class MultiModalRegistry:
         cache = None if disable_cache else self._processing_cache
 
         return factories.build_processor(ctx, cache=cache)
+
+    def get_decoder_dummy_data(
+        self,
+        model_config: "ModelConfig",
+        seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
+    ) -> DummyDecoderData:
+        """
+        Create dummy data for profiling the memory usage of a model.
+
+        The model is identified by ``model_config``.
+        """
+        processor = self.create_processor(model_config, disable_cache=True)
+        profiler = MultiModalProfiler(processor)
+        dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts)
+
+        # Having more tokens is over-conservative but otherwise fine
+        token_ids = dummy_data.prompt_token_ids
+        if len(token_ids) < seq_len:
+            raise AssertionError(
+                f"Expected at least {seq_len} dummy tokens for profiling, "
+                f"but found {len(token_ids)} tokens instead.")
+
+        return dummy_data
+
+    def get_encoder_dummy_data(
+        self,
+        model_config: "ModelConfig",
+        seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
+    ) -> DummyEncoderData:
+        """
+        Create dummy data for profiling the memory usage of a model.
+
+        The model is identified by ``model_config``.
+        """
+        processor = self.create_processor(model_config, disable_cache=True)
+        profiler = MultiModalProfiler(processor)
+        dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts)
+
+        # Having more tokens is over-conservative but otherwise fine
+        token_ids = dummy_data.prompt_token_ids
+        if len(token_ids) < seq_len:
+            logger.warning_once(
+                f"Expected at least {seq_len} dummy encoder tokens for "
+                f"profiling, but found {len(token_ids)} tokens instead.")
+
+        return dummy_data

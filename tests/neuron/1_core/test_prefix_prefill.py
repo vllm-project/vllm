@@ -258,13 +258,13 @@ def sample_inputs(
                              value[start_loc:end_loc])
             cur_ctx += block_size
             block_id += 1
+    kv_cache = torch.stack([k_cache, v_cache])
 
     return (
         query,
         k,
         v,
-        k_cache,
-        v_cache,
+        kv_cache,
         block_table,
         key,
         value,
@@ -314,12 +314,13 @@ def get_active_block_tables(block_tables, query_lens, seq_lens, block_size,
 
         # Test edge cases
         (1, 128, 16, 1024, 4, 2, 16, False),  # large decode batch
-        (16, 4, 8, 8192, 48, 1, 128, True),  # large prefill batch
+        (16, 4, 8, 1024, 4, 2, 128, True),  # large prefill batch
         (4, 12, 32, 2048, 16, 1, 32, True),  # multi-head attention (MHA)
         (4, 12, 32, 2048, 16, 16, 32, True),  # multi-query attention (MQA)
     ])
 @torch.inference_mode()
 def test_contexted_kv_attention(
+    monkeypatch: pytest.MonkeyPatch,
     prefill_batch_size: int,
     decode_batch_size: int,
     num_heads: int,
@@ -329,7 +330,6 @@ def test_contexted_kv_attention(
     large_tile_size,
     mixed_precision: bool,
 ) -> None:
-    import os
 
     import torch_xla.core.xla_model as xm
 
@@ -340,174 +340,175 @@ def test_contexted_kv_attention(
 
     device = xm.xla_device()
 
-    compiler_flags = [
+    compiler_flags_str = " ".join([
         "-O1",
         "--retry_failed_compilation",
-    ]
-    compiler_flags_str = " ".join(compiler_flags)
-    os.environ["NEURON_CC_FLAGS"] = compiler_flags_str
+    ])
+    with monkeypatch.context() as m:
+        m.setenv("NEURON_CC_FLAGS", compiler_flags_str)
 
-    torch.manual_seed(0)
-    torch.set_printoptions(sci_mode=False)
-    torch.set_default_device("cpu")
-    dtype = torch.float32
+        torch.manual_seed(0)
+        torch.set_printoptions(sci_mode=False)
+        torch.set_default_device("cpu")
+        dtype = torch.float32
 
-    min_ctx_len = 32
-    max_ctx_len = 1024
-    min_query_len = 16
-    max_query_len = 512
-    num_kv_heads = num_heads // num_queries_per_kv
-    (
-        query,
-        k_active,
-        v_active,
-        k_cache,
-        v_cache,
-        block_table,
-        key,
-        value,
-        query_lens,
-        seq_lens,
-    ) = sample_inputs(
-        prefill_batch_size=prefill_batch_size,
-        decode_batch_size=decode_batch_size,
-        min_query_len=min_query_len,
-        max_query_len=max_query_len,
-        min_ctx_len=min_ctx_len,
-        max_ctx_len=max_ctx_len,
-        block_size=block_size,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        head_size=head_size,
-        dtype=dtype,
-    )
+        min_ctx_len = 32
+        max_ctx_len = 1024
+        min_query_len = 16
+        max_query_len = 512
+        num_kv_heads = num_heads // num_queries_per_kv
+        (
+            query,
+            k_active,
+            v_active,
+            kv_cache,
+            block_table,
+            key,
+            value,
+            query_lens,
+            seq_lens,
+        ) = sample_inputs(
+            prefill_batch_size=prefill_batch_size,
+            decode_batch_size=decode_batch_size,
+            min_query_len=min_query_len,
+            max_query_len=max_query_len,
+            min_ctx_len=min_ctx_len,
+            max_ctx_len=max_ctx_len,
+            block_size=block_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+        )
 
-    output_ref = ref_context_attention(
-        query,
-        key,
-        value,
-        query_lens,
-        seq_lens,
-        head_size,
-        num_queries_per_kv,
-        return_max_reduce=False,
-    )
+        output_ref = ref_context_attention(
+            query,
+            key,
+            value,
+            query_lens,
+            seq_lens,
+            head_size,
+            num_queries_per_kv,
+            return_max_reduce=False,
+        )
 
-    # build neuron program
-    B_P_SIZE = 128
-    assert (large_tile_size >= B_P_SIZE
-            ), f"Expect {large_tile_size=} to be larger than {B_P_SIZE=}"
+        # build neuron program
+        B_P_SIZE = 128
+        assert (large_tile_size >= B_P_SIZE
+                ), f"Expect {large_tile_size=} to be larger than {B_P_SIZE=}"
 
-    def ceil_div(a, b):
-        return (a + b - 1) // b
+        def ceil_div(a, b):
+            return (a + b - 1) // b
 
-    def pad_to_multiple(a, b):
-        return ceil_div(a, b) * b
+        def pad_to_multiple(a, b):
+            return ceil_div(a, b) * b
 
-    def pad_to_next_power_of_2(a):
-        assert a > 0
-        return 2**int(a - 1).bit_length()
+        def pad_to_next_power_of_2(a):
+            assert a > 0
+            return 2**int(a - 1).bit_length()
 
-    # calculate input shapes
-    max_num_queries = pad_to_next_power_of_2(sum(query_lens))
-    context_lens = torch.tensor(seq_lens) - torch.tensor(query_lens)
-    num_active_blocks = ceil_div(context_lens, block_size).sum().item()
-    num_active_blocks = pad_to_multiple(num_active_blocks,
-                                        large_tile_size // block_size)
-    context_kv_len = num_active_blocks * block_size
-    assert (context_kv_len %
+        # calculate input shapes
+        max_num_queries = pad_to_next_power_of_2(sum(query_lens))
+        context_lens = torch.tensor(seq_lens) - torch.tensor(query_lens)
+        num_active_blocks = ceil_div(context_lens, block_size).sum().item()
+        num_active_blocks = pad_to_multiple(num_active_blocks,
+                                            large_tile_size // block_size)
+        context_kv_len = num_active_blocks * block_size
+        assert (
+            context_kv_len %
             large_tile_size == 0), f"invalid context_kv_len={context_kv_len}"
 
-    # pad QKV tensors
-    pad_dims = (
-        0,
-        0,
-        0,
-        0,
-        0,
-        max_num_queries - query.shape[0],
-    )
-    query = F.pad(query, pad_dims, "constant", 0)
-    k = F.pad(k_active, pad_dims, "constant", 0)
-    v = F.pad(v_active, pad_dims, "constant", 0)
-
-    # permute QKV tensors
-    # query: (1, n_heads, d, seq_q)
-    # key:   (1, n_kv_heads, d, seq_k)
-    # value: (1, n_kv_heads, seq_v, d)
-    query = query.unsqueeze(0).permute(0, 2, 3, 1).contiguous()
-    k = k.unsqueeze(0).permute(0, 2, 3, 1).contiguous()
-    v = v.unsqueeze(0).permute(0, 2, 1, 3).contiguous()
-    k_cache = k_cache.permute(0, 2, 1, 3).contiguous()
-    v_cache = v_cache.permute(0, 2, 1, 3).contiguous()
-
-    # transform block table
-    active_block_table = get_active_block_tables(
-        block_table.cpu(),
-        torch.tensor(query_lens).cpu(),
-        torch.tensor(seq_lens).cpu(),
-        block_size,
-        num_active_blocks,
-    )
-
-    # Build attention masks
-    prior_mask, active_mask = (
-        BlockDiagonalCausalFromBottomRightMask.from_seqlens(
-            query_lens, seq_lens, block_size=block_size))
-    prior_mask_padded = F.pad(
-        prior_mask,
-        (
+        # pad QKV tensors
+        pad_dims = (
             0,
-            context_kv_len - prior_mask.shape[1],
             0,
-            max_num_queries - prior_mask.shape[0],
-        ),
-        "constant",
-        0,
-    ).bool()
-    active_mask_padded = F.pad(
-        active_mask,
-        (
             0,
-            max_num_queries - active_mask.shape[1],
             0,
-            max_num_queries - active_mask.shape[0],
-        ),
-        "constant",
-        0,
-    ).bool()
-    attn_mask = torch.concat([prior_mask_padded, active_mask_padded], dim=1)
+            0,
+            max_num_queries - query.shape[0],
+        )
+        query = F.pad(query, pad_dims, "constant", 0)
+        k = F.pad(k_active, pad_dims, "constant", 0)
+        v = F.pad(v_active, pad_dims, "constant", 0)
 
-    attn_mask = reorder_context_mask(attn_mask, large_tile_size, block_size)
+        # permute QKV tensors
+        # query: (1, n_heads, d, seq_q)
+        # key:   (1, n_kv_heads, d, seq_k)
+        # value: (1, n_kv_heads, seq_v, d)
+        query = query.unsqueeze(0).permute(0, 2, 3, 1).contiguous()
+        k = k.unsqueeze(0).permute(0, 2, 3, 1).contiguous()
+        v = v.unsqueeze(0).permute(0, 2, 1, 3).contiguous()
+        kv_cache = kv_cache.permute(0, 1, 3, 2, 4).contiguous()
 
-    input_args = (
-        query.to(device=device),
-        k.to(device=device),
-        v.to(device=device),
-        k_cache.to(device=device),
-        v_cache.to(device=device),
-        active_block_table.to(device=device),
-        attn_mask.to(device=device),
-    )
-    input_kwargs = dict(
-        n_kv_head=num_kv_heads,
-        head_size=head_size,
-        mixed_precision=mixed_precision,
-        LARGE_TILE_SZ=large_tile_size,
-    )
+        # transform block table
+        active_block_table = get_active_block_tables(
+            block_table.cpu(),
+            torch.tensor(query_lens).cpu(),
+            torch.tensor(seq_lens).cpu(),
+            block_size,
+            num_active_blocks,
+        )
 
-    output_nki = flash_attn_varlen_nkifunc(*input_args, **input_kwargs)
+        # Build attention masks
+        prior_mask, active_mask = (
+            BlockDiagonalCausalFromBottomRightMask.from_seqlens(
+                query_lens, seq_lens, block_size=block_size))
+        prior_mask_padded = F.pad(
+            prior_mask,
+            (
+                0,
+                context_kv_len - prior_mask.shape[1],
+                0,
+                max_num_queries - prior_mask.shape[0],
+            ),
+            "constant",
+            0,
+        ).bool()
+        active_mask_padded = F.pad(
+            active_mask,
+            (
+                0,
+                max_num_queries - active_mask.shape[1],
+                0,
+                max_num_queries - active_mask.shape[0],
+            ),
+            "constant",
+            0,
+        ).bool()
+        attn_mask = torch.concat([prior_mask_padded, active_mask_padded],
+                                 dim=1)
 
-    num_actual_tokens = sum(query_lens)
-    # - o: shape (bs, n_heads, seq_q, d) -> (bs, seq_q, n_heads, d)
-    output_nki = output_nki.cpu().permute(0, 2, 1, 3)
-    output_nki = output_nki[0, :num_actual_tokens, :, :]
-    output_ref_padded = F.pad(
-        output_ref,
-        (0, 0, 0, 0, 0, 0, 0, max_num_queries - output_ref.shape[0]),
-        "constant",
-        0,
-    )
-    output_ref = output_ref_padded.transpose(0, 1)[0, :num_actual_tokens, :, :]
+        attn_mask = reorder_context_mask(attn_mask, large_tile_size,
+                                         block_size)
 
-    torch.testing.assert_close(output_nki, output_ref, atol=1e-2, rtol=0)
+        input_args = (
+            query.to(device=device),
+            k.to(device=device),
+            v.to(device=device),
+            kv_cache.to(device=device),
+            active_block_table.to(device=device),
+            attn_mask.to(device=device),
+        )
+        input_kwargs = dict(
+            n_kv_head=num_kv_heads,
+            head_size=head_size,
+            mixed_precision=mixed_precision,
+            LARGE_TILE_SZ=large_tile_size,
+        )
+
+        output_nki = flash_attn_varlen_nkifunc(*input_args, **input_kwargs)
+
+        num_actual_tokens = sum(query_lens)
+        # - o: shape (bs, n_heads, seq_q, d) -> (bs, seq_q, n_heads, d)
+        output_nki = output_nki.cpu().permute(0, 2, 1, 3)
+        output_nki = output_nki[0, :num_actual_tokens, :, :]
+        output_ref_padded = F.pad(
+            output_ref,
+            (0, 0, 0, 0, 0, 0, 0, max_num_queries - output_ref.shape[0]),
+            "constant",
+            0,
+        )
+        output_ref = output_ref_padded.transpose(
+            0, 1)[0, :num_actual_tokens, :, :]
+
+        torch.testing.assert_close(output_nki, output_ref, atol=1e-2, rtol=0)

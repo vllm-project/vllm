@@ -23,9 +23,8 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from functools import partial
-from typing import (Any, Callable, Dict, List, Literal, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
+                    Union)
 
 import torch
 from torch import nn
@@ -36,64 +35,70 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.multimodal.parse import (AudioItem, DictEmbeddingItems, ModalityData,
+from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
+from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
+                                   DictEmbeddingItems, ModalityData,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser)
-from vllm.multimodal.processing import PromptReplacement
+from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.profiling import ProcessorInputs
-from vllm.sequence import IntermediateTensors
 
-from .minicpmv import (MiniCPMV2_6, MiniCPMVDummyInputsBuilder,
+from .minicpmv import (_MAX_FRAMES_PER_VIDEO, MiniCPMV2_6,
+                       MiniCPMVDummyInputsBuilder,
                        MiniCPMVMultiModalDataParser,
                        MiniCPMVMultiModalProcessor, MiniCPMVProcessingInfo,
                        _minicpmv_field_config)
-from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
+from .utils import (AutoWeightsLoader, cast_overflow_tensors, flatten_bn,
+                    maybe_prefix)
+from .vision import scatter_patch_features
 
 CPU_DEVICE = torch.device("cpu")
 
 
 class MiniCPMOAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
-    data: torch.Tensor
+    audio_features: Union[torch.Tensor, list[torch.Tensor]]
     """
     Shape: `(batch_size * num_audios * num_slices, num_channels, length)`
     Slice here means chunk. Audio that is too long will be split into slices,
     which is the same as image.
-    Padding is used therefore `data` is `torch.Tensor`.
+    Padding is used therefore `audio_features` is `torch.Tensor`.
     """
 
-    audio_feature_lens: torch.Tensor
+    audio_feature_lens: Union[torch.Tensor, list[torch.Tensor]]
     """
-    Shape: `(batch_size * num_audios * num_slices)`
+    Shape: `(batch_size * num_audios, num_slices)`
 
     This should be feature length of each audio slice, 
-    which equals to `data.shape[-1]`
+    which equals to `audio_features.shape[-1]`
     """
 
-    audio_bounds: torch.Tensor
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
     """
-    Shape: `(batch_size * num_audios * num_slices, 2)`
+    A boolean mask indicating which audio embeddings correspond
+    to patch tokens.
 
-    This should be in `(start, stop)` format.
+    Shape: `(batch_size * num_audios, num_embeds)`
     """
 
 
 class MiniCPMOAudioEmbeddingInputs(TypedDict):
     type: Literal["audio_embeds"]
-    data: List[torch.Tensor]
+    audio_embeds: Union[torch.Tensor, list[torch.Tensor]]
     """
-    Shape: `(batch_size * num_images * num_slices, hidden_size)`
+    Shape: `(batch_size * num_audios, num_slices, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     instead of a batched tensor.
     Length of each slice may vary, so pass it as a list.
     """
-    audio_bounds: torch.Tensor
-    """
-    Shape: `(batch_size * num_audios * num_slices, 2)`
 
-    This should be in `(start, stop)` format.
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
+    """
+    A boolean mask indicating which audio embeddings correspond
+    to patch tokens.
+
+    Shape: `(batch_size * num_audios, num_embeds)`
     """
 
 
@@ -102,18 +107,16 @@ MiniCPMOAudioInputs = Union[MiniCPMOAudioFeatureInputs,
 
 
 def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
-    audio_num_slices = hf_inputs.get("audio_num_slices", torch.empty(0))
+    audio_features = hf_inputs.get("audio_features", torch.empty(0))
+    num_audios = len(audio_features)
 
     return dict(
         **_minicpmv_field_config(hf_inputs),
-        audio_features=MultiModalFieldConfig.flat_from_sizes(
-            "audio", audio_num_slices),
-        audio_feature_lens=MultiModalFieldConfig.flat_from_sizes(
-            "audio", audio_num_slices),
-        audio_num_slices=MultiModalFieldConfig.batched("audio"),
-        audio_orders_in_mm_data=MultiModalFieldConfig.batched("audio"),
-        audio_embeds=MultiModalFieldConfig.flat_from_sizes(
-            "audio", audio_num_slices),
+        audio_features=MultiModalFieldConfig.batched("audio"),
+        audio_feature_lens=MultiModalFieldConfig.batched("audio"),
+        audio_embeds=MultiModalFieldConfig.batched("audio"),
+        audio_embed_is_patch=MultiModalFieldConfig.batched("audio"),
+        audio_token_id=MultiModalFieldConfig.shared("audio", num_audios),
     )
 
 
@@ -153,11 +156,8 @@ class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
 class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     audio_pattern = "(<audio>./</audio>)"
 
-    def get_supported_mm_modalities(self) -> List[str]:
-        return ["image", "video", "audio"]
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "video": None, "audio": None}
+        return {**super().get_supported_mm_limits(), "audio": None}
 
     def get_mm_max_tokens_per_item(
         self,
@@ -165,10 +165,24 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
         return {
-            "image": self.get_max_image_tokens(),
-            "audio": self.get_max_audio_tokens(),
-            "video": self.get_max_video_tokens(seq_len),
+            **super().get_mm_max_tokens_per_item(seq_len, mm_counts),
+            "audio":
+            self.get_max_audio_tokens(),
         }
+
+    def get_audio_placeholder(
+        self,
+        audio_lens: int,
+        chunk_input: bool = True,
+        chunk_length: int = 1,
+    ) -> str:
+        hf_processor = self.get_hf_processor()
+
+        return hf_processor.get_audio_placeholder(
+            audio_lens,
+            chunk_input=chunk_input,
+            chunk_length=chunk_length,
+        )
 
     def get_default_audio_pool_step(self) -> int:
         return 2
@@ -190,8 +204,8 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         return 30
 
     def get_max_audio_tokens(self) -> int:
-        return self.get_max_audio_tokens_per_chunk(
-        ) * self.get_max_audio_chunks_with_most_features()
+        num_chunks = self.get_max_audio_chunks_with_most_features()
+        return self.get_max_audio_tokens_per_chunk() * num_chunks
 
     def get_audio_len_by_num_chunks(self, num_chunks: int) -> int:
         sampling_rate = self.get_default_audio_sampling_rate()
@@ -199,25 +213,24 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         num_tokens_per_chunk = self.get_max_audio_tokens_per_chunk() - 2
         return int(num_chunks * sampling_rate / num_tokens_per_chunk) + 1
 
-    def get_num_frames_with_most_features(self, seq_len: int) -> int:
-        mm_config = self.ctx.get_mm_config()
-        max_images = mm_config.get_limit_per_prompt("image")
-        max_videos = mm_config.get_limit_per_prompt("video")
-        max_audios = mm_config.get_limit_per_prompt("audio")
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        max_images = mm_counts.get("image", 0)
+        max_videos = mm_counts.get("video", 0)
+        max_audios = mm_counts.get("audio", 0)
 
-        # count <image_idx></image_idx> tokens
-        # which are not in get_max_image_tokens
-        max_image_tokens = self.get_max_image_tokens(
-        ) * max_images + 4 * max_images
-        max_audio_tokens = self.get_max_audio_tokens(
-        ) * max_audios + 2 * max_audios
+        max_image_tokens = self.get_max_image_tokens() * max_images
+        max_audio_tokens = self.get_max_audio_tokens() * max_audios
         max_total_frames = self.get_max_video_frames(seq_len -
                                                      max_image_tokens -
                                                      max_audio_tokens)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   _MAX_FRAMES_PER_VIDEO)
 
-        num_frames = max(max_total_frames // max(max_videos, 1), 1)
-
-        return num_frames
+        return max(max_frames_per_video, 1)
 
 
 class MiniCPMODummyInputsBuilder(
@@ -232,20 +245,20 @@ class MiniCPMODummyInputsBuilder(
 
         processor_inputs = super().get_dummy_processor_inputs(
             seq_len, mm_counts)
-        mm_data = {
-            "image":
-            processor_inputs.mm_data["image"],
-            "video":
-            processor_inputs.mm_data["video"],
+
+        audio_prompt_texts = self.info.audio_pattern * num_audios
+        audio_mm_data = {
             "audio":
             self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
 
-        audio_prompt_texts = self.info.audio_pattern * num_audios
-
-        return ProcessorInputs(prompt_text=processor_inputs.prompt_text + \
-                               audio_prompt_texts,
-                               mm_data=mm_data)
+        return ProcessorInputs(
+            prompt_text=processor_inputs.prompt_text + audio_prompt_texts,
+            mm_data={
+                **processor_inputs.mm_data,
+                **audio_mm_data,
+            },
+        )
 
 
 class MiniCPMOMultiModalProcessor(
@@ -255,142 +268,129 @@ class MiniCPMOMultiModalProcessor(
         return MiniCPMOMultiModalDataParser(
             target_sr=self.info.get_default_audio_sampling_rate())
 
-    def get_audio_prompt_texts(self,
-                               audio_lens: int,
-                               chunk_input: bool = True,
-                               chunk_length: int = 1) -> str:
-        return self.info.get_hf_processor().get_audio_placeholder(
-            audio_lens, chunk_input, chunk_length)
+    def get_audio_prompt_texts(
+        self,
+        audio_lens: int,
+        chunk_input: bool = True,
+        chunk_length: int = 1,
+    ) -> str:
+        return self.info.get_audio_placeholder(
+            audio_lens,
+            chunk_input=chunk_input,
+            chunk_length=chunk_length,
+        )
 
-    def get_special_tokens(self) -> Dict[str, torch.Tensor]:
-        tokenizer = self.info.get_tokenizer()
-        special_tokens = super().get_special_tokens()
-        if hasattr(tokenizer, "audio_start_id"):
-            special_tokens["audio_start_id"] = torch.tensor(
-                tokenizer.audio_start_id)
-            special_tokens["audio_end_id"] = torch.tensor(
-                tokenizer.audio_end_id)
-        return special_tokens
+    def process_audios(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        if (audios := mm_data.get("audios")) is None:
+            return {}
 
-    def process_audios(self, mm_data: Mapping[str, object],
-                       mm_kwargs: Mapping[str, object]) -> Dict[str, object]:
-        audios = mm_data.pop("audios", [])
-        audio_embeds = mm_data.pop("audio_embeds", [])
-        if isinstance(audios, (list, torch.Tensor)) and len(audios) > 0:
-            audio_outputs = {
-                "audio_lens": [],
-                "audio_features": [],
-                "audio_feature_lens": [],
-                "audio_num_segments": []
-            }
-            for audio in audios:
-                single_audio_outputs = super().call_base_hf_processor(
-                    prompt=self.info.audio_pattern,
-                    mm_data={
-                        "audios": audio,
-                        "chunk_input": True
-                    },
-                    mm_kwargs=mm_kwargs)
-                audio_outputs["audio_lens"].append(len(audio))
-                audio_outputs["audio_features"].append(
-                    single_audio_outputs["audio_features"])
-                audio_outputs["audio_num_segments"].append(
-                    len(single_audio_outputs["audio_feature_lens"][0]))
-                audio_outputs["audio_feature_lens"] += \
-                    single_audio_outputs["audio_feature_lens"]
-            audio_outputs["audio_features"] = [
-                audio_feature for single_audio_features in \
-                    audio_outputs["audio_features"]
-                for audio_feature in single_audio_features
+        parsed_audios = (self._get_data_parser().parse_mm_data({
+            "audio": audios
+        }).get_items("audio",
+                     (MiniCPMOAudioEmbeddingItems, AudioProcessorItems)))
+
+        if isinstance(parsed_audios, MiniCPMOAudioEmbeddingItems):
+            audio_inputs = {}
+
+            audio_lens = [
+                self.info.get_audio_len_by_num_chunks(
+                    sum(map(len,
+                            parsed_audios.get(i)["audio_embeds"])))
+                for i in range(len(parsed_audios))
             ]
-            audio_outputs["audio_feature_lens"] = torch.cat(
-                audio_outputs["audio_feature_lens"])
-        elif len(audio_embeds):
-            audio_outputs = {
-                "audio_lens": [
-                    self.info.get_audio_len_by_num_chunks(
-                        sum(chunk_embeds.shape[0]
-                            for chunk_embeds in single_audio_embeds))
-                    for single_audio_embeds in audio_embeds
-                ],
-                "audio_embeds": [
-                    chunk_embeds for single_audio_embeds in audio_embeds
-                    for chunk_embeds in single_audio_embeds
-                ],
-                "audio_num_segments": [
-                    len(single_audio_embeds)
-                    for single_audio_embeds in audio_embeds
-                ]
-            }
         else:
-            audio_outputs = {}
-        return audio_outputs
+            audio_inputs = self._base_call_hf_processor(
+                prompts=[self.info.audio_pattern] * len(parsed_audios),
+                mm_data={"audios": [[audio] for audio in parsed_audios]},
+                mm_kwargs={
+                    **mm_kwargs,
+                    "chunk_input": True,
+                },
+                out_keys={"audio_features", "audio_feature_lens"},
+            )
 
-    def get_placeholder_match_pattern(self) -> str:
-        return r"\(<(image|video|audio)>./</\1>\)"
+            # Avoid padding since we need the output for each audio to be
+            # independent of other audios for the cache to work correctly
+            unpadded_audio_features = [
+                feat[:, :feature_len] for feat, feature_len in zip(
+                    audio_inputs["audio_features"],
+                    audio_inputs["audio_feature_lens"],
+                )
+            ]
+            audio_inputs["audio_features"] = unpadded_audio_features
 
-    def get_placeholder_split_pattern(self) -> str:
-        return r"\(<(?:image|video|audio)>./</(?:image|video|audio)>\)"
+            audio_lens = [
+                parsed_audios.get_audio_length(i)
+                for i in range(len(parsed_audios))
+            ]
 
-    def process_mm_inputs(self, mm_data, mm_kwargs) -> object:
+        audio_repl_features = [
+            self.get_audio_prompt_texts(audio_len) for audio_len in audio_lens
+        ]
+
+        tokenizer = self.info.get_tokenizer()
+        audio_repls_feature_tokens = [
+            tokenizer.encode(audio_repl, add_special_tokens=False)
+            for audio_repl in audio_repl_features
+        ]
+
+        embed_is_patch = [
+            self.get_embed_is_patch(audio_repl_tokens)
+            for audio_repl_tokens in audio_repls_feature_tokens
+        ]
+        audio_inputs["audio_embed_is_patch"] = embed_is_patch
+
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        audio_inputs["audio_token_id"] = torch.tensor(unk_token_id)
+
+        return audio_inputs
+
+    def process_mm_inputs(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
         return {
-            "image": self.process_images(mm_data, mm_kwargs),
-            "video": self.process_videos(mm_data, mm_kwargs),
-            "audio": self.process_audios(mm_data, mm_kwargs)
+            **super().process_mm_inputs(mm_data, mm_kwargs),
+            **self.process_audios(mm_data, mm_kwargs),
         }
-
-    def get_modality_num_counter(self, modality: str) -> str:
-        if modality == "audio":
-            return "audio_lens"
-        return super().get_modality_num_counter(modality)
-
-    def get_num_slices_by_modality(self, inputs: Dict[str, object],
-                                   modality: str, index: int) -> int:
-        if modality == "audio":
-            return inputs["audio"]["audio_num_segments"][index]
-        return super().get_num_slices_by_modality(inputs, modality, index)
-
-    def get_prompt_texts_by_modality(self, inputs: Dict[str, object],
-                                     modality: str, index: int) -> str:
-        if modality == "audio":
-            return self.get_audio_prompt_texts(
-                inputs["audio"]["audio_lens"][index])
-        return super().get_prompt_texts_by_modality(inputs, modality, index)
 
     def _get_prompt_updates(
-            self, mm_items: MultiModalDataItems,
-            hf_processor_mm_kwargs: Mapping[str, Any],
-            out_mm_kwargs: MultiModalKwargs) -> Sequence[PromptReplacement]:
-        placeholder = {
-            "image": self.info.image_pattern,
-            "video": self.info.video_pattern,
-            "audio": self.info.audio_pattern
-        }
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
+        base_updates = super()._get_prompt_updates(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            out_mm_kwargs=out_mm_kwargs,
+        )
 
-        def get_replacement_minicpmv(item_idx: int, modality: str):
-            if modality == "image":
-                return self.get_image_prompt_texts(
-                    mm_items["image"].get_image_size(item_idx), item_idx)
-            elif modality == "video":
-                return self.get_video_prompt_texts(
-                    mm_items["video"].get_frame_size(item_idx),
-                    mm_items["video"].get_num_frames(item_idx))
-            else:  # audio
-                if isinstance(mm_items["audio"], MiniCPMOAudioEmbeddingItems):
-                    single_audio_embeds = mm_items["audio"].get(item_idx)
-                    audio_len = self.info.get_audio_len_by_num_chunks(
-                        sum(chunk_embeds.shape[0]
-                            for chunk_embeds in single_audio_embeds))
-                    return self.get_audio_prompt_texts(audio_len)
-                return self.get_audio_prompt_texts(
-                    len(mm_items["audio"].get(item_idx)))
+        audio_placeholder = self.info.audio_pattern
+
+        def get_audio_replacement(item_idx: int):
+            audios = mm_items.get_items(
+                "audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems))
+
+            if isinstance(audios, MiniCPMOAudioEmbeddingItems):
+                single_audio_embeds = audios.get(item_idx)["audio_embeds"]
+                audio_len = self.info.get_audio_len_by_num_chunks(
+                    sum(map(len, single_audio_embeds)))
+            else:
+                audio_len = audios.get_audio_length(item_idx)
+
+            return self.get_audio_prompt_texts(audio_len)
 
         return [
-            PromptReplacement(modality=modality,
-                              target=placeholder[modality],
-                              replacement=partial(get_replacement_minicpmv,
-                                                  modality=modality))
-            for modality in ("image", "video", "audio")
+            *base_updates,
+            PromptReplacement(modality="audio",
+                              target=audio_placeholder,
+                              replacement=get_audio_replacement),
         ]
 
     def _get_mm_fields_config(
@@ -562,6 +562,8 @@ class MiniCPMO(MiniCPMV2_6):
         self.apm = self.init_audio_module(vllm_config=vllm_config,
                                           prefix=maybe_prefix(prefix, "apm"))
 
+        self.audio_token_id = None
+
     def init_audio_module(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # Do not use parameters temporarily
         audio_config = self.config.audio_config
@@ -611,207 +613,178 @@ class MiniCPMO(MiniCPMV2_6):
 
         return input_lengths_after_cnn, input_lengths_after_pooling
 
-    # Copied from HF repo of MiniCPM-o-2_6,
-    # designed for batched inputs and outputs
-    def get_audio_hidden_states(self, data: MiniCPMOAudioInputs,
-                                chunk_length: int) -> torch.Tensor:
-        wavforms = data.get(
-            "data",
-            [])  # (bs, 80, frames) or [], multi audios need filled in advance
-        audio_feature_lens_raw = [data.get("audio_feature_lens",
-                                           [])]  # list, [[x1, x2], [y1], [z1]]
+    def get_audio_hidden_states(
+            self, data: MiniCPMOAudioFeatureInputs) -> list[torch.Tensor]:
+        chunk_length = self.config.audio_chunk_length
 
-        # exist audio
-        if len(wavforms) > 0:
-            audio_feature_lens = torch.hstack(audio_feature_lens_raw)
-            batch_size, _, max_mel_seq_len = wavforms.shape
-            max_seq_len = (max_mel_seq_len - 1) // 2 + 1
+        # (bs, 80, frames) or [], multi audios need filled in advance
+        wavforms_raw = data["audio_features"]
+        if isinstance(wavforms_raw, list):
+            B = len(wavforms_raw)
+            C = wavforms_raw[0].shape[-2]
+            L = max(item.shape[-1] for item in wavforms_raw)
+            device = wavforms_raw[0].device
+            dtype = wavforms_raw[0].dtype
 
-            # Create a sequence tensor of shape (batch_size, max_seq_len)
-            seq_range = (torch.arange(
-                0,
-                max_seq_len,
-                dtype=audio_feature_lens.dtype,
-                device=audio_feature_lens.device).unsqueeze(0).expand(
-                    batch_size, max_seq_len))
-            lengths_expand = audio_feature_lens.unsqueeze(1).expand(
-                batch_size, max_seq_len)
-            # Create mask
-            padding_mask = seq_range >= lengths_expand  # 1 for padded values
-
-            audio_attention_mask_ = padding_mask.view(
-                batch_size, 1, 1, max_seq_len).expand(batch_size, 1,
-                                                      max_seq_len, max_seq_len)
-            audio_attention_mask = audio_attention_mask_.to(
-                dtype=self.apm.conv1.weight.dtype,
-                device=self.apm.conv1.weight.device)
-
-            if chunk_length > 0:
-                chunk_num_frame = int(chunk_length * 50)
-                chunk_mask = self.subsequent_chunk_mask(
-                    size=max_seq_len,
-                    chunk_size=chunk_num_frame,
-                    num_left_chunks=-1,
-                    device=audio_attention_mask_.device,
-                )
-                audio_attention_mask_ = torch.logical_or(
-                    audio_attention_mask_, torch.logical_not(chunk_mask))
-
-            audio_attention_mask[audio_attention_mask_] = float("-inf")
-            audio_states = self.apm(
-                wavforms, attention_mask=audio_attention_mask).hidden_states[
-                    self.audio_encoder_layer]
-            audio_embeds = self.audio_projection_layer(audio_states)
-
-            audio_embeds = audio_embeds.transpose(1, 2)
-            audio_embeds = self.audio_avg_pooler(audio_embeds)
-            audio_embeds = audio_embeds.transpose(1, 2)
-
-            _, feature_lens_after_pooling = \
-                self._get_feat_extract_output_lengths(audio_feature_lens)
-
-            num_audio_tokens = feature_lens_after_pooling
-
-            final_audio_embeds = []
-            idx = 0
-            for i in range(len(audio_feature_lens_raw)):
-                target_audio_embeds = []
-                for _ in range(len(audio_feature_lens_raw[i])):
-                    target_audio_embeds.append(
-                        audio_embeds[idx, :num_audio_tokens[idx], :])
-                    idx += 1
-                final_audio_embeds.append(target_audio_embeds)
-            return final_audio_embeds
+            wavforms = torch.zeros((B, C, L), dtype=dtype, device=device)
+            for i, wavforms_item in enumerate(wavforms_raw):
+                L_item = wavforms_item.shape[-1]
+                wavforms[i, ..., :L_item] = wavforms_item
         else:
-            return []
+            wavforms = wavforms_raw
 
-    def get_embedding_with_audios(self, vlm_embedding: torch.Tensor,
-                                  audio_inputs: Optional[MiniCPMOAudioInputs],
-                                  chunk_length: int) -> torch.Tensor:
-        device, dtype = vlm_embedding.device, vlm_embedding.dtype
-        if audio_inputs["type"] == "audio_embeds":
-            audio_embeddings = audio_inputs["data"]
-            audio_embeddings = [
-                audio_embeddings[i].to(device=device, dtype=dtype)
-                for i in range(len(audio_embeddings))
-            ]
-        else:
-            audio_embeddings = self.get_audio_hidden_states(
-                audio_inputs, chunk_length)[0]
-        if audio_embeddings is None or len(audio_embeddings) == 0:
-            return vlm_embedding
-        audio_bounds = audio_inputs["audio_bounds"]
-        if self.config.chunk_input:
-            audio_embs = torch.cat(audio_embeddings, dim=0).to(device=device,
-                                                               dtype=dtype)
-            audio_start_pos = 0
-            for bound in audio_bounds:
-                audio_len = bound[1] - bound[0]
-                vlm_embedding[bound[0]:bound[1]] = audio_embs[
-                    audio_start_pos:audio_start_pos + audio_len, :]
-                audio_start_pos += audio_len
-        else:
-            for embs, bound in zip(audio_embeddings, audio_bounds):
-                audio_indices = torch.arange(bound[0],
-                                             bound[1],
-                                             dtype=torch.long).to(device)
+        # list, [[x1, x2], [y1], [z1]]
+        audio_feature_lens_raw = data["audio_feature_lens"]
+        if isinstance(audio_feature_lens_raw, torch.Tensor):
+            audio_feature_lens_raw = audio_feature_lens_raw.unbind(0)
 
-                if embs.shape[0] != len(audio_indices):
-                    raise ValueError(
-                        "Shape mismatch: Trying to assign embeddings "
-                        f"of shape {embs.shape} "
-                        f"to input indices of length {len(audio_indices)}")
-                vlm_embedding[audio_indices] = embs.to(dtype)
-        return vlm_embedding
+        audio_feature_lens = torch.hstack(audio_feature_lens_raw)
+        batch_size, _, max_mel_seq_len = wavforms.shape
+        max_seq_len = (max_mel_seq_len - 1) // 2 + 1
 
-    def _get_audio_bounds(self, input_ids: torch.Tensor,
-                          audio_start_id: torch.Tensor,
-                          audio_end_id: torch.Tensor) -> torch.Tensor:
-        audio_start_tokens, = torch.where(input_ids == audio_start_id[0])
-        audio_start_tokens += 1
-        audio_end_tokens, = torch.where(input_ids == audio_end_id[0])
-        valid_audio_nums = max(len(audio_start_tokens), len(audio_end_tokens))
-        return torch.hstack([
-            audio_start_tokens[:valid_audio_nums].unsqueeze(-1),
-            audio_end_tokens[:valid_audio_nums].unsqueeze(-1)
-        ])
+        # Create a sequence tensor of shape (batch_size, max_seq_len)
+        seq_range = (torch.arange(
+            0,
+            max_seq_len,
+            dtype=audio_feature_lens.dtype,
+            device=audio_feature_lens.device).unsqueeze(0).expand(
+                batch_size, max_seq_len))
+        lengths_expand = audio_feature_lens.unsqueeze(1).expand(
+            batch_size, max_seq_len)
+        # Create mask
+        padding_mask = seq_range >= lengths_expand  # 1 for padded values
 
-    def _parse_and_validate_audio_inputs(
-            self, input_ids: torch.Tensor,
-            **kwargs: object) -> Tuple[MiniCPMOAudioInputs]:
-        audio_features = kwargs.pop("audio_features", [])
-        audio_feature_lens = kwargs.pop("audio_feature_lens", [])
+        audio_attention_mask_ = padding_mask.view(
+            batch_size, 1, 1, max_seq_len).expand(batch_size, 1, max_seq_len,
+                                                  max_seq_len)
+        audio_attention_mask = audio_attention_mask_.to(
+            dtype=self.apm.conv1.weight.dtype,
+            device=self.apm.conv1.weight.device)
+
+        if chunk_length > 0:
+            chunk_num_frame = int(chunk_length * 50)
+            chunk_mask = self.subsequent_chunk_mask(
+                size=max_seq_len,
+                chunk_size=chunk_num_frame,
+                num_left_chunks=-1,
+                device=audio_attention_mask_.device,
+            )
+            audio_attention_mask_ = torch.logical_or(
+                audio_attention_mask_, torch.logical_not(chunk_mask))
+
+        audio_attention_mask[audio_attention_mask_] = float("-inf")
+        audio_states = self.apm(
+            wavforms, attention_mask=audio_attention_mask).hidden_states[
+                self.audio_encoder_layer]
+        audio_embeds = self.audio_projection_layer(audio_states)
+
+        audio_embeds = audio_embeds.transpose(1, 2)
+        audio_embeds = self.audio_avg_pooler(audio_embeds)
+        audio_embeds = audio_embeds.transpose(1, 2)
+
+        _, feature_lens_after_pooling = \
+            self._get_feat_extract_output_lengths(audio_feature_lens)
+
+        num_audio_tokens = feature_lens_after_pooling
+
+        final_audio_embeds = list[torch.Tensor]()
+        idx = 0
+        for i in range(len(audio_feature_lens_raw)):
+            target_audio_embeds_lst = list[torch.Tensor]()
+            for _ in range(len(audio_feature_lens_raw[i])):
+                target_audio_embeds_lst.append(
+                    audio_embeds[idx, :num_audio_tokens[idx], :])
+                idx += 1
+
+            final_audio_embeds.append(torch.cat(target_audio_embeds_lst))
+
+        return final_audio_embeds
+
+    def _parse_and_validate_audio_input(
+            self, **kwargs: object) -> Optional[MiniCPMOAudioInputs]:
+        audio_features = kwargs.pop("audio_features", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
-        audio_start_id = kwargs.pop("audio_start_id", None)
-        audio_end_id = kwargs.pop("audio_end_id", None)
+
+        if audio_features is None and audio_embeds is None:
+            return None
+
+        audio_token_id = kwargs.pop("audio_token_id")
+        if audio_token_id is not None:
+            assert isinstance(audio_token_id, torch.Tensor)
+            self.mm_token_ids.add(audio_token_id.flatten().unique().item())
+
+        audio_embed_is_patch = kwargs.pop("audio_embed_is_patch")
+        if not isinstance(audio_embed_is_patch, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of audio_embed_is_patch. "
+                             f"Got type: {type(audio_embed_is_patch)}")
+
+        audio_embed_is_patch = flatten_bn(audio_embed_is_patch)
+
         if audio_embeds is not None:
-            audio_embeds = [
-                audio_embeds[i][j] for i in range(len(audio_embeds))
-                for j in range(len(audio_embeds[i]))
-            ]
+            if not isinstance(audio_embeds, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of audio_embeds. "
+                                 f"Got type: {type(audio_embeds)}")
+
+            audio_embeds_flat = flatten_bn(audio_embeds)
+
             return MiniCPMOAudioEmbeddingInputs(
-                audio_bounds=self._get_audio_bounds(input_ids, audio_start_id,
-                                                    audio_end_id),
-                data=audio_embeds,
-                type="audio_embeds")
-        if len(audio_features) > 0:
-            audio_features_all = [
-                i.permute(1, 0) for audio_feature in audio_features
-                for i in audio_feature
-            ]
-            audio_features = torch.nn.utils.rnn.pad_sequence(
-                audio_features_all, batch_first=True,
-                padding_value=0.0).permute(0, 2, 1)
-            audio_feature_lens = torch.cat(
-                [item for item in audio_feature_lens])
+                type="audio_embeds",
+                audio_embeds=audio_embeds_flat,
+                embed_is_patch=audio_embed_is_patch,
+            )
 
-            return MiniCPMOAudioFeatureInputs(
-                audio_bounds=self._get_audio_bounds(input_ids, audio_start_id,
-                                                    audio_end_id),
-                data=audio_features,
-                audio_feature_lens=audio_feature_lens,
-                type="audio_features")
-        return None
+        if not isinstance(audio_features, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of audio_features. "
+                             f"Got type: {type(audio_features)}")
 
-    def _parse_and_validate_inputs(self, input_ids: torch.Tensor,
-                                   **kwargs: object):
-        image_inputs = self._parse_and_validate_image_inputs(
-            input_ids, **kwargs)
-        if not any("audio" in key for key in kwargs):
-            return image_inputs, None
-        audio_inputs = self._parse_and_validate_audio_inputs(
-            input_ids, **kwargs)
-        return image_inputs, audio_inputs
+        audio_feature_lens = kwargs.pop("audio_feature_lens")
+        if not isinstance(audio_feature_lens, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of audio_feature_lens. "
+                             f"Got type: {type(audio_feature_lens)}")
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        if intermediate_tensors is not None:
-            vlm_embeddings = None
-        else:
-            image_inputs, audio_inputs = \
-                self._parse_and_validate_inputs(input_ids, **kwargs)
-            vlm_embeddings, _ = self.get_embedding_with_vision(
-                input_ids, image_inputs)
+        audio_features_flat = flatten_bn(audio_features)
+        audio_feature_lens_flat = flatten_bn(audio_feature_lens)
 
-            if audio_inputs is not None:
-                vlm_embeddings = self.get_embedding_with_audios(
-                    vlm_embeddings, audio_inputs,
-                    self.config.audio_chunk_length)
-
-        # always pass the input via `inputs_embeds`
-        # to make sure the computation graph is consistent
-        # for `torch.compile` integration
-        input_ids = None
-
-        output = self.llm.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=vlm_embeddings,
+        return MiniCPMOAudioFeatureInputs(
+            type="audio_features",
+            audio_features=audio_features_flat,
+            audio_feature_lens=audio_feature_lens_flat,
+            embed_is_patch=audio_embed_is_patch,
         )
-        return output
+
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        modalities = super()._parse_and_validate_multimodal_inputs(**kwargs)
+
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if input_key in ("audio_features",
+                             "audio_embeds") and "audios" not in modalities:
+                modalities["audios"] = self._parse_and_validate_audio_input(
+                    **kwargs)
+
+        return modalities
+
+    def _process_audio_input(
+        self,
+        audio_input: MiniCPMOAudioInputs,
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        if audio_input["type"] == "audio_embeds":
+            return audio_input["audio_embeds"]
+
+        return self.get_audio_hidden_states(audio_input)
+
+    def _process_multimodal_inputs(self, modalities: dict):
+        multimodal_embeddings = super()._process_multimodal_inputs(modalities)
+
+        for modality in modalities:
+            if modality == "audios":
+                audio_input = modalities["audios"]
+                audio_features = self._process_audio_input(audio_input)
+                multimodal_embeddings += tuple(
+                    scatter_patch_features(
+                        audio_features,
+                        audio_input["embed_is_patch"],
+                    ))
+
+        return multimodal_embeddings

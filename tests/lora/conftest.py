@@ -2,7 +2,6 @@
 
 import tempfile
 from collections import OrderedDict
-from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,28 +23,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
-
-
-class ContextIDInfo(TypedDict):
-    lora_id: int
-    context_length: str
-
-
-class ContextInfo(TypedDict):
-    lora: str
-    context_length: str
-
-
-LONG_LORA_INFOS: list[ContextIDInfo] = [{
-    "lora_id": 1,
-    "context_length": "16k",
-}, {
-    "lora_id": 2,
-    "context_length": "16k",
-}, {
-    "lora_id": 3,
-    "context_length": "32k",
-}]
 
 
 @pytest.fixture()
@@ -174,11 +151,6 @@ def sql_lora_files(sql_lora_huggingface_id):
 
 
 @pytest.fixture(scope="session")
-def lora_bias_files():
-    return snapshot_download(repo_id="followumesh/granite-3b-lora8-bias")
-
-
-@pytest.fixture(scope="session")
 def mixtral_lora_files():
     # Note: this module has incorrect adapter_config.json to test
     # https://github.com/vllm-project/vllm/pull/5909/files.
@@ -244,39 +216,6 @@ def phi2_lora_files():
 @pytest.fixture(scope="session")
 def long_context_lora_files_16k_1():
     return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1")
-
-
-@pytest.fixture(scope="session")
-def long_context_lora_files_16k_2():
-    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_2")
-
-
-@pytest.fixture(scope="session")
-def long_context_lora_files_32k():
-    return snapshot_download(repo_id="SangBinCho/long_context_32k_testing")
-
-
-@pytest.fixture(scope="session")
-def long_context_infos(long_context_lora_files_16k_1,
-                       long_context_lora_files_16k_2,
-                       long_context_lora_files_32k):
-    cleanup_dist_env_and_memory(shutdown_ray=True)
-    infos: dict[int, ContextInfo] = {}
-    for lora_checkpoint_info in LONG_LORA_INFOS:
-        lora_id = lora_checkpoint_info["lora_id"]
-        if lora_id == 1:
-            lora = long_context_lora_files_16k_1
-        elif lora_id == 2:
-            lora = long_context_lora_files_16k_2
-        elif lora_id == 3:
-            lora = long_context_lora_files_32k
-        else:
-            raise AssertionError("Unknown lora id")
-        infos[lora_id] = {
-            "context_length": lora_checkpoint_info["context_length"],
-            "lora": lora,
-        }
-    return infos
 
 
 @pytest.fixture
