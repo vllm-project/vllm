@@ -124,7 +124,7 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
     cal_diff(out_flash, out_torch, "out")
     cal_diff(lse_flash, lse_torch, "lse")
 
-    t = triton.testing.do_bench(flash_mla, fast_flush=False)
+    t = triton.testing.do_bench(flash_mla)
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
     bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d +
              b * s_q * h_q * dv) * (torch.finfo(dtype).bits // 8)
