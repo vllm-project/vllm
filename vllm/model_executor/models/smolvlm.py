@@ -21,11 +21,11 @@ class SmolVLMProcessingInfo(Idefics3ProcessingInfo):
     def get_hf_processor(
         self,
         *,
-        size: Optional[Dict[str, int]] = None,
+        max_image_size: Optional[Dict[str, int]] = None,
         **kwargs: object,
     ) -> SmolVLMProcessor:
-        if size is not None:
-            kwargs["size"] = size
+        if max_image_size is not None:
+            kwargs["max_image_size"] = max_image_size
 
         return self.ctx.get_hf_processor(SmolVLMProcessor, **kwargs)
 
