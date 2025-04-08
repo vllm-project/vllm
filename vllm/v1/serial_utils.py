@@ -5,8 +5,8 @@ from types import FunctionType
 from typing import Any, Optional, Union
 
 import cloudpickle
-import torch
 import numpy
+import torch
 from msgspec import msgpack
 
 from vllm.logger import init_logger
@@ -44,9 +44,8 @@ class MsgpackDecoder:
         return self.decoder.decode(obj)
 
 
-NestedArrays = Union[
-    list["NestedArrays"], list[numpy.ndarray], numpy.ndarray, tuple[numpy.ndarray, ...]
-]
+NestedArrays = Union[list["NestedArrays"], list[numpy.ndarray], numpy.ndarray,
+                     tuple[numpy.ndarray, ...]]
 
 
 def nested_tensors_to_numpy(nt: NestedTensors) -> NestedArrays:
@@ -90,7 +89,9 @@ def custom_enc_hook(obj: Any) -> Any:
             return msgpack.Ext(CUSTOM_TYPE_TENSORDICT, pickle.dumps(adict))
         except TypeError as err:
             # fall back to pickle serializer.
-            logger.warning(f"Unable to serialize MultiModalKwargs : {err}, falling back to pickle")
+            logger.warning(
+                f"Unable to serialize MultiModalKwargs : {err}, falling back to pickle"
+            )
             pass
 
     if isinstance(obj, FunctionType):
