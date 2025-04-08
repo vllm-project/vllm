@@ -589,7 +589,7 @@ class Qwen2_5_VisionAttentionScheduler:
     def _numba_kernel(
         grid_thw: np.ndarray,
         window_size: int,
-        spatial_merge_size: int,
+        merge_size: int,
         patch_size: int,
     ) -> tuple[
             np.ndarray,  # output_buffer (concatenated:
@@ -603,107 +603,114 @@ class Qwen2_5_VisionAttentionScheduler:
             int,  # length of cu_full_seqlens
             int,  # length of cu_window_seqlens
     ]:
-        spatial_merge_unit = spatial_merge_size * spatial_merge_size
-        vit_merger_wnd_size = window_size // spatial_merge_size // patch_size
+        merge_area = merge_size * merge_size
+        win_size_merged = window_size // merge_size // patch_size
 
-        total_cell_count = 0
-        total_window_count = 0
-        total_temporal = 0
+        # --- first pass: calculate sizes for allocation ---
+        total_merged_cells = 0
+        total_windows = 0
+        total_frames = 0
 
-        # first pass: compute total sizes
-        for i in range(grid_thw.shape[0]):
-            temporal = grid_thw[i, 0]
+        for grid_idx in range(grid_thw.shape[0]):
+            t_dim = grid_thw[grid_idx, 0]
+            h_dim = grid_thw[grid_idx, 1]
+            w_dim = grid_thw[grid_idx, 2]
 
-            merged_height = grid_thw[i, 1] // spatial_merge_size
-            merged_width = grid_thw[i, 2] // spatial_merge_size
+            merged_h = h_dim // merge_size
+            merged_w = w_dim // merge_size
 
-            total_cell_count += temporal * merged_height * merged_width
+            total_merged_cells += t_dim * merged_h * merged_w
 
-            n_blocks_height = numba_cdiv(merged_height, vit_merger_wnd_size)
-            n_blocks_width = numba_cdiv(merged_width, vit_merger_wnd_size)
+            num_blocks_h = numba_cdiv(merged_h, win_size_merged)
+            num_blocks_w = numba_cdiv(merged_w, win_size_merged)
 
-            total_window_count += temporal * n_blocks_height * n_blocks_width
+            total_windows += t_dim * num_blocks_h * num_blocks_w
 
-            total_temporal += temporal
+            total_frames += t_dim
 
-        # output array buffers
-        output_buffer = np.empty(total_cell_count + total_temporal + 1 +
-                                 total_window_count + 1,
+        # --- allocate buffers ---
+        # single buffer to hold concatenated results
+        # size: [merged cell indices] + [cumulative full seq lens] +
+        #       [cumulative window seq lens]
+        output_buffer = np.empty(total_merged_cells + total_frames + 1 +
+                                 total_windows + 1,
                                  dtype=np.int64)
-        full_seqlens = np.empty(total_temporal, dtype=np.int64)
-        window_seqlens = np.empty(total_window_count, dtype=np.int64)
 
-        # array views
-        window_indices = output_buffer[:total_cell_count]
-        cu_full_seqlens = output_buffer[total_cell_count:total_cell_count +
-                                        total_temporal + 1]
-        cu_window_seqlens = output_buffer[total_cell_count + total_temporal +
+        full_seqlens = np.empty(total_frames, dtype=np.int64)
+        window_seqlens = np.empty(total_windows, dtype=np.int64)
+
+        # --- create views & initialize cumulative sum ---
+        window_indices = output_buffer[:total_merged_cells]
+        cu_full_seqlens = output_buffer[total_merged_cells:total_merged_cells +
+                                        total_frames + 1]
+        cu_window_seqlens = output_buffer[total_merged_cells + total_frames +
                                           1:]
 
-        # initialize cu_seqlens
         cu_full_seqlens[0] = 0
         cu_window_seqlens[0] = 0
 
-        # second pass: fill arrays
-        current_index_offset = 0
-        window_index_ptr = 0
-        window_seqlen_ptr = 0
+        # --- second pass: fill arrays ---
+        cell_offset = 0
+        win_idx_ptr = 0
+        win_seqlen_ptr = 0
         full_seqlen_ptr = 0
 
-        for i in range(grid_thw.shape[0]):
-            temporal = grid_thw[i, 0]
-            height = grid_thw[i, 1]
-            width = grid_thw[i, 2]
+        for grid_idx in range(grid_thw.shape[0]):
+            t_dim = grid_thw[grid_idx, 0]
+            h_dim = grid_thw[grid_idx, 1]
+            w_dim = grid_thw[grid_idx, 2]
 
-            merged_height = height // spatial_merge_size
-            merged_width = width // spatial_merge_size
+            merged_h = h_dim // merge_size
+            merged_w = w_dim // merge_size
 
-            n_blocks_height = numba_cdiv(merged_height, vit_merger_wnd_size)
-            n_blocks_width = numba_cdiv(merged_width, vit_merger_wnd_size)
+            num_blocks_h = numba_cdiv(merged_h, win_size_merged)
+            num_blocks_w = numba_cdiv(merged_w, win_size_merged)
 
-            block_area = merged_height * merged_width
+            merged_area_frame = merged_h * merged_w
+            frame_len = h_dim * w_dim
 
-            seqlen = width * height
-            for _ in range(temporal):
-                full_seqlens[full_seqlen_ptr] = seqlen
+            for _ in range(t_dim):
+                full_seqlens[full_seqlen_ptr] = frame_len
                 cu_full_seqlens[full_seqlen_ptr + 1] = \
-                    cu_full_seqlens[full_seqlen_ptr] + seqlen
+                    cu_full_seqlens[full_seqlen_ptr] + frame_len
                 full_seqlen_ptr += 1
 
-            for temporal_offset in range(0, temporal * block_area, block_area):
-                for block_offset_y in range(0, merged_height,
-                                            vit_merger_wnd_size):
-                    for block_offset_x in range(0, merged_width,
-                                                vit_merger_wnd_size):
-                        cell_counter = 0
+            for t_offset in range(t_dim):
+                merged_t_offset = t_offset * merged_area_frame
 
-                        for grid_y in range(
-                                block_offset_y,
-                                min(block_offset_y + vit_merger_wnd_size,
-                                    merged_height),
+                for block_y in range(0, merged_h, win_size_merged):
+                    for block_x in range(0, merged_w, win_size_merged):
+                        cells_in_wnd = 0
+
+                        for merged_y in range(
+                                block_y,
+                                min(block_y + win_size_merged, merged_h),
                         ):
-                            row_offset = temporal_offset + grid_y * merged_width
+                            merged_row_offset = merged_t_offset + \
+                                merged_y * merged_w
 
-                            for grid_x in range(
-                                    block_offset_x,
-                                    min(block_offset_x + vit_merger_wnd_size,
-                                        merged_width),
+                            for merged_x in range(
+                                    block_x,
+                                    min(block_x + win_size_merged, merged_w),
                             ):
-                                window_indices[
-                                    window_index_ptr + cell_counter,
-                                ] = \
-                                    current_index_offset + row_offset + grid_x
-                                cell_counter += 1
+                                global_merged_cell_idx = \
+                                    cell_offset + merged_row_offset + merged_x
 
-                        window_index_ptr += cell_counter
+                                window_indices[win_idx_ptr + cells_in_wnd] = \
+                                    global_merged_cell_idx
+                                cells_in_wnd += 1
 
-                        cur_seqlen = cell_counter * spatial_merge_unit
-                        window_seqlens[window_seqlen_ptr] = cur_seqlen
-                        cu_window_seqlens[window_seqlen_ptr + 1] = \
-                            cu_window_seqlens[window_seqlen_ptr] + cur_seqlen
-                        window_seqlen_ptr += 1
+                        win_idx_ptr += cells_in_wnd
 
-            current_index_offset += temporal * merged_height * merged_width
+                        current_window_len = cells_in_wnd * merge_area
+                        window_seqlens[win_seqlen_ptr] = current_window_len
+
+                        cu_window_seqlens[win_seqlen_ptr + 1] = \
+                            cu_window_seqlens[win_seqlen_ptr] + \
+                                current_window_len
+                        win_seqlen_ptr += 1
+
+            cell_offset += t_dim * merged_h * merged_w
 
         return (
             output_buffer,
