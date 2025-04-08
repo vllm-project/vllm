@@ -37,7 +37,7 @@ from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.configuration_minimax_text_01 import MiniMaxText01Config
 from .image_processer import ImageProcessor, CustomBatchFeature
-
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
@@ -47,161 +47,11 @@ from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
 
-import os
-import re
-import numpy as np
-from PIL import Image
-try:
-    from torchvision.transforms import InterpolationMode
-    BICUBIC = InterpolationMode.BICUBIC
-except ImportError:
-    BICUBIC = Image.BICUBIC
+from .processing_minimax_vl_01 import MiniMaxVL01ProcessingInfo, MiniMaxVL01ProcessorKwargs
 
-logger = logging.get_logger(__name__)
-
-LEGACY_PROCESSING = int(os.getenv('LEGACY_PROCESSING', 1))
-
-def get_hw_multiple_of(image_size, multiple, max_size=None):
-    w, h = image_size
-    new_w = w if w % multiple == 0 else w + (multiple - w % multiple)
-    new_h = h if h % multiple == 0 else h + (multiple - h % multiple)
-    if max_size is not None:
-        assert isinstance(max_size, (list, tuple)) and len(max_size) == 2
-        max_w, max_h = max_size
-        assert max_w % multiple == 0 and max_h % multiple == 0
-        if new_w > max_w or new_h > max_h:
-            new_w = min((new_w * max_w) // new_w, (new_w * max_h) // new_h)
-            new_h = min((new_h * max_w) // new_w, (new_h * max_h) // new_h)
-
-            new_w = new_w if new_w % multiple == 0 else new_w + (multiple - new_w % multiple)
-            new_h = new_h if new_h % multiple == 0 else new_h + (multiple - new_h % multiple)
-        assert new_w % multiple == 0 and new_h % multiple == 0
-        assert new_w <= max_w and new_h <= max_h
-    return new_w, new_h
-
-def select_best_resolution(original_size, possible_resolutions):
-    """
-    Selects the best resolution from a list of possible resolutions based on the original size.
-    Args:
-        original_size (tuple): The original size of the image in the format (width, height).
-        possible_resolutions (list): A list of possible resolutions in the format [(width1, height1), (width2, height2), ...].
-    Returns:
-        tuple: The best fit resolution in the format (width, height).
-    """
-    original_width, original_height = original_size
-    best_fit = None
-    max_effective_resolution = 0
-    min_wasted_resolution = float("inf")
-
-    for width, height in possible_resolutions:
-        scale = min(width / original_width, height / original_height)
-        downscaled_width, downscaled_height = int(original_width * scale), int(original_height * scale)
-
-        effective_resolution = min(downscaled_width * downscaled_height, original_width * original_height)
-        wasted_resolution = (width * height) - effective_resolution
-
-        if effective_resolution > max_effective_resolution or (effective_resolution == max_effective_resolution and wasted_resolution < min_wasted_resolution):
-            max_effective_resolution = effective_resolution
-            min_wasted_resolution = wasted_resolution
-            best_fit = (width, height)
-
-    return best_fit
-
-def get_num_token(img_h, img_w, grid_pinpoints, patch_size):
-    best_resolution = select_best_resolution((img_w,img_h), grid_pinpoints)
-    resized_w, resized_h = best_resolution
-    w_num, h_num = get_w_h_num((img_w, img_h), (resized_w// patch_size, resized_h// patch_size))
-    total_token = int((w_num+1) * h_num) + (336//patch_size)**2
-    return total_token
-
-def get_w_h_num(resolution, best_resolution):
-    original_width, original_height = resolution
-    current_width, current_height = best_resolution
-
-    current_height = int(current_height)
-    current_width = int(current_width)
-    original_height = int(original_height)
-    original_width = int(original_width)
-
-    original_aspect_ratio = original_width / original_height
-    current_aspect_ratio = current_width / current_height
-
-    if original_aspect_ratio > current_aspect_ratio:
-        scale_factor = current_width / original_width
-        new_height = int(original_height * current_width) // original_width
-        padding = (current_height - new_height) // 2
-        w_num = current_width
-        h_num = current_height - 2*padding
-    else:
-        scale_factor = current_height / original_height
-        new_width = int(original_width * current_height) // original_height
-        
-        padding = (current_width - new_width) // 2
-        w_num = current_width - 2*padding
-        h_num = current_height
-
-    return (w_num, h_num)
-
-def split_special_tokens(text, special_tokens):
-    pattern = '|'.join(map(re.escape, special_tokens))
-    return re.split(f'({pattern})', text)
-
-class CustomBatchFeature(BatchFeature):
-    def convert_to_tensors(self, tensor_type: Optional[Union[str, TensorType]] = None):
-        if tensor_type is None:
-            return self
-
-        is_tensor, as_tensor = self._get_is_as_tensor_fns(tensor_type)
-
-        for key, value in self.items():
-            if key == "pixel_values":
-                for i, image in enumerate(value):
-                    if not is_tensor(image):
-                        tensor = as_tensor(image)
-                        self[key][i] = tensor
-                continue
-            try:
-                if not is_tensor(value):
-                    tensor = as_tensor(value)
-                    self[key] = tensor
-            except:
-                if key == "overflowing_values":
-                    raise ValueError("Unable to create tensor returning overflowing values of different lengths. ")
-                raise ValueError(
-                    "Unable to create tensor, you should probably activate padding "
-                    "with 'padding=True' to have batched tensors with the same length."
-                )
-
-        return self
-
-def _convert_image_to_rgb(image):
-    """Convert PIL image to RGB mode."""
-    return image.convert("RGB")
-
-def resize_multiple_of(image, multiple, max_size=None):
-    """Resize image to be multiple of a number."""
-    width, height = image.size
-    new_width, new_height = get_hw_multiple_of((width, height), multiple, max_size)
-    return image.resize((new_width, new_height), Image.BICUBIC)
-
-def make_list_of_images(images):
-    """Convert input image to list of PIL images."""
-    if isinstance(images, (Image.Image, np.ndarray, torch.Tensor)):
-        return [images]
-    elif isinstance(images, (list, tuple)):
-        return images
-    else:
-        raise ValueError(f"images must be PIL image, numpy array, torch tensor, or list of such, got {type(images)}")
 # Register the processors
 AutoImageProcessor.register("minimax_vl_01", ImageProcessor)
 AutoProcessor.register("minimax_vl_01", ImageProcessor)
-
-class MiniMaxVL01ProcessorKwargs(ProcessingKwargs, total=False):
-    _defaults = {
-        "text_kwargs": {
-            "padding": False,
-        }
-    }
 
 class MiniMaxVL01Processor(ProcessorMixin):
     r"""
@@ -586,10 +436,34 @@ class LlavaNextMultiModalProcessor(
         image_processor_input_names = self.image_processor.model_input_names
         return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
 
+_I = TypeVar("_I", bound=MiniMaxVL01ProcessingInfo)
+class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+        num_images = mm_counts.get("image", 0)
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text="<image>" * num_images,
+            mm_data=mm_data,
+        )
+
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaNextMultiModalProcessor,
     info=LlavaNextProcessingInfo,
-    dummy_inputs=LlavaDummyInputsBuilder)
+    dummy_inputs=MiniMaxVLDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
@@ -1000,179 +874,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-
-class MiniMaxVL01Config(PretrainedConfig):
-    model_type = "minimax_vl_01"
-
-    def __init__(
-        self,
-        vision_config=None,
-        text_config=None,
-        ignore_index=-100,
-        image_token_index=32000,
-        projector_hidden_act="gelu",
-        vision_feature_select_strategy="default",
-        vision_feature_layer=-2,
-        image_grid_pinpoints=None,
-        tie_word_embeddings=False,
-        image_seq_length=576,
-        **kwargs,
-    ):
-        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
-        
-        self.ignore_index = ignore_index
-        self.image_token_index = image_token_index
-        self.projector_hidden_act = projector_hidden_act
-        self.image_seq_length = image_seq_length
-
-        if vision_feature_select_strategy not in ["default", "full"]:
-            raise ValueError(
-                "vision_feature_select_strategy should be one of 'default', 'full'."
-                f"Got: {vision_feature_select_strategy}"
-            )
-
-        self.vision_feature_select_strategy = vision_feature_select_strategy
-        self.vision_feature_layer = vision_feature_layer
-        image_grid_pinpoints = (
-            image_grid_pinpoints
-            if image_grid_pinpoints is not None
-            else [[336, 672], [672, 336], [672, 672], [1008, 336], [336, 1008]]
-        )
-        self.image_grid_pinpoints = image_grid_pinpoints
-
-        if isinstance(vision_config, dict):
-            vision_config["model_type"] = (
-                vision_config["model_type"] if "model_type" in vision_config else "clip_vision_model"
-            )
-            vision_config = CONFIG_MAPPING[vision_config["model_type"]](**vision_config)
-        elif vision_config is None:
-            from transformers import CLIPVisionConfig
-            vision_config = CLIPVisionConfig(
-                intermediate_size=4096,
-                hidden_size=1024,
-                patch_size=14,
-                image_size=336,
-                num_hidden_layers=24,
-                num_attention_heads=16,
-                vocab_size=32000,
-                projection_dim=768,
-            )
-
-        self.vision_config = vision_config
-
-        if text_config is not None:
-            assert "model_type" in text_config, "text_config model_type is not specified"
-            text_config = MiniMaxText01Config(**text_config)
-        else:
-            text_config = MiniMaxText01Config()
-
-        self.text_config = text_config
-
-
-class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
-
-    def get_hf_config(self) -> MiniMaxVL01Config:
-        return self.ctx.get_hf_config(MiniMaxVL01Config)
-
-    def get_hf_processor(self, **kwargs: object):
-        if "image_processor" not in kwargs:
-            kwargs["image_processor"] = self.get_image_processor(**kwargs)
-        if "tokenizer" not in kwargs:
-            from transformers import AutoTokenizer
-            kwargs["tokenizer"] = AutoTokenizer.from_pretrained(self.ctx.model_config.tokenizer)
-        return MiniMaxVL01Processor(**kwargs)
-
-    def get_image_processor(self, **kwargs: object) -> ImageProcessor:
-        return ImageProcessor(**kwargs)
-
-    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
-        hf_config = self.get_hf_config()
-        vision_encoder_info = self.get_vision_encoder_info()
-
-        base_feature_size = self._apply_feature_select_strategy(
-            hf_config.vision_feature_select_strategy,
-            vision_encoder_info.get_num_image_tokens(
-                image_width=image_width,
-                image_height=image_height,
-            ),
-        )
-
-        num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-            image_size=(image_height, image_width),
-            grid_pinpoints=hf_config.image_grid_pinpoints,
-            patch_size=vision_encoder_info.get_image_size(),
-        )
-
-        (
-            unpadded_feature_size,
-            newline_feature_size,
-        ) = self._get_num_unpadded_features(
-            original_height=image_height,
-            original_width=image_width,
-            npatches=vision_encoder_info.get_patch_grid_length(),
-            num_patch_height=num_patch_height,
-            num_patch_width=num_patch_width,
-        )
-
-        return unpadded_feature_size + newline_feature_size + base_feature_size
-
-    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
-    def _get_num_unpadded_features(
-        self,
-        *,
-        original_height: int,
-        original_width: int,
-        npatches: int,
-        num_patch_height: int,
-        num_patch_width: int,
-    ) -> tuple[int, int]:
-        current_height = npatches * num_patch_height
-        current_width = npatches * num_patch_width
-
-        aspect_ratio = original_width / original_height
-        current_aspect_ratio = current_width / current_height
-
-        if aspect_ratio > current_aspect_ratio:
-            new_height = (original_height * current_width) // original_width
-            padding = (current_height - new_height) // 2
-            current_height = current_height - (2 * padding)
-        else:
-            new_width = (original_width * current_height) // original_height
-            padding = (current_width - new_width) // 2
-            current_width = current_width - (2 * padding)
-
-        unpadded_features = current_height * current_width
-        newline_features = current_height
-
-        return (unpadded_features, newline_features)
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        hf_config = self.get_hf_config()
-
-        largest_feature_size, largest_feature_pinpoint = 0, None
-        for (height, width) in hf_config.image_grid_pinpoints:
-            feat_size = self.get_num_image_tokens(image_width=width,
-                                                  image_height=height)
-            if feat_size > largest_feature_size:
-                largest_feature_size = feat_size
-                largest_feature_pinpoint = ImageSize(width=width,
-                                                     height=height)
-
-        if largest_feature_size == 0 or largest_feature_pinpoint is None:
-            raise ValueError("Cannot have a largest feature size of 0!")
-
-        return largest_feature_pinpoint
-
-
-_I = TypeVar("_I", bound=LlavaNextProcessingInfo)
-
 
 class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
 
