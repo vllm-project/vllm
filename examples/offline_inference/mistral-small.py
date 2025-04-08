@@ -90,8 +90,9 @@ def run_simple_demo(args: argparse.Namespace):
         },
     ]
     outputs = llm.chat(messages, sampling_params=sampling_params)
-
+    print("-" * 50)
     print(outputs[0].outputs[0].text)
+    print("-" * 50)
 
 
 def run_advanced_demo(args: argparse.Namespace):
@@ -162,7 +163,9 @@ def run_advanced_demo(args: argparse.Namespace):
     ]
 
     outputs = llm.chat(messages=messages, sampling_params=sampling_params)
+    print("-" * 50)
     print(outputs[0].outputs[0].text)
+    print("-" * 50)
 
 
 def main():
