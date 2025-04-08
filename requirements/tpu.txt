@@ -17,9 +17,10 @@ ray[data]
 --find-links https://storage.googleapis.com/libtpu-releases/index.html
 --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-torch @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-2.8.0.dev20250319-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
-torch @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-2.8.0.dev20250319-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
-torch @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-2.8.0.dev20250319-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250319-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250319-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250319-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
+torch @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-2.8.0.dev20250406-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
+torch @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-2.8.0.dev20250406-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
+torch @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-2.8.0.dev20250406-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250406-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250406-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250406-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
+
