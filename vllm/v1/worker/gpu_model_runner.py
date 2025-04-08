@@ -3,7 +3,7 @@
 import gc
 import time
 import weakref
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -205,6 +205,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
+        self.token_type_ids = None
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -270,6 +271,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+
+    def get_token_type_ids(self) -> Optional[torch.Tensor]:
+        if self.token_type_ids is None:
+            self.token_type_ids = torch.zeros(self.max_num_tokens,
+                                              dtype=torch.int8,
+                                              device=self.device)
+        return self.token_type_ids
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -338,6 +346,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
+                token_type_ids=new_req_data.token_type_ids,
                 prompt=new_req_data.prompt,
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
@@ -537,6 +546,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
+        if self.input_batch.token_type_ids_cpu_tensor is not None:
+            token_type_ids = torch.index_select(
+                self.input_batch.token_type_ids_cpu_tensor.flatten(), 0,
+                torch.from_numpy(token_indices))
+            # Copy the tensors to the GPU.
+            self.get_token_type_ids()[:total_num_scheduled_tokens]\
+                .copy_(token_type_ids, non_blocking=True)
 
         # Calculate the slot mapping.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -1008,11 +1024,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_input_tokens = num_scheduled_tokens
         attn_metadata.num_input_tokens = num_input_tokens
 
+        has_token_types = self.token_type_ids is not None
+        model_kwargs = {}
+
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:num_scheduled_tokens]
+            if has_token_types:
+                model_kwargs["token_type_ids"] = cast(
+                    torch.Tensor, self.token_type_ids)[:num_scheduled_tokens]
             if encoder_outputs:
                 inputs_embeds = self.model.get_input_embeddings(
                     input_ids, encoder_outputs)
@@ -1028,6 +1050,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # multimodal models, it is not desirable for performance since
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids[:num_input_tokens]
+            if has_token_types:
+                model_kwargs["token_type_ids"] = cast(
+                    torch.Tensor, self.token_type_ids)[:num_input_tokens]
             inputs_embeds = None
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
@@ -1055,6 +1080,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                **model_kwargs,
             )
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.

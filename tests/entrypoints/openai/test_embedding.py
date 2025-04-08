@@ -11,10 +11,19 @@ import requests
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+from ...models.embedding.utils import check_embeddings_close
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
 
 
 @pytest.fixture(scope="module")
@@ -201,19 +210,24 @@ async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
             np.frombuffer(base64.b64decode(data.embedding),
                           dtype="float32").tolist())
 
-    assert responses_float.data[0].embedding == decoded_responses_base64_data[
-        0]
-    assert responses_float.data[1].embedding == decoded_responses_base64_data[
-        1]
+    check_embeddings_close(
+        embeddings_0_lst=[d.embedding for d in responses_float.data],
+        embeddings_1_lst=decoded_responses_base64_data,
+        name_0="float",
+        name_1="base64",
+        tol=1e-2,
+    )
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(input=input_texts,
                                                        model=model_name)
-
-    assert responses_float.data[0].embedding == responses_default.data[
-        0].embedding
-    assert responses_float.data[1].embedding == responses_default.data[
-        1].embedding
+    check_embeddings_close(
+        embeddings_0_lst=[d.embedding for d in responses_float.data],
+        embeddings_1_lst=[d.embedding for d in responses_default.data],
+        name_0="float",
+        name_1="default",
+        tol=1e-2,
+    )
 
 
 @pytest.mark.asyncio

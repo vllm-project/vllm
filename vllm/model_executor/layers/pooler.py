@@ -323,7 +323,6 @@ class CrossEncodingPooler(nn.Module):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         """Pools sentence pair scores from the hidden_states."""
-
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
 
         offset = 0

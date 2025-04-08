@@ -26,6 +26,7 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
+    token_type_ids: Optional[list[int]]
     prompt: Optional[str]
     mm_inputs: list[MultiModalKwargs]
     mm_positions: list[PlaceholderRange]
@@ -88,6 +89,8 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
+        self.token_type_ids_cpu_tensor = None
+        self._token_type_ids_cpu = None
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
@@ -229,6 +232,22 @@ class InputBatch:
         self.pooling_reqs: set[str] = set()
 
     @property
+    def token_type_ids_cpu(self) -> np.ndarray:
+        if self._token_type_ids_cpu is None:
+            self.token_type_ids_cpu_tensor = torch.zeros(
+                self.token_ids_cpu_tensor.shape,
+                device="cpu",
+                dtype=torch.int8,
+                pin_memory=False,
+            )
+            self._token_type_ids_cpu = cast(
+                torch.Tensor, self.token_type_ids_cpu_tensor).numpy()
+        return self._token_type_ids_cpu
+
+    def has_token_types(self) -> bool:
+        return self._token_type_ids_cpu is not None
+
+    @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
         # while performing state updates to the batch.
@@ -258,6 +277,9 @@ class InputBatch:
         self.num_prompt_tokens[req_index] = num_prompt_tokens
         self.token_ids_cpu[
             req_index, :num_prompt_tokens] = request.prompt_token_ids
+        if request.token_type_ids is not None:
+            self.token_type_ids_cpu[
+                req_index, :num_prompt_tokens] = request.token_type_ids
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index,
@@ -443,6 +465,10 @@ class InputBatch:
         tmp = self.token_ids_cpu[i1, ...].copy()
         self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
         self.token_ids_cpu[i2, ...] = tmp
+        if self.has_token_types():
+            tmp2 = self.token_type_ids_cpu[i1, ...].copy()
+            self.token_type_ids_cpu[i1, ...] = self.token_type_ids_cpu[i2, ...]
+            self.token_type_ids_cpu[i2, ...] = tmp2
 
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.min_tokens, i1, i2)
@@ -494,6 +520,9 @@ class InputBatch:
             num_tokens = self.num_tokens[last_req_index]
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens]
+            if self.has_token_types():
+                self.token_type_ids_cpu[empty_index, :num_tokens] = \
+                    self.token_type_ids_cpu[last_req_index, :num_tokens]
             self.num_tokens[empty_index] = num_tokens
             self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
                 last_req_index]

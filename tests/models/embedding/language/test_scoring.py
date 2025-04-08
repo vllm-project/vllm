@@ -29,6 +29,14 @@ TEXTS_2 = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 @pytest.fixture(scope="module", params=MODELS)
 def model_name(request):
     yield request.param
