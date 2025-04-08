@@ -75,7 +75,7 @@ MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python exampl
 - Qwen-2.5-72B: `--model "Qwen/Qwen2.5-72B"` (currently only supported on T3K)
 - DeepSeek-R1-Distill-Llama-70B: `--model "deepseek-ai/DeepSeek-R1-Distill-Llama-70B"`
 
-### Llama-3.2-11B-Vision-Instruct
+### Llama-3.2 (11B and 90B) Vision models
 
 To generate tokens for sample prompts:
 ```python
@@ -88,6 +88,12 @@ MESH_DEVICE=N300 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examp
 ```
 
 **Note**: To run on T3000, set `MESH_DEVICE=T3K` and `--max_seqs_in_batch 32`.
+
+**Note**: Running `90B` model, set `MESH_DEVICE=T3K` and `--max_seqs_in_batch 4`:
+
+```python
+MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --model "meta-llama/Llama-3.2-90B-Vision-Instruct" --multi_modal --max_seqs_in_batch 4
+```
 
 ## Running the server example
 
@@ -103,3 +109,57 @@ curl http://localhost:8000/v1/completions -H "Content-Type: application/json" -d
 
 **Note**: By default, the server will run with Llama-3.1-70B-Instruct. To run with other models, set `MESH_DEVICE` and `--model` as described in [Running the offline inference example](#running-the-offline-inference-example).
 
+### Llama-3.2 (11B and 90B) Vision models
+
+First, start the server following the instructions above with the correct model through `--model`. 
+
+Second, generate a prompt json, e.g.,
+```python
+import base64
+import json
+
+# Function to encode the image
+def encode_image(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
+
+# Path to your image
+image_path = "pasta.jpeg"
+
+# Getting the base64 string
+base64_image = encode_image(image_path)
+
+payload = {
+    "model": "meta-llama/Llama-3.2-11B-Vision-Instruct",
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "<image>\nWhat is for dinner?"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_image}"
+                    }
+                }
+            ]
+        }
+    ],
+    "max_tokens": 128,
+    "temperature": 1,
+    "top_p": 0.9,
+    "top_k": 10
+}
+
+# Save to a JSON file
+with open("server-instruct-mm-prompt.json", "w") as json_file:
+    json.dump(payload, json_file, indent=4)
+```
+
+Finally, send a request to the server:
+```bash
+curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" --data-binary @server-instruct-mm-prompt.json
+```

@@ -227,6 +227,9 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         if ("Llama-3.1-8B" in self.model_config.model and 
             len(self.device_config.device.get_devices()) == 1):  # Llama8B on N150
             max_tokens_all_users = 65536
+        elif ("Llama-3.2-90B" in self.model_config.model and 
+              len(self.device_config.device.get_devices()) == 8):  # Llama90B on T3K
+            max_tokens_all_users = 65536 # [INFO] avoid OOM for Llama-3.2-90B
         else:
             max_tokens_all_users = 131072  # Note: includes num vision tokens for multi-modal
         num_tt_blocks = math.ceil(max_tokens_all_users / self.cache_config.block_size)
