@@ -21,7 +21,7 @@ import argparse
 import datetime
 import os
 import re
-from typing import List, Union
+from typing import Union
 
 import albumentations
 import numpy as np
@@ -260,9 +260,9 @@ def _convert_np_uint8(float_image: torch.Tensor):
 
 
 def load_example(
-    file_paths: List[str],
-    mean: List[float] = None,
-    std: List[float] = None,
+    file_paths: list[str],
+    mean: list[float] = None,
+    std: list[float] = None,
     indices: Union[list[int], None] = None,
 ):
     """Build an input example by loading images in *file_paths*.

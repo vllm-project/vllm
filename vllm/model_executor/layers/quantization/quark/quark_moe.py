@@ -142,8 +142,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             layer.w2_input_scale = torch.nn.Parameter(
                 layer.w2_input_scale.max(), requires_grad=False)
 
-        # If rocm, normalize the weights and scales to e4m3fnuz
-        if current_platform.is_rocm():
+        if current_platform.is_fp8_fnuz():
             # Normalize the weights and scales
             w13_weight, w13_weight_scale, w13_input_scale = \
                 normalize_e4m3fn_to_e4m3fnuz(
@@ -203,6 +202,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -218,16 +219,18 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        return fused_experts(x,
-                             layer.w13_weight,
-                             layer.w2_weight,
-                             topk_weights=topk_weights,
-                             topk_ids=topk_ids,
-                             inplace=True,
-                             use_fp8_w8a8=True,
-                             global_num_experts=global_num_experts,
-                             expert_map=expert_map,
-                             w1_scale=layer.w13_weight_scale,
-                             w2_scale=layer.w2_weight_scale,
-                             a1_scale=layer.w13_input_scale,
-                             a2_scale=layer.w2_input_scale)
+        return fused_experts(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=True,
+            use_fp8_w8a8=True,
+            global_num_experts=global_num_experts,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            expert_map=expert_map,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale)

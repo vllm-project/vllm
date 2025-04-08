@@ -9,14 +9,13 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (List, Literal, Optional, Set, Tuple, TypedDict, TypeVar,
-                    Union)
+from typing import Literal, Optional, Set, Tuple, TypedDict, TypeVar, Union
 
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers import BatchEncoding, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -37,7 +36,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -51,20 +50,19 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 class InternVLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: torch.Tensor
+    pixel_values_flat: torch.Tensor
     """
     Shape:
     `(batch_size * num_images * (1 + num_patches), num_channels, height, width)`
     """
-    patches_per_image: List[int]
-    """
-    List of number of total patches for each image in the batch.
-    """
+
+    num_patches: torch.Tensor
+    """Shape: `(batch_size * num_images)`"""
 
 
 class InternVLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    data: NestedTensors
+    data: Union[torch.Tensor, list[torch.Tensor]]
     """ 
     A tensor of shape `(num_images, total_image_feature_size, hidden_size)`
     or a list of tensors of shape `(total_image_feature_size, hidden_size)`
@@ -286,19 +284,11 @@ class BaseInternVLProcessor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_image_repl_features(
+    def get_image_repl(
         self,
         feature_size: int,
         num_patches: Optional[int],
-    ) -> str:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_image_repl_full(
-        self,
-        feature_size: int,
-        num_patches: Optional[int],
-    ) -> str:
+    ) -> PromptUpdateDetails[str]:
         raise NotImplementedError
 
     def resolve_min_max_num(
@@ -394,7 +384,7 @@ class BaseInternVLProcessor(ABC):
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
-    ) -> BatchFeature:
+    ) -> Mapping[str, NestedTensors]:
         if text is None:
             text = []
         if not isinstance(text, list):
@@ -413,28 +403,26 @@ class BaseInternVLProcessor(ABC):
                 max_dynamic_patch=max_dynamic_patch,
                 dynamic_image_size=dynamic_image_size,
             )
-            image_inputs = {
-                "pixel_values_flat": torch.cat(pixel_values_lst),
-                "image_num_patches": list(map(len, pixel_values_lst)),
+            image_inputs: dict[str, NestedTensors] = {
+                "pixel_values_flat":
+                torch.cat(pixel_values_lst),
+                "image_num_patches":
+                torch.tensor([len(item) for item in pixel_values_lst]),
             }
 
             for pixel_values in pixel_values_lst:
                 num_patches = pixel_values.shape[0]
                 feature_size = num_patches * self.num_image_token
 
-                image_repl = self.get_image_repl_full(feature_size,
-                                                      num_patches)
-                text = [t.replace('<image>', image_repl, 1) for t in text]
+                image_repl = self.get_image_repl(feature_size, num_patches)
+                text = [t.replace('<image>', image_repl.full, 1) for t in text]
 
         text_inputs = self.tokenizer(text)
 
-        return BatchFeature(
-            {
-                **text_inputs,
-                **image_inputs,
-            },
-            tensor_type=return_tensors,
-        )
+        return {
+            **BatchEncoding(text_inputs, tensor_type=return_tensors),
+            **image_inputs,
+        }
 
 
 class InternVLProcessor(BaseInternVLProcessor):
@@ -443,20 +431,15 @@ class InternVLProcessor(BaseInternVLProcessor):
     def image_token_id(self) -> int:
         return self.tokenizer.get_vocab()[IMG_CONTEXT]
 
-    def get_image_repl_features(
+    def get_image_repl(
         self,
         feature_size: int,
         num_patches: Optional[int],
-    ) -> str:
-        return IMG_CONTEXT * feature_size
+    ) -> PromptUpdateDetails[str]:
+        repl_features = IMG_CONTEXT * feature_size
+        repl_full = IMG_START + repl_features + IMG_END
 
-    def get_image_repl_full(
-        self,
-        feature_size: int,
-        num_patches: Optional[int],
-    ) -> str:
-        features = self.get_image_repl_features(feature_size, num_patches)
-        return IMG_START + features + IMG_END
+        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
 
 class BaseInternVLProcessingInfo(BaseProcessingInfo):
@@ -566,16 +549,15 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+    ) -> Mapping[str, NestedTensors]:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
 
-        image_token_id = self.info.get_hf_processor(**mm_kwargs).image_token_id
-        image_data = mm_data.get("images", [])
-        assert isinstance(image_data, list)
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        image_token_id = hf_processor.image_token_id
 
         # Since there may be extra tokens in the feature placeholders,
         # we need to pass the image token ID to the model to select the
@@ -586,7 +568,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: BatchFeature,
+        hf_inputs: Mapping[str, NestedTensors],
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
@@ -637,12 +619,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return PromptUpdateDetails(
-                full=hf_processor.get_image_repl_full(feature_size,
-                                                      num_patches),
-                features=hf_processor.get_image_repl_features(
-                    feature_size, num_patches),
-            )
+            return hf_processor.get_image_repl(feature_size, num_patches)
 
         return [
             PromptReplacement(
@@ -838,7 +815,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             return None
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, torch.Tensor):
+            if not isinstance(image_embeds, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
 
@@ -856,35 +833,39 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values_flat)}")
 
-            assert isinstance(image_num_patches, (torch.Tensor, list))
+            if not isinstance(image_num_patches, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of image_num_patches. "
+                                 f"Got type: {type(image_num_patches)}")
+
+            pixel_values_flat = flatten_bn(pixel_values_flat, concat=True)
+            image_num_patches = flatten_bn(image_num_patches, concat=True)
 
             return InternVLImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(
-                    flatten_bn(pixel_values_flat, concat=True)),
-                patches_per_image=flatten_bn(image_num_patches,
-                                             concat=True).tolist())
+                pixel_values_flat=self._validate_pixel_values(
+                    pixel_values_flat),
+                num_patches=image_num_patches,
+            )
 
         raise AssertionError("This line should be unreachable.")
 
     def _process_image_input(
         self,
         image_input: InternVLImageInputs,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor, ...]]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
         assert self.vision_model is not None
 
-        image_embeds = self.extract_feature(image_input["data"])
+        image_embeds = self.extract_feature(image_input["pixel_values_flat"])
 
-        patches_per_image = image_input["patches_per_image"]
+        num_patches = image_input["num_patches"]
 
         # Only one image in the current batch
-        if len(patches_per_image) == 1:
-            image_embeds = image_embeds.view(
+        if len(num_patches) == 1:
+            return image_embeds.view(
                 -1, self.config.text_config.hidden_size).unsqueeze(0)
-            return image_embeds
 
         # NOTE: Image embeddings are split into separate tensors for each image
         # by the size of each embedding.
@@ -892,10 +873,9 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         image_embeds = image_embeds.view(-1,
                                          self.config.text_config.hidden_size)
         image_feature_sizes = [
-            num_patches * feature_size for num_patches in patches_per_image
+            num_patches * feature_size for num_patches in num_patches
         ]
-        image_embeds = image_embeds.split(image_feature_sizes)
-        return image_embeds
+        return image_embeds.split(image_feature_sizes)
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
         if self.is_mono:
@@ -904,25 +884,29 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         else:
             self.visual_token_mask = None
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
-        vision_embeddings = self._process_image_input(image_input)
-        return vision_embeddings
+
+        return self._process_image_input(image_input)
 
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             assert self.img_context_token_id is not None
             self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.img_context_token_id)
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                self.img_context_token_id,
+            )
         return inputs_embeds
 
     def forward(
@@ -979,5 +963,12 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(self)
+        # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
+        skip_prefixes = [
+            "action_embed", "temporal_embed", "track_embed",
+            "track_embed_decoder", "box_token", "cg_criterion", "cg_model",
+            "loc_encoder", "loc_decoder", "sam", "temporal_token",
+            "track_token"
+        ]
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)

@@ -93,6 +93,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         mm_kwargs = {}
 
@@ -104,6 +105,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             prompt=prompt,
             prompt_token_ids=[1],
             mm_kwargs=MultiModalKwargs(mm_kwargs),
+            mm_hashes=None,
             mm_placeholders={},
         )
 

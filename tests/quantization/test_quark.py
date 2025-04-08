@@ -10,7 +10,9 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkLinearMethod, QuarkW8A8Fp8)
 
 
-def test_quark_fp8(vllm_runner):
+def test_quark_fp8(vllm_runner, monkeypatch):
+    # vllm_runner.apply_model() relies on V0 internals.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
     with vllm_runner(model_path) as llm:
 
