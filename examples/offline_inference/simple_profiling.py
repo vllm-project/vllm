@@ -32,10 +32,12 @@ if __name__ == "__main__":
     llm.stop_profile()
 
     # Print the outputs.
+    print("-" * 50)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+        print("-" * 50)
 
     # Add a buffer to wait for profiler in the background process
     # (in case MP is on) to finish writing profiling output.
