@@ -2,7 +2,7 @@
 
 import time
 from collections.abc import Mapping
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
@@ -12,6 +12,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
 from vllm.multimodal.inputs import PlaceholderRange
+from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -299,17 +300,29 @@ class Processor:
         prompt_inputs: SingletonInputs,
         lora_request: Optional[LoRARequest],
         *,
-        prompt_type: str,
+        prompt_type: Literal["encoder", "decoder"],
     ):
+        tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
+
+        if prompt_type == "encoder":
+            model_config = self.model_config
+
+            if model_config.is_multimodal_model:
+                mm_registry = self.input_preprocessor.mm_registry
+                mm_processor = mm_registry.create_processor(
+                    model_config, tokenizer=tokenizer)
+                assert isinstance(mm_processor, EncDecMultiModalProcessor)
+
+                if mm_processor.pad_dummy_encoder_prompt:
+                    return  # Skip encoder length check
+
         prompt_ids = prompt_inputs["prompt_token_ids"]
 
         if not prompt_ids:
             raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
         max_input_id = max(prompt_ids)
-        max_allowed = self.tokenizer.get_lora_tokenizer(
-            lora_request).max_token_id
-        if max_input_id > max_allowed:
+        if max_input_id > tokenizer.max_token_id:
             raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len

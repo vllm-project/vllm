@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                    Iterable, List, Mapping, NamedTuple, Optional)
+                    Iterable, List, Literal, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
@@ -40,6 +40,7 @@ from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
@@ -2043,8 +2044,21 @@ class LLMEngine:
         prompt_inputs: SingletonInputs,
         lora_request: Optional[LoRARequest],
         *,
-        prompt_type: str,
+        prompt_type: Literal["encoder", "decoder"],
     ):
+        if prompt_type == "encoder" and self.tokenizer is not None:
+            tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
+            model_config = self.model_config
+
+            if model_config.is_multimodal_model:
+                mm_registry = self.input_preprocessor.mm_registry
+                mm_processor = mm_registry.create_processor(
+                    model_config, tokenizer=tokenizer)
+                assert isinstance(mm_processor, EncDecMultiModalProcessor)
+
+                if mm_processor.pad_dummy_encoder_prompt:
+                    return  # Skip encoder length check
+
         prompt_ids = prompt_inputs["prompt_token_ids"]
 
         if not prompt_ids:
