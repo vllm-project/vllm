@@ -6,9 +6,6 @@ from typing import Optional, Tuple
 import torch
 from functorch.experimental.control_flow import cond  # noqa: F401
 
-from vllm.model_executor.layers.quantization.utils import replace_parameter
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    convert_to_channelwise)
 from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (ScaledMMLinearKernel,
@@ -45,25 +42,17 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # WEIGHT
         # [out, in] (different than cutlass_scaled_mm)
-        weight = getattr(layer, self.w_q_name)
-        replace_parameter(layer, self.w_q_name,
-                          torch.nn.Parameter(weight.data, requires_grad=False))
+        weight_param = getattr(layer, self.w_q_name)
+        self.replace_parameter(layer, self.w_q_name, weight_param)
 
         # WEIGHT SCALE
         # XLA kernels support only per-tensor and per-channel.
-        # If we have a fused module (QKV, MLP) with per tensor scales (thus N
-        # scales being passed to the kernel), convert to the per-channel case.
-        is_fused_module = len(layer.logical_widths) > 1
-        weight_scale = getattr(layer, self.w_s_name)
-        if is_fused_module and not self.config.is_channelwise:
-            weight_scale = convert_to_channelwise(weight_scale,
-                                                  layer.logical_widths)
+        w_scale_param = getattr(layer, self.w_s_name)
+        w_scale_param = self.maybe_unfuse_weight_scale(layer, w_scale_param)
 
         # [out_channel,] (different than cutlass_scaled_mm)
-        weight_scale = weight_scale.squeeze(-1)
-        replace_parameter(
-            layer, self.w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False))
+        w_scale_param = w_scale_param.squeeze(-1)
+        self.replace_parameter(layer, self.w_s_name, w_scale_param)
 
         # Only support symmetric dynamic activation quantization.
         setattr(layer, self.i_s_name, None)

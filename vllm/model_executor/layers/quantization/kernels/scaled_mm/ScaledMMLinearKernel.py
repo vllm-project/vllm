@@ -6,6 +6,9 @@ from typing import Optional, Tuple
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    convert_to_channelwise)
 from vllm.platforms import current_platform
 
 
@@ -100,14 +103,53 @@ class ScaledMMLinearKernel(ABC):
             self, layer: torch.nn.Module) -> Tuple[
                 torch.Tensor,  # weight
                 torch.Tensor,  # weight_scale
-                Optional[torch.Tensor],  # input_scale, 
+                Optional[torch.Tensor],  # input_scale,
                 Optional[torch.Tensor],  # input_zp
                 Optional[torch.Tensor],  # azp_adj
             ]:
         return (
             getattr(layer, self.w_q_name),
             getattr(layer, self.w_s_name),
-            getattr(layer, self.i_s_name),
-            getattr(layer, self.i_zp_name),
-            getattr(layer, self.azp_adj_name),
+            getattr(layer, self.i_s_name, None),
+            getattr(layer, self.i_zp_name, None),
+            getattr(layer, self.azp_adj_name, None),
         )
+
+    def replace_parameter(self, layer: torch.nn.Module, name: str,
+                          param: torch.nn.Parameter):
+        """
+        This utility can replace a parameter with the new value.
+        """
+
+        # Call free util function
+        replace_parameter(layer, name,
+                          torch.nn.Parameter(param.data, requires_grad=False))
+
+    def maybe_unfuse_weight_scale(self, layer: torch.nn.Module,
+                                  weight_scale_param: torch.nn.Parameter):
+        # If we have a fused module (QKV, MLP) with per tensor scales (thus N
+        # scales being passed to the kernel), convert to the per-channel case.
+        is_fused_module = len(layer.logical_widths) > 1
+
+        if is_fused_module and not self.config.is_channelwise:
+            weight_scale_param = convert_to_channelwise(
+                weight_scale_param, layer.logical_widths)
+
+        return weight_scale_param
+
+    def fuse_asymmetric_params(
+        self, input_scale_param: torch.nn.Parameter,
+        input_zp_param: torch.nn.Parameter
+    ) -> Tuple[torch.nn.Parameter, torch.nn.Parameter]:
+        # reconstruct the ranges
+        int8_traits = torch.iinfo(torch.int8)
+        azps = input_zp_param.to(dtype=torch.int32)
+        range_max = (input_scale_param * (int8_traits.max - azps)).max()
+        range_min = (input_scale_param * (int8_traits.min - azps)).min()
+
+        scale = (range_max - range_min) / (int8_traits.max - int8_traits.min)
+
+        # AZP loaded as int8 but used as int32
+        azp = (int8_traits.min - range_min / scale).to(dtype=torch.int32)
+
+        return scale, azp

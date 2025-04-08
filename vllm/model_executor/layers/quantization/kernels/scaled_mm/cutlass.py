@@ -5,9 +5,6 @@ from typing import Optional, Tuple
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils import replace_parameter
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    convert_to_channelwise)
 from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (ScaledMMLinearKernel,
@@ -44,54 +41,30 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # WEIGHT
         # Cutlass kernels need transposed weight.
-        weight = getattr(layer, self.w_q_name)
-        replace_parameter(
-            layer, self.w_q_name,
-            torch.nn.Parameter(weight.t().data, requires_grad=False))
+        weight_param = getattr(layer, self.w_q_name)
+        self.replace_parameter(layer, self.w_q_name, weight_param.t())
 
         # WEIGHT SCALE
         # Cutlass kernels support only per-tensor and per-channel.
-        # If we have a fused module (QKV, MLP) with per tensor scales (thus N
-        # scales being passed to the kernel), convert to the per-channel case.
-        is_fused_module = len(layer.logical_widths) > 1
-        weight_scale = getattr(layer, self.w_s_name)
-        if is_fused_module and not self.config.is_channelwise:
-            weight_scale = convert_to_channelwise(weight_scale,
-                                                  layer.logical_widths)
-        replace_parameter(
-            layer, self.w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False))
+        w_scale_param = getattr(layer, self.w_s_name)
+        w_scale_param = self.maybe_unfuse_weight_scale(layer, w_scale_param)
+        self.replace_parameter(layer, self.w_s_name, w_scale_param)
 
         # INPUT SCALE
         if self.config.is_static_input_scheme:
-            input_scale = getattr(layer, self.i_s_name)
+            input_scale_param = getattr(layer, self.i_s_name)
 
             if self.config.input_symmetric:
-                replace_parameter(
-                    layer, self.i_s_name,
-                    torch.nn.Parameter(input_scale.max(), requires_grad=False))
+                self.replace_parameter(layer, self.i_s_name,
+                                       input_scale_param.max())
                 setattr(layer, self.i_zp_name, None)
             else:
                 input_zero_point = getattr(layer, self.i_zp_name)
 
-                # reconstruct the ranges
-                int8_traits = torch.iinfo(torch.int8)
-                azps = input_zero_point.to(dtype=torch.int32)
-                range_max = (input_scale * (int8_traits.max - azps)).max()
-                range_min = (input_scale * (int8_traits.min - azps)).min()
-
-                scale = (range_max - range_min) / (int8_traits.max -
-                                                   int8_traits.min)
-                replace_parameter(
-                    layer, self.i_s_name,
-                    torch.nn.Parameter(scale, requires_grad=False))
-
-                # AZP loaded as int8 but used as int32
-                azp = (int8_traits.min -
-                       range_min / scale).to(dtype=torch.int32)
-                replace_parameter(layer, self.i_zp_name,
-                                  torch.nn.Parameter(azp, requires_grad=False))
-
+                i_scale, i_zp = self.fuse_asymmetric_params(
+                    input_scale_param, input_zero_point)
+                self.replace_parameter(layer, self.i_s_name, i_scale)
+                self.replace_parameter(layer, self.i_zp_name, i_zp)
         else:
             setattr(layer, self.i_s_name, None)
             setattr(layer, self.i_zp_name, None)
