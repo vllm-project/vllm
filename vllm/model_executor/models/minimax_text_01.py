@@ -1013,6 +1013,24 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(
             batch_size)
 
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    def set_decoder(self, decoder):
+        self.model = decoder
+
+    def get_decoder(self):
+        return self.model
+
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
