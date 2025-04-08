@@ -319,6 +319,12 @@ class EngineCoreProc(EngineCore):
     ):
         try:
             super().__init__(vllm_config, executor_class, log_stats)
+
+            self.errored_sent_event = threading.Event()
+            self.step_fn = (self.step if self.batch_queue is None else
+                            self.step_with_batch_queue)
+            self.global_unfinished_reqs = False
+
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,
             # and to overlap some serialization/deserialization with the
@@ -326,30 +332,22 @@ class EngineCoreProc(EngineCore):
             # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
             self.input_queue: queue.Queue[tuple[EngineCoreRequestType,
                                                 Any]] = queue.Queue()
-            self.output_queue: queue.Queue[Union[EngineCoreOutputs,
-                                                 bytes]] = queue.Queue()
-            self.errored_sent_event = threading.Event()
+            self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
             threading.Thread(target=self.process_input_socket,
-                             args=(input_path, ),
+                             args=(input_path, engine_index),
                              daemon=True).start()
             threading.Thread(target=self.process_output_socket,
                              args=(output_path, engine_index),
                              daemon=True).start()
 
-            self.global_unfinished_reqs = False
-
-            self.step_fn = (self.step if self.batch_queue is None else
-                            self.step_with_batch_queue)
-
         except Exception as e:
-            logger.exception("EngineCore got error in __init__:", exc_info=e)
+            logger.exception("Error during EngineCore initialization.")
             raise e
 
     @staticmethod
     def run_engine_core(*args,
                         dp_rank: int = 0,
                         local_dp_rank: int = 0,
-                        ready_pipe,
                         **kwargs):
         """Launch EngineCore busy loop in background process."""
 
@@ -384,17 +382,16 @@ class EngineCoreProc(EngineCore):
             else:
                 engine_core = EngineCoreProc(*args, **kwargs)
 
-            # Send Readiness signal to EngineClient.
-            ready_pipe.send({"status": "READY"})
             startup_failed = False
             engine_core.run_busy_loop()
+
         except SystemExit:
             logger.debug("EngineCore interrupted.")
         except Exception as e:
             if startup_failed:
                 logger.exception("EngineCore got error at startup:",
                                  exc_info=e)
-                ready_pipe.send({"status": "FAILED"})
+                # TODO need to send failure here
                 raise e
             else:
                 assert engine_core is not None
@@ -497,14 +494,22 @@ class EngineCoreProc(EngineCore):
             logger.fatal("vLLM shutdown signal from EngineCore failed "
                          "to send. Please report this issue.")
 
-    def process_input_socket(self, input_path: str):
+    def process_input_socket(self, input_path: str, engine_index: int):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
         generic_decoder = MsgpackDecoder()
+        identity = engine_index.to_bytes(length=2, byteorder="little")
 
-        with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(input_path,
+                            zmq.DEALER,
+                            identity=identity,
+                            bind=False) as socket:
+
+            # Send ready message to front-end once input socket is connected.
+            socket.send(b'READY')
+
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)

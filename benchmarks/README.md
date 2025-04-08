@@ -52,6 +52,12 @@ become available.
       <td style="text-align: center;">✅</td>
       <td><code>likaixin/InstructCoder</code></td>
     </tr>
+      <tr>
+      <td><strong>HuggingFace-AIMO</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>AI-MO/aimo-validation-aime</code> , <code>AI-MO/NuminaMath-1.5</code>, <code>AI-MO/NuminaMath-CoT</code></td>
+    </tr>
     <tr>
       <td><strong>HuggingFace-Other</strong></td>
       <td style="text-align: center;">✅</td>
@@ -187,6 +193,35 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --num-prompts 10
 ```
 
+**`AI-MO/aimo-validation-aime`**
+
+``` bash
+python3 vllm/benchmarks/benchmark_serving.py \
+    --model Qwen/QwQ-32B \
+    --dataset-name hf \
+    --dataset-path AI-MO/aimo-validation-aime \
+    --num-prompts 10 \
+    --seed 42
+```
+
+### Running With Sampling Parameters
+
+When using OpenAI-compatible backends such as `vllm`, optional sampling
+parameters can be specified. Example client command:
+
+```bash
+python3 vllm/benchmarks/benchmark_serving.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --endpoint /v1/completions \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --top-k 10 \
+  --top-p 0.9 \
+  --temperature 0.5 \
+  --num-prompts 10
+```
+
 ---
 ## Example - Offline Throughput Benchmark
 
@@ -274,6 +309,18 @@ python3 vllm/benchmarks/benchmark_throughput.py \
   --backend vllm-chat \
   --dataset-name hf \
   --dataset-path Aeala/ShareGPT_Vicuna_unfiltered \
+  --hf-split train \
+  --num-prompts 10
+```
+
+**`AI-MO/aimo-validation-aime`**
+
+```bash
+python3 benchmarks/benchmark_throughput.py \
+  --model Qwen/QwQ-32B \
+  --backend vllm \
+  --dataset-name hf \
+  --dataset-path AI-MO/aimo-validation-aime \
   --hf-split train \
   --num-prompts 10
 ```
