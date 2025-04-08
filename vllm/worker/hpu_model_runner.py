@@ -457,6 +457,12 @@ class HpuModelAdapter(torch.nn.Module):
     def sampler(self):
         return self.model.sampler
 
+    # lm_head property will be used by spec_decode_worker
+    # don't rename
+    @property
+    def lm_head(self):
+        return self.model.lm_head
+
 
 class PreparePromptMetadata(NamedTuple):
     input_tokens: torch.Tensor
