@@ -77,17 +77,14 @@ class BertEmbedding(nn.Module):
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
-        if self.position_embedding_type == "rotary":
-            embeddings = inputs_embeds + token_type_embeddings
-            embeddings = self.LayerNorm(embeddings)
-            return embeddings
-        else:
-            # Absolute position embeddings.
+        embeddings = inputs_embeds + token_type_embeddings
+
+        if self.position_embedding_type == "absolute":
             position_embeddings = self.position_embeddings(position_ids)
-            embeddings = (inputs_embeds + token_type_embeddings +
-                          position_embeddings)
-            embeddings = self.LayerNorm(embeddings)
-            return embeddings
+            embeddings += position_embeddings
+
+        embeddings = self.LayerNorm(embeddings)
+        return embeddings
 
 
 class BertPooler(nn.Module):
