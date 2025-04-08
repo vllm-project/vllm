@@ -4,7 +4,7 @@
 #include <torch/all.h>
 
 #include "cutlass/cutlass.h"
-#include "grouped_mm_c3x.cuh"
+#include "grouped_mm_c3x_sm90.cuh"
 
 using namespace cute;
 
