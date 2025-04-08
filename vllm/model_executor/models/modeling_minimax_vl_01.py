@@ -415,7 +415,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
             kwargs["image_processor"] = self.get_image_processor(**kwargs)
         if "tokenizer" not in kwargs:
             from transformers import AutoTokenizer
-            kwargs["tokenizer"] = AutoTokenizer.from_pretrained("minimax/minimax-vl-01")
+            kwargs["tokenizer"] = AutoTokenizer.from_pretrained(self.ctx.model_config.tokenizer)
         return MiniMaxVL01Processor(**kwargs)
 
     def get_image_processor(self, **kwargs: object) -> ImageProcessor:
@@ -1081,7 +1081,7 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
             kwargs["image_processor"] = self.get_image_processor(**kwargs)
         if "tokenizer" not in kwargs:
             from transformers import AutoTokenizer
-            kwargs["tokenizer"] = AutoTokenizer.from_pretrained("minimax/minimax-vl-01")
+            kwargs["tokenizer"] = AutoTokenizer.from_pretrained(self.ctx.model_config.tokenizer)
         return MiniMaxVL01Processor(**kwargs)
 
     def get_image_processor(self, **kwargs: object) -> ImageProcessor:
