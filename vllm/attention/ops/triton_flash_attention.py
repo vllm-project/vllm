@@ -36,6 +36,9 @@ default_eight_bit_dtype_triton = tl.float8e4b8
 default_eight_bit_dtype_torch = current_platform.fp8_dtype()
 default_float8_info = torch.finfo(default_eight_bit_dtype_torch)
 
+DEFAULT_FP8_MIN: triton.language.constexpr = default_float8_info.min
+DEFAULT_FP8_MAX: triton.language.constexpr = default_float8_info.max
+
 
 class MetaData:
     cu_seqlens_q = None
@@ -327,9 +330,10 @@ def _attn_fwd_inner(
     USE_P_SCALE: tl.constexpr,
     EIGHT_BIT_KV: tl.constexpr,
     EIGHT_BIT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
-    FP8_MIN: tl.constexpr = default_float8_info.min,
-    FP8_MAX: tl.constexpr = default_float8_info.max,
 ):
+    FP8_MIN: tl.constexpr = DEFAULT_FP8_MIN
+    FP8_MAX: tl.constexpr = DEFAULT_FP8_MAX
+
     # loop over k, v, and update accumulator
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
@@ -708,10 +712,10 @@ def attn_fwd(
     EIGHT_BIT: tl.constexpr,
     USE_P_SCALE: tl.constexpr,
     EIGHT_BIT_KV: tl.constexpr,
-    FP8_MIN: tl.constexpr = default_float8_info.min,
-    FP8_MAX: tl.constexpr = default_float8_info.max,
     EIGHT_BIT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
 ):
+    FP8_MIN: tl.constexpr = DEFAULT_FP8_MIN
+    FP8_MAX: tl.constexpr = DEFAULT_FP8_MAX
 
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
         NUM_WG = NUM_CU * GRID_CU_MULTIP  # number of workgroups launched
@@ -1004,9 +1008,7 @@ def attn_fwd(
                         EIGHT_BIT_GEMM,
                         USE_P_SCALE,
                         EIGHT_BIT_KV,
-                        EIGHT_BIT_DTYPE,
-                        FP8_MIN=FP8_MIN,
-                        FP8_MAX=FP8_MAX)
+                        EIGHT_BIT_DTYPE)
                     block_min = block_max
                     block_max = n_blocks * BLOCK_N
 
@@ -1068,9 +1070,7 @@ def attn_fwd(
                         EIGHT_BIT_GEMM,
                         USE_P_SCALE,
                         EIGHT_BIT_KV,
-                        EIGHT_BIT_DTYPE,
-                        FP8_MIN=FP8_MIN,
-                        FP8_MAX=FP8_MAX)
+                        EIGHT_BIT_DTYPE)
 
                 if EIGHT_BIT and not EIGHT_BIT_KV:
                     if USE_P_SCALE:
@@ -1268,8 +1268,6 @@ class _attention(torch.autograd.Function):
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
-        float8_info = torch.finfo(metadata.eight_bit_dtype_torch)
-
         attn_fwd[grid](q,
                        k,
                        v,
@@ -1321,9 +1319,7 @@ class _attention(torch.autograd.Function):
                        NUM_CU=NUM_CU,
                        atomic_counter=atomic_counter,
                        B=batch,
-                       EIGHT_BIT_DTYPE=metadata.eight_bit_dtype_triton,
-                       FP8_MIN=float8_info.min,
-                       FP8_MAX=float8_info.max)
+                       EIGHT_BIT_DTYPE=metadata.eight_bit_dtype_triton)
 
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
