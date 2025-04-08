@@ -691,12 +691,12 @@ class TPUModelRunner:
                 positions=self.position_ids,
                 inputs_embeds=inputs_embeds,
             )
-        hidden_states = self.select_hidden_states(
-            hidden_states, logits_indices)
+        hidden_states = self.select_hidden_states(hidden_states,
+                                                  logits_indices)
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, num_reqs, self.device)
-        selected_token_ids = self.sample_from_hidden(
-            hidden_states, tpu_sampling_metadata)
+        selected_token_ids = self.sample_from_hidden(hidden_states,
+                                                     tpu_sampling_metadata)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 

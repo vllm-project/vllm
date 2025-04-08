@@ -63,7 +63,7 @@ class TPUSupportedSamplingMetadata:
         input_batch: InputBatch,
         padded_num_reqs: int,
         xla_device: torch.device,
-        generate_all_params_if_all_greedy: bool = False
+        generate_params_if_all_greedy: bool = False
     ) -> "TPUSupportedSamplingMetadata":
         """
         Copy sampling tensors slices from `input_batch` to on device tensors.
@@ -72,10 +72,20 @@ class TPUSupportedSamplingMetadata:
         slices dynamic shapes on device tensors. This impl moves the dynamic 
         ops to CPU and produces tensors of fixed `padded_num_reqs` size. It 
         also reuses the on-device persistent tensors managed in `input_batch`
-        to reduce waste. 
+        to reduce waste.
+
+        Args:
+            input_batch: The input batch containing sampling parameters.
+            padded_num_reqs: The padded number of requests.
+            xla_device: The XLA device.
+            generate_params_if_all_greedy: If True, generate sampling parameters
+                even if all requests are greedy. this is useful for cases where
+                we want to pre-compile a graph with sampling parameters, even if
+                they are not strictly needed for greedy decoding.
         """
+        # Early return to avoid unnecessary cpu to tpu copy
         if (input_batch.all_greedy is True
-                and generate_all_params_if_all_greedy is False):
+                and generate_params_if_all_greedy is False):
             return cls(all_greedy=True)
 
         num_reqs = input_batch.num_reqs
