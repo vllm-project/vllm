@@ -53,9 +53,9 @@ def decode_tokens(
 def encode_tokens(
     tokenizer: AnyTokenizer,
     text: str,
+    *,
     truncation: Optional[bool] = None,
     max_length: Optional[int] = None,
-    *,
     add_special_tokens: Optional[bool] = None,
 ) -> list[int]:
     """
@@ -65,10 +65,18 @@ def encode_tokens(
     :code:`add_special_tokens=None` means to use the backend's default
     settings.
     """
-    return tokenizer.encode(text,
-                            max_length=max_length,
-                            truncation=truncation,
-                            add_special_tokens=add_special_tokens)
+
+    kw_args = {}
+    if max_length is not None:
+        kw_args["max_length"] = max_length
+
+    if truncation is not None:
+        kw_args["truncation"] = truncation
+
+    if add_special_tokens is not None:
+        kw_args["add_special_tokens"] = add_special_tokens
+
+    return tokenizer.encode(text, **kw_args)
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:

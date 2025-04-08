@@ -55,7 +55,7 @@ def _validate_truncation_size(
         truncate_prompt_tokens: Union[int, None]) -> Union[int, None]:
 
     if truncate_prompt_tokens is not None:
-        if truncate_prompt_tokens == -1:
+        if truncate_prompt_tokens <= -1:
             truncate_prompt_tokens = max_model_len
             return truncate_prompt_tokens
 
