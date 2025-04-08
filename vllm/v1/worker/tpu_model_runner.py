@@ -510,7 +510,7 @@ class TPUModelRunner:
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
-        return attn_metadata, logits_indices
+        return attn_metadata, logits_indices, padded_num_reqs
 
     def _scatter_placeholders(
         self,
@@ -665,7 +665,8 @@ class TPUModelRunner:
             mm_embeds = []
 
         # Prepare inputs
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+        attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
+            scheduler_output)
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -694,7 +695,7 @@ class TPUModelRunner:
         hidden_states = self.select_hidden_states(hidden_states,
                                                   logits_indices)
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_input_batch(self.input_batch, num_reqs, self.device)
+            from_input_batch(self.input_batch, padded_num_reqs, self.device)
         selected_token_ids = self.sample_from_hidden(hidden_states,
                                                      tpu_sampling_metadata)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
@@ -999,7 +1000,8 @@ class TPUModelRunner:
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
         else:
-            out_tokens = self.sampler(logits, sampling_metadata)
+            out_tokens = self.sampler(logits,
+                                      sampling_metadata).sampled_token_ids
         return out_tokens
 
     def get_multimodal_embeddings(self, *args, **kwargs):
