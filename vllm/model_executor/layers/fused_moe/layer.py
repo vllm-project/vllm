@@ -412,7 +412,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-        routed_scaling_factor: float = 2.5,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         return self.forward(
             x=x,
@@ -492,7 +492,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-        routed_scaling_factor: float = 2.5,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -505,14 +505,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-<<<<<<< HEAD
-            indices_type=torch.uint32 if self.moe.use_pplx_kernels else None)
-=======
+            indices_type=torch.uint32 if self.moe.use_pplx_kernels else None,
             share_fusion=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS,
             routed_scaling_factor=routed_scaling_factor,
         )
->>>>>>> 9b39734b6 (Enabled DSV2-Coder, added comment for new env var)
-
         if self.rocm_aiter_moe_enabled:
             assert expert_map is None
             return self.rocm_aiter_fused_experts(
@@ -773,7 +769,7 @@ class FusedMoE(torch.nn.Module):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-        routed_scaling_factor: float = 2.5,
+        routed_scaling_factor: Optional[float] = None,
     ):
         super().__init__()
 
@@ -1220,17 +1216,10 @@ class FusedMoE(torch.nn.Module):
                        custom_routing_function: Optional[Callable] = None,
                        scoring_func: str = "softmax",
                        e_score_correction_bias: Optional[torch.Tensor] = None,
-<<<<<<< HEAD
                        indices_type: Optional[torch.dtype] = None,
-                       share_fusion: int = 0):
+                       hare_fusion: int = 0,
+                       routed_scaling_factor: Optional[float] = None):
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-=======
-                       share_fusion: int = 0,
-                       routed_scaling_factor: float = 2.5):
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
-            fused_topk, grouped_topk)
-
->>>>>>> 9b39734b6 (Enabled DSV2-Coder, added comment for new env var)
         # DeekSeekv2 uses grouped_top_k
         if use_grouped_topk:
             assert topk_group is not None
@@ -1244,14 +1233,10 @@ class FusedMoE(torch.nn.Module):
                 topk_group=topk_group,
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
-<<<<<<< HEAD
-                share_fusion=share_fusion)
-            if indices_type is not None:
-                topk_ids = topk_ids.to(dtype=indices_type)
-=======
                 share_fusion=share_fusion,
                 routed_scaling_factor=routed_scaling_factor)
->>>>>>> 9b39734b6 (Enabled DSV2-Coder, added comment for new env var)
+            if indices_type is not None:
+                topk_ids = topk_ids.to(dtype=indices_type)
         elif custom_routing_function is None:
             topk_weights, topk_ids, token_expert_indices = fused_topk(
                 hidden_states=hidden_states,
@@ -1381,9 +1366,7 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-            routed_scaling_factor=self.routed_scaling_factor
-            )
-
+            routed_scaling_factor=self.routed_scaling_factor)
 
         if self.dp_size > 1:
             final_hidden_states = get_ep_group().combine(final_hidden_states)
