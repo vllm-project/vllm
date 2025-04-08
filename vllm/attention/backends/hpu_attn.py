@@ -108,8 +108,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         max_seq_len: int = 4096,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        if use_irope:
+            logger.warning_once(
+                "Using irope in HPU is not supported yet, it will fall back "
+                "to global attention for long context.")
         self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
         self.head_size = head_size
