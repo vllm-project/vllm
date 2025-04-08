@@ -27,7 +27,8 @@ prompts = [
 ]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-if __name__ == "__main__":
+
+def main():
     llm = LLM(model="facebook/opt-125m", seed=SEED)
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)
@@ -36,3 +37,7 @@ if __name__ == "__main__":
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-" * 50)
+
+
+if __name__ == "__main__":
+    main()

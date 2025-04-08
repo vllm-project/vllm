@@ -16,7 +16,8 @@ N = 1
 # Currently, top-p sampling is disabled. `top_p` should be 1.0.
 sampling_params = SamplingParams(temperature=0, top_p=1.0, n=N, max_tokens=16)
 
-if __name__ == "__main__":
+
+def main():
     # Set `enforce_eager=True` to avoid ahead-of-time compilation.
     # In real workloads, `enforace_eager` should be `False`.
     llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
@@ -30,3 +31,7 @@ if __name__ == "__main__":
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         assert generated_text.startswith(answer)
         print("-" * 50)
+
+
+if __name__ == "__main__":
+    main()

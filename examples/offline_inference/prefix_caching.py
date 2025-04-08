@@ -31,7 +31,8 @@ generating_prompts = [prefix + prompt for prompt in prompts]
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.0)
 
-if __name__ == "__main__":
+
+def main():
     # Create an LLM without prefix caching as a baseline.
     regular_llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.4)
 
@@ -85,3 +86,7 @@ if __name__ == "__main__":
         for i in range(len(prompts))
     ])
     print(f"Generated answers are the same: {generated_same}")
+
+
+if __name__ == "__main__":
+    main()
