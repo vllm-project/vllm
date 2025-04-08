@@ -16,15 +16,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 
   // Custom gemm op for matrix-vector multiplication
   rocm_ops.def(
-      "LLMM1(Tensor in_a, Tensor in_b, Tensor! out_c, int rows_per_block) -> "
-      "()");
+      "LLMM1(Tensor in_a, Tensor in_b, int rows_per_block) -> "
+      "Tensor");
   rocm_ops.impl("LLMM1", torch::kCUDA, &LLMM1);
 
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
-      "wvSplitK(Tensor in_a, Tensor in_b, Tensor! out_c, int N_in,"
-      "        int CuCount) -> ()");
+      "wvSplitK(Tensor in_a, Tensor in_b, int CuCount) -> "
+      "Tensor");
   rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
+
+  // wvSplitK for fp8
+  rocm_ops.def(
+      "wvSplitKQ(Tensor in_a, Tensor in_b, Tensor! out_c, Tensor scale_a, "
+      "          Tensor scale_b, int CuCount) -> ()");
+  rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
 
   // Custom attention op
   // Compute the attention between an input query and the cached

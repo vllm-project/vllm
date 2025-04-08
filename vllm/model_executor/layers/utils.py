@@ -5,7 +5,6 @@ from typing import Callable, Optional, Tuple
 import torch
 
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm.platforms import current_platform
 
 
@@ -71,25 +70,17 @@ def rocm_unquantized_gemm(x: torch.Tensor,
     n = x_view.shape[0]
     cu_count = current_platform.get_cu_count()
 
-    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM is True and \
+    use_skinny = (current_platform.is_rocm_skinny_gemm_enabled() and \
                     x.dtype in [torch.float16, torch.bfloat16] \
                     and k % 8 == 0 and bias is None)
 
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
-    if m > 8 and n < 4:
-        out = torch.empty(x_view.shape[0],
-                          weight.shape[0],
-                          dtype=x.dtype,
-                          device=x.device)
-        ops.wvSplitK(weight, x_view, out, n, cu_count)
+    if m > 8 and n <= 4:
+        out = ops.wvSplitK(weight, x_view, cu_count)
         return out.view(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192:
-        out = torch.empty(x_view.shape[0],
-                          weight.shape[0],
-                          dtype=x.dtype,
-                          device=x.device)
-        ops.LLMM1(weight, x_view, out, 4)
+        out = ops.LLMM1(weight, x_view, out, 4)
         return out.view(*x.shape[:-1], weight.shape[0])
     return torch.nn.functional.linear(x, weight, bias)
 

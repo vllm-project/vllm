@@ -1181,14 +1181,23 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
 
 
 # ROCm skinny gemms
-def LLMM1(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
-          rows_per_block: int) -> None:
-    torch.ops._rocm_C.LLMM1(a, b, out, rows_per_block)
+def LLMM1(a: torch.Tensor, b: torch.Tensor,
+          rows_per_block: int) -> torch.Tensor:
+    return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
 
 
-def wvSplitK(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor, N: int,
-             cu_count: int) -> None:
-    torch.ops._rocm_C.wvSplitK(a, b, out, N, cu_count)
+def wvSplitK(a: torch.Tensor, b: torch.Tensor, cu_count: int) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitK(a, b, cu_count)
+
+
+def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
+              scale_a: torch.Tensor, scale_b: torch.Tensor,
+              cu_count: int) -> torch.Tensor:
+    out = torch.empty((b.shape[0], a.shape[0]),
+                      dtype=out_dtype,
+                      device=b.device)
+    torch.ops._rocm_C.wvSplitKQ(a, b, out, scale_a, scale_b, cu_count)
+    return out
 
 
 # moe
