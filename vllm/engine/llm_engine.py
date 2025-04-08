@@ -2062,7 +2062,7 @@ class LLMEngine:
         prompt_ids = prompt_inputs["prompt_token_ids"]
 
         if not prompt_ids:
-            raise ValueError(f"The {prompt_type} cannot be empty")
+            raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
         max_prompt_len = self.model_config.max_model_len
         if len(prompt_ids) >= max_prompt_len:
