@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from copy import copy
-from typing import Any, Callable, Optional, Union, cast
+from typing import Any, Callable, Optional, Union
 
 from typing_extensions import TypeVar
 
@@ -189,9 +189,7 @@ class LLMEngine:
                                                 prompt_adapter_request,
                                                 priority)
 
-        n = params.n if isinstance(params, SamplingParams) else 1
-
-        if n == 1:
+        if not isinstance(params, SamplingParams):
             # Make a new RequestState and queue.
             self.output_processor.add_request(request, None, 0)
             # Add the request to EngineCore.
@@ -199,7 +197,8 @@ class LLMEngine:
             return
 
         # Fan out child requests (for n>1).
-        parent_req = ParentRequest(request_id, cast(SamplingParams, params))
+        parent_req = ParentRequest(request_id, params)
+        n = params.n
         for idx in range(n):
             request_id, params = parent_req.get_child_info(idx)
             child_request = request if idx == n - 1 else copy(request)
