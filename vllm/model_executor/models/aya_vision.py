@@ -27,7 +27,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo,
                                         MultiModalFieldConfig,
                                         PromptReplacement, PromptUpdate,
-                                        encode_tokens)
+                                        PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -35,7 +35,6 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import scatter_patch_features, select_patch_features
 
 
 class AyaVisionImagePixelInputs(TypedDict):
@@ -50,13 +49,6 @@ class AyaVisionImagePixelInputs(TypedDict):
 
     num_patches: torch.Tensor
     """Shape: `(batch_size * num_images)`"""
-
-    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    A boolean mask indicating which image embeddings correspond to patch tokens.
-
-    Shape: `(batch_size * num_images, num_embeds)`
-    """
 
 
 class AyaVisionMultiModalProjector(nn.Module):
@@ -135,21 +127,20 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         hf_processor = self.get_hf_processor()
         image_processor = hf_processor.image_processor
+
         image_size = self.get_image_size_with_most_features()
-        tokenizer = hf_processor.tokenizer
         num_patches = self.get_num_patches(
             image_width=image_size.width,
             image_height=image_size.height,
             size=image_processor.size,
             min_patches=image_processor.min_patches,
-            max_patches=image_processor.max_patches)
-        image_string = hf_processor._prompt_split_image(num_patches)
-        x = encode_tokens(
-            tokenizer,
-            image_string,
-            add_special_tokens=False,
+            max_patches=image_processor.max_patches,
         )
-        return len(x)
+
+        img_patches_per_tile = (hf_processor.img_size //
+                                hf_processor.patch_size)**2
+
+        return num_patches * img_patches_per_tile
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -221,7 +212,6 @@ class AyaVisionMultiModalProcessor(
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         image_processor = hf_processor.image_processor
 
-        hf_config = self.info.get_hf_config()
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
         if (images :=
                 mm_data.get("images")) is not None and '<image>' in prompt:
@@ -234,6 +224,7 @@ class AyaVisionMultiModalProcessor(
                 parsed_images.get_image_size(i)
                 for i in range(len(parsed_images))
             ]
+
             num_patches = [
                 self.info.get_num_patches(
                     image_width=image_size.width,
@@ -243,20 +234,6 @@ class AyaVisionMultiModalProcessor(
                     max_patches=image_processor.max_patches)
                 for image_size in image_sizes
             ]
-            image_tokens_list = [
-                hf_processor._prompt_split_image(num_patch)
-                for num_patch in num_patches
-            ]
-            tokenizer = self.info.get_tokenizer()
-            image_token_ids = [
-                tokenizer.encode(image_tokens, add_special_tokens=False)
-                for image_tokens in image_tokens_list
-            ]
-            embed_is_patch = [
-                torch.tensor(image_repl_tokens) == hf_config.image_token_index
-                for image_repl_tokens in image_token_ids
-            ]
-            processed_outputs["embed_is_patch"] = embed_is_patch
             processed_outputs["num_patches"] = torch.tensor(num_patches)
 
         return processed_outputs
@@ -271,7 +248,6 @@ class AyaVisionMultiModalProcessor(
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_patches),
             num_patches=MultiModalFieldConfig.batched("image"),
-            embed_is_patch=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -283,6 +259,7 @@ class AyaVisionMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
+        img_patch_token = hf_processor.img_patch_token
         image_processor = hf_processor.image_processor
 
         def get_replacement(item_idx: int):
@@ -294,8 +271,11 @@ class AyaVisionMultiModalProcessor(
                 image_height=image_size.height,
                 size=image_processor.size,
                 min_patches=image_processor.min_patches,
-                max_patches=image_processor.max_patches)
-            return hf_processor._prompt_split_image(num_patches=num_patches)
+                max_patches=image_processor.max_patches,
+            )
+            repl = hf_processor._prompt_split_image(num_patches=num_patches)
+
+            return PromptUpdateDetails.select_text(repl, img_patch_token)
 
         return [
             PromptReplacement(
@@ -424,7 +404,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             self, **kwargs: object) -> Optional[AyaVisionImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         num_patches = kwargs.pop("num_patches", None)
-        embed_is_patch = kwargs.pop("embed_is_patch", None)
         image_embeds = kwargs.pop("image_embeds", None)
         assert image_embeds is None, "Aya Vision does not support image_embeds."
 
@@ -436,18 +415,13 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError("Incorrect type of num_patches. "
                              f"Got type: {type(num_patches)}")
 
-        if not isinstance(embed_is_patch, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of embed_is_patch. "
-                             f"Got type: {type(embed_is_patch)}")
-
         pixel_values = flatten_bn(pixel_values, concat=True)
         num_patches = flatten_bn(num_patches, concat=True)
-        embed_is_patch = flatten_bn(embed_is_patch)
+
         return AyaVisionImagePixelInputs(
             type="pixel_values",
             pixel_values=self._validate_pixel_values(pixel_values),
             num_patches=num_patches,
-            embed_is_patch=embed_is_patch,
         )
 
     def get_multimodal_embeddings(
@@ -455,11 +429,8 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
-        image_features = self._process_image_input(image_input, **kwargs)
-        return scatter_patch_features(
-            image_features,
-            image_input["embed_is_patch"],
-        )
+
+        return self._process_image_input(image_input, **kwargs)
 
     def get_input_embeddings(
         self,
@@ -471,9 +442,9 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
-                multimodal_embeddings=select_patch_features(
-                    multimodal_embeddings),
-                placeholder_token_id=self.config.image_token_index)
+                multimodal_embeddings=multimodal_embeddings,
+                placeholder_token_id=self.config.image_token_index,
+            )
 
         return inputs_embeds
 

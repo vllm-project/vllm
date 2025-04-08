@@ -162,9 +162,9 @@ class PaliGemmaMultiModalProcessor(
                 modality="image",
                 target=PromptIndexTargets.prefix(
                     [bos_token_id] if tokenizer.add_bos_token else []),
-                insertion=PromptUpdateDetails(
-                    full=image_tokens + [bos_token_id],
-                    features=image_tokens,
+                insertion=PromptUpdateDetails.select_token_id(
+                    image_tokens + [bos_token_id],
+                    embed_token_id=image_token_id,
                 ),
             )
         ]

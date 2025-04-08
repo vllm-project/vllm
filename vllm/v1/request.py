@@ -121,7 +121,7 @@ class Request:
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
         assert input_id < len(self.mm_positions)
-        num_tokens = self.mm_positions[input_id]["length"]
+        num_tokens = self.mm_positions[input_id].length
         return num_tokens
 
     @property

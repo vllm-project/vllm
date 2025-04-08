@@ -46,7 +46,8 @@ from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptIndexTargets,
-                                        PromptInsertion, PromptUpdate)
+                                        PromptInsertion, PromptUpdate,
+                                        PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -56,7 +57,6 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import scatter_patch_features, select_patch_features
 
 # TODO: hard-coded for now. Consider making it configurable.
 VIT_LAYERS = [-2, -9]
@@ -82,14 +82,6 @@ class MolmoImageInputs(TypedDict):
     to patch tokens.
 
     Shape: `(batch_size * num_images, num_crops, num_patch)`
-    """
-
-    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    A boolean mask indicating which image embeddings correspond
-    to patch tokens.
-    
-    Shape: `(batch_size * num_images, num_embeds)`
     """
 
     num_crops: torch.Tensor
@@ -1146,30 +1138,6 @@ class MolmoProcessorWrapper:
         if image_input_idx is not None:
             feat_is_patch = image_input_idx >= 0
 
-            input_is_embed = torch.isin(
-                input_ids,
-                torch.tensor([
-                    self.image_patch_id,
-                    self.im_col_id,
-                    self.im_start_id,
-                    self.im_end_id,
-                ]),
-            )
-            embed_ids = input_ids[input_is_embed]
-            embed_is_patch = embed_ids == self.image_patch_id
-            assert embed_is_patch.sum() == feat_is_patch.sum()
-
-            # image_tokens = extra_joint + joint
-            # Both `extra_joint` and `joint` have `im_start_id` and `im_end_id`
-            embed_start = torch.nonzero(embed_ids == self.im_start_id)[::2, 0]
-            embed_end = torch.nonzero(embed_ids == self.im_end_id)[1::2, 0]
-            assert len(embed_start) == len(embed_end) == len(images)
-
-            embed_is_patch = [
-                embed_is_patch[start:end + 1]
-                for start, end in zip(embed_start, embed_end)
-            ]
-
             tilings = [
                 self.select_tiling(
                     image_width=image.size[0],
@@ -1181,7 +1149,6 @@ class MolmoProcessorWrapper:
             assert num_crops.sum() == len(feat_is_patch)
 
             outputs["feat_is_patch"] = feat_is_patch
-            outputs["embed_is_patch"] = embed_is_patch
             outputs["num_crops"] = num_crops
             outputs["img_patch_id"] = self.image_patch_id
 
@@ -1220,17 +1187,13 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         )
         pooling_size = processor.pooling_size
 
-        base_image_input_size = processor.base_image_input_size
-        base_image_input_d = processor.image_patch_size
+        image_token_length_w = processor.image_token_length_w
+        image_token_length_h = processor.image_token_length_h
 
-        crop_patches = base_image_input_size[0] // base_image_input_d
+        extra = image_token_length_w * image_token_length_h
+        joint = ((ncols + 1) // pooling_size) * ((nrows + 1) // pooling_size)
 
-        per_row = ncols // pooling_size + 1
-        joint = per_row * (nrows // pooling_size) + 2
-        image_token_length = (crop_patches + pooling_size - 1) // pooling_size
-        resize = (image_token_length + 1) * image_token_length + 2
-
-        return resize + joint
+        return extra + joint
 
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
@@ -1328,7 +1291,6 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
                 "image", num_crops),
             feat_is_patch=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_crops),
-            embed_is_patch=MultiModalFieldConfig.batched("image"),
             num_crops=MultiModalFieldConfig.batched("image"),
             img_patch_id=MultiModalFieldConfig.shared("image", num_images),
         )
@@ -1368,8 +1330,10 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             joint = ([img_start_id] + joint_row *
                      ((nrows + 1) // pooling_size) + [img_end_id])
 
-            image_tokens = extra_joint + joint
-            return image_tokens
+            return PromptUpdateDetails.select_token_id(
+                extra_joint + joint,
+                embed_token_id=img_patch_id,
+            )
 
         return [
             PromptInsertion(
@@ -1475,11 +1439,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
             raise ValueError("Incorrect type of feat_is_patch. "
                              f"Got type: {type(feat_is_patch)}")
 
-        embed_is_patch = kwargs.pop("embed_is_patch", None)
-        if not isinstance(embed_is_patch, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of embed_is_patch. "
-                             f"Got type: {type(embed_is_patch)}")
-
         num_crops = kwargs.pop("num_crops", None)
         if not isinstance(num_crops, (torch.Tensor, list)):
             raise ValueError("Incorrect type of num_crops. "
@@ -1491,14 +1450,12 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
                              f"Got type: {type(img_patch_id)}")
         self.img_patch_id = img_patch_id.flatten().unique().item()
 
-        embed_is_patch = flatten_bn(embed_is_patch)
         num_crops = flatten_bn(num_crops, concat=True)
 
         return MolmoImageInputs(
             images=images,
             image_masks=image_masks,
             feat_is_patch=feat_is_patch,
-            embed_is_patch=embed_is_patch,
             num_crops=num_crops,
         )
 
@@ -1537,12 +1494,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
         if image_input is None:
             return None
 
-        image_features = self._process_image_input(image_input)
-
-        return scatter_patch_features(
-            image_features,
-            image_input["embed_is_patch"],
-        )
+        return self._process_image_input(image_input)
 
     def get_input_embeddings(
         self,
@@ -1556,7 +1508,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                select_patch_features(multimodal_embeddings),
+                multimodal_embeddings,
                 self.img_patch_id,
             )
         return inputs_embeds
