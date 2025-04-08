@@ -187,7 +187,11 @@ WEATHER_TOOL: ChatCompletionToolParam = {
                 "unit": {
                     "type": "string",
                     "description": "The unit to fetch the temperature in",
-                    "enum": ["celsius", "fahrenheit"]
+                    "oneOf": [{
+                        "const": "celsius"
+                    }, {
+                        "const": "fahrenheit"
+                    }]
                 }
             }
         }
