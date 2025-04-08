@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Optional, Union
 
 from vllm.config import VllmConfig
@@ -18,6 +18,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.utils import (
@@ -45,6 +46,8 @@ class Processor:
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)
+
+        self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
 
         # Multi-modal hasher (for images)
         self.use_hash = (
@@ -230,7 +233,7 @@ class Processor:
             self.tokenizer.get_lora_tokenizer(lora_request))
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[list[MultiModalKwargs]] = None
+        sorted_mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
         if decoder_inputs["type"] == "multimodal":
@@ -240,7 +243,7 @@ class Processor:
             # from dictionaries to lists, and sort them by each item's position
             # in the input sequence.
             (
-                sorted_item_modalities,
+                sorted_modalities,
                 sorted_mm_positions,
                 sorted_mm_hashes,
             ) = merge_and_sort_multimodal_metadata(
@@ -253,21 +256,29 @@ class Processor:
             # This code flattens kwargs for individual items in a list and
             # sorts them by each item's position in the input sequence if there
             # are multiple modalities.
-            unique_modalities = set(sorted_item_modalities)
+            unique_modalities = set(sorted_modalities)
             if len(unique_modalities) > 1:
-                sorted_mm_inputs = []
+                sorted_mm_inputs_ = []
                 used_indices = {modality: 0 for modality in unique_modalities}
-                for modality in sorted_item_modalities:
+
+                for modality in sorted_modalities:
                     items = decoder_mm_inputs.get_items(modality)
                     item = items[used_indices[modality]]
-                    sorted_mm_inputs.append(MultiModalKwargs.from_items([item
-                                                                         ]))
+
+                    sorted_mm_inputs_.append(
+                        MultiModalKwargs.from_items([item]))
                     used_indices[modality] += 1
             else:
-                sorted_mm_inputs = [
+                sorted_mm_inputs_ = [
                     MultiModalKwargs.from_items([item]) for item in
-                    decoder_mm_inputs.get_items(sorted_item_modalities[0])
+                    decoder_mm_inputs.get_items(sorted_modalities[0])
                 ]
+
+            if sorted_mm_hashes is not None:
+                sorted_mm_inputs = self.mm_input_cache_client.get_and_update_p0(
+                    sorted_mm_inputs_, sorted_mm_hashes)
+            else:
+                sorted_mm_inputs = sorted_mm_inputs_
 
         return EngineCoreRequest(
             request_id=request_id,
