@@ -111,7 +111,7 @@ curl http://localhost:8000/v1/completions -H "Content-Type: application/json" -d
 
 ### Llama-3.2 (11B and 90B) Vision models
 
-First, start the server following the instructions above with the corret model through `--model`. 
+First, start the server following the instructions above with the correct model through `--model`. 
 
 Second, generate a prompt json, e.g.,
 ```python
