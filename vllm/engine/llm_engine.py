@@ -781,7 +781,6 @@ class LLMEngine:
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
-            request_id=request_id,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
