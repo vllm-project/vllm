@@ -124,6 +124,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloomz-1b1"),
     "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
                                     trust_remote_code=True),
+    "ChatGLMForConditionalGeneration": _HfExamplesInfo("thu-coai/ShieldLM-6B-chatglm3",  # noqa: E501
+                                                       trust_remote_code=True),
     "CohereForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r-v01",
                                          trust_remote_code=True),
     "Cohere2ForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r7b-12-2024", # noqa: E501

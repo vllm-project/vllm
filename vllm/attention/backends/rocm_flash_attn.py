@@ -464,6 +464,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         attn_type: str = AttentionType.DECODER,
         use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in ROCm Flash Attention is not supported yet, it "
+                "will fail back to global attention for long context.")
         if blocksparse_params is not None:
             raise ValueError(
                 "ROCmFlashAttention does not support blocksparse attention.")

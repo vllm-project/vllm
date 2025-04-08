@@ -156,10 +156,3 @@ vLLM V1 is currently optimized for decoder-only transformers. Models requiring
   cross-attention between separate encoder and decoder are not yet supported (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`).
 
 For a complete list of supported models, see the [list of supported models](https://docs.vllm.ai/en/latest/models/supported_models.html).
-
-## Frequently Asked Questions
-
-**I'm using vLLM V1 and I'm getting CUDA OOM errors. What should I do?**
-The default `max_num_seqs` has been raised from `256` in V0 to `1024` in V1. If you encounter CUDA OOM only when using V1 engine, try setting a lower value of `max_num_seqs` or `gpu_memory_utilization`.
-
-On the other hand, if you get an error about insufficient memory for the cache blocks, you should increase `gpu_memory_utilization` as this indicates that your GPU has sufficient memory but you're not allocating enough to vLLM for KV cache blocks.
