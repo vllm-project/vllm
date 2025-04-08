@@ -34,7 +34,8 @@ def main(args: Namespace):
         embeds_trimmed = ((str(embeds[:16])[:-1] +
                            ", ...]") if len(embeds) > 16 else embeds)
         print(f"Prompt: {prompt!r} \n"
-              f"Embeddings for text matching: {embeds_trimmed} (size={len(embeds)})")
+              f"Embeddings for text matching: {embeds_trimmed} "
+              f"(size={len(embeds)})")
         print("-" * 60)
 
 
