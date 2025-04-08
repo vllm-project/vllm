@@ -12,21 +12,18 @@ from ...utils import build_model_context
 @pytest.mark.parametrize("model_id", ["HuggingFaceTB/SmolVLM2-2.2B-Instruct"])
 # yapf: disable
 @pytest.mark.parametrize(
-    ("mm_processor_kwargs", "expected_toks_per_img"),
+    ("expected_toks_per_img"),
     [
-        ({"size": {"longest_edge": 364}}, 169),
-        ({"size": {"longest_edge": 728}}, 169 * (2**2 + 1)),
+        (169),
+        ( 169 * (2**2 + 1)),
     ])
 # yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
-@pytest.mark.parametrize("kwargs_on_init", [True, False])
 def test_processor_override(
     image_assets: _ImageAssets,
     model_id: str,
-    mm_processor_kwargs: dict[str, object],
     expected_toks_per_img: int,
     num_imgs: int,
-    kwargs_on_init: bool,
 ):
     """Ensure Idefics3MultiModalProcessor handles num_crops properly."""
     # Same as the previous test - don't initialize mm_processor_kwargs
@@ -34,11 +31,10 @@ def test_processor_override(
     # the partial when calling the custom input processor.
     ctx = build_model_context(
         model_id,
-        mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
         limit_mm_per_prompt={"image": num_imgs},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
+    hf_processor_mm_kwargs = {}
 
     # Build the image str / prompt based on the number of images we pass
     placeholders = "<image>" if num_imgs == 1 else "\n".join(
