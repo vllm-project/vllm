@@ -64,19 +64,20 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
 def rocm_unquantized_gemm(x: torch.Tensor,
                           weight: torch.Tensor,
                           bias: Optional[torch.Tensor] = None):
-    x_view = x.view(-1, x.size(-1))
-    m = weight.shape[0]
     k = weight.shape[1]
-    n = x_view.shape[0]
-    cu_count = current_platform.get_cu_count()
-
     use_skinny = (current_platform.is_rocm_skinny_gemm_enabled() and \
                     x.dtype in [torch.float16, torch.bfloat16] \
                     and k % 8 == 0 and bias is None)
 
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
-    if m > 8 and n <= 4:
+
+    x_view = x.view(-1, x.size(-1))
+    n = x_view.shape[0]
+    m = weight.shape[0]
+    cu_count = current_platform.get_cu_count()
+
+    if m > 8 and n < 4:
         out = ops.wvSplitK(weight, x_view, cu_count)
         return out.view(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192:
