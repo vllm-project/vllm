@@ -4,7 +4,7 @@
 # Dependencies for HPU code
 ray
 triton==3.1.0
-pandas
+pandas==2.2.3
 tabulate
 setuptools>=61
 setuptools-scm>=8
