@@ -181,11 +181,6 @@ class Attention(nn.Module):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
-
-        # KVConnector: start async saving kvs to connector
-        # to the layers KV cache before running attention.
-        wait_for_kv_layer_from_connector(self.layer_name)
-
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
@@ -236,10 +231,6 @@ class Attention(nn.Module):
                 output = torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
 
-        # KVConnector: start saving kvs to the connector.
-        # NOTE: forward_context completion will block until
-        # this operation is completed.
-        maybe_save_kv_layer_to_connector(self.layer_name, self.kv_cache)
         return output
 
     def calc_kv_scales(self, query, key, value):
@@ -361,7 +352,6 @@ def maybe_save_kv_layer_to_connector(
     kv_cache: List[torch.Tensor],
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
-        print("WE ARE HERE")
         return
     connector = get_kv_transfer_group()
 
@@ -380,11 +370,17 @@ def unified_attention(
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
+    # wait_for_kv_layer_from_connector(layer_name)
+
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
+    output = self.impl.forward(self, query, key, value, kv_cache,
+                               attn_metadata)
+
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    return output
 
 
 def unified_attention_fake(
@@ -412,6 +408,7 @@ def unified_attention_with_output(
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
+    # wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.no_compile_layers[layer_name]
@@ -423,6 +420,8 @@ def unified_attention_with_output(
                       kv_cache,
                       attn_metadata,
                       output=output)
+
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
 
 def unified_attention_with_output_fake(
