@@ -284,10 +284,9 @@ if triton.__version__ >= "2.1.0":
         @triton.autotune(
             configs=[
                 triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
-                                "waves_per_eu": 2, \
                                 "num_unroll_cache": 4, \
                                 "num_unroll_request": 1 } | \
-                                ({"kpack": 2} \
+                                ({"kpack": 2, "waves_per_eu": 2} \
                                     if current_platform.is_rocm() else {}), \
                                 num_warps=4, \
                                 num_stages=1)
@@ -1120,6 +1119,7 @@ if triton.__version__ >= "2.1.0":
             return
 
         if triton.__version__ >= "3.2.0":
+            max_seq_len = 0 if max_seq_len is None else max_seq_len
             grid = lambda META: (batch, head,
                                  triton.cdiv(max_input_len, META["BLOCK_M"]))
             _my_fwd_kernel[grid](
