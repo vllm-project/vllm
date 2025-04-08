@@ -352,6 +352,7 @@ class MistralTokenizer(TokenizerBase):
 
     def encode(self,
                text: str,
+               *,
                truncation: Optional[bool] = None,
                max_length: Optional[int] = None,
                add_special_tokens: Optional[bool] = None) -> List[int]:

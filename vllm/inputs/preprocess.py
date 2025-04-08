@@ -779,7 +779,8 @@ class InputPreprocessor:
                 "returned until they are supported on vLLM V1.")
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
-            return self._process_encoder_decoder_prompt(prompt)
+            return self._process_encoder_decoder_prompt(prompt,
+                                                        request_id=request_id)
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise ValueError("Cannot pass encoder-decoder prompt "
@@ -798,6 +799,7 @@ class InputPreprocessor:
     async def preprocess_async(
         self,
         prompt: PromptType,
+        request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
@@ -809,7 +811,8 @@ class InputPreprocessor:
                 "returned until they are supported on vLLM V1.")
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
-            return await self._process_encoder_decoder_prompt_async(prompt)
+            return await self._process_encoder_decoder_prompt_async(
+                prompt, request_id=request_id)
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise ValueError("Cannot pass encoder-decoder prompt "
@@ -818,6 +821,7 @@ class InputPreprocessor:
         # Decoder-only operation
         return await self._process_decoder_only_prompt_async(
             prompt,
+            request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=return_mm_hashes,
