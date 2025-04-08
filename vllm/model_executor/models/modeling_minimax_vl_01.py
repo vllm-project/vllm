@@ -407,11 +407,11 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         def _validate_shape(d: torch.Tensor):
             actual_dims = tuple(d.shape)
             if len(actual_dims) == 2:
-                # 如果是2D图像,添加通道维度
                 d = d.unsqueeze(0)
             elif len(actual_dims) == 3 and actual_dims[0] != 3:
-                # 如果通道维度不在第一维,调整维度顺序
                 d = d.permute(2, 0, 1)
+            elif len(actual_dims) == 4 and actual_dims[0] == 1:
+                d = d.squeeze(0)
             
             if d.shape != expected_dims:
                 raise ValueError(
