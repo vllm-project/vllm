@@ -905,15 +905,16 @@ def fused_topk(
 # This is used by the Deepseek-V2 and Deepseek-V3 model
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def grouped_topk(
-    hidden_states: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk: int,
-    renormalize: bool,
-    num_expert_group: int = 0,
-    topk_group: int = 0,
-    scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None,
-    share_fusion: int = 0,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+        num_expert_group: int = 0,
+        topk_group: int = 0,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        share_fusion: int = 0,
+        routed_scaling_factor: float = 2.5
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
@@ -957,14 +958,17 @@ def grouped_topk(
                                             dim=-1,
                                             sorted=False)
 
-    if share_fusion:
+    if share_fusion > 0:
         topk_ids[:, -1] = torch.randint(low=num_experts,
                                         high=num_experts + share_fusion,
                                         size=(topk_ids.size(0), ),
                                         dtype=topk_ids.dtype,
                                         device=topk_ids.device)
-        topk_weights[:, -1] = topk_weights[:, :-1].sum(dim=-1) * 1.0 / 2.5
-
+        if renormalize:
+            topk_weights[:, -1] = topk_weights[:, :-1].sum(
+                dim=-1) * 1.0 / routed_scaling_factor
+        else:
+            topk_weights[:, -1] = routed_scaling_factor
     if renormalize:
         topk_weights_sum = topk_weights.sum(
             dim=-1,

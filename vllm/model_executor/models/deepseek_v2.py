@@ -28,7 +28,6 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from tqdm import tqdm
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -138,7 +137,9 @@ class DeepseekV2MoE(nn.Module):
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias)
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            routed_scaling_factor=config.routed_scaling_factor,
+        )
 
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
@@ -753,31 +754,20 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-        if self.share_fusion != 0:
+        if self.share_fusion > 0:
             weights_list = list(weights)
             weights_dict = {k: v for (k, v) in weights_list}
-            suffix_list = [
-                'down_proj.weight', 'down_proj.weight_scale_inv',
-                'gate_proj.weight', 'gate_proj.weight_scale_inv',
-                'up_proj.weight', 'up_proj.weight_scale_inv'
-            ]
-            current_device = torch.cuda.current_device()
-            is_master = (current_device == 0)
-            for moe_layer in tqdm(range(self.config.num_hidden_layers),
-                                  desc=f"Cloning {self.share_fusion} "
-                                  "replicas of shared expert into MoE",
-                                  disable=not is_master):
+            for moe_layer in range(self.config.num_hidden_layers):
                 if moe_layer < self.config.first_k_dense_replace:
                     continue
                 for num_repeat in range(self.share_fusion):
-                    for suffix in suffix_list:
-                        weights_list.append((
-                            f"model.layers.{moe_layer}."
-                            f"mlp.experts."
-                            f"{self.config.n_routed_experts + num_repeat}"
-                            f".{suffix}", weights_dict[
-                                f"model.layers.{moe_layer}.mlp.shared_experts.{suffix}"]
-                            .clone()))
+                    prefix = f"model.layers.{moe_layer}.mlp.shared_experts."
+                    for k in weights_dict:
+                        if k.startswith(prefix):
+                            weights_list.append((k.replace(
+                                "shared_experts", "experts.",
+                                f"{self.config.n_routed_experts + num_repeat}"
+                            ), weights_dict[k].clone()))
             weights = weights_list
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
