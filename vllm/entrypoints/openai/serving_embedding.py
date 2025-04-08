@@ -21,7 +21,7 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.score_utils import _validate_truncation_size
+from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput)
