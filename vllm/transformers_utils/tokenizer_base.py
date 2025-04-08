@@ -92,7 +92,11 @@ class TokenizerBase(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def encode(self, text: str, **kwargs) -> List[int]:
+    def encode(self,
+               text: str,
+               truncation: Optional[bool] = None,
+               max_length: Optional[int] = None,
+               add_special_tokens: Optional[bool] = None) -> List[int]:
         raise NotImplementedError()
 
     @abstractmethod

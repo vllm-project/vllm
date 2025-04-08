@@ -66,7 +66,7 @@ def encode_tokens(
     settings.
     """
 
-    kw_args = {}
+    kw_args: dict[str, Any] = {}
     if max_length is not None:
         kw_args["max_length"] = max_length
 
