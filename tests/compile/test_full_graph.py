@@ -75,7 +75,7 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
 
     # filter by keywords
     pred = lambda model: any(keyword in model[0] for keyword in keywords)
-    return [filter(pred, TEST_MODELS)]
+    return list(filter(pred, TEST_MODELS))
 
 
 @pytest.mark.parametrize(
@@ -108,20 +108,21 @@ PassConfig = CompilationConfig.PassConfig
     [
         # additional compile sizes, only some of the models
         (CompilationConfig(level=CompilationLevel.PIECEWISE,
-                           compile_sizes=[1, 2]), models_list(all=False)),
-
+                           compile_sizes=[1, 2]), model)
+        for model in models_list(all=False)
+    ] + [
         # RMSNorm + quant fusion, only 8-bit quant models
         (CompilationConfig(level=CompilationLevel.PIECEWISE,
                            custom_ops=["+rms_norm"],
                            pass_config=PassConfig(enable_fusion=True,
-                                                  enable_noop=True)),
-         models_list(keywords=["FP8-dynamic", "quantized.w8a8"]))
+                                                  enable_noop=True)), model)
+        for model in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
     ])
 # only test some of the models
 @create_new_process_for_each_test()
 def test_custom_compile_config(
-    model_info: tuple[str, dict[str, Any]],
     compilation_config: CompilationConfig,
+    model_info: tuple[str, dict[str, Any]],
 ):
     model, model_kwargs = model_info
     print(f"MODEL={model}")
