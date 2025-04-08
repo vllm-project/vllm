@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 else:
     ModelConfig = None
     VllmConfig = None
+    LoRARequest = None
+    PoolingParams = None
+    SamplingParams = None
     FlexibleArgumentParser = None
 
 logger = init_logger(__name__)
