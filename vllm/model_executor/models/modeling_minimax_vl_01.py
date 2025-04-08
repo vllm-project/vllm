@@ -41,7 +41,7 @@ from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
-from .processing_minimax_vl_01 import MiniMaxVL01ProcessingInfo, MiniMaxVL01Processor
+from .processing_minimax_vl_01 import MiniMaxVL01Processor
 
 # Register the processors
 AutoImageProcessor.register("minimax_vl_01", ImageProcessor)
@@ -258,7 +258,7 @@ class LlavaNextMultiModalProcessor(
         image_processor_input_names = self.image_processor.model_input_names
         return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
 
-_I = TypeVar("_I", bound=MiniMaxVL01ProcessingInfo)
+_I = TypeVar("_I", bound=LlavaNextProcessingInfo)
 class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
     def get_dummy_processor_inputs(
