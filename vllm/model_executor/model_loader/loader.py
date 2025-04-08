@@ -53,9 +53,10 @@ from vllm.model_executor.model_loader.utils import (ParamMapping,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
-    filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_gguf_extra_tensor_names, get_lock, gguf_quant_weights_iterator,
-    initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
+    fastsafetensors_weights_iterator, filter_duplicate_safetensors_files,
+    filter_files_not_needed_for_inference, get_gguf_extra_tensor_names,
+    get_lock, gguf_quant_weights_iterator, initialize_dummy_weights,
+    np_cache_weights_iterator, pt_weights_iterator,
     runai_safetensors_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -114,10 +115,12 @@ def _initialize_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
+    model_class: Optional[type[nn.Module]] = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
-    model_class, _ = get_model_architecture(model_config)
+    if model_class is None:
+        model_class, _ = get_model_architecture(model_config)
 
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
@@ -284,7 +287,8 @@ class DefaultModelLoader(BaseModelLoader):
         # Some quantized models use .pt files for storing the weights.
         if load_format == LoadFormat.AUTO:
             allow_patterns = ["*.safetensors", "*.bin"]
-        elif load_format == LoadFormat.SAFETENSORS:
+        elif (load_format == LoadFormat.SAFETENSORS
+              or load_format == LoadFormat.FASTSAFETENSORS):
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
         elif load_format == LoadFormat.MISTRAL:
@@ -366,10 +370,16 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.use_tqdm_on_load,
             )
         elif use_safetensors:
-            weights_iterator = safetensors_weights_iterator(
-                hf_weights_files,
-                self.load_config.use_tqdm_on_load,
-            )
+            if self.load_config.load_format == LoadFormat.FASTSAFETENSORS:
+                weights_iterator = fastsafetensors_weights_iterator(
+                    hf_weights_files,
+                    self.load_config.use_tqdm_on_load,
+                )
+            else:
+                weights_iterator = safetensors_weights_iterator(
+                    hf_weights_files,
+                    self.load_config.use_tqdm_on_load,
+                )
         else:
             weights_iterator = pt_weights_iterator(
                 hf_weights_files,
@@ -387,6 +397,16 @@ class DefaultModelLoader(BaseModelLoader):
                     xm.mark_step()
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
+
+        elif current_platform.is_hpu():
+            import habana_frameworks.torch.core as htcore
+
+            def _hpu_weights_iterator(iterator: Generator):
+                for weights in iterator:
+                    yield weights
+                    htcore.mark_step()
+
+            weights_iterator = _hpu_weights_iterator(weights_iterator)
 
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()
@@ -871,12 +891,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         try:
             import bitsandbytes
 
-            if bitsandbytes.__version__ < "0.45.0":
+            if bitsandbytes.__version__ < "0.45.3":
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.45.0.")
+                                  "install bitsandbytes>=0.45.3.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.45.0 via "
-                              "`pip install bitsandbytes>=0.45.0` to use "
+            raise ImportError("Please install bitsandbytes>=0.45.3 via "
+                              "`pip install bitsandbytes>=0.45.3` to use "
                               "bitsandbytes quantizer.") from err
 
         hf_weights_files, use_safetensors = self._prepare_weights(
@@ -1250,6 +1270,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                          pack_ratio)
 
                 offsets = np.concatenate(([0], np.cumsum(num_elements)))
+                # Make torch infer_schema happy
+                offsets = torch.tensor(offsets).cpu()
                 set_weight_attrs(param, {"bnb_shard_offsets": offsets})
 
                 if load_8bit:
