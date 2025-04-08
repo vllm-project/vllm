@@ -196,115 +196,35 @@ class LlavaNextMultiModalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _process_image_input(
-        self,
-        image_input: LlavaNextImageInputs,
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
-        if image_input["type"] == "image_embeds":
-            return [image_input["data"]]
-
-        patch_embeddings = self._process_image_pixels(image_input)
-
-        image_sizes = image_input.get("image_sizes")
-        if image_sizes is None:
-            batch_size = len(image_input["data"])
-            vision_config = self.config.vision_config
-            default_height = default_width = vision_config.image_size
-            image_sizes = torch.as_tensor([[default_height, default_width]
-                                           for _ in range(batch_size)])
-
-        return [
-            self._merge_image_patch_embeddings(image_sizes[i],
-                                               patch_features_batch,
-                                               strategy="spatial_unpad")
-            for i, patch_features_batch in enumerate(patch_embeddings)
-        ]
-
-    def _merge_image_patch_embeddings(self, image_size: torch.Tensor,
-                                      patch_embeddings: torch.Tensor, *,
-                                      strategy: str) -> torch.Tensor:
-        if strategy == "flat":
-            return patch_embeddings.flatten(0, 1)
-
-        if strategy.startswith("spatial"):
-            height = width = self.config.vision_config.image_size \
-                // self.config.vision_config.patch_size
-
-            base_patch_embeds = patch_embeddings[0]
-            if height * width != base_patch_embeds.shape[0]:
-                raise ValueError(
-                    "The number of patches is not consistent with the "
-                    "image size.")
-
-            if patch_embeddings.shape[0] > 1:
-                other_patch_embeds = patch_embeddings[1:]
-
-                # Move to CPU to avoid floating-point errors
-                orig_height, orig_width = image_size.tolist()
-
-                # image_aspect_ratio == "anyres"
-                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-                    (orig_height, orig_width),
-                    self.config.image_grid_pinpoints,
-                    self.config.vision_config.image_size,
-                )
-                num_patches = num_patch_height * num_patch_width
-
-                # Image patches might be padded for batch processing
-                other_patch_embeds = other_patch_embeds[:num_patches] \
-                    .view(num_patch_height, num_patch_width, height, width, -1)
-
-                if "unpad" in strategy:
-                    other_patch_embeds = other_patch_embeds \
-                        .permute(4, 0, 2, 1, 3).contiguous() \
-                        .flatten(1, 2).flatten(2, 3)
-                    other_patch_embeds = unpad_image(other_patch_embeds,
-                                                     (orig_height, orig_width))
-                    other_patch_embeds = torch.cat((
-                        other_patch_embeds,
-                        self.image_newline[:, None, None] \
-                            .expand(*other_patch_embeds.shape[:-1], 1) \
-                            .to(other_patch_embeds.device),
-                    ), dim=-1)
-                    other_patch_embeds = other_patch_embeds \
-                        .flatten(1, 2).transpose(0, 1)
-                else:
-                    other_patch_embeds = other_patch_embeds \
-                        .permute(0, 2, 1, 3, 4).contiguous() \
-                        .flatten(0, 3)
-
-                merged_patch_embeddings = torch.cat(
-                    (base_patch_embeds, other_patch_embeds), dim=0)
-            else:
-                if "unpad" in strategy:
-                    merged_patch_embeddings = torch.cat(
-                        (base_patch_embeds,
-                         self.image_newline[None] \
-                            .to(base_patch_embeds.device)
-                    ), dim=0)
-                else:
-                    merged_patch_embeddings = base_patch_embeds
-
-            return merged_patch_embeddings
-
-        raise ValueError(f"Unexpected patch merge strategy: {strategy}")
-
 
 @MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor,
                                         info=LlavaNextProcessingInfo,
                                         dummy_inputs=LlavaDummyInputsBuilder)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                                  if not isinstance(image_sizes, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image sizes. "
-                                 f"Got type: {type(image_sizes)}")
+                                        SupportsPP):
 
-            return LlavaNextImagePixelInputs(
-                type="pixel_values",
-                pixel_values=self._validate_pixel_values(
-                    flatten_bn(pixel_values)),
-                image_sizes=self._validate_image_sizes(
-                    flatten_bn(image_sizes, concat=True)),
- = config
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
+
+        vision_feature_layer = config.vision_feature_layer
+        # Determine the layer up to which we will initialize the vision tower
+        if isinstance(vision_feature_layer, int):
+            vision_hidden_size = config.vision_config.hidden_size
+            self.feature_sample_layers = None
+        # Used for multimodal granite models to control encoder outputs
+        elif isinstance(vision_feature_layer, (list, tuple)):
+            vision_hidden_size = config.vision_config.hidden_size * len(
+                vision_feature_layer)
+            self.feature_sample_layers = vision_feature_layer
+        else:
+            raise TypeError(
+                f"vision_layer_feature type: {type(vision_feature_layer)}"
+                " is not supported")
+
+        self.config = config
         self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
@@ -389,29 +309,16 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            # 确保pixel_values具有正确的维度
-            def _ensure_3d(img):
-                if len(img.shape) == 2:
-                    # 如果是2维的,添加通道维度
-                    return img.unsqueeze(0)
-                elif len(img.shape) == 3:
-                    # 如果已经是3维的,检查通道维度
-                    if img.shape[0] != 3:
-                        return img.permute(2, 0, 1)
-                return img
-
-            if isinstance(pixel_values, torch.Tensor):
-                if len(pixel_values.shape) == 4:  # (batch, channels, height, width)
-                    pixel_values = [_ensure_3d(img) for img in pixel_values]
-                else:
-                    pixel_values = _ensure_3d(pixel_values)
-            elif isinstance(pixel_values, list):
-                pixel_values = [_ensure_3d(img) for img in pixel_values]
+            if not isinstance(image_sizes, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of image sizes. "
+                                 f"Got type: {type(image_sizes)}")
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(flatten_bn(pixel_values)),
-                image_sizes=self._validate_image_sizes(flatten_bn(image_sizes, concat=True)),
+                pixel_values=self._validate_pixel_values(
+                    flatten_bn(pixel_values)),
+                image_sizes=self._validate_image_sizes(
+                    flatten_bn(image_sizes, concat=True)),
             )
 
         if image_embeds is not None:
@@ -452,6 +359,76 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             strategy=self.config.vision_feature_select_strategy,
         )
 
+    # Based on: https://github.com/haotian-liu/LLaVA/blob/main/llava/model/llava_arch.py
+    def _merge_image_patch_embeddings(self, image_size: torch.Tensor,
+                                      patch_embeddings: torch.Tensor, *,
+                                      strategy: str) -> torch.Tensor:
+        if strategy == "flat":
+            return patch_embeddings.flatten(0, 1)
+
+        if strategy.startswith("spatial"):
+            height = width = self.config.vision_config.image_size \
+                // self.config.vision_config.patch_size
+
+            base_patch_embeds = patch_embeddings[0]
+            if height * width != base_patch_embeds.shape[0]:
+                raise ValueError(
+                    "The number of patches is not consistent with the "
+                    "image size.")
+
+            if patch_embeddings.shape[0] > 1:
+                other_patch_embeds = patch_embeddings[1:]
+
+                # Move to CPU to avoid floating-point errors
+                orig_height, orig_width = image_size.tolist()
+
+                # image_aspect_ratio == "anyres"
+                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+                    (orig_height, orig_width),
+                    self.config.image_grid_pinpoints,
+                    self.config.vision_config.image_size,
+                )
+                num_patches = num_patch_height * num_patch_width
+
+                # Image patches might be padded for batch processing
+                other_patch_embeds = other_patch_embeds[:num_patches] \
+                    .view(num_patch_height, num_patch_width, height, width, -1)
+
+                if "unpad" in strategy:
+                    other_patch_embeds = other_patch_embeds \
+                        .permute(4, 0, 2, 1, 3).contiguous() \
+                        .flatten(1, 2).flatten(2, 3)
+                    other_patch_embeds = unpad_image(other_patch_embeds,
+                                                     (orig_height, orig_width))
+                    other_patch_embeds = torch.cat((
+                        other_patch_embeds,
+                        self.image_newline[:, None, None] \
+                            .expand(*other_patch_embeds.shape[:-1], 1) \
+                            .to(other_patch_embeds.device),
+                    ), dim=-1)
+                    other_patch_embeds = other_patch_embeds \
+                        .flatten(1, 2).transpose(0, 1)
+                else:
+                    other_patch_embeds = other_patch_embeds \
+                        .permute(0, 2, 1, 3, 4).contiguous() \
+                        .flatten(0, 3)
+
+                merged_patch_embeddings = torch.cat(
+                    (base_patch_embeds, other_patch_embeds), dim=0)
+            else:
+                if "unpad" in strategy:
+                    merged_patch_embeddings = torch.cat(
+                        (base_patch_embeds,
+                         self.image_newline[None] \
+                            .to(base_patch_embeds.device)
+                    ), dim=0)
+                else:
+                    merged_patch_embeddings = base_patch_embeds
+
+            return merged_patch_embeddings
+
+        raise ValueError(f"Unexpected patch merge strategy: {strategy}")
+
     def _process_image_pixels(
         self,
         inputs: LlavaNextImagePixelInputs,
@@ -478,6 +455,30 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return torch.split(self.multi_modal_projector(stacked_image_features),
                            num_patches_per_batch)
+
+    def _process_image_input(
+        self,
+        image_input: LlavaNextImageInputs,
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        if image_input["type"] == "image_embeds":
+            return [image_input["data"]]
+
+        patch_embeddings = self._process_image_pixels(image_input)
+
+        image_sizes = image_input.get("image_sizes")
+        if image_sizes is None:
+            batch_size = len(image_input["data"])
+            vision_config = self.config.vision_config
+            default_height = default_width = vision_config.image_size
+            image_sizes = torch.as_tensor([[default_height, default_width]
+                                           for _ in range(batch_size)])
+
+        return [
+            self._merge_image_patch_embeddings(image_sizes[i],
+                                               patch_features_batch,
+                                               strategy="spatial_unpad")
+            for i, patch_features_batch in enumerate(patch_embeddings)
+        ]
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
