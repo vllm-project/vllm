@@ -16,7 +16,7 @@ try:
             ROCmFlashAttentionMetadata as FlashAttentionMetadata)
 except (ModuleNotFoundError, ImportError) as err:
     raise RuntimeError(
-        "Draft model speculative decoding currently only supports"
+        "Draft model speculative decoding currently only supports "
         "CUDA and ROCm flash attention backend.") from err
 
 from vllm.logger import init_logger
@@ -50,12 +50,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
     """
 
     def __init__(self, model_runner: ModelRunnerBase):
-        if hasattr(
-                model_runner,
-                "return_hidden_states") and model_runner.return_hidden_states:
-            raise ValueError(
-                "return_hidden_states is not supported for TP1DraftModelRunner."
-            )
         super().__init__(model_runner)
 
         self.indices_of_seq_with_bonus_tokens = None
@@ -139,7 +133,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
     def supports_gpu_multi_step(self, execute_model_req: ExecuteModelRequest):
         """Determines if draft_model_runner GPU multi-step can be used.
         Currently required conditions are:
-            1. Only decodes 
+            1. Only decodes
             2. Only flash-attn
             3. No LORA
             4. No prompt_adapter_config
@@ -153,7 +147,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 return False
 
         # TODO: Add support for other attn backends
-        if self.attn_backend.get_name() not in ("FLASH_ATTN", "TRITON_MLA"):
+        if self.attn_backend.get_name() not in ("FLASH_ATTN", ):
             return False
 
         # TODO: Add support for LORA
@@ -177,12 +171,12 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         num_steps: int = 1,
         **kwargs,
     ) -> Optional[List[SamplerOutput]]:
-        """Executes num_steps forward passes with advacement of input tensors 
+        """Executes num_steps forward passes with advacement of input tensors
         on the GPU. Look at supports_gpu_multi_step(..) for pre-conditions.
 
         Optimizations used:
             1. Input tensors are updated on the GPU directly
-            2. Skips GPU=>CPU serialization of sampler outputs (we don't need 
+            2. Skips GPU=>CPU serialization of sampler outputs (we don't need
                 them since we do batch expansion later that uses GPU outputs)
             3. Reuses sampling tensors (since we run only decodes and they have
                 a repeating sampling logic)
@@ -288,8 +282,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
-                    kv_caches=kv_caches,
-                    attn_metadata=model_input.attn_metadata,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
@@ -308,6 +300,14 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 sampling_metadata=model_input.sampling_metadata,
             )
             outputs.append(output)
+
+            if self.return_hidden_states and is_fallback:
+                if use_cuda_graph:
+                    indices = model_input.sampling_metadata\
+                      .selected_token_indices
+                    output.hidden_states = hidden_states[:len(indices)]
+                else:
+                    output.hidden_states = hidden_states
 
             if model_input.attn_metadata.num_prefills == 0 \
                 and self.indices_of_seq_with_bonus_tokens is not None:

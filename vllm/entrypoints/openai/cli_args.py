@@ -8,12 +8,12 @@ purposes.
 import argparse
 import json
 import ssl
-from typing import List, Optional, Sequence, Union, get_args
+from collections.abc import Sequence
+from typing import Optional, Union, get_args
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
-from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
 from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
@@ -34,7 +34,7 @@ class LoRAParserAction(argparse.Action):
         if isinstance(values, str):
             raise TypeError("Expected values to be a list")
 
-        lora_list: List[LoRAModulePath] = []
+        lora_list: list[LoRAModulePath] = []
         for item in values:
             if item in [None, '']:  # Skip if item is None or empty string
                 continue
@@ -70,7 +70,7 @@ class PromptAdapterParserAction(argparse.Action):
         if isinstance(values, str):
             raise TypeError("Expected values to be a list")
 
-        adapter_list: List[PromptAdapterPath] = []
+        adapter_list: list[PromptAdapterPath] = []
         for item in values:
             name, path = item.split('=')
             adapter_list.append(PromptAdapterPath(name, path))
@@ -89,6 +89,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default="info",
         choices=['debug', 'info', 'warning', 'error', 'critical', 'trace'],
         help="Log level for uvicorn.")
+    parser.add_argument("--disable-uvicorn-access-log",
+                        action="store_true",
+                        help="Disable uvicorn access log.")
     parser.add_argument("--allow-credentials",
                         action="store_true",
                         help="Allow credentials.")
@@ -165,6 +168,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         default=None,
                         help="The CA certificates file.")
     parser.add_argument(
+        "--enable-ssl-refresh",
+        action="store_true",
+        default=False,
+        help="Refresh SSL Context when SSL certificate files change")
+    parser.add_argument(
         "--ssl-cert-reqs",
         type=int,
         default=int(ssl.CERT_NONE),
@@ -210,23 +218,6 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help="Enable auto tool choice for supported models. Use "
         "``--tool-call-parser`` to specify which parser to use.")
-    parser.add_argument(
-        "--enable-reasoning",
-        action="store_true",
-        default=False,
-        help="Whether to enable reasoning_content for the model. "
-        "If enabled, the model will be able to generate reasoning content.")
-
-    valid_reasoning_parsers = ReasoningParserManager.reasoning_parsers.keys()
-    parser.add_argument(
-        "--reasoning-parser",
-        type=str,
-        metavar="{" + ",".join(valid_reasoning_parsers) + "}",
-        default=None,
-        help=
-        "Select the reasoning parser depending on the model that you're using."
-        " This is used to parse the reasoning content into OpenAI API "
-        "format. Required for ``--enable-reasoning``.")
 
     valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
@@ -256,7 +247,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         default=None,
                         help='Max number of prompt characters or prompt '
                         'ID numbers being printed in log.'
-                        '\n\nDefault: Unlimited')
+                        ' The default of None means unlimited.')
 
     parser.add_argument(
         "--disable-fastapi-docs",
@@ -269,6 +260,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action='store_true',
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.")
+    parser.add_argument(
+        "--enable-server-load-tracking",
+        action='store_true',
+        default=False,
+        help=
+        "If set to True, enable tracking server_load_metrics in the app state."
+    )
 
     return parser
 
@@ -290,13 +288,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_reasoning and not args.reasoning_parser:
         raise TypeError("Error: --enable-reasoning requires "
                         "--reasoning-parser")
-
-    # Ref https://api-docs.deepseek.com/guides/reasoning_model
-    # tool call and reasoning cannot be enabled at the same time.
-    if args.enable_auto_tool_choice and args.enable_reasoning:
-        raise TypeError(
-            "Error: --enable-auto-tool-choice and "
-            "--enable-reasoning cannot be enabled at the same time")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

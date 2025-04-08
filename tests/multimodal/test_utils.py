@@ -4,17 +4,15 @@ import base64
 import mimetypes
 import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
-from typing import TYPE_CHECKING, Dict, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, NamedTuple, Optional
 
 import numpy as np
 import pytest
 from PIL import Image, ImageChops
-from transformers import AutoConfig, AutoTokenizer
 
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (MediaConnector,
-                                   merge_and_sort_multimodal_metadata,
-                                   repeat_and_pad_placeholder_tokens)
+                                   merge_and_sort_multimodal_metadata)
 
 if TYPE_CHECKING:
     from vllm.multimodal.hasher import MultiModalHashDict
@@ -30,7 +28,7 @@ TEST_IMAGE_URLS = [
 
 
 @pytest.fixture(scope="module")
-def url_images() -> Dict[str, Image.Image]:
+def url_images() -> dict[str, Image.Image]:
     connector = MediaConnector()
 
     return {
@@ -39,7 +37,7 @@ def url_images() -> Dict[str, Image.Image]:
     }
 
 
-def get_supported_suffixes() -> Tuple[str, ...]:
+def get_supported_suffixes() -> tuple[str, ...]:
     # We should at least test the file types mentioned in GPT-4 with Vision
     OPENAI_SUPPORTED_SUFFIXES = ('.png', '.jpeg', '.jpg', '.webp', '.gif')
 
@@ -66,7 +64,7 @@ async def test_fetch_image_http(image_url: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
-async def test_fetch_image_base64(url_images: Dict[str, Image.Image],
+async def test_fetch_image_base64(url_images: dict[str, Image.Image],
                                   image_url: str, suffix: str):
     connector = MediaConnector()
     url_image = url_images[image_url]
@@ -136,71 +134,6 @@ async def test_fetch_image_local_files(image_url: str):
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
 
-@pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-mistral-7b-hf"])
-def test_repeat_and_pad_placeholder_tokens(model):
-    config = AutoConfig.from_pretrained(model)
-    image_token_id = config.image_token_index
-
-    tokenizer = AutoTokenizer.from_pretrained(model)
-
-    test_cases = [
-        (
-            "<image>",
-            2,
-            "<image><image>",
-            [32000, 32000],
-            [{ "offset": 0, "length": 2 }],
-        ),
-        (
-            "<image><image>",
-            2,
-            "<image><image><image>",
-            [32000, 32000, 32000],
-            [{ "offset": 0, "length": 2 }],
-        ),
-        (
-            "<image><image>",
-            [3, 2],
-            "<image><image><image><image><image>",
-            [32000, 32000, 32000, 32000, 32000],
-            [{ "offset": 0, "length": 3 }, { "offset": 3, "length": 2 }],
-        ),
-        (
-            "Image:<image>Image:<image>!",
-            [3, 2],
-            "Image:<image><image><image>Image:<image><image>!",
-            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
-            [{ "offset": 2, "length": 3 }, { "offset": 7, "length": 2 }],
-        ),
-        (
-            "<image>",
-            [3, 2],
-            "<image><image><image>",
-            [32000, 32000, 32000],
-            [{ "offset": 0, "length": 3 }],
-        ),
-    ]  # yapf: disable
-
-    for (
-            prompt,
-            repeat_count,
-            expected_prompt,
-            expected_token_ids,
-            expected_ranges,
-    ) in test_cases:
-        new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
-            tokenizer=tokenizer,
-            prompt=prompt,
-            prompt_token_ids=tokenizer.encode(prompt,
-                                              add_special_tokens=False),
-            placeholder_token_id=image_token_id,
-            repeat_count=repeat_count,
-        )
-        assert new_prompt == expected_prompt
-        assert new_token_ids == expected_token_ids
-        assert ranges == expected_ranges
-
-
 # Used for the next two tests related to `merge_and_sort_multimodal_metadata`.
 class TestCase(NamedTuple):
     mm_positions: "MultiModalPlaceholderDict"
@@ -222,7 +155,7 @@ def test_merge_and_sort_multimodal_metadata():
                 ]
             },
             mm_hashes={"image": ["hash1", "hash2"]},
-            expected_modalities=["image"],
+            expected_modalities=["image", "image"],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=3, length=2),
@@ -239,7 +172,7 @@ def test_merge_and_sort_multimodal_metadata():
                 ]
             },
             mm_hashes=None,
-            expected_modalities=["image"],
+            expected_modalities=["image", "image"],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=2, length=2),
@@ -264,7 +197,7 @@ def test_merge_and_sort_multimodal_metadata():
                 "image": ["image_hash1", "image_hash2"],
                 "audio": ["audio_hash1", "audio_hash2"],
             },
-            expected_modalities=["audio", "image"],
+            expected_modalities=["audio", "audio", "image", "image"],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=2, length=3),
@@ -290,7 +223,7 @@ def test_merge_and_sort_multimodal_metadata():
                 ]
             },
             mm_hashes=None,
-            expected_modalities=["audio", "image"],
+            expected_modalities=["audio", "audio", "image", "image"],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=2, length=3),
@@ -321,7 +254,9 @@ def test_merge_and_sort_multimodal_metadata():
                 "audio": ["audio_hash1"],
                 "video": ["video_hash1", "video_hash2", "video_hash3"]
             },
-            expected_modalities=["audio", "video", "image"],
+            expected_modalities=[
+                "audio", "video", "video", "video", "image", "image"
+            ],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=3, length=4),
@@ -367,12 +302,19 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                 "image": ["image_hash1", "image_hash2"],
                 "audio": ["audio_hash1", "audio_hash2"],
             },
-            expected_modalities=[],
-            expected_ranges=[],
-            expected_hashes=None,
+            expected_modalities=["image", "audio", "image", "audio"],
+            expected_ranges=[
+                PlaceholderRange(offset=0, length=4),
+                PlaceholderRange(offset=5, length=2),
+                PlaceholderRange(offset=8, length=2),
+                PlaceholderRange(offset=11, length=4),
+            ],
+            expected_hashes=[
+                "image_hash1", "audio_hash1", "image_hash2", "audio_hash2"
+            ],
         ),
 
-        # <image> <image> <video> <audio> <image>
+        # <image> <image> <audio> <video> <image>
         TestCase(
             mm_positions={
                 "image": [
@@ -388,15 +330,54 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                 ]
             },
             mm_hashes=None,
-            expected_modalities=[],
-            expected_ranges=[],
+            expected_modalities=["image", "image", "audio", "video", "image"],
+            expected_ranges=[
+                PlaceholderRange(offset=0, length=2),
+                PlaceholderRange(offset=2, length=3),
+                PlaceholderRange(offset=5, length=2),
+                PlaceholderRange(offset=8, length=5),
+                PlaceholderRange(offset=20, length=4),
+            ],
             expected_hashes=None,
+        ),
+
+        # <image> <audio> <video> <image> with hashes
+        TestCase(
+            mm_positions={
+                "image": [
+                    PlaceholderRange(offset=0, length=2),
+                    PlaceholderRange(offset=18, length=4),
+                ],
+                "audio": [
+                    PlaceholderRange(offset=6, length=2),
+                ],
+                "video": [
+                    PlaceholderRange(offset=10, length=5),
+                ]
+            },
+            mm_hashes={
+                "image": ["image_hash1", "image_hash2"],
+                "audio": ["audio_hash1"],
+                "video": ["video_hash1"],
+            },
+            expected_modalities=["image", "audio", "video", "image"],
+            expected_ranges=[
+                PlaceholderRange(offset=0, length=2),
+                PlaceholderRange(offset=6, length=2),
+                PlaceholderRange(offset=10, length=5),
+                PlaceholderRange(offset=18, length=4),
+            ],
+            expected_hashes=[
+                "image_hash1", "audio_hash1", "video_hash1", "image_hash2"
+            ],
         ),
     ]
 
-    for case in test_cases:
-        with pytest.raises(ValueError) as ex_info:
-            merge_and_sort_multimodal_metadata(case.mm_positions,
-                                               case.mm_hashes)
+    for (mm_positions, mm_hashes, expected_modalities, expected_ranges,
+         expected_hashes) in test_cases:
+        modalities, ranges, hashes = merge_and_sort_multimodal_metadata(
+            mm_positions, mm_hashes)
 
-        assert "Interleaved mixed-modality" in str(ex_info.value)
+        assert modalities == expected_modalities
+        assert ranges == expected_ranges
+        assert hashes == expected_hashes

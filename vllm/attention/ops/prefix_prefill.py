@@ -31,7 +31,6 @@ if triton.__version__ >= "2.1.0":
         v_scale,
         B_Start_Loc,
         B_Seqlen,
-        B_Ctxlen,
         block_size,
         x,
         Out,
@@ -65,17 +64,24 @@ if triton.__version__ >= "2.1.0":
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
         BLOCK_N: tl.constexpr,
         SLIDING_WINDOW: tl.constexpr,
+        SKIP_DECODE: tl.constexpr,
     ):
+
         cur_batch = tl.program_id(0)
         cur_head = tl.program_id(1)
         start_m = tl.program_id(2)
 
         cur_kv_head = cur_head // num_queries_per_kv
 
-        cur_batch_ctx_len = tl.load(B_Ctxlen + cur_batch)
         cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
         cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
-        cur_batch_query_len = cur_batch_seq_len - cur_batch_ctx_len
+        cur_batch_in_all_stop_index = tl.load(B_Start_Loc + cur_batch + 1)
+        cur_batch_query_len = (cur_batch_in_all_stop_index -
+                               cur_batch_in_all_start_index)
+        cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
+
+        if SKIP_DECODE and cur_batch_query_len == 1:
+            return
 
         # start position inside of the query
         # generally, N goes over kv, while M goes over query_len
@@ -466,7 +472,6 @@ if triton.__version__ >= "2.1.0":
         v_scale,
         B_Start_Loc,
         B_Seqlen,
-        B_Ctxlen,
         Alibi_slopes,
         block_size,
         x,
@@ -500,6 +505,7 @@ if triton.__version__ >= "2.1.0":
         BLOCK_DMODEL: tl.constexpr,  # head size
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
         BLOCK_N: tl.constexpr,
+        SKIP_DECODE: tl.constexpr,
     ):
         # attn_bias[]
         cur_batch = tl.program_id(0)
@@ -511,9 +517,15 @@ if triton.__version__ >= "2.1.0":
         # cur_batch_seq_len: the length of prompts
         # cur_batch_ctx_len: the length of prefix
         # cur_batch_in_all_start_index: the start id of the dim=0
-        cur_batch_ctx_len = tl.load(B_Ctxlen + cur_batch)
         cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
         cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
+        cur_batch_in_all_stop_index = tl.load(B_Start_Loc + cur_batch + 1)
+        cur_batch_query_len = (cur_batch_in_all_stop_index -
+                               cur_batch_in_all_start_index)
+        cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
+
+        if SKIP_DECODE and cur_batch_query_len == 1:
+            return
 
         block_start_loc = BLOCK_M * start_m
 
@@ -713,13 +725,14 @@ if triton.__version__ >= "2.1.0":
                               b_loc,
                               b_start_loc,
                               b_seq_len,
-                              b_ctx_len,
+                              max_seq_len,
                               max_input_len,
                               k_scale: torch.Tensor,
                               v_scale: torch.Tensor,
                               alibi_slopes=None,
                               sliding_window=None,
-                              sm_scale=None):
+                              sm_scale=None,
+                              skip_decode=False):
 
         q_dtype_is_f32 = q.dtype is torch.float32
         # need to reduce num. blocks when using fp32
@@ -740,7 +753,7 @@ if triton.__version__ >= "2.1.0":
             assert (v_cache.dtype == torch.uint8)
 
             if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-                target_dtype = torch.float8_e4m3fn
+                target_dtype = current_platform.fp8_dtype()
             elif kv_cache_dtype == "fp8_e5m2":
                 target_dtype = torch.float8_e5m2
             else:
@@ -765,6 +778,7 @@ if triton.__version__ >= "2.1.0":
         batch, head = b_seq_len.shape[0], q.shape[1]
         num_queries_per_kv = q.shape[1] // k.shape[1]
 
+        assert batch + 1 == len(b_start_loc)
         grid = (batch, head, triton.cdiv(max_input_len, BLOCK))  # batch, head,
 
         # 0 means "disable"
@@ -784,7 +798,6 @@ if triton.__version__ >= "2.1.0":
                 v_scale,
                 b_start_loc,
                 b_seq_len,
-                b_ctx_len,
                 alibi_slopes,
                 v_cache.shape[3],
                 k_cache.shape[4],
@@ -821,6 +834,7 @@ if triton.__version__ >= "2.1.0":
                 BLOCK_DMODEL=Lk,
                 BLOCK_DMODEL_PADDED=Lk_padded,
                 BLOCK_N=BLOCK,
+                SKIP_DECODE=skip_decode,
                 num_warps=NUM_WARPS,
                 num_stages=1,
             )
@@ -838,7 +852,6 @@ if triton.__version__ >= "2.1.0":
             v_scale,
             b_start_loc,
             b_seq_len,
-            b_ctx_len,
             v_cache.shape[3],
             k_cache.shape[4],
             o,
@@ -874,6 +887,7 @@ if triton.__version__ >= "2.1.0":
             BLOCK_DMODEL_PADDED=Lk_padded,
             BLOCK_N=BLOCK,
             SLIDING_WINDOW=sliding_window,
+            SKIP_DECODE=skip_decode,
             num_warps=NUM_WARPS,
             num_stages=1,
         )

@@ -2,10 +2,12 @@
 
 import os
 import re
-from typing import List, Optional, Tuple, Type
+from typing import Optional
 
 import pytest
+from packaging.version import Version
 from transformers import AutoTokenizer
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.multimodal.image import rescale_image_size
 from vllm.platforms import current_platform
@@ -25,7 +27,7 @@ HF_MULTIIMAGE_IMAGE_PROMPT = "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these
 models = ["microsoft/Phi-3.5-vision-instruct"]
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+def vllm_to_hf_output(vllm_output: tuple[list[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
@@ -55,9 +57,9 @@ if current_platform.is_rocm():
 
 
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], PromptImageInput]],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    inputs: list[tuple[list[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,
@@ -80,6 +82,13 @@ def run_test(
     # https://github.com/huggingface/transformers/issues/34307
     from transformers import AutoImageProcessor  # noqa: F401
     from transformers import AutoProcessor  # noqa: F401
+
+    # Once the model repo is updated to 4.49, we should be able to run the
+    # test in `test_models.py` without the above workaround
+    if Version(TRANSFORMERS_VERSION) >= Version("4.49"):
+        pytest.skip(f"`transformers=={TRANSFORMERS_VERSION}` installed, "
+                    "but `transformers<=4.49` is required to run this model. "
+                    "Reason: Cannot run HF implementation")
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.

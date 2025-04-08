@@ -15,7 +15,8 @@ from vllm_hpu_extension.utils import (Matmul, ModuleFusedSDPA, Softmax,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionMetadata, AttentionType,
+                                              is_quantized_kv_cache)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.hpu_paged_attn import (HPUPagedAttention,
                                                HPUPagedAttentionMetadata)
@@ -107,8 +108,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         max_seq_len: int = 4096,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        if use_irope:
+            logger.warning_once(
+                "Using irope in HPU is not supported yet, it will fall back "
+                "to global attention for long context.")
         self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
         self.head_size = head_size
@@ -157,6 +163,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "HPUAttentionImpl")
+
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "HPUAttention with FP8 KV cache not yet supported")
 
     def forward(
         self,

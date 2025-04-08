@@ -2,8 +2,9 @@
 
 import json
 import re
+from collections.abc import Sequence
 from json import JSONDecoder
-from typing import Dict, Sequence, Union
+from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -145,7 +146,7 @@ class Granite20bFCToolParser(ToolParser):
                 return None
 
             # select as the current tool call the one we're on the state at
-            current_tool_call: Dict = tool_call_arr[self.current_tool_id] \
+            current_tool_call: dict = tool_call_arr[self.current_tool_id] \
                 if len(tool_call_arr) > 0 else {}
 
             # case -- if no tokens have been streamed for the tool, e.g.

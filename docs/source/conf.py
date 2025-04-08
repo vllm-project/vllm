@@ -12,11 +12,11 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
+import datetime
 import inspect
 import logging
 import os
 import sys
-from typing import List
 
 import requests
 from sphinx.ext import autodoc
@@ -27,7 +27,7 @@ sys.path.append(os.path.abspath("../.."))
 # -- Project information -----------------------------------------------------
 
 project = 'vLLM'
-copyright = '2024, vLLM Team'
+copyright = f'{datetime.datetime.now().year}, vLLM Team'
 author = 'the vLLM Team'
 
 # -- General configuration ---------------------------------------------------
@@ -57,7 +57,7 @@ templates_path = ['_templates']
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns: List[str] = ["**/*.template.md", "**/*.inc.md"]
+exclude_patterns: list[str] = ["**/*.template.md", "**/*.inc.md"]
 
 # Exclude the prompt "$" when copying code
 copybutton_prompt_text = r"\$ "
@@ -85,6 +85,7 @@ html_static_path = ["_static"]
 html_js_files = ["custom.js"]
 html_css_files = ["custom.css"]
 
+myst_heading_anchors = 2
 myst_url_schemes = {
     'http': None,
     'https': None,
@@ -100,6 +101,11 @@ myst_url_schemes = {
         "url":
         "https://github.com/vllm-project/vllm/pull/{{path}}#{{fragment}}",
         "title": "Pull Request #{{path}}",
+        "classes": ["github"],
+    },
+    "gh-project": {
+        "url": "https://github.com/orgs/vllm-project/projects/{{path}}",
+        "title": "Project #{{path}}",
         "classes": ["github"],
     },
     "gh-dir": {

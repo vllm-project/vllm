@@ -38,8 +38,11 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
 from vllm.attention.layer import Attention
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.logger import init_logger
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -438,7 +441,7 @@ class FlashInferMetadata(AttentionMetadata):
                 not in supported_head_sizes:
             raise ValueError(
                 f"Only {supported_head_sizes} are supported for head_dim,",
-                f"received {self.head_dim}.")
+                f" received {self.head_dim}.")
 
     def begin_forward(self):
         if self.num_prefill_tokens > 0:
@@ -907,7 +910,12 @@ class FlashInferImpl(AttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in FlashInfer is not supported yet, it will fall"
+                " back to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
