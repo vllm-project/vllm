@@ -277,117 +277,20 @@ if triton.__version__ >= "2.1.0":
 
         def my_bench(kernel, quantiles):
             timings = triton.testing.do_bench(kernel, quantiles=quantiles, \
-                                              warmup=100, rep=10000)
-            # print(f"{timings=}")
+                                              warmup=100, rep=1000)
+            print(f"{timings=}")
             return timings
 
         @triton.autotune(
             configs=[
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, \
-                                "num_unroll_cache": 1, \
-                                "num_unroll_request": 2 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=1),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 16, \
-                                "num_unroll_cache": 1, \
-                                "num_unroll_request": 2 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=8, \
-                                num_stages=1),
                 triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
-                                "num_unroll_cache": 1, \
-                                "num_unroll_request": 1 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=2),
-                triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, \
-                                "num_unroll_cache": 2, \
-                                "num_unroll_request": 1 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=1),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, \
-                                "num_unroll_cache": 2, \
-                                "num_unroll_request": 1 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=1),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
-                                "num_unroll_cache": 1, \
-                                "num_unroll_request": 1 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=2),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
-                                "num_unroll_cache": 1, \
-                                "num_unroll_request": 1 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=2),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
-                                "num_unroll_cache": 2, \
-                                "num_unroll_request": 1 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=2),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
-                                "num_unroll_cache": 1, \
-                                "num_unroll_request": 1 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=1),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 16, \
-                                "num_unroll_cache": 1, \
-                                "num_unroll_request": 2 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=1),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
-                                "num_unroll_cache": 2, \
-                                "num_unroll_request": 2 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=1),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
-                                "num_unroll_cache": 1, \
-                                "num_unroll_request": 2 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=1),
-                triton.Config({'BLOCK_M': 16, 'BLOCK_N': 64, \
-                                "num_unroll_cache": 1, \
-                                "num_unroll_request": 1 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=4, \
-                                num_stages=1),
-                triton.Config({'BLOCK_M': 16, 'BLOCK_N': 32, \
-                                "num_unroll_cache": 2, \
-                                "num_unroll_request": 4 } | \
-                                ({"kpack": 2} \
-                                    if current_platform.is_rocm() else {}), \
-                                num_warps=8, \
-                                num_stages=1),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
+                                "waves_per_eu": 2, \
                                 "num_unroll_cache": 4, \
                                 "num_unroll_request": 1 } | \
                                 ({"kpack": 2} \
                                     if current_platform.is_rocm() else {}), \
-                                num_warps=8, \
-                                num_stages=1),
+                                num_warps=4, \
+                                num_stages=1)
             ],
             do_bench=lambda kernel, quantiles: my_bench(kernel, quantiles),
             key=["BLOCK_SIZE", "MAX_Q_LEN", "MAX_CTX_LEN"]
@@ -1267,7 +1170,7 @@ if triton.__version__ >= "2.1.0":
                 SLIDING_WINDOW=sliding_window,
                 SKIP_DECODE=skip_decode,
                 MAX_Q_LEN=triton.next_power_of_2(max_input_len),
-            )
+                MAX_CTX_LEN=triton.next_power_of_2(max_seq_len))
             return
 
         # need to reduce num. blocks when using fp32
