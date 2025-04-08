@@ -24,7 +24,10 @@ class EagleProposer:
         self.num_speculative_tokens = (
             vllm_config.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
-        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs,
+        # We need +1 here because the arange is used to set query_start_loc,
+        # which has one more element than batch_size.
+        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
+                                   1,
                                    device=device,
                                    dtype=torch.int32)
 
