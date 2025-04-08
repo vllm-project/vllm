@@ -264,10 +264,14 @@ def test_reshape_and_cache_flash(
         kv_cache_dtype,
         dtype,
         device=device,
-        is_NHD=is_NHD,
     )
     key_cache, value_cache = key_caches[0].contiguous(
     ), value_caches[0].contiguous()
+    page_stride, head_stride = num_heads * head_size, head_size
+    if not is_NHD:
+        key_cache = torch.permute(key_cache, (0, 2, 1, 3)).contiguous()
+        value_cache = torch.permute(value_cache, (0, 2, 1, 3)).contiguous()
+        page_stride, head_stride = head_size, head_size * block_size
     del key_caches
     del value_caches
 
@@ -289,11 +293,13 @@ def test_reshape_and_cache_flash(
     # Call the reshape_and_cache kernel.
     opcheck(torch.ops._C_cache_ops.reshape_and_cache_flash,
             (key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
-             k_scale, v_scale, is_NHD),
+             block_size, page_stride, head_stride,
+             k_scale, v_scale),
             cond=(head_size == HEAD_SIZES[0]))
     ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
-                                slot_mapping, kv_cache_dtype, k_scale, v_scale,
-                                is_NHD)
+                                slot_mapping, kv_cache_dtype,
+                                block_size, page_stride, head_stride,
+                                k_scale, v_scale)
 
     if kv_cache_dtype == "fp8":
         result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
