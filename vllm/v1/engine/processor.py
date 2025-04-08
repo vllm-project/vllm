@@ -187,7 +187,6 @@ class Processor:
         current_platform.validate_request(
             prompt=prompt,
             params=params,
-            lora_request=lora_request,
         )
         self._validate_lora(lora_request)
         self._validate_params(params)

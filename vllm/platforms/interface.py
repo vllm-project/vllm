@@ -404,7 +404,6 @@ class Platform:
         cls,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
-        lora_request: Optional[LoRARequest] = None,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
