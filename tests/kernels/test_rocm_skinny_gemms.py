@@ -54,9 +54,8 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
 
 
 @pytest.mark.parametrize("n", N)  # only test for batch size <= 4
-@pytest.mark.parametrize("k",
-                         K[1:] + [8192 * 2, 8192 * 3, 8192 * 4])  # k % 16 == 0
-@pytest.mark.parametrize("m", M)  # m >= 16
+@pytest.mark.parametrize("k", K[1:] + [14336, 24576, 32768])  # k % 16 == 0
+@pytest.mark.parametrize("m", M + [28672])  # m >= 16
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(),
