@@ -54,7 +54,7 @@ Currently, there are no pre-built XPU images.
 ### Build image from source
 
 ```console
-$ docker build -f Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
+$ docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
 $ docker run -it \
              --rm \
              --network=host \
