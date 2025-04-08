@@ -84,6 +84,7 @@ class NeuronPlatform(Platform):
         except ImportError:
             transformers_neuronx = None
         return transformers_neuronx is not None
-      
+
+    @classmethod
     def supports_structured_output(cls) -> bool:
         return True
