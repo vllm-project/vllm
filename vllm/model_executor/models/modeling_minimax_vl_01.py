@@ -299,7 +299,6 @@ class LlavaNextMultiModalProcessor(
 
         raise ValueError(f"Unexpected patch merge strategy: {strategy}")
 
-_I = TypeVar("_I", bound=LlavaNextProcessingInfo)
 class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
     def get_dummy_processor_inputs(
@@ -315,11 +314,11 @@ class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images)
+                                   num_images=0)
         }
 
         return ProcessorInputs(
-            prompt_text="<image>" * num_images,
+            prompt_text="<image>" * 0,
             mm_data=mm_data,
         )
 
