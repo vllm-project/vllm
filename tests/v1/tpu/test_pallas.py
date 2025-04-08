@@ -4,9 +4,7 @@ from unittest.mock import ANY, patch
 import torch
 
 from vllm.attention.backends.abstract import AttentionType
-from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
-                                               NUM_QUERIES_PER_BLOCK,
-                                               PallasAttentionBackendImpl,
+from vllm.v1.attention.backends.pallas import (PallasAttentionBackendImpl,
                                                PallasMetadata)
 
 
@@ -88,8 +86,8 @@ def test_ragged_paged_attention():
             ANY,  # block_tables
             ANY,  # query_start_loc
             ANY,  # num_seqs
-            num_kv_pages_per_block=NUM_KV_PAGES_PER_BLOCK,
-            num_queries_per_block=NUM_QUERIES_PER_BLOCK,
+            num_kv_pages_per_block=None,
+            num_queries_per_block=None,
             vmem_limit_bytes=mock_vmem_limit_bytes,
             use_kernel=True,
             sm_scale=scale,
