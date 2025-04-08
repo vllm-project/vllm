@@ -9,7 +9,8 @@ from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLine
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
-from .configuration_aimv2 import AIMv2Config
+from transformers import PretrainedConfig
+from transformers import PretrainedConfig as AIMv2Config
 from torch import nn
 from torch.nn import functional as F
 from transformers.modeling_outputs import BaseModelOutputWithNoAttention

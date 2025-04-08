@@ -636,6 +636,32 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
         prompts=prompts,
     )
 
+# Ovis2
+def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "AIDC-AI/Ovis2-1B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        dtype="half",
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
+    )
+
+    prompts = [
+        f"<image>\n{question}"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
 
 # PaliGemma
 def run_paligemma(questions: list[str], modality: str) -> ModelRequestData:
@@ -909,6 +935,7 @@ model_example_map = {
     "mllama": run_mllama,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,
+    "ovis2": run_ovis2,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
