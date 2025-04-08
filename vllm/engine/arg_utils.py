@@ -179,6 +179,7 @@ class EngineArgs:
 
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: Optional[bool] = None
+    disable_chunked_mm_input: bool = False
 
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
@@ -1017,6 +1018,20 @@ class EngineArgs:
             "Note that even if this is set to False, cascade attention will be "
             "only used when the heuristic tells that it's beneficial.")
 
+        parser.add_argument(
+            "--disable-chunked-mm-input",
+            action=StoreBoolean,
+            default=EngineArgs.disable_chunked_mm_input,
+            nargs="?",
+            const="False",
+            help="Disable multimodal input chunking attention for V1. "
+            "If set to true and chunked prefill is enabled, we do not want to"
+            " partially schedule a multimodal item. This ensures that if a "
+            "request has a mixed prompt (like text tokens TTTT followed by "
+            "image tokens IIIIIIIIII) where only some image tokens can be "
+            "scheduled (like TTTTIIIII, leaving IIIII), it will be scheduled "
+            "as TTTT in one step and IIIIIIIIII in the next.")
+
         return parser
 
     @classmethod
@@ -1261,6 +1276,7 @@ class EngineArgs:
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
