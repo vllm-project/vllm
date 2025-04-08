@@ -31,6 +31,7 @@ ls
 # mv metric_report.json benchmark-vllm-1.0qps-20250404-195413-meta-llama-Meta-Llama-3-8B.json
 # ls
 cat *meta-llama-Meta-Llama-3-8B.json
+jq 'walk(if . == "Infinity" then 0 else . end)' *meta-llama-Meta-Llama-3-8B.json > *meta-llama-Meta-Llama-3-8B.json
 cat *meta-llama-Meta-Llama-3-8B.json >> metric_result.jsonl
 # echo '' >> metric_result.jsonl
 cat metric_result.jsonl && rm *meta-llama-Meta-Llama-3-8B.json
