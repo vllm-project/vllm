@@ -157,21 +157,13 @@ class Ovis2DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2ProcessingInfo]):
         }
 
         return ProcessorInputs(
-            prompt_text='''<|im_start|>system
-You are a helpful assistant.<|im_end|>
-<|im_start|>user
-<image>
-Describe the image.<|im_end|>
-<|im_start|>assistant''',
+            prompt_text=IMAGE_TOKEN * num_images,
             mm_data=mm_data,
 
         )
 
 
 class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
-
-    def _get_token_value(self, tok):
-        return self.info.get_tokenizer()(self.info.get_tokenizer().extra_special_tokens[tok])["input_ids"]
 
     def _call_hf_processor(
             self,
@@ -217,15 +209,9 @@ class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
             out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
 
-        def get_replacement_tokens_ovis(grid):
-            """
-            Calculates the placeholder for the sequence, starting from the grid
+        def get_replacement_ovis(item_idx):
+            grid = out_mm_kwargs["grids"][item_idx]
 
-            Args:
-                grid: the grid tuple for the image
-            Returns:
-                list: Placeholder sequence for the image with padding
-            """
             hf_processor = self.info.get_hf_processor()
             # Get the base placeholder tokens
             placeholder_tokens = hf_processor.construct_image_placeholders(grid)
@@ -248,9 +234,9 @@ class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
             PromptReplacement(
                 modality="image",
                 target=IMAGE_TOKEN,
-                replacement=get_replacement_tokens_ovis(grid),
-            )
-            for grid in out_mm_kwargs["grids"]]
+                replacement=get_replacement_ovis,
+            ),
+        ]
 
 
 @MULTIMODAL_REGISTRY.register_processor(Ovis2MultiModalProcessor,

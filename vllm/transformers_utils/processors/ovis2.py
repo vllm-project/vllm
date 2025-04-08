@@ -68,6 +68,17 @@ class OvisProcessor(ProcessorMixin):
         self.video_token = "<|video_pad|>" if not hasattr(tokenizer, "video_token") else tokenizer.video_token
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
+        self.extra_special_tokens = {
+            "image_token": "<image>",
+            "image_atom": "<image_atom>",
+            "image_start": "<img>",
+            "image_prefix": "<pre>",
+            "image_col_sep": "<col>",
+            "image_row_sep": "<row>",
+            "image_end": "</img>",
+            'image_pad': '<image_pad>',
+        }
+
     def __call__(
         self,
         images: ImageInput = None,
@@ -144,7 +155,7 @@ class OvisProcessor(ProcessorMixin):
                 text,
                 **output_kwargs["text_kwargs"]
             )
-            image_token_id = self.tokenizer(self.tokenizer.extra_special_tokens['image_token'])['input_ids'][0]
+            image_token_id = self.get_token_value("image_token")
             replaced_ids_list = []
             replaced_attn_mask_list = []
             idx = 0
@@ -213,7 +224,7 @@ class OvisProcessor(ProcessorMixin):
         return height, width
 
     def get_token_value(self, tok):
-            return self.tokenizer(self.tokenizer.extra_special_tokens[tok])["input_ids"][0]
+        return self.tokenizer(self.extra_special_tokens[tok])["input_ids"][0]
 
     def construct_image_placeholders(self, grid):
 
