@@ -470,26 +470,26 @@ class TPUModelRunner:
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
-        self.input_ids = self.input_ids_cpu[:
-                                            padded_total_num_scheduled_tokens].to(
-                                                self.device)
+        self.input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         self.position_ids = self.positions_cpu[:
-                                               padded_total_num_scheduled_tokens].to(
-                                                   self.device)
+                                               padded_total_num_scheduled_tokens]
         self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
         slot_mapping = self.slot_mapping_cpu[:
-                                             padded_total_num_scheduled_tokens].to(
-                                                 self.device)
+                                             padded_total_num_scheduled_tokens]
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
-        block_tables = block_tables.to(self.device)
-        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
-            self.device)
-        seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
-
+        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
+        seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
         self.validate_paged_attention_precondition(block_tables, num_reqs,
                                                    query_start_loc, seq_lens)
+
+        self.input_ids = self.input_ids.to(self.device)
+        self.position_ids = self.position_ids.to(self.device)
+        slot_mapping = slot_mapping.to(self.device)
+        block_tables = block_tables.to(self.device)
+        query_start_loc = query_start_loc.to(self.device)
+        seq_lens = query_start_loc.to(self.device)
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -562,7 +562,7 @@ class TPUModelRunner:
                     f"{q_len=} must be less or equal to {kv_len=} for "
                     "sequence {i}")
 
-    def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
