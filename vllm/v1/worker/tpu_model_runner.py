@@ -15,11 +15,13 @@ import torch_xla.runtime as xr
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -36,7 +38,8 @@ from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from .utils import sanity_check_mm_encoder_outputs
+from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
+                    scatter_mm_placeholders)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -507,19 +510,46 @@ class TPUModelRunner:
         logits_indices = logits_indices.to(self.device)
         return attn_metadata, logits_indices
 
-    def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
+    def _scatter_placeholders(
+        self,
+        embeds: torch.Tensor,
+        is_embed: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if is_embed is None:
+            return embeds
+
+        placeholders = embeds.new_full(
+            (is_embed.shape[0], embeds.shape[-1]),
+            fill_value=torch.nan,
+        )
+        placeholders[is_embed] = embeds
+        return placeholders
+
+    def _gather_placeholders(
+        self,
+        placeholders: torch.Tensor,
+        is_embed: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if is_embed is None:
+            return placeholders
+
+        return placeholders[is_embed]
+
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
 
         # Batch the multi-modal inputs.
-        mm_inputs: list[MultiModalKwargs] = []
-        req_input_ids: list[tuple[str, int]] = []
+        mm_inputs = list[MultiModalKwargs]()
+        req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
-            for input_id in encoder_input_ids:
-                mm_inputs.append(req_state.mm_inputs[input_id])
-                req_input_ids.append((req_id, input_id))
+
+            for mm_input_id in encoder_input_ids:
+                mm_inputs.append(req_state.mm_inputs[mm_input_id])
+                req_ids_pos.append(
+                    (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -555,16 +585,23 @@ class TPUModelRunner:
                 encoder_outputs.append(output)
 
         # Cache the encoder outputs.
-        for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
+        for (req_id, input_id, pos_info), output in zip(
+                req_ids_pos,
+                encoder_outputs,
+        ):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
-            self.encoder_cache[req_id][input_id] = output
 
-    def _gather_encoder_outputs(
+            self.encoder_cache[req_id][input_id] = scatter_mm_placeholders(
+                output,
+                is_embed=pos_info.is_embed,
+            )
+
+    def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> list[torch.Tensor]:
-        encoder_outputs: list[torch.Tensor] = []
+        mm_embeds: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -572,8 +609,8 @@ class TPUModelRunner:
             num_computed_tokens = req_state.num_computed_tokens
             mm_positions = req_state.mm_positions
             for i, pos_info in enumerate(mm_positions):
-                start_pos = pos_info["offset"]
-                num_encoder_tokens = pos_info["length"]
+                start_pos = pos_info.offset
+                num_encoder_tokens = pos_info.length
 
                 # The encoder output is needed if the two ranges overlap:
                 # [num_computed_tokens,
@@ -595,8 +632,16 @@ class TPUModelRunner:
                 assert req_id in self.encoder_cache
                 assert i in self.encoder_cache[req_id]
                 encoder_output = self.encoder_cache[req_id][i]
-                encoder_outputs.append(encoder_output[start_idx:end_idx])
-        return encoder_outputs
+
+                if (is_embed := pos_info.is_embed) is not None:
+                    is_embed = is_embed[start_idx:end_idx]
+
+                mm_embeds_item = gather_mm_placeholders(
+                    encoder_output[start_idx:end_idx],
+                    is_embed=is_embed,
+                )
+                mm_embeds.append(mm_embeds_item)
+        return mm_embeds
 
     @torch.no_grad()
     def execute_model(
@@ -612,10 +657,10 @@ class TPUModelRunner:
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
-            self._execute_encoder(scheduler_output)
-            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+            self._execute_mm_encoder(scheduler_output)
+            mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
-            encoder_outputs = []
+            mm_embeds = []
 
         # Prepare inputs
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
@@ -623,9 +668,9 @@ class TPUModelRunner:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            if encoder_outputs:
+            if mm_embeds:
                 inputs_embeds = self.model.get_input_embeddings(
-                    self.input_ids, encoder_outputs)
+                    self.input_ids, mm_embeds)
             else:
                 inputs_embeds = self.model.get_input_embeddings(self.input_ids)
             input_ids = None
@@ -647,11 +692,10 @@ class TPUModelRunner:
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
-                kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
             )
-        selected_token_ids = self.model.sample_from_hidden(
-            hidden_states, tpu_sampling_metadata)
+        selected_token_ids = self.sample_from_hidden(hidden_states,
+                                                     tpu_sampling_metadata)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
@@ -751,17 +795,15 @@ class TPUModelRunner:
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
-        model = model.eval()
+        # Sync all pending XLA execution during model initialization and weight
+        # loading.
         xm.mark_step()
         xm.wait_device_ops()
-        model = ModelWrapperV1(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        self.model = model
+        self.sampler = TPUSampler()
 
     @torch.no_grad()
-    def _dummy_run(self, kv_caches, num_tokens: int) -> None:
+    def _dummy_run(self, num_tokens: int) -> None:
         if self.is_multimodal_model:
             input_ids = None
             inputs_embeds = torch.zeros((num_tokens, self.hidden_size),
@@ -812,7 +854,6 @@ class TPUModelRunner:
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
                              positions=position_ids,
-                             kv_caches=kv_caches,
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
 
@@ -824,7 +865,7 @@ class TPUModelRunner:
         start = time.perf_counter()
         for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
-            self._dummy_run(self.kv_caches, num_tokens)
+            self._dummy_run(num_tokens)
             xm.mark_step()
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -855,8 +896,7 @@ class TPUModelRunner:
                     from_input_batch(self.input_batch, indices)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
-                out = self.model.sample_from_hidden(dummy_hidden,
-                                                    sampling_meta)
+                out = self.sample_from_hidden(dummy_hidden, sampling_meta)
                 out = out.cpu()
                 # Requests can't be more than tokens. But do compile for the
                 # next bigger value in case num_tokens uses bucketed padding.
@@ -910,45 +950,17 @@ class TPUModelRunner:
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
-
-class ModelWrapperV1(nn.Module):
-
-    def __init__(self, model: nn.Module):
-        super().__init__()
-        self.model = model
-        self.sampler = TPUSampler()
-
-    def sample(
-            self, logits: torch.Tensor,
-            sampling_metadata: TPUSupportedSamplingMetadata) -> SamplerOutput:
-        sampler_out = self.sampler(logits, sampling_metadata)
-        return sampler_out
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: list[torch.Tensor],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Executes the forward pass of the model.
-
-        Args:
-            input_ids: The input token IDs of shape [num_tokens].
-            positions: The input position IDs of shape [num_tokens].
-            kv_caches: The key and value caches. They can be None during the
-                memory profiling at initialization.
-            inputs_embeds: The input embeddings of shape [num_tokens,
-                hidden_size]. It is used for multimodal models.
-        """
-
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            inputs_embeds=inputs_embeds,
-        )
-
-        return hidden_states
+    def reset_dynamo_cache(self):
+        if self.is_multimodal_model:
+            assert hasattr(self.model, "language_model")
+            compiled_model = self.model.language_model.model
+        else:
+            compiled_model = self.model.model
+        if isinstance(compiled_model, TorchCompileWrapperWithCustomDispatcher):
+            logger.info("Clear dynamo cache and cached dynamo bytecode.")
+            torch._dynamo.eval_frame.remove_from_cache(
+                compiled_model.original_code_object)
+            compiled_model.compiled_codes.clear()
 
     def sample_from_hidden(
         self,
@@ -956,32 +968,29 @@ class ModelWrapperV1(nn.Module):
         sampling_metadata: TPUSupportedSamplingMetadata,
     ) -> torch.Tensor:
         """
-        Sample with xla-friendly function. This function is to be traced 
-        separately from `forward` for lighter compilation overhead.
-        """
+            Sample with xla-friendly function. This function is to be traced 
+            separately for lighter compilation overhead.
+            """
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
-        logits = self.compute_logits(sample_hidden_states)
+        # SamplingMetadata here for pruning output in LogitsProcessor, disabled.
+        logits = self.model.compute_logits(sample_hidden_states, None)
+
+        def sample(
+                logits: torch.Tensor,
+                sampling_metadata: TPUSupportedSamplingMetadata
+        ) -> SamplerOutput:
+            sampler_out = self.sampler(logits, sampling_metadata)
+            return sampler_out
+
         # Optimized greedy sampling branch, tracing both paths in a single pass
         # NOTE all_greedy is a scalar, this is just an optimized if/else.
-        out_tokens = torch.where(sampling_metadata.all_greedy,
-                        torch.argmax(logits, dim=-1, keepdim=True),
-                        self.sample(logits, sampling_metadata)\
-                                            .sampled_token_ids)
+        out_tokens = torch.where(
+            sampling_metadata.all_greedy,
+            torch.argmax(logits, dim=-1, keepdim=True),
+            sample(logits, sampling_metadata).sampled_token_ids)
         return out_tokens
-
-    def compute_logits(self,
-                       hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
-        # SamplingMetadata here for pruning output in LogitsProcessor, disabled
-        logits = self.model.compute_logits(hidden_states, None)
-        return logits
-
-    def get_multimodal_embeddings(self, *args, **kwargs):
-        return self.model.get_multimodal_embeddings(*args, **kwargs)
-
-    def get_input_embeddings(self, *args, **kwargs):
-        return self.model.get_input_embeddings(*args, **kwargs)
 
 
 def _get_padded_number(n: int, multiple: int) -> int:
