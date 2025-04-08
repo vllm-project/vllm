@@ -71,13 +71,11 @@ def test_processor_override(
     # image token offsets
     img_locs = processed_inputs["mm_placeholders"].get("image", [])
     assert len(img_locs) == num_imgs
-    assert [img_loc["offset"] for img_loc in img_locs] == \
+    assert [img_loc.offset for img_loc in img_locs] == \
         [i for i, v in enumerate(prompt_token_ids) \
         if v == config.boi_token_index]
 
     # patch sizes and masks
-    assert prompt_token_ids.count(config.image_token_index) \
-        == sum(img_patch.sum() for img_patch in mm_kwargs["embed_is_patch"])
     patch_token_id = vocab[hf_processor.img_patch_token]
     num_patches = processed_inputs["prompt_token_ids"].count(patch_token_id)
     mm_counts = {"image": num_imgs}
@@ -89,11 +87,3 @@ def test_processor_override(
         == mm_kwargs["patches_per_image"].sum() * num_patches_per_chunk
     assert mm_kwargs["pixel_values"].shape[0] \
         == mm_kwargs["patches_per_image"].sum()
-
-    for embed_is_patch, aspect_ratio in zip(mm_kwargs["embed_is_patch"],
-                                            mm_kwargs["aspect_ratios"]):
-        assert embed_is_patch.shape[0] == \
-            len(tokenizer.encode(
-                hf_processor._prompt_split_image(
-                    aspect_ratio, num_patches_per_chunk),
-                add_special_tokens=False))

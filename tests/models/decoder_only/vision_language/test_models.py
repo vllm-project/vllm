@@ -330,9 +330,8 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=4,
         dtype="bfloat16",
         auto_cls=AutoModelForImageTextToText,
-        tensor_parallel_size=8,
-        vllm_runner_kwargs={"gpu_memory_utilization": 0.8},
-        marks=multi_gpu_marks(num_gpus=8),
+        tensor_parallel_size=4,
+        marks=multi_gpu_marks(num_gpus=4),
     ),
     "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],

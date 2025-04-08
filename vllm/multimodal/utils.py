@@ -340,7 +340,7 @@ def merge_and_sort_multimodal_metadata(
             all_items.append((modality, placeholder, hash_value))
 
     # Sort all items by offset
-    all_items.sort(key=lambda x: x[1]['offset'])
+    all_items.sort(key=lambda x: x[1].offset)
 
     # Split into separate lists
     sorted_modalities = [item[0] for item in all_items]

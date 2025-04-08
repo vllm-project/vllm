@@ -109,7 +109,8 @@ The built-in modalities are defined by :class:`MultiModalDataBuiltins`.
 """
 
 
-class PlaceholderRange(TypedDict):
+@dataclass(frozen=True)
+class PlaceholderRange:
     """
     Placeholder location information for multi-modal data.
 
@@ -121,8 +122,8 @@ class PlaceholderRange(TypedDict):
 
         .. code-block::
 
-            A: { "offset": 0, "length": 4 }
-            B: { "offset": 5, "length": 4 }
+            A: PlaceholderRange(offset=0, length=4)
+            B: PlaceholderRange(offset=5, length=4)
     """
 
     offset: int
@@ -130,6 +131,31 @@ class PlaceholderRange(TypedDict):
 
     length: int
     """The length of the placeholder."""
+
+    is_embed: Optional[torch.Tensor] = None
+    """
+    A boolean mask of shape `(length,)` indicating which positions
+    between `offset` and `offset + length` to assign embeddings to.
+    """
+
+    def get_num_embeds(self) -> int:
+        if self.is_embed is None:
+            return self.length
+
+        return int(self.is_embed.sum().item())
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, self.__class__):
+            return False
+        if not (self.offset, self.length) == (other.offset, other.length):
+            return False
+
+        if self.is_embed is None:
+            return other.is_embed is None
+        if other.is_embed is None:
+            return self.is_embed is None
+
+        return nested_tensors_equal(self.is_embed, other.is_embed)
 
 
 NestedTensors = Union[list["NestedTensors"], list[torch.Tensor], torch.Tensor,
