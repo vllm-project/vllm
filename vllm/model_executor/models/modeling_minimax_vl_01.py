@@ -31,7 +31,7 @@ from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.configuration_minimax_text_01 import MiniMaxText01Config
-from .image_processer import ImageProcessor
+from .image_processer import ImageProcessor, resize_multiple_of
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
