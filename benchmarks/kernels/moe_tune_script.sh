@@ -1,7 +1,7 @@
 #!/bin/bash
 
 export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
+export RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 
 ## ---- Mixtral fp8 tuning example ---- ##
 python benchmark_moe.py --model /data/models/mistral-ai-models/Mixtral-8x22B-Instruct-v0.1-FP8/ --tp-size 1 --tune --dtype fp8_w8a8 
@@ -31,3 +31,9 @@ python benchmark_moe.py --model /data/models/mistral-ai-models/Mixtral-8x22B-v0.
 ## ---- Notes ---- ##
 # 1. The tuned file is specific for a TP size. This means a tuned file obtained for --tp-size 8 can only be used when running the model under TP=8 setting.
 # 2. The script uses Ray for multi-gpu tuning. Export HIP_VISIBLE_DEVICES accordingly to expose the required no. of GPUs and use multiple gpus for tuning.
+# 3. RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1 resolves the following errors (depending on if HIP_VISIBLE_DEVICES is set or not):
+#    - Error-1: RuntimeError: HIP error: invalid device ordinal
+#               HIP kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+#               For debugging consider passing AMD_SERIALIZE_KERNEL=3
+#    - Error-2: RuntimeError: HIP_VISIBLE_DEVICES contains more devices than ROCR_VISIBLE_DEVICES
+
