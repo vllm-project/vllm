@@ -10,6 +10,7 @@ from typing import Optional, Union
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -565,6 +566,8 @@ class Scheduler(SchedulerInterface):
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
+        ## forward_context = get_forward_context()
+        ## print("666666", forward_context.req_idx_to_num_dropped_token_offset)
         for request in self.running:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)

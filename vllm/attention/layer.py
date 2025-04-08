@@ -378,6 +378,16 @@ def unified_attention_with_output(
                       kv_cache,
                       attn_metadata,
                       output=output)
+    forward_context = get_forward_context()
+    if forward_context:
+        print("$$$$$", forward_context.req_idx_to_num_dropped_token_offset)
+        if len(forward_context.req_idx_to_num_dropped_token_offset) > 0:
+            forward_context.req_idx_to_num_dropped_token_offset[0] = -1
+            print("#####", forward_context.req_idx_to_num_dropped_token_offset)
+        else:
+            print("&&&&&&&&&&")
+    else:
+        print("--------")
 
 
 def unified_attention_with_output_fake(

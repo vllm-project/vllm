@@ -1,7 +1,7 @@
 from vllm import LLM, SamplingParams
 prompts = [
-    "Hello, my name is",
-    "How are you",
+    #"Hello, my name is",
+    #"How are you",
     "Good morning",
 ]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
