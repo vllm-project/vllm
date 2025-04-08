@@ -369,6 +369,12 @@ class ImageProcessor(BaseImageProcessor):
         if self.size is None:
             self.size = (224, 224)
             
+        # 如果 image_mean 或 image_std 为 None，使用默认值
+        if self.image_mean is None:
+            self.image_mean = (0.48145466, 0.4578275, 0.40821073)
+        if self.image_std is None:
+            self.image_std = (0.26862954, 0.26130258, 0.27577711)
+            
         for image in images:
             resized_image = image.resize(self.size, Image.BICUBIC)
             transform_img = _transform(self.size[1], self.size[0], self.image_mean, self.image_std)(resized_image)
