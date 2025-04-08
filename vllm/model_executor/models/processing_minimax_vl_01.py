@@ -10,6 +10,8 @@ from transformers.processing_utils import ProcessingKwargs, ProcessorMixin#, _va
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging
 
+from .image_processer import CustomBatchFeature
+
 logger = logging.get_logger(__name__)
 
 import os
