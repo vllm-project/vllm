@@ -536,6 +536,16 @@ class LLM:
                                          tokenizer.eos_token_id,
                                          length_penalty)
 
+        # TODO - fix handling of multimodal data for beam search; we pass it
+        # through in the async version on the abstract EngineClient, but not
+        # here.
+        if any("multi_modal_data" in prompt
+               and prompt["multi_modal_data"] is not None
+               for prompt in prompts):
+            logger.warning(
+                "Multimodal data appears to have been provided, but is not"
+                " currently being passed through in LLM.beam_search()!")
+
         tokenizer = self.get_tokenizer()
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
