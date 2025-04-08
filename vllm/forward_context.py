@@ -45,9 +45,6 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
-    # KV cache connector
-    # NOTE(Kuntai): only v1 connector works with ForwardContext for now
-    kv_connector: Optional[KVConnectorBase_V1] = None
 
 
 _forward_context: Optional[ForwardContext] = None
