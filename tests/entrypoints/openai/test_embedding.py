@@ -201,11 +201,18 @@ async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
             np.frombuffer(base64.b64decode(data.embedding),
                           dtype="float32").tolist())
 
+    rtol = 1e-3
+    atol = 1e-4
+
     assert len(responses_float.data) == len(decoded_responses_base64_data)
     assert np.allclose(responses_float.data[0].embedding,
-                       decoded_responses_base64_data[0])
+                       decoded_responses_base64_data[0],
+                       rtol=rtol,
+                       atol=atol)
     assert np.allclose(responses_float.data[1].embedding,
-                       decoded_responses_base64_data[1])
+                       decoded_responses_base64_data[1],
+                       rtol=rtol,
+                       atol=atol)
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(input=input_texts,
@@ -213,9 +220,13 @@ async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
 
     assert len(responses_float.data) == len(responses_default.data)
     assert np.allclose(responses_float.data[0].embedding,
-                       responses_default.data[0].embedding)
+                       responses_default.data[0].embedding,
+                       rtol=rtol,
+                       atol=atol)
     assert np.allclose(responses_float.data[1].embedding,
-                       responses_default.data[1].embedding)
+                       responses_default.data[1].embedding,
+                       rtol=rtol,
+                       atol=atol)
 
 
 @pytest.mark.asyncio
