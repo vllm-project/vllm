@@ -607,6 +607,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             
             if current_platform.is_hpu() and VLLM_REQUANT_FP8_INC:
                 moe_op = layer.moe_op
+                os.environ["INC_DYNAMIC_MOE_EXPERTS"] = str(moe_op.num_experts)
                 for index in range(moe_op.num_experts):
                     moe_op.w13_list[index].set_weight(layer.w13_weight[index])
                     moe_op.w13_list[index].set_scale_inv_fp8(
@@ -1094,11 +1095,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 assert not use_partial_experts, "Partial experts not supported with VLLM_REQUANT_FP8_INC"
                 final_hidden_states = layer.moe_op(
                     x,
-                    topk_ids,
-                    topk_weights,
-                    moe_n_slice,
-                    n_expert_slice,
-                    ep_shift,
+                    topk_ids.to(torch.int64),
+                    topk_weights.to(x.dtype),
                 )
                 return final_hidden_states.view(-1, x.shape[1])
             w13_weight_fp8 = layer.w13_weight.data
