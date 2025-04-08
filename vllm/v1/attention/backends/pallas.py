@@ -11,6 +11,9 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -81,7 +84,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
         blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in Pallas is not supported yet, it will fall back "
+                "to global attention for long context.")
         if blocksparse_params is not None:
             raise ValueError("Paged attention Pallas kernel does "
                              "not support block-sparse attention.")

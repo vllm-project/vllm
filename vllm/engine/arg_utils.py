@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import json
+import re
 import threading
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
@@ -138,6 +139,7 @@ class EngineArgs:
     code_revision: Optional[str] = None
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
+    hf_token: Optional[Union[bool, str]] = None
     hf_overrides: Optional[HfOverrides] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
@@ -177,6 +179,7 @@ class EngineArgs:
 
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: Optional[bool] = None
+    disable_chunked_mm_input: bool = False
 
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
@@ -367,10 +370,14 @@ class EngineArgs:
             'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
             'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
         parser.add_argument('--max-model-len',
-                            type=int,
+                            type=human_readable_int,
                             default=EngineArgs.max_model_len,
                             help='Model context length. If unspecified, will '
-                            'be automatically derived from the model config.')
+                            'be automatically derived from the model config. '
+                            'Supports k/m/g/K/M/G in human-readable format.\n'
+                            'Examples:\n'
+                            '- 1k → 1000\n'
+                            '- 1K → 1024\n')
         parser.add_argument(
             '--guided-decoding-backend',
             type=str,
@@ -602,6 +609,16 @@ class EngineArgs:
                             help='RoPE theta. Use with `rope_scaling`. In '
                             'some cases, changing the RoPE theta improves the '
                             'performance of the scaled model.')
+        parser.add_argument(
+            '--hf-token',
+            type=str,
+            nargs='?',
+            const=True,
+            default=None,
+            help='The token to use as HTTP bearer authorization'
+            ' for remote files. If `True`, will use the token '
+            'generated when running `huggingface-cli login` '
+            '(stored in `~/.huggingface`).')
         parser.add_argument('--hf-overrides',
                             type=json.loads,
                             default=EngineArgs.hf_overrides,
@@ -1001,6 +1018,20 @@ class EngineArgs:
             "Note that even if this is set to False, cascade attention will be "
             "only used when the heuristic tells that it's beneficial.")
 
+        parser.add_argument(
+            "--disable-chunked-mm-input",
+            action=StoreBoolean,
+            default=EngineArgs.disable_chunked_mm_input,
+            nargs="?",
+            const="False",
+            help="Disable multimodal input chunking attention for V1. "
+            "If set to true and chunked prefill is enabled, we do not want to"
+            " partially schedule a multimodal item. This ensures that if a "
+            "request has a mixed prompt (like text tokens TTTT followed by "
+            "image tokens IIIIIIIIII) where only some image tokens can be "
+            "scheduled (like TTTTIIIII, leaving IIIII), it will be scheduled "
+            "as TTTT in one step and IIIIIIIIII in the next.")
+
         return parser
 
     @classmethod
@@ -1038,6 +1069,7 @@ class EngineArgs:
             code_revision=self.code_revision,
             rope_scaling=self.rope_scaling,
             rope_theta=self.rope_theta,
+            hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
@@ -1244,6 +1276,7 @@ class EngineArgs:
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
@@ -1274,6 +1307,10 @@ class EngineArgs:
                 self.model_loader_extra_config = {}
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
+
+        # bitsandbytes pre-quantized model need a specific model loader
+        if model_config.quantization == "bitsandbytes":
+            self.quantization = self.load_format = "bitsandbytes"
 
         load_config = self.create_load_config()
 
@@ -1650,12 +1687,14 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
             }
+            default_max_num_seqs = 1024
         else:
             # TODO(woosuk): Tune the default values for other hardware.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 8192,
                 UsageContext.OPENAI_API_SERVER: 2048,
             }
+            default_max_num_seqs = 256
 
         use_context_value = usage_context.value if usage_context else None
         if (self.max_num_batched_tokens is None
@@ -1666,7 +1705,6 @@ class EngineArgs:
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
 
-        default_max_num_seqs = 1024
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs
 
@@ -1721,6 +1759,47 @@ def _warn_or_fallback(feature_name: str) -> bool:
             "Falling back to V0 Engine.", feature_name)
         should_exit = True
     return should_exit
+
+
+def human_readable_int(value):
+    """Parse human-readable integers like '1k', '2M', etc.
+    Including decimal values with decimal multipliers.
+    
+    Examples:
+    - '1k' -> 1,000
+    - '1K' -> 1,024
+    - '25.6k' -> 25,600
+    """
+    value = value.strip()
+    match = re.fullmatch(r'(\d+(?:\.\d+)?)([kKmMgGtT])', value)
+    if match:
+        decimal_multiplier = {
+            'k': 10**3,
+            'm': 10**6,
+            'g': 10**9,
+        }
+        binary_multiplier = {
+            'K': 2**10,
+            'M': 2**20,
+            'G': 2**30,
+        }
+
+        number, suffix = match.groups()
+        if suffix in decimal_multiplier:
+            mult = decimal_multiplier[suffix]
+            return int(float(number) * mult)
+        elif suffix in binary_multiplier:
+            mult = binary_multiplier[suffix]
+            # Do not allow decimals with binary multipliers
+            try:
+                return int(number) * mult
+            except ValueError as e:
+                raise argparse.ArgumentTypeError("Decimals are not allowed " \
+                f"with binary suffixes like {suffix}. Did you mean to use " \
+                f"{number}{suffix.lower()} instead?") from e
+
+    # Regular plain number.
+    return int(value)
 
 
 # These functions are used by sphinx to build the documentation
