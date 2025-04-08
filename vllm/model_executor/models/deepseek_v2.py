@@ -765,7 +765,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                     for k in weights_dict:
                         if k.startswith(prefix):
                             weights_list.append((k.replace(
-                                "shared_experts", "experts.",
+                                "shared_experts", "experts."
                                 f"{self.config.n_routed_experts + num_repeat}"
                             ), weights_dict[k].clone()))
             weights = weights_list
