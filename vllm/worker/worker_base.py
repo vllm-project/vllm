@@ -208,33 +208,6 @@ class LoRANotSupportedWorkerBase(WorkerBase):
         raise ValueError(f"{type(self)} does not support LoRA")
 
 
-class ModelExecutionV0Error(RuntimeError):
-    """Custom RuntimeError with input data for model execution
-    
-    In a nutshell, this object is useful for custom handling of exception for
-    the case the engine raises an error. For instance, it is used to log the
-    input metadata that is useful for debugging on engine crashes.
-    
-    Args:
-        model_input: BroadcastableModelInput object that contains the input
-            data for model execution
-        
-    """
-    model_input: BroadcastableModelInput
-
-    def __init__(self, *args, model_input=None):
-        super().__init__(*args)
-        self.model_input = model_input
-
-    def __reduce__(self):
-        # To avoid pickle errors.
-        # This happens when we exchange this object between processes.
-        # since model_input can have objects that only makes sense
-        # to their context/process we remove them from the serialization
-        # and only send the summary of the error as a regular RuntimeError.
-        return (self.__class__, (self.args[0], ))
-
-
 @dataclasses.dataclass(frozen=True)
 class WorkerInput:
     """Local inputs to each worker. May contain device-specific data. These
@@ -443,20 +416,15 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     and self.observability_config.collect_model_execute_time):
                 orig_model_execute_time = intermediate_tensors.tensors.get(
                     "model_execute_time", torch.tensor(0)).item()
-        try:
-            output = self.model_runner.execute_model(
-                model_input=model_input,
-                kv_caches=self.kv_cache[worker_input.virtual_engine]
-                if self.kv_cache is not None else None,
-                intermediate_tensors=intermediate_tensors,
-                num_steps=num_steps,
-                **kwargs,
-            )
-        except BaseException as err:
-            raise ModelExecutionV0Error(
-                f"Model execution failure,"
-                f"reason: {repr(err)}",
-                model_input=model_input) from err
+
+        output = self.model_runner.execute_model(
+            model_input=model_input,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
+            intermediate_tensors=intermediate_tensors,
+            num_steps=num_steps,
+            **kwargs,
+        )
 
         model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:
@@ -506,19 +474,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         kwargs = extract_previous_hidden_states(execute_model_req)
 
-        try:
-            return self.model_runner.execute_model(
-                model_input=model_input,
-                kv_caches=self.kv_cache[worker_input.virtual_engine]
-                if self.kv_cache is not None else None,
-                intermediate_tensors=intermediate_tensors,
-                **kwargs,
-            )
-        except BaseException as err:
-            raise ModelExecutionV0Error(
-                f"Model execution failure,"
-                f"reason: {repr(err)}",
-                model_input=model_input) from err
+        return self.model_runner.execute_model(
+            model_input=model_input,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
+            intermediate_tensors=intermediate_tensors,
+            **kwargs,
+        )
 
 
 class WorkerWrapperBase:
