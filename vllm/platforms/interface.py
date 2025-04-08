@@ -380,6 +380,20 @@ class Platform:
         return False
 
     @classmethod
+    def supports_structured_output(cls) -> bool:
+        """
+        Returns whether the current platform can support structured output.
+        """
+        return False
+
+    @classmethod
+    def use_custom_allreduce(cls) -> bool:
+        """
+        Returns if custom allreduce is supported on the current platform
+        """
+        return False
+
+    @classmethod
     def is_rocm_skinny_gemm_enabled(cls) -> bool:
         """
         Return if skinny gemms enabled on rocm
