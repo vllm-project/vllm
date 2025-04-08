@@ -34,6 +34,16 @@ class _HfExamplesInfo:
     The minimum version of HF Transformers that is required to run this model.
     """
 
+    max_transformers_version: Optional[str] = None
+    """
+    The maximum version of HF Transformers that this model runs on.
+    """
+
+    transformers_version_reason: Optional[str] = None
+    """
+    The reason for the minimum/maximum version requirement.
+    """
+
     is_available_online: bool = True
     """
     Set this to ``False`` if the name of this architecture no longer exists on
@@ -57,21 +67,28 @@ class _HfExamplesInfo:
         If the installed transformers version does not meet the requirements,
         perform the given action.
         """
-        if self.min_transformers_version is None:
+        if (self.min_transformers_version is None
+                and self.max_transformers_version is None):
             return
 
         current_version = TRANSFORMERS_VERSION
-        required_version = self.min_transformers_version
-        if Version(current_version) < Version(required_version):
-            msg = (
-                f"You have `transformers=={current_version}` installed, but "
-                f"`transformers>={required_version}` is required to run this "
-                "model")
+        min_version = self.min_transformers_version
+        max_version = self.max_transformers_version
+        msg = f"`transformers=={current_version}` installed, but `transformers"
+        if min_version and Version(current_version) < Version(min_version):
+            msg += f">={min_version}` is required to run this model."
+        elif max_version and Version(current_version) > Version(max_version):
+            msg += f"<={max_version}` is required to run this model."
+        else:
+            return
 
-            if on_fail == "error":
-                raise RuntimeError(msg)
-            else:
-                pytest.skip(msg)
+        if self.transformers_version_reason:
+            msg += f" Reason: {self.transformers_version_reason}"
+
+        if on_fail == "error":
+            raise RuntimeError(msg)
+        else:
+            pytest.skip(msg)
 
     def check_available_online(
         self,
@@ -107,12 +124,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloomz-1b1"),
     "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
                                     trust_remote_code=True),
+    "ChatGLMForConditionalGeneration": _HfExamplesInfo("thu-coai/ShieldLM-6B-chatglm3",  # noqa: E501
+                                                       trust_remote_code=True),
     "CohereForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r-v01",
                                          trust_remote_code=True),
     "Cohere2ForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r7b-12-2024", # noqa: E501
                                          trust_remote_code=True),
     "DbrxForCausalLM": _HfExamplesInfo("databricks/dbrx-instruct"),
-    "DeciLMForCausalLM": _HfExamplesInfo("Deci/DeciLM-7B-instruct",
+    "DeciLMForCausalLM": _HfExamplesInfo("nvidia/Llama-3_3-Nemotron-Super-49B-v1", # noqa: E501
                                          trust_remote_code=True),
     "DeepseekForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-llm-7b-chat"),
     "DeepseekV2ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V2-Lite-Chat",  # noqa: E501
@@ -159,6 +178,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "MiniCPM3ForCausalLM": _HfExamplesInfo("openbmb/MiniCPM3-4B",
                                          trust_remote_code=True),
+    "MiniMaxText01ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01",
+                                                trust_remote_code=True),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MixtralForCausalLM": _HfExamplesInfo("mistralai/Mixtral-8x7B-Instruct-v0.1"),  # noqa: E501
     "QuantMixtralForCausalLM": _HfExamplesInfo("mistral-community/Mixtral-8x22B-v0.1-AWQ"),  # noqa: E501
@@ -183,6 +204,16 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-7B-Instruct",
                                         extras={"2.5": "Qwen/Qwen2.5-7B-Instruct"}), # noqa: E501
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
+    "Qwen3ForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        is_available_online=False,
+        min_transformers_version="4.51"
+    ),
+    "Qwen3MoeForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3-MoE-15B-A2B",
+        is_available_online=False,
+        min_transformers_version="4.51"
+    ),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b",
                                      is_available_online=False),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b",  # noqa: E501
@@ -242,9 +273,14 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
-    "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b"),  # noqa: E501
+    "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b"), # noqa: E501
+    "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b",  # noqa: E501
+                                                     extras={"6b": "Salesforce/blip2-opt-6.7b"}),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
+                                                extras={"fork": "Isotr0py/deepseek-vl2-tiny"},  # noqa: E501
+                                                max_transformers_version="4.48",  # noqa: E501
+                                                transformers_version_reason="HF model is not compatible.",  # noqa: E501
                                                hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it",
@@ -253,12 +289,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
-                                      extras={"2b": "h2oai/h2ovl-mississippi-2b"}),  # noqa: E501
+                                      extras={"2b": "h2oai/h2ovl-mississippi-2b"},  # noqa: E501
+                                      max_transformers_version="4.48",  # noqa: E501
+                                      transformers_version_reason="HF model is not compatible."),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
                                          extras={"2B": "OpenGVLab/InternVL2-2B"},  # noqa: E501
                                          trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
+    "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
+                                                      min_transformers_version="4.51"),
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
                                                      extras={"mistral": "mistral-community/pixtral-12b", # noqa: E501
                                                              "mistral-fp8": "nm-testing/pixtral-12b-FP8-dynamic"}),  # noqa: E501
@@ -266,13 +306,22 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo("llava-hf/LLaVA-NeXT-Video-7B-hf"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),  # noqa: E501
     "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3",  # noqa: E501
+                                                      max_transformers_version="4.48",  # noqa: E501
+                                                      transformers_version_reason="HF model is not compatible.",  # noqa: E501
                                                       hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
     "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
+                                max_transformers_version="4.48",
+                                transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
                                 trust_remote_code=True),
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
                                 extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
+    "Mistral3ForConditionalGeneration": _HfExamplesInfo("mistralai/Mistral-Small-3.1-24B-Instruct-2503",  # noqa: E501
+                                                        min_transformers_version="4.50",  # noqa: E501
+                                                        extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"}),  # noqa: E501
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
+                                        max_transformers_version="4.48",
+                                        transformers_version_reason="Use of private method which no longer exists.",  # noqa: E501
                                         extras={"olmo": "allenai/Molmo-7B-O-0924"},  # noqa: E501
                                         trust_remote_code=True),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B",
@@ -281,7 +330,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
     "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
                                         trust_remote_code=True,
-                                        extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"}),  # noqa: E501),
+                                        extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"}),  # noqa: E501
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
@@ -294,8 +343,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct",  # noqa: E501
                                                           min_transformers_version="4.49"),  # noqa: E501
+    "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
-                                     trust_remote_code=True),
+                                     trust_remote_code=True,
+                                     max_transformers_version="4.50"),
     # [Encoder-decoder]
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
     # Therefore, we borrow the BartTokenizer from the original Bart model
@@ -318,8 +369,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
 }
 
-_FALLBACK_MODEL = {
-    "TransformersModel": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
+_TRANSFORMERS_MODELS = {
+    "TransformersForCausalLM": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
 }
 
 _EXAMPLE_MODELS = {
@@ -328,7 +379,7 @@ _EXAMPLE_MODELS = {
     **_CROSS_ENCODER_EXAMPLE_MODELS,
     **_MULTIMODAL_EXAMPLE_MODELS,
     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
-    **_FALLBACK_MODEL,
+    **_TRANSFORMERS_MODELS,
 }
 
 

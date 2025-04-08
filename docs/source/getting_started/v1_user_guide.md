@@ -47,9 +47,9 @@ This living user guide outlines a few known **important changes and limitations*
 | **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
 | **LoRA**                                    | <nobr>🟢 Functional ([PR #13096](https://github.com/vllm-project/vllm/pull/13096))</nobr>|
 | **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                                                        |
+| **FP8 KV Cache**                            | <nobr>🟢 Functional on Hopper devices ([PR #15191](https://github.com/vllm-project/vllm/pull/15191))</nobr>|
 | **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
 | **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
-| **FP8 KV Cache**                            | <nobr>🟡 Planned</nobr>                                                           |
 | **Structured Output Alternative Backends**  | <nobr>🟡 Planned</nobr>                                                           |
 | **Embedding Models**                        | <nobr>🟡 Planned ([RFC #12249](https://github.com/vllm-project/vllm/issues/12249))</nobr> |
 | **Mamba Models**                            | <nobr>🟡 Planned</nobr>                                                           |
@@ -134,8 +134,6 @@ in progress.
 
 #### Features to Be Supported
 
-- **FP8 KV Cache**: While vLLM V1 introduces new FP8 kernels for model weight quantization, support for an FP8 key–value cache is not yet available. Users must continue using FP16 (or other supported precisions) for the KV cache.
-
 - **Structured Output Alternative Backends**: Structured output alternative backends (outlines, guidance) support is planned. V1 currently
   supports only the `xgrammar:no_fallback` mode, meaning that it will error out if the output schema is unsupported by xgrammar.
   Details about the structured outputs can be found
@@ -158,10 +156,3 @@ vLLM V1 is currently optimized for decoder-only transformers. Models requiring
   cross-attention between separate encoder and decoder are not yet supported (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`).
 
 For a complete list of supported models, see the [list of supported models](https://docs.vllm.ai/en/latest/models/supported_models.html).
-
-## Frequently Asked Questions
-
-**I'm using vLLM V1 and I'm getting CUDA OOM errors. What should I do?**
-The default `max_num_seqs` has been raised from `256` in V0 to `1024` in V1. If you encounter CUDA OOM only when using V1 engine, try setting a lower value of `max_num_seqs` or `gpu_memory_utilization`.
-
-On the other hand, if you get an error about insufficient memory for the cache blocks, you should increase `gpu_memory_utilization` as this indicates that your GPU has sufficient memory but you're not allocating enough to vLLM for KV cache blocks.

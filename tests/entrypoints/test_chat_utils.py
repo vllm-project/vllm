@@ -9,11 +9,11 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (_resolve_hf_chat_template,
-                                         _try_extract_ast, load_chat_template,
+from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
                                          parse_chat_messages,
                                          parse_chat_messages_futures,
-                                         resolve_chat_template_content_format)
+                                         resolve_chat_template_content_format,
+                                         resolve_hf_chat_template)
 from vllm.entrypoints.llm import apply_hf_chat_template
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import encode_image_base64
@@ -30,6 +30,7 @@ QWEN25VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
 HERMES_MODEL_ID = "NousResearch/Hermes-3-Llama-3.1-8B"
+MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 
 
 @pytest.fixture(scope="function")
@@ -74,6 +75,30 @@ def mllama_model_config():
 def mllama_tokenizer():
     return TokenizerGroup(
         MLLAMA_MODEL_ID,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+
+
+@pytest.fixture(scope="function")
+def mistral_model_config():
+    return ModelConfig(MISTRAL_MODEL_ID,
+                       task="generate",
+                       tokenizer=MISTRAL_MODEL_ID,
+                       tokenizer_mode="auto",
+                       trust_remote_code=True,
+                       dtype="auto",
+                       seed=0,
+                       limit_mm_per_prompt={
+                           "image": 2,
+                       })
+
+
+@pytest.fixture(scope="module")
+def mistral_tokenizer():
+    return TokenizerGroup(
+        tokenizer_id=MISTRAL_MODEL_ID,
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
@@ -129,6 +154,66 @@ def test_parse_chat_messages_single_image(
         "content": "<|image_1|>\nWhat's in the image?"
     }]
     _assert_mm_data_is_image_input(mm_data, 1)
+
+
+def test_parse_chat_messages_empty_system(
+    mistral_model_config,
+    mistral_tokenizer,
+):
+    # Test string format
+    conversation, _ = parse_chat_messages(
+        [{
+            "role": "system",
+            "content": ""
+        }, {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Who are you?"
+            }]
+        }],
+        mistral_model_config,
+        mistral_tokenizer,
+        content_format="string",
+    )
+    assert conversation == [{
+        "role": "system",
+        "content": ""
+    }, {
+        "role": "user",
+        "content": "Who are you?"
+    }]
+
+    # Test openai format
+    conversation, _ = parse_chat_messages(
+        [{
+            "role": "system",
+            "content": ""
+        }, {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Who are you?"
+            }]
+        }],
+        mistral_model_config,
+        mistral_tokenizer,
+        content_format="openai",
+    )
+    assert conversation == [{
+        "role": "system",
+        "content": [{
+            "type": "text",
+            "text": ""
+        }]
+    }, {
+        "role":
+        "user",
+        "content": [{
+            "type": "text",
+            "text": "Who are you?"
+        }]
+    }]
 
 
 @pytest.mark.asyncio
@@ -671,7 +756,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     # Build a config for the model
     model_config = ModelConfig(model,
                                task="generate",
-                               tokenizer=MLLAMA_MODEL_ID,
+                               tokenizer=model,
                                tokenizer_mode="auto",
                                trust_remote_code=True,
                                dtype="auto",
@@ -682,7 +767,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
 
     # Build the tokenizer group and grab the underlying tokenizer
     tokenizer_group = TokenizerGroup(
-        MLLAMA_MODEL_ID,
+        model,
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
@@ -747,7 +832,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
     }] if use_tools else None
 
     # Test detecting the tokenizer's chat_template
-    chat_template = _resolve_hf_chat_template(
+    chat_template = resolve_hf_chat_template(
         tokenizer,
         chat_template=None,
         tools=tools,
@@ -781,7 +866,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     tokenizer = tokenizer_group.tokenizer
 
     # Test detecting the tokenizer's chat_template
-    chat_template = _resolve_hf_chat_template(
+    chat_template = resolve_hf_chat_template(
         tokenizer,
         chat_template=None,
         tools=None,

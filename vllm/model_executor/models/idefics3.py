@@ -17,16 +17,14 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Dict, List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Dict, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
-import torch.utils.checkpoint
 from torch import nn
 from transformers import (BatchFeature, Idefics3Config, Idefics3ImageProcessor,
                           Idefics3Processor)
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -35,13 +33,16 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import NestedTensors
-from vllm.multimodal.parse import ImageProcessorItems
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo,
                                         MultiModalDataItems,
                                         MultiModalFieldConfig,
-                                        PromptReplacement, PromptUpdate)
+                                        PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails)
+# yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -54,17 +55,18 @@ from .llama import LlamaModel
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 
-logger = init_logger(__name__)
-
 
 class Idefics3ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: torch.Tensor
+    pixel_values: torch.Tensor
     """
     Shape: `(batch_size * num_images * num_patches, 
              num_channels, height, width)`
     """
-    pixel_attention_mask: Optional[torch.BoolTensor]
+    pixel_attention_mask: torch.Tensor
+
+    num_patches: torch.Tensor
+    """Shape: `(batch_size * num_images)`"""
 
 
 class Idefics3ImageEmbeddingInputs(TypedDict):
@@ -100,32 +102,14 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        hf_processor = self.get_hf_processor()
-        image_processor: Idefics3ImageProcessor = hf_processor.image_processor
-        grid_w, grid_h = self._get_image_feature_grid_size(
-            image_width=image_processor.size['longest_edge'],
-            image_height=image_processor.size['longest_edge'],
-        )
-        num_image_token = (grid_w * grid_h + 1) * hf_processor.image_seq_len
-        # Calculate Non-image-token length
-        # NOTE: <row_1_col_1> and <global-img> are special token for SmolVLM
-        # but not for Idefic3, so we need to tokenize them to get actual length.
-        tokenizer = self.get_tokenizer()
-        tile_token_len = len(tokenizer.tokenize("<row_1_col_1>"))
-        glob_token_len = len(tokenizer.tokenize(hf_processor.global_image_tag))
-        # linebreak and <fake_token_around_image> always cost 1 token
-        fake_token_len = lb_len = 1
-        non_image_token = (grid_w * grid_h) * (
-            tile_token_len + fake_token_len) + glob_token_len + (
-                grid_h + 1) * lb_len + fake_token_len
-        return {"image": num_image_token + non_image_token}
+        return {"image": self.get_max_image_tokens()}
 
     def _resize_output_size(self,
                             *,
                             height: int,
                             width: int,
                             max_len: Optional[int] = None,
-                            min_len: Optional[int] = 1,
+                            min_len: int = 1,
                             max_size: Optional[int] = None) -> tuple[int, int]:
         # Set default value for max_len if not provided
         max_len = max(height, width) if max_len is None else max_len
@@ -181,10 +165,13 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        size: Optional[dict[str, object]] = None,
+        processor: Optional[Idefics3Processor],
     ) -> tuple[int, int]:
-        hf_processor = self.get_hf_processor(size=size)
-        image_processor: Idefics3ImageProcessor = hf_processor.image_processor
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        image_processor: Idefics3ImageProcessor = processor.image_processor
+
         max_image_size = image_processor.max_image_size['longest_edge']
         size = image_processor.size['longest_edge']
         assert size % max_image_size == 0, (
@@ -204,6 +191,102 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
             grid_h = grid_w = 0
         return grid_w, grid_h
 
+    def get_num_patches(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: Optional[Idefics3Processor],
+    ) -> int:
+        grid_w, grid_h = self._get_image_feature_grid_size(
+            image_width=image_width,
+            image_height=image_height,
+            processor=processor,
+        )
+
+        return grid_w * grid_h + 1
+
+    def get_image_repl(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: Optional[Idefics3Processor],
+    ) -> str:
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        image_token = processor.image_token.content
+        fake_image_token = processor.fake_image_token.content
+        global_img_token = processor.global_image_tag
+        image_seq_len = processor.image_seq_len
+        grid_placeholder = "<row_{n_h}_col_{n_w}>"
+
+        p_img = image_token * image_seq_len
+        global_img_placeholder = fake_image_token + global_img_token + p_img
+        tile_img_placeholder = fake_image_token + grid_placeholder + p_img
+
+        grid_w, grid_h = self._get_image_feature_grid_size(
+            image_width=image_width,
+            image_height=image_height,
+            processor=processor,
+        )
+        if grid_w == 0 and grid_h == 0:
+            return global_img_placeholder + fake_image_token
+
+        tiles_placeholder = list[str]()
+        for i in range(grid_h):
+            for j in range(grid_w):
+                placeholder_per_tile = tile_img_placeholder.format(n_h=i + 1,
+                                                                   n_w=j + 1)
+                tiles_placeholder.append(placeholder_per_tile)
+                # Add line break if it is the last tile in the row
+                if j == grid_w - 1:
+                    tiles_placeholder.append("\n")
+
+        return "".join([
+            *tiles_placeholder,
+            "\n",
+            global_img_placeholder,
+            fake_image_token,
+        ])
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: Optional[Idefics3Processor],
+    ) -> int:
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        num_patches = self.get_num_patches(
+            image_width=image_width,
+            image_height=image_height,
+            processor=processor,
+        )
+
+        return num_patches * processor.image_seq_len
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        processor = self.get_hf_processor()
+        image_processor: Idefics3ImageProcessor = processor.image_processor
+
+        return ImageSize(
+            width=image_processor.size["longest_edge"],
+            height=image_processor.size["longest_edge"],
+        )
+
+    def get_max_image_tokens(self) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        return self.get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            processor=None,
+        )
+
 
 class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
                                  ):
@@ -217,7 +300,7 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
         hf_processor = self.info.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         longest_edge = image_processor.max_image_size['longest_edge']
-        image_token: str = hf_processor.image_token.content
+        image_token = hf_processor.image_token.content
 
         mm_data = {
             "image":
@@ -232,7 +315,7 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
         )
 
 
-class Idefics3MultimodalProcessor(
+class Idefics3MultiModalProcessor(
         BaseMultiModalProcessor[Idefics3ProcessingInfo]):
 
     def _call_hf_processor(
@@ -241,26 +324,39 @@ class Idefics3MultimodalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs)
-            image_grids = [
-                self.info._get_image_feature_grid_size(
-                    image_width=img.width,
-                    image_height=img.height,
-                    **mm_kwargs,
-                ) for img in mm_data["images"]
-            ]
-            image_patches = list(map(lambda x: math.prod(x) + 1, image_grids))
-            for key in ("pixel_values", "pixel_attention_mask"):
-                data = processed_outputs.pop(key)
-                data = data.flatten(0, 1).split(image_patches)
-                processed_outputs[key] = data
-        else:
-            tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(prompt,
-                                          add_special_tokens=True,
-                                          return_tensors="pt")
+        # Text-only input not supported in composite processor
+        if not (images := mm_data.get("images", [])):
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        processed_outputs = super()._call_hf_processor(
+            prompt,
+            mm_data,
+            mm_kwargs,
+        )
+
+        parsed_images = (self._get_data_parser().parse_mm_data({
+            "image": images
+        }).get_items("image", ImageProcessorItems))
+        image_sizes = [
+            parsed_images.get_image_size(i) for i in range(len(parsed_images))
+        ]
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+
+        num_patches = [
+            self.info.get_num_patches(
+                image_width=size.width,
+                image_height=size.height,
+                processor=hf_processor,
+            ) for size in image_sizes
+        ]
+        processed_outputs["num_patches"] = torch.tensor(num_patches)
+
+        # Remove the extra batch dimension
+        processed_outputs["pixel_values"].squeeze_(0)
+        processed_outputs["pixel_attention_mask"].squeeze_(0)
+
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -268,10 +364,15 @@ class Idefics3MultimodalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        num_patches = hf_inputs.get("num_patches", torch.empty(0))
+
         return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            pixel_attention_mask=MultiModalFieldConfig.batched("image"),
+            pixel_values=MultiModalFieldConfig.flat_from_sizes(
+                "image", num_patches),
+            pixel_attention_mask=MultiModalFieldConfig.flat_from_sizes(
+                "image", num_patches),
             image_embeds=MultiModalFieldConfig.batched("image"),
+            num_patches=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_updates(
@@ -281,42 +382,23 @@ class Idefics3MultimodalProcessor(
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
         image_token = hf_processor.image_token.content
-        fake_image_token = hf_processor.fake_image_token.content
-        global_img_token = hf_processor.global_image_tag
-        image_seq_len = hf_processor.image_seq_len
-        grid_placeholder = "<row_{n_h}_col_{n_w}>"
 
-        p_img = image_token * image_seq_len
-        global_img_placeholder = fake_image_token + global_img_token + p_img
-        tile_img_placeholder = fake_image_token + grid_placeholder + p_img
-
-        def get_replacement_idefics3(item_idx: int) -> str:
+        def get_replacement_idefics3(item_idx: int) -> PromptUpdateDetails:
             images = mm_items.get_items("image", ImageProcessorItems)
 
             image_size = images.get_image_size(item_idx)
-            grid_w, grid_h = self.info._get_image_feature_grid_size(
+
+            image_repl = self.info.get_image_repl(
                 image_width=image_size.width,
                 image_height=image_size.height,
-                **hf_processor_mm_kwargs,
+                processor=hf_processor,
             )
-            if grid_w == 0 and grid_h == 0:
-                image_placeholder = global_img_placeholder
-            else:
-                tiles_placeholder = list[str]()
-                for i in range(grid_h):
-                    for j in range(grid_w):
-                        placeholder_per_tile = tile_img_placeholder.format(
-                            n_h=i + 1, n_w=j + 1)
-                        tiles_placeholder.append(placeholder_per_tile)
-                        # Add line break if it is the last tile in the row
-                        if j == grid_w - 1:
-                            tiles_placeholder.append("\n")
 
-                image_placeholder = "".join(
-                    [*tiles_placeholder, "\n", global_img_placeholder])
-            return image_placeholder + fake_image_token
+            return PromptUpdateDetails.select_text(
+                image_repl,
+                embed_text=image_token,
+            )
 
         return [
             PromptReplacement(
@@ -424,73 +506,13 @@ class Idefics3Model(nn.Module):
               config.vision_config.patch_size)**2) / (config.scale_factor**2))
         self.image_token_id = self.config.image_token_id
 
-    def _validate_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
-
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape[1:])
-
-            if actual_dims != expected_dims:
-                expected_expr = ("num_patches", *map(str, expected_dims))
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
-    def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[ImageInputs]:
-        pixel_values = kwargs.pop("pixel_values", None)
-        image_embeds = kwargs.pop("image_embeds", None)
-        pixel_attention_mask = kwargs.pop("pixel_attention_mask", None)
-
-        if pixel_values is None and image_embeds is None:
-            return None
-
-        if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
-
-            return Idefics3ImageEmbeddingInputs(
-                type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
-            )
-
-        if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
-            if isinstance(pixel_values, list):
-                pixel_values = torch.cat(pixel_values, dim=1)
-                pixel_attention_mask = torch.cat(pixel_attention_mask, dim=1)
-            else:
-                pixel_values = flatten_bn(pixel_values)
-                pixel_attention_mask = flatten_bn(pixel_attention_mask)
-
-            return Idefics3ImagePixelInputs(
-                type="pixel_values",
-                data=self._validate_pixel_values(pixel_values),
-                pixel_attention_mask=pixel_attention_mask)
-
-        raise AssertionError("This line should be unreachable.")
-
-    def _image_pixels_to_features(
+    def image_pixels_to_features(
         self,
         pixel_values: torch.Tensor,
-        pixel_attention_mask: Optional[torch.BoolTensor] = None,
-    ) -> NestedTensors:
+        pixel_attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        num_patches = [x.size(0) for x in pixel_values]
         pixel_values = pixel_values.to(
             dtype=self.vision_model.embeddings.patch_embedding.weight.dtype
         )  # fp16 compatibility
@@ -502,17 +524,9 @@ class Idefics3Model(nn.Module):
         pixel_values = pixel_values[real_images_inds].contiguous()
 
         # Handle the vision attention mask
-        if pixel_attention_mask is None:
-            pixel_attention_mask = torch.ones(
-                size=(pixel_values.size(0), pixel_values.size(2),
-                      pixel_values.size(3)),
-                dtype=torch.bool,
-                device=pixel_values.device,
-            )
-        else:
-            # Remove padding images from the mask
-            pixel_attention_mask = pixel_attention_mask[
-                real_images_inds].contiguous()
+        # Remove padding images from the mask
+        pixel_attention_mask = pixel_attention_mask[
+            real_images_inds].contiguous()
 
         patch_size = self.config.vision_config.patch_size
         patches_subgrid = pixel_attention_mask.unfold(dimension=1,
@@ -529,27 +543,7 @@ class Idefics3Model(nn.Module):
             patch_attention_mask=patch_attention_mask,
         )
 
-        return image_hidden_states.split(num_patches)
-
-    def _process_image_pixels(
-            self, inputs: Idefics3ImagePixelInputs) -> NestedTensors:
-        assert self.vision_model is not None
-
-        pixel_values = inputs["data"]
-        pixel_attention_mask = inputs["pixel_attention_mask"]
-
-        return self._image_pixels_to_features(pixel_values,
-                                              pixel_attention_mask)
-
-    def _process_image_input(self, image_input: ImageInputs) -> torch.Tensor:
-        if image_input["type"] == "image_embeds":
-            return image_input["data"]
-
-        assert self.vision_model is not None
-        image_features = self._process_image_pixels(image_input)
-        num_patches = [x.size(0) for x in image_features]
-        image_features = torch.cat(image_features)
-        return self.connector(image_features).split(num_patches)
+        return image_hidden_states
 
     def get_input_embeddings(
         self,
@@ -575,7 +569,7 @@ class Idefics3Model(nn.Module):
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    Idefics3MultimodalProcessor,
+    Idefics3MultiModalProcessor,
     info=Idefics3ProcessingInfo,
     dummy_inputs=Idefics3DummyInputsBuilder)
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
@@ -616,13 +610,104 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
         self.sampler = get_sampler()
 
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+        h = w = self.config.vision_config.image_size
+        expected_dims = (3, h, w)
+
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = tuple(d.shape)
+
+            if actual_dims != expected_dims:
+                expected_expr = str(expected_dims)
+                raise ValueError(
+                    "The expected shape of pixel values per image per batch "
+                    f" per patch is {expected_expr}. "
+                    f"You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
+
+        return data
+
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[ImageInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+
+            return Idefics3ImageEmbeddingInputs(
+                type="image_embeds",
+                data=flatten_bn(image_embeds, concat=True),
+            )
+
+        if pixel_values is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+
+            pixel_attention_mask = kwargs.pop("pixel_attention_mask")
+            if not isinstance(pixel_attention_mask, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel_attention_mask. "
+                                 f"Got type: {type(pixel_attention_mask)}")
+
+            num_patches = kwargs.pop("num_patches")
+            if not isinstance(num_patches, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of num_patches. "
+                                 f"Got type: {type(num_patches)}")
+
+            pixel_values = flatten_bn(pixel_values, concat=True)
+            pixel_attention_mask = flatten_bn(pixel_attention_mask,
+                                              concat=True)
+            num_patches = flatten_bn(num_patches, concat=True)
+
+            return Idefics3ImagePixelInputs(
+                type="pixel_values",
+                pixel_values=self._validate_pixel_values(pixel_values),
+                pixel_attention_mask=pixel_attention_mask,
+                num_patches=num_patches,
+            )
+
+        raise AssertionError("This line should be unreachable.")
+
+    def _process_image_pixels(
+            self, inputs: Idefics3ImagePixelInputs) -> torch.Tensor:
+        pixel_values = inputs["pixel_values"]
+        pixel_attention_mask = inputs["pixel_attention_mask"]
+
+        return self.model.image_pixels_to_features(
+            pixel_values,
+            pixel_attention_mask=pixel_attention_mask,
+        )
+
+    def _process_image_input(
+        self,
+        image_input: ImageInputs,
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
+        image_features = self._process_image_pixels(image_input)
+        image_features = self.model.connector(image_features)
+
+        num_patches = image_input["num_patches"]
+        return [
+            e.flatten(0, 1) for e in image_features.split(num_patches.tolist())
+        ]
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
-        image_input = self.model._parse_and_validate_image_input(**kwargs)
+        image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
-        vision_embeddings = self.model._process_image_input(image_input)
-        return vision_embeddings
+
+        return self._process_image_input(image_input)
 
     def get_input_embeddings(
         self,
@@ -632,8 +717,11 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.image_token_id)
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                self.config.image_token_id,
+            )
         return inputs_embeds
 
     def forward(
