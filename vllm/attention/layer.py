@@ -361,8 +361,8 @@ def maybe_save_kv_layer_to_connector(
     kv_cache: List[torch.Tensor],
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+        print("WE ARE HERE")
         return
-
     connector = get_kv_transfer_group()
 
     forward_context: ForwardContext = get_forward_context()
