@@ -116,7 +116,6 @@ def test_embeddings():
             BatchRequestOutput.model_validate_json(line)
 
 
-# Make INPUT_SCORE_BATCH a parameterized test
 @pytest.mark.parametrize("input_batch",
                          [INPUT_SCORE_BATCH, INPUT_RERANK_BATCH])
 def test_score(input_batch):
