@@ -53,6 +53,11 @@ class MetaData:
     dropout_p, return_encoded_softmax = 0.0, False
     eight_bit_dtype_triton = default_eight_bit_dtype_triton
     eight_bit_dtype_torch = default_eight_bit_dtype_torch
+    output_dtype = torch.float16
+    q_scale_is_singular_value = False
+    k_scale_is_singular_value = False
+    v_scale_is_singular_value = False
+    p_scale_is_singular_value = False
 
     def __init__(self, sm_scale=1.0):
         self.sm_scale = sm_scale
@@ -78,17 +83,27 @@ class MetaData:
         self.persistent = persistent
 
     def set_eight_bit_params(self, q_descale, k_descale, v_descale, p_scale,
-                             p_descale):
+                             p_descale, o_scale):
         self.eight_bit = True
         self.q_descale = q_descale
         self.k_descale = k_descale
         self.v_descale = v_descale
         self.p_scale = p_scale
         self.p_descale = p_descale
+        self.o_scale = o_scale
         self.use_p_scale = (p_scale is not None) and (
             p_descale is not None) and (v_descale is not None)
         self.eight_bit_kv = ((q_descale is None) and (k_descale is not None)
                              and (v_descale is not None))
+
+    def set_eight_bit_param_attrs(self, q_scale_is_singular_value,
+                                  k_scale_is_singular_value,
+                                  v_scale_is_singular_value,
+                                  p_scale_is_singular_value):
+        self.q_scale_is_singular_value = q_scale_is_singular_value
+        self.k_scale_is_singular_value = q_scale_is_singular_value
+        self.v_scale_is_singular_value = q_scale_is_singular_value
+        self.p_scale_is_singular_value = q_scale_is_singular_value
 
     def need_bias(self, bias, batch, nheads, seqlen_q, seqlen_k):
         assert bias.is_cuda
@@ -668,7 +683,12 @@ def attn_fwd(
     K_descale,
     P_scale,
     P_descale,
+    o_descale_ptr,
     V_descale,
+    q_scale_is_singular_value,
+    k_scale_is_singular_value,
+    v_scale_is_singular_value,
+    p_scale_is_singular_value,
     cu_seqlens_q,
     cu_seqlens_k,
     dropout_p,
@@ -720,6 +740,9 @@ def attn_fwd(
     else:  # standard, kernel processes only one tile
         tile_id = 0
         num_tiles_total = 1
+
+    if o_descale_ptr is not None:
+        o_descale = torch.load(o_descale_ptr)
 
     while tile_id < num_tiles_total:  # loops more than once only if PERSISTENT
         if PERSISTENT:
@@ -839,13 +862,26 @@ def attn_fwd(
 
                 EIGHT_BIT_GEMM: tl.constexpr = EIGHT_BIT & (not EIGHT_BIT_KV)
                 if EIGHT_BIT:
-                    k_descale_ptrs = K_descale + off_h_k
-                    v_descale_ptrs = V_descale + off_h_k
+                    if k_scale_is_singular_value:
+                        k_descale_ptrs = K_descale
+                    else:
+                        k_descale_ptrs = K_descale + off_h_k
+                    if v_scale_is_singular_value:
+                        v_descale_ptrs = V_descale
+                    else:
+                        v_descale_ptrs = V_descale + off_h_k
                     if not EIGHT_BIT_KV:
-                        q_descale_ptrs = Q_descale + off_h_q
+                        if q_scale_is_singular_value:
+                            q_descale_ptrs = Q_descale
+                        else:
+                            q_descale_ptrs = Q_descale + off_h_q
                     if USE_P_SCALE:
-                        p_scale_ptrs = P_scale + off_h_q
-                        p_descale_ptrs = P_descale + off_h_q
+                        if p_scale_is_singular_value:
+                            p_scale_ptrs = P_scale
+                            p_descale_ptrs = P_descale
+                        else:
+                            p_scale_ptrs = P_scale + off_h_q
+                            p_descale_ptrs = P_descale + off_h_q
 
                 if USE_BIAS:
                     # Note: might get large enough to overflow on some configs
@@ -1069,6 +1105,10 @@ def attn_fwd(
                 end_m_idx = (start_m + 1) * BLOCK_M
                 start_m_idx = start_m * BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k
+                if EIGHT_BIT and not EIGHT_BIT_KV:  # noqa: SIM102
+                    if o_descale_ptr is not None:
+                        acc *= o_descale
+                        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
                 acc = acc.to(Out.type.element_ty)
                 if IS_CAUSAL:  # noqa: SIM102
                     if (causal_start_idx > start_m_idx
@@ -1165,10 +1205,8 @@ class _attention(torch.autograd.Function):
             assert (metadata.bias.numel() < 2**31)
 
         if o is None:
-            if not metadata.eight_bit:
-                o = torch.empty_like(q, dtype=v.dtype)
-            else:
-                o = torch.empty_like(q, dtype=metadata.eight_bit_dtype_torch)
+            assert metadata.output_dtype is not None
+            o = torch.empty_like(q, dtype=metadata.output_dtype)
 
         metadata.check_args(q, k, v, o)
 
@@ -1219,12 +1257,14 @@ class _attention(torch.autograd.Function):
             alibi_strides = (0, 0)
 
         if metadata.eight_bit:
-            q_descale, k_descale, p_scale, p_descale, v_descale = (
+            q_descale, k_descale, p_scale, p_descale, v_descale, o_scale = (
                 metadata.q_descale, metadata.k_descale, metadata.p_scale,
-                metadata.p_descale, metadata.v_descale)
+                metadata.p_descale, metadata.v_descale, metadata.o_scale)
+            assert o_scale is None or torch.is_nonzero(o_scale)
+            o_descale = 1.0 / o_scale if o_scale is not None else None
         else:
             q_descale = k_descale = p_scale = None
-            p_descale = v_descale = None
+            p_descale = v_descale = o_descale = None
 
         # number of compute units available
         NUM_CU = torch.cuda.get_device_properties("cuda").multi_processor_count
@@ -1259,7 +1299,12 @@ class _attention(torch.autograd.Function):
                        k_descale,
                        p_scale,
                        p_descale,
+                       o_descale,
                        v_descale,
+                       metadata.q_scale_is_singular_value,
+                       metadata.k_scale_is_singular_value,
+                       metadata.v_scale_is_singular_value,
+                       metadata.p_scale_is_singular_value,
                        metadata.cu_seqlens_q,
                        metadata.cu_seqlens_k,
                        dropout_p=metadata.dropout_p,
@@ -1312,17 +1357,11 @@ num_good = 0
 objects = {'tensors': {}}
 
 
-def quantize_fp8(x, scale, eight_bit_dtype):
-    float8_info = torch.finfo(eight_bit_dtype)
-    x *= scale
-    x = x.clamp(min=float8_info.min, max=float8_info.max).to(eight_bit_dtype)
-    return x
-
-
 def maybe_quantize_fp8(t, scale):
     eight_bit_dtype = current_platform.fp8_dtype()
     if t.dtype != eight_bit_dtype:
-        t = quantize_fp8(t, 1.0 / scale, eight_bit_dtype)
+        from vllm import _custom_ops as ops
+        t = ops.scaled_fp8_quant(t, scale)
     return t
 
 
@@ -1334,27 +1373,6 @@ def check_and_maybe_quantize_qkv(q, k, v, fp8_scales):
     v = maybe_quantize_fp8(v, v_scale)
 
     return q, k, v
-
-
-def prepare_scales_for_triton(q, k, v, fp8_scales):
-    (q_scale, k_scale, v_scale, p_scale) = fp8_scales
-    q_scale = torch.full((q.shape[1], ),
-                         q_scale,
-                         dtype=torch.float32,
-                         device=q.device)
-    k_scale = torch.full((k.shape[1], ),
-                         k_scale,
-                         dtype=torch.float32,
-                         device=k.device)
-    v_scale = torch.full((v.shape[1], ),
-                         v_scale,
-                         dtype=torch.float32,
-                         device=v.device)
-    p_scale = torch.full((q.shape[1], ),
-                         p_scale,
-                         dtype=torch.float32,
-                         device=q.device)
-    return q_scale, k_scale, v_scale, p_scale
 
 
 # query   - [num_tokens, num_heads, head_size]
@@ -1374,6 +1392,8 @@ def triton_attention(
     sm_scale: float = 1.0,
     bias: Optional[torch.Tensor] = None,
     fp8_scales: Optional[tuple[float, ...]] = None,
+    input_scale: Optional[torch.Tensor] = None,
+    output_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     num_seqs, num_heads, head_size = q.shape
     attn_metadata = MetaData(sm_scale=sm_scale)
@@ -1385,13 +1405,24 @@ def triton_attention(
 
     if fp8_scales is not None:
         q, k, v = check_and_maybe_quantize_qkv(q, k, v, fp8_scales)
-        q_scale, k_scale, v_scale, p_scale = prepare_scales_for_triton(
-            q, k, v, fp8_scales)
 
+        q_scale, k_scale, v_scale, p_scale = fp8_scales
         attn_metadata.set_eight_bit_params(q_scale, k_scale, v_scale,
-                                           1.0 / p_scale, p_scale)
+                                           1.0 / p_scale, p_scale, input_scale)
+        attn_metadata.set_eight_bit_param_attrs(q_scale.numel() == 1,
+                                                k_scale.numel() == 1,
+                                                v_scale.numel() == 1,
+                                                p_scale.numel() == 1)
 
         eight_bit_dtype = current_platform.fp8_dtype()
         attn_metadata.eight_bit_dtype_torch = eight_bit_dtype
+
+    # NOTE: Need this to output float16 so scaling can happen afterwards.
+    # Currently, scaled_fp8_quant can not scale a fp8 output and if it could,
+    # there would still be accuracy loss.
+    if o is None and (input_scale is None or output_dtype is None):
+        attn_metadata.output_dtype = torch.float16
+    else:
+        attn_metadata.output_dtype = o.dtype if o is not None else output_dtype
 
     return triton_attention_rocm(q, k, v, o, attn_metadata)
