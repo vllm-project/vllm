@@ -239,8 +239,7 @@ class Attention(nn.Module):
         # KVConnector: start saving kvs to the connector.
         # NOTE: forward_context completion will block until
         # this operation is completed.
-        maybe_save_kv_layer_to_connector(self.layer_name,
-                                         self.kv_cache)
+        maybe_save_kv_layer_to_connector(self.layer_name, self.kv_cache)
         return output
 
     def calc_kv_scales(self, query, key, value):
