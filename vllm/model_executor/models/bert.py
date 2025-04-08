@@ -419,11 +419,10 @@ class BertEmbeddingModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids=input_ids,
-                                   position_ids=positions,
-                                   inputs_embeds=inputs_embeds,
-                                   intermediate_tensors=intermediate_tensors)
-        return hidden_states
+        return self.model(input_ids=input_ids,
+                          position_ids=positions,
+                          inputs_embeds=inputs_embeds,
+                          intermediate_tensors=intermediate_tensors)
 
     def pooler(
         self,
