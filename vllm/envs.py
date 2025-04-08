@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_DISABLE_MERGE_ATTN_CUDA_OP: bool = False
 
 
 def get_default_cache_root():
@@ -697,6 +698,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+
+    # Force disable merge_attn_states CUDA op, use Triton kernel.
+    "VLLM_DISABLE_MERGE_ATTN_CUDA_OP":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_MERGE_ATTN_CUDA_OP", "0"))),
 }
 
 # end-env-vars-definition
