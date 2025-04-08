@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-from typing import Iterable, Optional, Tuple, Union
+from typing import Iterable, Optional, Tuple
 
 import torch
 from torch import nn
@@ -12,8 +12,7 @@ from vllm.model_executor.layers.pooler import CrossEncodingPooler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.bert import (BertEmbeddingModel, BertModel,
-                                             BertWithRotaryModel)
+from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
@@ -124,13 +123,25 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
        _pooler: An instance of Pooler used for pooling operations.
    """
 
-    def _build_model(
-            self,
-            vllm_config: VllmConfig,
-            prefix: str = "") -> Union[BertModel, BertWithRotaryModel]:
+    def _build_model(self,
+                     vllm_config: VllmConfig,
+                     prefix: str = "") -> BertModel:
         if (vllm_config.model_config.hf_config.position_embedding_type ==
                 "rotary"):
-            return BertWithRotaryModel(vllm_config=vllm_config, prefix=prefix)
+            config = vllm_config.model_config.hf_config
+            head_dim = config.hidden_size // config.num_attention_heads
+
+            rotary_kwargs = {
+                "head_size": head_dim,
+                "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+                "max_position": config.max_position_embeddings,
+                "base": config.rotary_emb_base,
+                "rope_scaling": getattr(config, "rope_scaling", None)
+            }
+
+            return BertModel(vllm_config=vllm_config,
+                             rotary_kwargs=rotary_kwargs,
+                             prefix=prefix)
         else:
             return BertModel(vllm_config=vllm_config,
                              prefix=prefix,
