@@ -367,7 +367,7 @@ class ImageProcessor(BaseImageProcessor):
         
         # 如果 size 为 None，使用默认值 (224, 224)
         if self.size is None:
-            self.size = (224, 224)
+            self.size = (336, 336)
             
         # 如果 image_mean 或 image_std 为 None，使用默认值
         if self.image_mean is None:
