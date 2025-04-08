@@ -89,8 +89,10 @@ class KVConnectorBase_V1(ABC):
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
-        """Start loading the KV cache from the connector buffer to vLLM's 
-        paged KV buffer.
+        """
+        Start loading the KV cache from the connector buffer to vLLM's 
+        paged KV buffer. This is called from the forward context before
+        the forward pass to enable async loading during model execution.
 
         Args:
             forward_context (ForwardContext): the forward context.
@@ -105,8 +107,10 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """Blocking until the KV for a specific layer is loaded into vLLM's
-        paged buffer. 
+        """
+        Block until the KV for a specific layer is loaded into vLLM's
+        paged buffer. This is called from within attention layer to ensure
+        async copying from start_load_kv is complete.
         
         This interface will be useful for layer-by-layer pipelining.
 
@@ -118,8 +122,10 @@ class KVConnectorBase_V1(ABC):
     @abstractmethod
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
                       attn_metadata: "AttentionMetadata", **kwargs) -> None:
-        """Start saving the a layer of KV cache from vLLM's paged buffer 
-        to the connector.
+        """
+        Start saving the a layer of KV cache from vLLM's paged buffer 
+        to the connector. This is called from within attention layer to
+        enable async copying during execution.
 
         Args:
             layer_name (str): the name of the layer.
@@ -132,10 +138,12 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def wait_for_save(self):
-        """Block until all the save operations is done. 
+        """
+        Block until all the save operations is done. This is called
+        as the forward context exits to ensure that the async saving
+        from save_kv_layer is complete before finishing the forward.
 
-        This prevents vLLM overwrites the paged KV buffer before 
-        saving is done.
+        This prevents overwrites of paged KV buffer before saving done.
         """
         pass
 
@@ -150,10 +158,11 @@ class KVConnectorBase_V1(ABC):
         num_computed_tokens: int,
         kv_cache_manager: "KVCacheManager",
     ) -> list["KVCacheBlock"]:
-        """Get the external prefix cache blocks from the connector.
+        """
+        Get the external prefix cache blocks from the connector.
 
-        This function may change the state of the connector, which will be 
-        used by `attach_connector_meta` later.
+        This function may change the state of the connector, which will
+        be used by `attach_connector_meta` later.
 
         This function will also allocate/free the blocks dynamically when  
         there is remote cache hit.
@@ -174,7 +183,8 @@ class KVConnectorBase_V1(ABC):
     @abstractmethod
     def attach_connector_meta(
             self, scheduler_output: SchedulerOutput) -> SchedulerOutput:
-        """Attach the connector metadata to the request object.
+        """
+        Attach the connector metadata to the request object.
 
         This function should NOT modify other fields in the scheduler_output 
         except the `connector_metadata` field.
