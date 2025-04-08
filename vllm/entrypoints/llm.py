@@ -24,8 +24,8 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
 from vllm.entrypoints.score_utils import (_cosine_similarity,
-                                          _validate_score_input_lens,
-                                          _validate_truncation_size)
+                                          _validate_score_input_lens)
+from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import is_token_prompt, parse_and_batch_prompt
 from vllm.logger import init_logger

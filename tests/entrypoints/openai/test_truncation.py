@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
-from fastapi import HTTPException
 
-model_name = "intfloat/multilingual-e5-large"
-max_model_len = 512
+model_name = "sentence-transformers/all-MiniLM-L12-v2"
+max_model_len = 128
 
-small_input = "The lake gets frozen in the winter"
-big_input = """Immerse yourself in the enchanting chronicle of calculus, a 
+input = """Immerse yourself in the enchanting chronicle of calculus, a 
     mathematical domain that has radically transformed our comprehension of 
     change and motion. Despite its roots in ancient civilizations, the 
     formal birth of calculus predominantly occurred in the 17th century, 
@@ -54,7 +52,7 @@ def test_smaller_truncation_size(vllm_runner,
                      max_model_len=max_model_len) as vllm_model:
         truncation_size = 10
         response = vllm_model.model.encode(
-            prompts=small_input, truncate_prompt_tokens=truncation_size)
+            prompts=input, truncate_prompt_tokens=truncation_size)
 
     assert len(response[0].prompt_token_ids) == truncation_size
 
@@ -67,14 +65,13 @@ def test_bigger_truncation_size(vllm_runner,
                      max_model_len=max_model_len) as vllm_model:
         truncation_size = max_model_len + 1
 
-        with pytest.raises(HTTPException):
+        with pytest.raises(ValueError):
             assert str(
-                vllm_model.model.encode(prompts=small_input,
+                vllm_model.model.encode(prompts=input,
                                         truncate_prompt_tokens=truncation_size)
-            ) == f"fastapi.exceptions.HTTPException: 400: \
-                truncate_prompt_tokens value ({truncation_size}) \
-                is greater than max_model_len ({max_model_len}).\
-                Please, select a smaller truncation size."
+            ) == f"""truncate_prompt_tokens value ({truncation_size})
+                    is greater than max_model_len ({max_model_len}).
+                    Please, select a smaller truncation size."""
 
 
 def test_max_truncation_size(vllm_runner,
@@ -84,6 +81,6 @@ def test_max_truncation_size(vllm_runner,
                      max_model_len=max_model_len) as vllm_model:
         truncation_size = -1
         response = vllm_model.model.encode(
-            prompts=big_input, truncate_prompt_tokens=truncation_size)
+            prompts=input, truncate_prompt_tokens=truncation_size)
 
     assert len(response[0].prompt_token_ids) == max_model_len

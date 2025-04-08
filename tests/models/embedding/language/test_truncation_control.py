@@ -3,11 +3,10 @@ import pytest
 
 from vllm.entrypoints.llm import LLM
 
-llm = LLM(model="intfloat/multilingual-e5-large", task="embed")
+llm = LLM(model="sentence-transformers/all-MiniLM-L12-v2", task="embed")
+max_model_len = 128
 
-small_input_str = "In which state the capital of the United States is located?"
-
-big_input_str = """Immerse yourself in the enchanting chronicle of calculus, a 
+input_str = """Immerse yourself in the enchanting chronicle of calculus, a 
     mathematical domain that has radically transformed our comprehension of 
     change and motion. Despite its roots in ancient civilizations, the 
     formal birth of calculus predominantly occurred in the 17th century, 
@@ -49,42 +48,40 @@ big_input_str = """Immerse yourself in the enchanting chronicle of calculus, a
 
 
 def test_smaller_truncation_size(llm=llm,
-                                 input_str=small_input_str,
+                                 input_str=input_str,
                                  truncate_prompt_tokens=10):
 
     llm_output = llm.encode(input_str,
                             truncate_prompt_tokens=truncate_prompt_tokens)
 
-    tokenizer = llm.llm_engine.get_tokenizer()
-
-    tokenized_input = tokenizer.encode(text=input_str,
-                                       truncation=True,
-                                       max_length=truncate_prompt_tokens)
     prompt_tokens = llm_output[0].prompt_token_ids
 
-    assert len(prompt_tokens) == len(tokenized_input)
-
-
-def test_bigger_truncation_size(llm=llm,
-                                input_str=big_input_str,
-                                truncate_prompt_tokens=513):
-
-    with pytest.raises(ValueError):
-        assert str(
-            llm.encode(input_str,
-                       truncate_prompt_tokens=truncate_prompt_tokens)
-        ) == "truncate_prompt_tokens value (513)\
-                                    is greater than max_model_len (512). \
-                                    Please, select a smaller truncation size."
+    assert len(prompt_tokens) == truncate_prompt_tokens
 
 
 def test_max_truncation_size(llm=llm,
-                             input_str=big_input_str,
-                             truncate_prompt_tokens=-1):
+                             input_str=input_str,
+                             truncate_prompt_tokens=-1,
+                             max_model_len=max_model_len):
 
     llm_output = llm.encode(input_str,
                             truncate_prompt_tokens=truncate_prompt_tokens)
 
     prompt_tokens = llm_output[0].prompt_token_ids
 
-    assert llm.llm_engine.model_config.max_model_len == len(prompt_tokens)
+    assert len(prompt_tokens) == max_model_len
+
+
+def test_bigger_truncation_size(llm=llm,
+                                input_str=input_str,
+                                max_model_len=max_model_len):
+
+    truncate_prompt_tokens = max_model_len + 1
+
+    with pytest.raises(ValueError):
+        assert str(
+            llm.encode(input_str,
+                       truncate_prompt_tokens=truncate_prompt_tokens).detail
+        ) == f"""truncate_prompt_tokens value ({truncate_prompt_tokens})
+                is greater than max_model_len ({max_model_len}).
+                Please, select a smaller truncation size."""
