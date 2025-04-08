@@ -20,8 +20,8 @@ def merge_attn_states_torch(
         suffix_lse: torch.Tensor,  # [NUM_HEADS, NUM_TOKENS]
         output_lse: Optional[torch.Tensor] = None,  # [NUM_HEADS, NUM_TOKENS]
 ) -> None:
-    p_lse = prefix_lse.clone()
-    s_lse = suffix_lse.clone()
+    p_lse = prefix_lse
+    s_lse = suffix_lse
     # inf -> -inf
     p_lse[p_lse == torch.inf] = -torch.inf
     s_lse[s_lse == torch.inf] = -torch.inf
@@ -115,17 +115,19 @@ def test_merge_attn_states(num_tokens: int, num_query_heads: int,
     end = torch.cuda.Event(enable_timing=True)
 
     # 0. Run the Torch kernel
+    prefix_lse_torch = prefix_lse.clone()
+    suffix_lse_torch = suffix_lse.clone()
     for _ in range(warmup_times):
         output_torch, output_lse_torch = merge_attn_states_torch(
-            output_torch, prefix_output, prefix_lse, suffix_output, suffix_lse,
-            output_lse_torch)
+            output_torch, prefix_output, prefix_lse_torch, suffix_output,
+            suffix_lse_torch, output_lse_torch)
     torch.cuda.synchronize()
 
     for _ in range(repeat_times):
         start.record()
         output_torch, output_lse_torch = merge_attn_states_torch(
-            output_torch, prefix_output, prefix_lse, suffix_output, suffix_lse,
-            output_lse_torch)
+            output_torch, prefix_output, prefix_lse_torch, suffix_output,
+            suffix_lse_torch, output_lse_torch)
         end.record()
         torch.cuda.synchronize()
         total_time_torch_kernel += start.elapsed_time(end)
