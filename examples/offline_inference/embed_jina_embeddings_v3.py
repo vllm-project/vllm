@@ -26,13 +26,15 @@ def main(args: Namespace):
     outputs = model.embed(prompts)
 
     # Print the outputs.
-    print("\nGenerated Outputs:\n" + "-" * 60)
+    print("\nGenerated Outputs:")
+    print("Only text matching task is supported for now. See #16120")
+    print("-" * 60)
     for prompt, output in zip(prompts, outputs):
         embeds = output.outputs.embedding
         embeds_trimmed = ((str(embeds[:16])[:-1] +
                            ", ...]") if len(embeds) > 16 else embeds)
         print(f"Prompt: {prompt!r} \n"
-              f"Embeddings: {embeds_trimmed} (size={len(embeds)})")
+              f"Embeddings for text matching: {embeds_trimmed} (size={len(embeds)})")
         print("-" * 60)
 
 
