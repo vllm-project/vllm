@@ -318,8 +318,8 @@ def load_mllama(question: str, image_urls: list[str]) -> ModelRequestData:
     # The configuration below has been confirmed to launch on a single L40 GPU.
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
-        max_num_seqs=16,
+        max_model_len=8192,
+        max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
