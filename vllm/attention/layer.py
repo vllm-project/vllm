@@ -181,7 +181,11 @@ class Attention(nn.Module):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
+
+        # KVConnector: start async saving kvs to connector
+        # to the layers KV cache before running attention.
         wait_for_kv_layer_from_connector(self.layer_name)
+
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
@@ -232,6 +236,9 @@ class Attention(nn.Module):
                 output = torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
 
+        # KVConnector: start saving kvs to the connector.
+        # NOTE: forward_context completion will block until
+        # this operation is completed.
         maybe_save_kv_layer_to_connector(self.layer_name,
                                          self.kv_cache)
         return output
