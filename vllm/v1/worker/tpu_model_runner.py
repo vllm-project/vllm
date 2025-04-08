@@ -688,12 +688,11 @@ class TPUModelRunner:
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
-                kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
             )
         # Temporary debug pathway for sampling.
         if self._disable_sampler:
-            selected_token_ids = self.model.compute_logits_no_sampler(
+            selected_token_ids = self.compute_logits_no_sampler(
                 hidden_states, logits_indices)
         else:
             # NOTE (NickLucche) here we sync with TPU: sampling params tensors
@@ -701,7 +700,7 @@ class TPUModelRunner:
             # avoid recompilations.
             tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
                 from_input_batch(self.input_batch, logits_indices)
-            selected_token_ids = self.model.sample_from_hidden(
+            selected_token_ids = self.sample_from_hidden(
                 hidden_states, tpu_sampling_metadata)
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
@@ -902,13 +901,11 @@ class TPUModelRunner:
                 xm.mark_step()
                 if self._disable_sampler:
                     # Compile no sampler path for debugging performance
-                    out = self.model.compute_logits_no_sampler(
-                        dummy_hidden, indices)
+                    out = self.compute_logits_no_sampler(dummy_hidden, indices)
                 else:
                     sampling_meta = TPUSupportedSamplingMetadata.\
                         from_input_batch(self.input_batch, indices)
-                    out = self.model.sample_from_hidden(
-                        dummy_hidden, sampling_meta)
+                    out = self.sample_from_hidden(dummy_hidden, sampling_meta)
                 out = out.cpu()
                 # Requests can't be more than tokens. But do compile for the
                 # next bigger value in case num_tokens uses bucketed padding.
@@ -980,9 +977,9 @@ class TPUModelRunner:
         sampling_metadata: TPUSupportedSamplingMetadata,
     ) -> torch.Tensor:
         """
-            Sample with xla-friendly function. This function is to be traced 
-            separately for lighter compilation overhead.
-            """
+        Sample with xla-friendly function. This function is to be traced 
+        separately for lighter compilation overhead.
+        """
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
@@ -1003,7 +1000,6 @@ class TPUModelRunner:
             torch.argmax(logits, dim=-1, keepdim=True),
             sample(logits, sampling_metadata).sampled_token_ids)
         return out_tokens
-
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def compute_logits_no_sampler(
