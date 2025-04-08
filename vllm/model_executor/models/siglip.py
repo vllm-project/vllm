@@ -50,7 +50,7 @@ class SiglipEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
 # Adapted from https://github.com/huggingface/transformers/blob/v4.43.3/src/transformers/models/siglip/modeling_siglip.py#L249 # noqa
 class SiglipVisionEmbeddings(nn.Module):
 
-    def __init__(self, config: SiglipVisionConfig):
+    def __init__(self, config: SiglipVisionConfig, prefix: str = ""):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -68,7 +68,7 @@ class SiglipVisionEmbeddings(nn.Module):
         self.num_patches = (self.image_size // self.patch_size)**2
         self.num_positions = self.num_patches
         self.position_embedding = VocabParallelEmbedding(
-            self.num_positions, self.embed_dim)
+            self.num_positions, self.embed_dim, prefix=f"{prefix}.position_embedding")
         self.register_buffer(
             "position_ids",
             torch.arange(self.num_positions, dtype=torch.int64).expand(
@@ -377,7 +377,7 @@ class SiglipVisionTransformer(nn.Module):
         self.config = config
         embed_dim = config.hidden_size
 
-        self.embeddings = SiglipVisionEmbeddings(config)
+        self.embeddings = SiglipVisionEmbeddings(config, prefix=f"{prefix}.embeddings")
 
         self.encoder = SiglipEncoder(
             config,
