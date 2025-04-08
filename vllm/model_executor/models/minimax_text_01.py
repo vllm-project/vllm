@@ -877,7 +877,7 @@ class MiniMaxText01Model(nn.Module):
             seq_to_slot_maps.update(seq_to_slot_map)
 
         slots_to_clear = []
-        for _prefill_id in range(getattr(attn_metadata, "num_prefills", 0)):
+        for _prefill_id in range(getattr(attn_metadata, "num_prefills", 0)) and _prefill_id < len(seq_id_map):
             seq_id = seq_id_map[_prefill_id]
             if attn_metadata.context_lens_tensor[
                     _prefill_id] == 0 and seq_id in seq_to_slot_maps:
