@@ -364,6 +364,11 @@ class ImageProcessor(BaseImageProcessor):
     def resize_preprocess(self, images, return_tensors: Optional[Union[str, TensorType]] = None, data_format: Optional[ChannelDimension] = ChannelDimension.FIRST, input_data_format: Optional[Union[str, ChannelDimension]] = None, **kwargs):
         images = make_list_of_images(images)
         all_images = []
+        
+        # 如果 size 为 None，使用默认值 (224, 224)
+        if self.size is None:
+            self.size = (224, 224)
+            
         for image in images:
             resized_image = image.resize(self.size, Image.BICUBIC)
             transform_img = _transform(self.size[1], self.size[0], self.image_mean, self.image_std)(resized_image)
