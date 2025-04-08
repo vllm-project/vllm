@@ -1721,6 +1721,14 @@ class SchedulerConfig:
 
     chunked_prefill_enabled: bool = field(init=False)
 
+    # If set to true and chunked prefill is enabled, we do not want to
+    # partially schedule a multimodal item. Only used in V1
+    # This ensures that if a request has a mixed prompt
+    # (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
+    # some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
+    # it will be scheduled as TTTT in one step and IIIIIIIIII in the next.
+    disable_chunked_mm_input: bool = False
+
     # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
     # or "mod.custom_class".
     scheduler_cls: Union[str, type[object]] = "vllm.core.scheduler.Scheduler"
