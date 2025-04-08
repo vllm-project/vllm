@@ -227,6 +227,11 @@ def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
         max_num_seqs=16,
         enforce_eager=True,
         limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={
+            "max_image_size": {
+                "longest_edge": 384
+            },
+        },
     )
 
     placeholders = "\n".join(f"Image-{i}: <image>\n"
