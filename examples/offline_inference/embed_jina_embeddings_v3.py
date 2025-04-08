@@ -22,7 +22,7 @@ def main(args: Namespace):
     model = LLM(**vars(args))
 
     # Generate embedding. The output is a list of EmbeddingRequestOutputs.
-    # Only text matching task is supported for now. see #16120
+    # Only text matching task is supported for now. See #16120
     outputs = model.embed(prompts)
 
     # Print the outputs.
