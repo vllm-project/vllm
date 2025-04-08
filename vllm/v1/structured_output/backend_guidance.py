@@ -8,7 +8,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -41,9 +41,17 @@ class GuidanceBackend(StructuredOutputBackend):
         tokenizer_group.ping()
         self.vllm_config = vllm_config
         self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.disable_any_whitespace = (
-            "disable-any-whitespace"
-            in vllm_config.decoding_config.guided_decoding_backend)
+
+        self.disable_any_whitespace = False
+        backend_options = GuidedDecodingParams(
+            backend=vllm_config.decoding_config.guided_decoding_backend
+        ).backend_options()
+        for option in backend_options:
+            if option == "disable-any-whitespace":
+                self.disable_any_whitespace = True
+            else:
+                raise ValueError(
+                    f"Unsupported option for the guidance backend: {option}")
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.ll_tokenizer = llguidance_hf.from_tokenizer(
