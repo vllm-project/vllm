@@ -896,7 +896,7 @@ def grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     e_score_correction_bias: Optional[torch.Tensor] = None,
-    share_fusion: int = 0,
+    num_share_fusion_replicas: int = 0,
     routed_scaling_factor: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], (
@@ -941,11 +941,13 @@ def grouped_topk(
                                             dim=-1,
                                             sorted=False)
 
-    if share_fusion > 0:
+    if num_share_fusion_replicas > 0:
         assert routed_scaling_factor is not None, \
-        "With share_fusion!=0, routed_scaling_factor need to be provided"
+        "With num_share_fusion_replicas>0"
+        ", routed_scaling_factor need to be provided"
         topk_ids[:, -1] = torch.randint(low=num_experts,
-                                        high=num_experts + share_fusion,
+                                        high=num_experts +
+                                        num_share_fusion_replicas,
                                         size=(topk_ids.size(0), ),
                                         dtype=topk_ids.dtype,
                                         device=topk_ids.device)
@@ -956,9 +958,9 @@ def grouped_topk(
             topk_weights[:, -1] = routed_scaling_factor
     if renormalize:
         topk_weights_sum = topk_weights.sum(
-            dim=-1,
-            keepdim=True) if share_fusion == 0 else topk_weights[:, :-1].sum(
-                dim=-1, keepdim=True)
+            dim=-1, keepdim=True
+        ) if num_share_fusion_replicas == 0 else topk_weights[:, :-1].sum(
+            dim=-1, keepdim=True)
         topk_weights = topk_weights / topk_weights_sum
 
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
@@ -1532,7 +1534,7 @@ def fused_moe(
             renormalize,
             num_expert_group,
             topk_group,
-            share_fusion=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS)
+            num_share_fusion_replicas=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS)
     elif custom_routing_function is None:
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)
