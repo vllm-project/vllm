@@ -27,7 +27,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .interfaces import SupportsCrossEncoding
+from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .utils import WeightsMapper, maybe_prefix
 
 
@@ -314,7 +314,8 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
-class BertModel(nn.Module):
+class BertModel(nn.Module, SupportsQuant):
+    packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
     def __init__(self,
                  *,
@@ -391,7 +392,7 @@ class BertModel(nn.Module):
         return loaded_params
 
 
-class BertEmbeddingModel(nn.Module):
+class BertEmbeddingModel(nn.Module, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -451,7 +452,8 @@ class BertEmbeddingModel(nn.Module):
                                                 softmax=False)
 
 
-class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
+class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
+                                    SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for

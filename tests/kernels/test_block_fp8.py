@@ -9,8 +9,11 @@ import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    deep_gemm_moe_fp8, fused_topk, moe_align_block_size)
+from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+    deep_gemm_moe_fp8)
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
@@ -357,7 +360,7 @@ def fp8_perm(m, idx):
         return m[idx, ...]
 
 
-def test_moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
+def _moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
     M, K = a.shape
 
     sorted_token_ids, m_indices, num_pad = moe_align_block_size(
@@ -376,7 +379,7 @@ def test_moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
     return a, a_s, m_indices, inv_perm
 
 
-def test_moe_unpermute(out, inv_perm, topk, K, topk_weight):
+def _moe_unpermute(out, inv_perm, topk, K, topk_weight):
     M = topk_weight.shape[0]
     out = out[inv_perm, ...]
     tmp_out = out.view(-1, topk, K)
@@ -398,8 +401,8 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
     a_q, a_s = per_token_group_quant_fp8(a, block_m)
 
-    a_q, a_s, m_indices, inv_perm = test_moe_permute(a_q, a_s, topk_ids,
-                                                     num_groups, topk, block_m)
+    a_q, a_s, m_indices, inv_perm = _moe_permute(a_q, a_s, topk_ids,
+                                                 num_groups, topk, block_m)
 
     inter_out = torch.zeros((a_q.shape[0], N * 2),
                             dtype=torch.bfloat16,
@@ -416,7 +419,7 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
         (act_out_q, act_out_s), (w2, w2_s), out, m_indices)
 
-    final_out = test_moe_unpermute(out, inv_perm, topk, K, topk_weight)
+    final_out = _moe_unpermute(out, inv_perm, topk, K, topk_weight)
 
     return final_out
 
@@ -437,7 +440,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         pytest.skip(
             f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
 
-    if (N <= 512):
+    if N <= 512:
         pytest.skip("Skipping N <= 512 until performance issues solved.")
 
     vllm_config = VllmConfig()
