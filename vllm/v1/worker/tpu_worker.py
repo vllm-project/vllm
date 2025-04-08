@@ -157,12 +157,18 @@ class TPUWorker:
             runner_kv_caches)
 
         self.model_runner._dummy_run(
-            runner_kv_caches,
-            num_tokens=self.scheduler_config.max_num_batched_tokens,
-        )
+            self.scheduler_config.max_num_batched_tokens)
 
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
+
+        # During the profiling run, the model runs without KV cache. After
+        # the profiling run, the model always runs with KV cache. Here we clear
+        # the dynamo cache and cached bytecode to ensure the model always has
+        # one compiled bytecode. Having one FX graph/cached bytecode per
+        # compiled model is required for `support_torch_compile` decorator to
+        # skip dynamo guard.
+        self.model_runner.reset_dynamo_cache()
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.

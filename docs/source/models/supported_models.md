@@ -24,7 +24,7 @@ vLLM also supports model implementations that are available in Transformers. Thi
 
 To check if the modeling backend is Transformers, you can simply do this:
 
-```python 
+```python
 from vllm import LLM
 llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
@@ -55,7 +55,7 @@ If your model is neither supported natively by vLLM or Transformers, you can sti
 Simply set `trust_remote_code=True` and vLLM will run any model on the Model Hub that is compatible with Transformers.
 Provided that the model writer implements their model in a compatible way, this means that you can run new models before they are officially supported in Transformers or vLLM!
 
-```python 
+```python
 from vllm import LLM
 llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of your model
 llm.apply_model(lambda model: print(model.__class__))
@@ -233,9 +233,9 @@ See [this page](#generative-models) for more information on how to use generativ
   * `facebook/bart-base`, `facebook/bart-large-cnn`, etc.
   *
   *
-- * `ChatGLMModel`
+- * `ChatGLMModel`, `ChatGLMForConditionalGeneration`
   * ChatGLM
-  * `THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.
+  * `THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, `ShieldLM-6B-chatglm3`, etc.
   * ✅︎
   * ✅︎
 - * `CohereForCausalLM`, `Cohere2ForCausalLM`
@@ -477,6 +477,16 @@ See [this page](#generative-models) for more information on how to use generativ
   * Qwen2MoE
   * `Qwen/Qwen1.5-MoE-A2.7B`, `Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc.
   *
+  * ✅︎
+- * `Qwen3ForCausalLM`
+  * Qwen3
+  * `Qwen/Qwen3-8B`, etc.
+  * ✅︎
+  * ✅︎
+- * `Qwen3MoeForCausalLM`
+  * Qwen3MoE
+  * `Qwen/Qwen3-MoE-15B-A2B`, etc.
+  * ✅︎
   * ✅︎
 - * `StableLmForCausalLM`
   * StableLM
@@ -840,6 +850,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `Llama4ForConditionalGeneration`
+  * Llama-4-17B-Omni-Instruct
+  * T + I<sup>+</sup>
+  * `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `LlavaForConditionalGeneration`
   * LLaVA-1.5
   * T + I<sup>E+</sup>
@@ -989,9 +1006,6 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{important}
-To use Gemma3 series models, you have to install Hugging Face Transformers library from source via
-`pip install git+https://github.com/huggingface/transformers`.
-
 Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
 You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": True}'`.
 :::
