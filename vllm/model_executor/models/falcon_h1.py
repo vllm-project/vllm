@@ -38,9 +38,6 @@ from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-
 class FalconH1MLP(nn.Module):
     def __init__(
         self,
@@ -117,6 +114,23 @@ class FalconH1SSMDecoderLayer(nn.Module):
         self._init_mup_vector()
 
     def _init_mup_vector(self):
+        """
+        Non learnable per-block scaling vector composed of element-wise multipliers
+        applied to each separate contiguous block of the output of the linear
+        projection (in_proj) before further processing(gating, convolution, SSM):
+
+            - Z block:      [0 : d_ssm]                          → zxbcdt_multipliers[0]
+            - X block:      [d_ssm : 2 * d_ssm]                  → zxbcdt_multipliers[1]
+            - B block:      [2 * d_ssm : 2 * d_ssm + G * S]      → zxbcdt_multipliers[2]
+            - C block:      [2 * d_ssm + G * S : 2 * d_ssm + 2 * G * S] → zxbcdt_multipliers[3]
+            - dt block:     [2 * d_ssm + 2 * G * S : end]        → zxbcdt_multipliers[4]
+
+        where:
+            - d_ssm:     Dimension of state-space model latent
+            - G:         Number of groups (n_groups)
+            - S:         SSM state size per group
+            - All indices are divided by tp_size to support tensor parallelism
+        """
         vector_shape = (
             2 * self.d_ssm + 2 * self.groups_time_state_size + self.config.mamba_n_heads
         ) // self.tp_size
@@ -520,7 +534,6 @@ class FalconH1ForCausalLM(
         )
         self.tie_word_embeddings = config.tie_word_embeddings
         self.lm_head_multiplier = config.lm_head_multiplier
-        # TODO: what is going on here?
         if self.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(
                 self.model.embed_tokens)

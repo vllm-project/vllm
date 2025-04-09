@@ -554,6 +554,8 @@ class MambaMixer2(CustomOp):
 
         # # 4. gated MLP
         if self.use_rms_norm:
+            # GatedRMSNorm internally applying SiLU to the gate 
+            # SiLU is applied internally before normalization, unlike standard norm usage
             hidden_states = self.norm(hidden_states, gate)
         else:
             hidden_states = hidden_states * torch.nn.functional.silu(gate)
