@@ -14,7 +14,7 @@ prompts = [
 
 sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
-llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct",
+llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
           enforce_eager=False,
           gpu_memory_utilization=0.8,
           kv_transfer_config=KVTransferConfig.from_cli(
