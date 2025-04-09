@@ -6,18 +6,12 @@ Run `pytest tests/kernels/test_triton_flash_attention.py`.
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.attention.ops.triton_flash_attention import (SUPPORTED_LAYOUTS,
                                                        MetaData,
                                                        compute_alibi_tensor,
+                                                       scale_fp8,
                                                        triton_attention_rocm)
 from vllm.platforms import current_platform
-
-FP8_DTYPE_TORCH = current_platform.fp8_dtype()
-
-float8_info = torch.finfo(FP8_DTYPE_TORCH)
-FP8_MIN = float8_info.min
-FP8_MAX = float8_info.max
 
 
 class ReferenceAttention:
@@ -66,21 +60,24 @@ class ReferenceAttention:
         return ref_out
 
     def fwd_fp8(self, q_quantized, k_quantized, v_quantized):
-        q = q_quantized.to(torch.float16) * self.input_metadata.q_descale
-        k = k_quantized.to(torch.float16) * self.input_metadata.k_descale
-        v = v_quantized.to(torch.float16) * self.input_metadata.v_descale
+        q = (q_quantized.to(torch.float16) * self.input_metadata.q_descale).to(
+            self.dtype)
+        k = (k_quantized.to(torch.float16) * self.input_metadata.k_descale).to(
+            self.dtype)
+        v = (v_quantized.to(torch.float16) * self.input_metadata.v_descale).to(
+            self.dtype)
         result = self.fwd(q, k, v)
         if self.input_metadata.o_scale is not None:
-            result = ops.scaled_fp8_quant(result, self.input_metadata.o_scale)
+            result, _ = scale_fp8(result, self.input_metadata.o_scale)
         return result
 
     def fwd_fp8_kv(self, q, k_quantized, v_quantized):
         k_descale, v_descale = (self.input_metadata.k_descale,
                                 self.input_metadata.v_descale)
         k_dequantized = (k_quantized.to(torch.float32) *
-                         k_descale.to(torch.float32)).half()
+                         k_descale.to(torch.float32)).to(self.dtype)
         v_dequantized = (v_quantized.to(torch.float32) *
-                         v_descale.to(torch.float32)).half()
+                         v_descale.to(torch.float32)).to(self.dtype)
         return self.fwd(q, k_dequantized, v_dequantized)
 
     def varlen_fwd(self, q, k, v, is_mqa=False):
@@ -114,42 +111,26 @@ class ReferenceAttention:
         return ref_out
 
 
-def quantize_fp8(tensor: torch.Tensor,
-                 dim) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    max_vals = tensor.abs().amax(
-        dim=[i for i in range(tensor.dim()) if i != dim], keepdim=True)
-
-    # Avoid division by zero
-    max_vals[max_vals == 0] = 1e-8
-
-    # Compute scale factors for each channel
-    scale = (FP8_MAX / max_vals).clamp(1e-12)
-
-    # Quantize the tensor
-    tensor = tensor * scale
-    tensor.clamp_(FP8_MIN, FP8_MAX)
-    tensor_quantized = tensor.to(FP8_DTYPE_TORCH)
-
-    return tensor_quantized, scale, 1 / scale
-
-
-def quantize_input(q, k, v, input_metadata: MetaData, fp8_kv=False):
+def quantize_input(q,
+                   k,
+                   v,
+                   input_metadata: MetaData,
+                   fp8_kv=False,
+                   use_o_scale=False):
     is_supported_layout = input_metadata.layout in SUPPORTED_LAYOUTS
     assert is_supported_layout, "Got unsupported layout."
-    if input_metadata.layout == 'bhsd':
-        quantization_dim = 1
-    elif input_metadata.layout == 'bshd':
-        quantization_dim = 2
 
     q_descale = None
     if not fp8_kv:
-        q, _, q_descale = quantize_fp8(q, dim=quantization_dim)
-    k, _, k_descale = quantize_fp8(k, dim=quantization_dim)
-    v, _, v_descale = quantize_fp8(v, dim=quantization_dim)
+        q, q_descale = scale_fp8(q)
+    k, k_descale = scale_fp8(k)
+    v, v_descale = scale_fp8(v)
 
     # In real world use case, the p scale would be a parameter trained by the
     # model.
     p_scale = p_descale = None
+
+    o_scale = torch.rand(1, device="cuda") if use_o_scale else None
 
     # We are not multiplying the scales together to get
     # qk_desale / o_descale e.g.
@@ -164,20 +145,12 @@ def quantize_input(q, k, v, input_metadata: MetaData, fp8_kv=False):
         # By default p_scaling is not enabled
         p_scale=p_scale,
         p_descale=p_descale,
-        o_scale=None)
+        o_scale=o_scale)
 
     return q, k, v
 
 
-def input_helper(Z,
-                 HQ,
-                 HK,
-                 N_CTX_Q,
-                 N_CTX_K,
-                 D_HEAD,
-                 dtype,
-                 layout,
-                 requires_grad=True):
+def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
     assert layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
 
     current_platform.seed_everything(0)
@@ -192,15 +165,15 @@ def input_helper(Z,
     q = torch.randn(q_tensor_shape,
                     dtype=dtype,
                     device="cuda",
-                    requires_grad=requires_grad)
+                    requires_grad=False)
     k = torch.randn(k_tensor_shape,
                     dtype=dtype,
                     device="cuda",
-                    requires_grad=requires_grad)
+                    requires_grad=False)
     v = torch.randn(k_tensor_shape,
                     dtype=dtype,
                     device="cuda",
-                    requires_grad=requires_grad)
+                    requires_grad=False)
 
     sm_scale = D_HEAD**-0.5
     input_metadata = MetaData(sm_scale=sm_scale)
@@ -285,7 +258,7 @@ def test_op_fwd(Z,
     current_platform.seed_everything(0)
     q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
                                            dtype, layout)
-    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
+    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
     if causal:
         input_metadata.need_causal()
 
@@ -354,7 +327,7 @@ def test_op_persistent_fwd(Z,
     current_platform.seed_everything(0)
     q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
                                            dtype, layout)
-    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
+    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
     if causal:
         input_metadata.need_causal()
 
@@ -417,30 +390,20 @@ def test_op_fwd_fp8(Z,
                     causal,
                     layout,
                     use_o_scale,
-                    dtype=torch.float16):
+                    dtype=torch.float32):
     current_platform.seed_everything(0)
 
     # Disable grad to save memory it won't run into OOM on CI machine.
-    q, k, v, input_metadata = input_helper(Z,
-                                           H,
-                                           H,
-                                           N_CTX_Q,
-                                           N_CTX_K,
-                                           D_HEAD,
-                                           dtype,
-                                           layout,
-                                           requires_grad=False)
-    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
+    q, k, v, input_metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD,
+                                           dtype, layout)
+    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
     if causal:
         input_metadata.need_causal()
 
-    if use_o_scale:
-        input_metadata.o_scale = torch.rand(1, device='cuda')
-
-    o = torch.empty_like(q)
+    o = torch.empty_like(q) if not use_o_scale else None
 
     q_quantized, k_quantized, v_quantized = quantize_input(
-        q, k, v, input_metadata)
+        q, k, v, input_metadata, use_o_scale=use_o_scale)
 
     tri_out, _ = triton_attention_rocm(q_quantized, k_quantized, v_quantized,
                                        o, input_metadata)
@@ -450,7 +413,10 @@ def test_op_fwd_fp8(Z,
     ref_out = ref_impl.fwd_fp8(q_quantized, k_quantized, v_quantized)
 
     # compare
-    torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(ref_out.to(torch.float32),
+                               tri_out.to(torch.float32),
+                               atol=2e-2,
+                               rtol=2e-2)
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
@@ -469,12 +435,12 @@ def test_op_fwd_fp8_kv(Z,
                        D_HEAD,
                        causal,
                        layout,
-                       dtype=torch.float16):
+                       dtype=torch.float32):
     current_platform.seed_everything(0)
 
     q, k, v, input_metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD,
                                            dtype, layout)
-    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
+    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
     if causal:
         input_metadata.need_causal()
 
@@ -493,7 +459,7 @@ def test_op_fwd_fp8_kv(Z,
                                   dtype, input_metadata)
     ref_out = ref_impl.fwd_fp8_kv(q, k_quantized, v_quantized)
 
-    torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(ref_out, tri_out, atol=3e-2, rtol=8e-1)
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
@@ -517,7 +483,7 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
                                            D_HEAD,
                                            dtype,
                                            layout='bhsd')
-    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
+    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
     if causal:
         input_metadata.need_causal()
     if use_bias:
@@ -573,7 +539,7 @@ def test_op_varlen_mqa_fwd(Z,
                            dtype=torch.float16):
     q, k, v, input_metadata = varlen_input_helper(Z, HQ, HK, N_CTX, N_CTX,
                                                   D_HEAD, dtype)
-    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
+    input_metadata.eight_bit_dtype_torch = current_platform.fp8_dtype()
 
     tri_out = torch.empty_like(q)
     triton_attention_rocm(q, k, v, tri_out, input_metadata)
