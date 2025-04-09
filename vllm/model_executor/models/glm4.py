@@ -47,6 +47,7 @@ from .llama import LlamaMLP as Glm4MLP
 from .llama import LlamaModel
 from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
 
+
 class Glm4Attention(nn.Module):
 
     def __init__(self,
@@ -107,6 +108,7 @@ class Glm4Attention(nn.Module):
             rotary_dim=self.rotary_dim,
             max_position=max_position,
             base=self.rope_theta,
+            rope_scaling=rope_scaling,
             partial_rotary_factor=partial_rotary_factor,
         )
         self.attn = Attention(self.num_heads,
