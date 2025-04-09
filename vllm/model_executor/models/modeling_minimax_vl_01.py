@@ -37,7 +37,7 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaDummyInputsBuilder, LlavaLikeConfig,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
-from .llava_next import (LlavaNextMultiModalProcessor, LlavaNextProcessingInfo, LlavaNextImageEmbeddingInputs, LlavaNextImagePixelInputs)
+from .llava_next import (LlavaNextMultiModalProcessor, LlavaNextProcessingInfo, LlavaNextImageEmbeddingInputs, LlavaNextImagePixelInputs, LlavaNextImageInputs)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
