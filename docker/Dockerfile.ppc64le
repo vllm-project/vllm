@@ -134,7 +134,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-13/enable && \
     git clone --recursive https://github.com/opencv/opencv-python.git -b ${OPENCV_VERSION} && \
     cd opencv-python && \
-    sed -i 's/"setuptools==59.2.0",/"setuptools<70.0",/g' pyproject.toml && \
+    sed -i -E -e 's/"setuptools.+",/"setuptools",/g' pyproject.toml && \
     cd opencv && git cherry-pick --no-commit $OPENCV_PATCH && cd .. && \
     python -m build --wheel --installer=uv --outdir /opencvwheels/
 
