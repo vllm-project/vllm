@@ -14,7 +14,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    is_rocm_aiter_moe_enabled, rocm_aiter_fused_experts, shuffle_weights)
+    is_rocm_aiter_channel_scaled_moe_enabled, rocm_aiter_fused_experts,
+    shuffle_weights)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -58,7 +59,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
               and activation == "silu" and expert_map is None):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif (quant_config._is_fp8_w8a8(weight_quant, input_quant)
-              and is_rocm_aiter_moe_enabled()):
+              and is_rocm_aiter_channel_scaled_moe_enabled()):
             return CompressedTensorsW8A8Fp8MoEAiterMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
@@ -490,7 +491,8 @@ class CompressedTensorsW8A8Fp8MoEAiterMethod(CompressedTensorsMoEMethod):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-
+        print("===========apply===============")
+        print(apply_router_weight_on_input)
         return rocm_aiter_fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
