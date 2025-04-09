@@ -44,6 +44,142 @@ from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
 logger = init_logger(__name__)
 
 
+class ToolHandler:
+    """Handles tool-related logic for chat completion."""
+
+    def __init__(self, enable_auto_tools: bool,
+                 tool_parser: Optional[Callable]):
+        self.enable_auto_tools = enable_auto_tools
+        self.tool_parser = tool_parser
+
+    def handle_named_tool_choice(self, request: ChatCompletionRequest,
+                                 tokenizer: AnyTokenizer, role: str,
+                                 reasoning_content: Optional[str],
+                                 content: str):
+        tool_call_class = (MistralToolCall if isinstance(
+            tokenizer, MistralTokenizer) else ToolCall)
+        return ChatMessage(
+            role=role,
+            reasoning_content=reasoning_content,
+            content="",
+            tool_calls=[
+                tool_call_class(function=FunctionCall(
+                    name=request.tool_choice.function.name,
+                    arguments=content,
+                ))
+            ],
+        )
+
+    def handle_required_tool_choice(self, request: ChatCompletionRequest,
+                                    tokenizer: AnyTokenizer, role: str,
+                                    output_text: str):
+        tool_call_class = (MistralToolCall if isinstance(
+            tokenizer, MistralTokenizer) else ToolCall)
+        # the fields of FunctionDefinition are a superset of the
+        # tool call outputs and can be used for parsing
+        tool_calls = TypeAdapter(
+            list[FunctionDefinition]).validate_json(output_text)
+        return ChatMessage(
+            role=role,
+            content="",
+            tool_calls=[
+                tool_call_class(function=FunctionCall(
+                    name=tool_call.name,
+                    arguments=json.dumps(tool_call.parameters),
+                )) for tool_call in tool_calls
+            ],
+        )
+
+    def handle_auto_tool_choice(self, request: ChatCompletionRequest,
+                                tokenizer: AnyTokenizer, role: str,
+                                reasoning_content: Optional[str],
+                                content: str):
+        tool_parser = self.tool_parser(tokenizer)
+        tool_call_info = tool_parser.extract_tool_calls(
+            content if content is not None else "", request=request)
+        # In the OpenAI API the finish_reason is "tools_called"
+        # if the tool choice is auto and the model produced a tool
+        # call. The same is not true for named function calls
+        if tool_call_info.tools_called:
+            return ChatMessage(
+                role=role,
+                reasoning_content=reasoning_content,
+                content=tool_call_info.content,
+                tool_calls=tool_call_info.tool_calls,
+            )
+        else:
+            # FOR NOW make it a chat message; we will have to detect
+            # the type to make it later.
+            return ChatMessage(role=role,
+                               reasoning_content=reasoning_content,
+                               content=content)
+
+
+class ChatMessageBuilder:
+    """Builds ChatMessage objects based on request parameters."""
+
+    def __init__(self, enable_auto_tools: bool,
+                 tool_parser: Optional[Callable]):
+        self.tool_handler = ToolHandler(enable_auto_tools, tool_parser)
+
+    def build_message(self, request: ChatCompletionRequest,
+                      tokenizer: AnyTokenizer, role: str,
+                      reasoning_content: Optional[str], content: str,
+                      output_text: str) -> ChatMessage:
+        if (not self.tool_handler.enable_auto_tools
+                or not self.tool_handler.tool_parser) and (
+                    not isinstance(request.tool_choice,
+                                   ChatCompletionNamedToolChoiceParam)
+                    and request.tool_choice != "required"):
+            return ChatMessage(role=role,
+                               reasoning_content=reasoning_content,
+                               content=content)
+
+        if request.tool_choice and type(
+                request.tool_choice) is ChatCompletionNamedToolChoiceParam:
+            return self.tool_handler.handle_named_tool_choice(
+                request, tokenizer, role, reasoning_content, content)
+
+        if request.tool_choice == "required":
+            return self.tool_handler.handle_required_tool_choice(
+                request, tokenizer, role, output_text)
+
+        if not request.tool_choice or request.tool_choice == "none":
+            return ChatMessage(role=role,
+                               reasoning_content=reasoning_content,
+                               content=content)
+
+        if request.tools and (request.tool_choice == "auto"
+                              or request.tool_choice is None):
+            return self.tool_handler.handle_auto_tool_choice(
+                request, tokenizer, role, reasoning_content, content)
+        # undetermined case that is still important to handle
+        logger.error(
+            "Error in chat_completion_full_generator - cannot determine"
+            " if tools should be extracted. Returning a standard chat "
+            "completion.")
+        return ChatMessage(role=role,
+                           reasoning_content=reasoning_content,
+                           content=content)
+
+
+class ToolChoiceProcessor:
+    """Processes tool choice requests and builds responses."""
+
+    def __init__(self, enable_auto_tools: bool,
+                 tool_parser: Optional[Callable]):
+        self.message_builder = ChatMessageBuilder(enable_auto_tools,
+                                                  tool_parser)
+
+    def process_completion(self, request: ChatCompletionRequest,
+                           tokenizer: AnyTokenizer, role: str,
+                           reasoning_content: Optional[str], content: str,
+                           output_text: str) -> ChatMessage:
+        return self.message_builder.build_message(request, tokenizer, role,
+                                                  reasoning_content, content,
+                                                  output_text)
+
+
 class OpenAIServingChat(OpenAIServing):
 
     def __init__(
@@ -107,7 +243,9 @@ class OpenAIServingChat(OpenAIServing):
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 f"tool_parser:'{tool_parser}' which has not "
                                 "been registered") from e
-
+        self.toolProcessor = ToolChoiceProcessor(
+            enable_auto_tools=self.enable_auto_tools,
+            tool_parser=self.tool_parser)
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
@@ -954,98 +1092,13 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning_content = None
                 content = output.text
 
-            # if auto tools are not enabled, and a named tool choice using
-            #   outlines is not being used
-            if (not self.enable_auto_tools or not self.tool_parser) and \
-                (not isinstance(request.tool_choice,
-                                ChatCompletionNamedToolChoiceParam
-                                ) and request.tool_choice != "required"):
-                message = ChatMessage(role=role,
-                                      reasoning_content=reasoning_content,
-                                      content=content)
-
-            # if the request uses tools and specified a tool choice
-            elif request.tool_choice and type(
-                    request.tool_choice) is ChatCompletionNamedToolChoiceParam:
-
-                tool_call_class = MistralToolCall if isinstance(
-                    tokenizer, MistralTokenizer) else ToolCall
-                message = ChatMessage(
-                    role=role,
-                    reasoning_content=reasoning_content,
-                    content="",
-                    tool_calls=[
-                        tool_call_class(function=FunctionCall(
-                            name=request.tool_choice.function.name,
-                            arguments=content))
-                    ])
-
-            elif request.tool_choice and request.tool_choice == "required":
-                tool_call_class = MistralToolCall if isinstance(
-                    tokenizer, MistralTokenizer) else ToolCall
-
-                # the fields of FunctionDefinition are a superset of the
-                # tool call outputs and can be used for parsing
-                tool_calls = TypeAdapter(
-                    list[FunctionDefinition]).validate_json(output.text)
-                message = ChatMessage(
-                    role=role,
-                    content="",
-                    tool_calls=[
-                        tool_call_class(function=FunctionCall(
-                            name=tool_call.name,
-                            arguments=json.dumps(tool_call.parameters)))
-                        for tool_call in tool_calls
-                    ])
-
-            # if the request doesn't use tool choice
-            # OR specifies to not use a tool
-            elif not request.tool_choice or request.tool_choice == "none":
-
-                message = ChatMessage(role=role,
-                                      reasoning_content=reasoning_content,
-                                      content=content)
-
-            # handle when there are tools and tool choice is auto
-            elif request.tools and (
-                    request.tool_choice == "auto"
-                    or request.tool_choice is None) and self.enable_auto_tools \
-                    and self.tool_parser:
-
-                try:
-                    tool_parser = self.tool_parser(tokenizer)
-                except RuntimeError as e:
-                    logger.exception("Error in tool parser creation.")
-                    return self.create_error_response(str(e))
-
-                tool_call_info = tool_parser.extract_tool_calls(
-                    content if content is not None else "", request=request)
-                # In the OpenAI API the finish_reason is "tools_called"
-                # if the tool choice is auto and the model produced a tool
-                # call. The same is not true for named function calls
-                auto_tools_called = tool_call_info.tools_called
-                if tool_call_info.tools_called:
-                    message = ChatMessage(role=role,
-                                          reasoning_content=reasoning_content,
-                                          content=tool_call_info.content,
-                                          tool_calls=tool_call_info.tool_calls)
-
-                else:
-                    # FOR NOW make it a chat message; we will have to detect
-                    # the type to make it later.
-                    message = ChatMessage(role=role,
-                                          reasoning_content=reasoning_content,
-                                          content=content)
-
-            # undetermined case that is still important to handle
-            else:
-                logger.error(
-                    "Error in chat_completion_full_generator - cannot determine"
-                    " if tools should be extracted. Returning a standard chat "
-                    "completion.")
-                message = ChatMessage(role=role,
-                                      reasoning_content=reasoning_content,
-                                      content=content)
+            try:
+                message = self.toolProcessor.process_completion(
+                    request, tokenizer, role, reasoning_content, content,
+                    output.text)
+            except RuntimeError as e:
+                logger.exception("Error in tool parser creation.")
+                return self.create_error_response(str(e))
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
