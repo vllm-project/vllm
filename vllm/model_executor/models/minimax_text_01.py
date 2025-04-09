@@ -895,6 +895,16 @@ class MiniMaxText01Model(nn.Module):
                                         dtype=torch.long)
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+    
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+
     def forward(self,
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
