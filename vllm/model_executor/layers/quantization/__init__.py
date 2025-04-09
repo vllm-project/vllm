@@ -2,8 +2,11 @@
 
 from typing import Dict, List, Type
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+
+logger = init_logger(__name__)
 
 QUANTIZATION_METHODS: List[str] = [
     "aqlm",
