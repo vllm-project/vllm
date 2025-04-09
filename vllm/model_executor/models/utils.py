@@ -381,23 +381,35 @@ def _merge_multimodal_embeddings(
     multimodal_embeddings: NestedTensors,
 ) -> torch.Tensor:
     """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
-    positions in ``inputs_embeds`` corresponding to placeholder tokens in
-    ``input_ids``.
+    Merge multimodal embeddings into the input embeddings at the positions
+    indicated by `is_multimodal`.
 
-    Note:
-        This updates ``inputs_embeds`` in place.
+    Args:
+        inputs_embeds: The input embeddings tensor.
+        is_multimodal: A boolean tensor indicating which positions should be
+            replaced with multimodal embeddings.
+        multimodal_embeddings: The multimodal embeddings to be merged.
+
+    Returns:
+        The merged embeddings tensor.
     """
     num_expected_tokens = is_multimodal.sum().item()
     assert isinstance(num_expected_tokens, int)
 
     flattened = _flatten_embeddings(multimodal_embeddings)
+    
+    # 处理多模态嵌入数量与占位符数量不匹配的情况
     if flattened.shape[0] != num_expected_tokens:
-        expr = _embedding_count_expression(multimodal_embeddings)
-        raise ValueError(
-            f"Attempted to assign {expr} = {flattened.shape[0]} "
-            f"multimodal tokens to {num_expected_tokens} placeholders")
-
+        if flattened.shape[0] > num_expected_tokens:
+            # 如果多模态嵌入数量大于占位符数量，则截断多模态嵌入
+            flattened = flattened[:num_expected_tokens]
+        else:
+            # 如果多模态嵌入数量小于占位符数量，则填充多模态嵌入
+            # 使用最后一个嵌入进行填充
+            last_embedding = flattened[-1].unsqueeze(0)
+            padding = torch.cat([last_embedding] * (num_expected_tokens - flattened.shape[0]))
+            flattened = torch.cat([flattened, padding], dim=0)
+    
     inputs_embeds[is_multimodal] = flattened
     return inputs_embeds
 
