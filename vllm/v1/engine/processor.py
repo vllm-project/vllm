@@ -259,27 +259,27 @@ class Processor:
             # are multiple modalities.
             unique_modalities = set(sorted_item_modalities)
             if len(unique_modalities) > 1:
-                sorted_mm_inputs_ = []
+                orig_sorted_mm_inputs = []
                 used_indices = {modality: 0 for modality in unique_modalities}
 
                 for modality in sorted_item_modalities:
                     items = decoder_mm_inputs.get_items(modality)
                     item = items[used_indices[modality]]
 
-                    sorted_mm_inputs_.append(
+                    orig_sorted_mm_inputs.append(
                         MultiModalKwargs.from_items([item]))
                     used_indices[modality] += 1
             else:
-                sorted_mm_inputs_ = [
+                orig_sorted_mm_inputs = [
                     MultiModalKwargs.from_items([item]) for item in
                     decoder_mm_inputs.get_items(sorted_item_modalities[0])
                 ]
 
             if sorted_mm_hashes is not None:
                 sorted_mm_inputs = self.mm_input_cache_client.get_and_update_p0(
-                    sorted_mm_inputs_, sorted_mm_hashes)
+                    orig_sorted_mm_inputs, sorted_mm_hashes)
             else:
-                sorted_mm_inputs = sorted_mm_inputs_
+                sorted_mm_inputs = orig_sorted_mm_inputs
 
         return EngineCoreRequest(
             request_id=request_id,
