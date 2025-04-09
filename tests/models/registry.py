@@ -369,7 +369,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
     "EagleLlamaForCausalLM": _HfExamplesInfo("yuhuili/EAGLE-LLaMA3-Instruct-8B",
                                              trust_remote_code=True,
-                                             speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B-vllm"),  # noqa: E501
+                                             speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B"),  # noqa: E501
 }
 
 _TRANSFORMERS_MODELS = {
