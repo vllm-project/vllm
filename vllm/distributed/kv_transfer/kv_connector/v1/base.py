@@ -9,7 +9,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -39,12 +39,9 @@ class KVConnectorMetadata:
 
 class KVConnectorBase_V1(ABC):
 
-    def __init__(self, rank: Optional[int], local_rank: Optional[int],
-                 config: "VllmConfig", role: KVConnectorRole):
+    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         self._connector_metadata = KVConnectorMetadata()
-        self._rank = rank
-        self._local_rank = local_rank
-        self._config = config
+        self._vllm_config = vllm_config
         self._role = role
 
     @property

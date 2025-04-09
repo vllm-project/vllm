@@ -16,7 +16,6 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
@@ -51,8 +50,8 @@ class KVConnectorAgent:
         assert self.config.kv_transfer_config.is_kv_transfer_instance, "KV"\
             "TransferAgent should only be used when kv_connector is set."
 
-        self.connector = KVConnectorFactory.create_connector(
-            rank, local_rank, config, KVConnectorRole.WORKER)
+        self.connector = KVConnectorFactory.create_connector_v0(
+            rank, local_rank, config)
 
     def send_kv_caches_and_hidden_states(
         self,

@@ -2,7 +2,7 @@
 import hashlib
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import safetensors
 import torch
@@ -77,19 +77,14 @@ class SharedStorageConnector(KVConnectorBase_V1):
     # It does extra work which will overwrite the existing prefix-cache in GPU
     # - to remove the overhead, need to add some "mask" in the ReqMeta class
 
-    def __init__(self, rank: Optional[int], local_rank: Optional[int],
-                 config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(
-            rank=rank,
-            local_rank=local_rank,
-            config=config,
-            role=role,
-        )
-        self._block_size = config.cache_config.block_size
+    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+        super().__init__(vllm_config=vllm_config, role=role)
+        self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: list[str] = []
-        self._storage_path = config.kv_transfer_config.get_from_extra_config(
+        transfer_config = vllm_config.kv_transfer_config
+        self._storage_path = transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp")
-        logger.info(config.kv_transfer_config)
+        logger.info(vllm_config.kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
 
     def start_load_kv(self, forward_context: "ForwardContext",

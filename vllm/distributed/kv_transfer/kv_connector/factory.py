@@ -34,10 +34,25 @@ class KVConnectorFactory:
         cls._registry[name] = loader
 
     @classmethod
-    def create_connector(
-            cls, rank: Optional[int], local_rank: Optional[int],
-            config: "VllmConfig", role: KVConnectorRole
-    ) -> Union[KVConnectorBase, KVConnectorBase_V1]:
+    def create_connector_v1(
+        cls,
+        config: "VllmConfig",
+        role: KVConnectorRole,
+    ) -> KVConnectorBase_V1:
+        if not envs.VLLM_USE_V1:
+            raise ValueError("Attempting to initialize a V1 Connector, "
+                             f"but found {envs.VLLM_USE_V1=}")
+
+        connector_name = config.kv_transfer_config.kv_connector
+        connector_cls = cls._registry[connector_name]()
+        assert issubclass(connector_cls, KVConnectorBase_V1)
+        logger.info("Creating v1 connector with name: %s", connector_name)
+        return connector_cls(config, role)
+
+    @classmethod
+    def create_connector_v0(cls, rank: Optional[int],
+                            local_rank: Optional[int], config: "VllmConfig",
+                            role: KVConnectorRole) -> KVConnectorBase:
         connector_name = config.kv_transfer_config.kv_connector
         if connector_name not in cls._registry:
             raise ValueError(f"Unsupported connector type: {connector_name}")
