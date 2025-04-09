@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, List
 
 import torch
 
+import vllm.envs
 from vllm.logger import init_logger
 
 try:
@@ -131,8 +132,13 @@ class GrammarCompilerCache:
                 encoded_vocab=config_data.encoded_vocab,
                 metadata=config_data.metadata,
             )
+            cache_size = vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024
             cls._cache[cache_key] = xgr.GrammarCompiler(
-                tokenizer_info, max_threads=config.max_threads)
+                tokenizer_info,
+                max_threads=config.max_threads,
+                cache_enabled=True,
+                cache_limit_bytes=cache_size,
+            )
 
         return cls._cache[cache_key]
 
