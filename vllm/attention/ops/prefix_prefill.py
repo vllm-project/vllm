@@ -295,7 +295,7 @@ if triton.__version__ >= "2.1.0":
             key=["BLOCK_SIZE", "MAX_Q_LEN", "MAX_CTX_LEN"]
         )
         @triton.jit
-        def _my_fwd_kernel(Q,
+        def _fwd_kernel_v2(Q,
                            K,
                            V,
                            K_cache,
@@ -1122,7 +1122,7 @@ if triton.__version__ >= "2.1.0":
             max_seq_len = 0 if max_seq_len is None else max_seq_len
             grid = lambda META: (batch, head,
                                  triton.cdiv(max_input_len, META["BLOCK_M"]))
-            _my_fwd_kernel[grid](
+            _fwd_kernel_v2[grid](
                 q,
                 k,
                 v,
