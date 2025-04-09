@@ -69,7 +69,7 @@ def register_quantization_config(quantization: str):
             raise ValueError("The quantization config must be a subclass of "
                              "`QuantizationConfig`.")
         if quantization in QUANTIZATION_METHODS:
-            logger.warning("The quantization config {quantization} will be rewritten.")
+            logger.warning(f"The quantization config {quantization} will be rewritten")
         else:
             QUANTIZATION_METHODS.append(quantization)
         _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[quantization] = quant_config_cls
