@@ -217,6 +217,33 @@ def load_idefics3(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+
+    # The configuration below has been confirmed to launch on a single L40 GPU.
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=16,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={
+            "max_image_size": {
+                "longest_edge": 384
+            },
+        },
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    prompt = f"<|im_start|>User:{placeholders}\n{question}<end_of_utterance>\nAssistant:"  # noqa: E501
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL2-2B"
 
@@ -614,6 +641,7 @@ model_example_map = {
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
     "qwen2_5_vl": load_qwen2_5_vl,
+    "smolvlm": load_smolvlm,
 }
 
 
