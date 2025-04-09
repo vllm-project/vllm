@@ -80,7 +80,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         super().__init__()
         self.tp_world = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = nn.Parameter(torch.ones(hidden_size // self.tp_world))
 
         self.weight.weight_loader = self.weight_loader
         self.variance_epsilon = eps
@@ -93,7 +93,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
     ) -> None:
         tp_world = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-
+            
         shard_size = loaded_weight.shape[0] // tp_world
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         param.data.copy_(loaded_weight[shard])
@@ -110,7 +110,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
             variance = tensor_model_parallel_all_reduce(
                 variance) / self.tp_world
         x = x * torch.rsqrt(variance + self.variance_epsilon)
-        weight = self.weight.view(-1)
+        weight = self.weight.view(-1, 1)
         x = x.to(orig_dtype) * weight
         return x
 
