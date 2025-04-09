@@ -5,11 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.model_executor.guided_decoding.reasoner import get_reasoner
 from vllm.model_executor.guided_decoding.utils import (
     convert_lark_to_gbnf, grammar_is_likely_lark,
     has_lmf_unsupported_json_features, has_xgrammar_unsupported_json_features)
-from vllm.platforms import CpuArchEnum
+from vllm.reasoning import ReasoningParserManager
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -26,7 +25,7 @@ def maybe_backend_fallback(
 
     def fallback_or_error(guided_params: GuidedDecodingParams, message: str,
                           fallback: str) -> None:
-        """Change the backend to the specified fallback with a warning log, 
+        """Change the backend to the specified fallback with a warning log,
         or raise a ValueError if the `no-fallback` option is specified."""
         if guided_params.no_fallback():
             raise ValueError(message)
@@ -53,19 +52,12 @@ def maybe_backend_fallback(
     if guided_params.backend_name == "xgrammar":
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (
             xgr_installed)
-        # xgrammar only has x86 wheels for linux, fallback to outlines
-        from vllm.platforms import current_platform
-        if current_platform.get_cpu_architecture() is not CpuArchEnum.X86:
-            fallback_or_error(guided_params,
-                              "xgrammar is only supported on x86 CPUs.",
-                              "outlines")
 
         # xgrammar doesn't support regex, fallback to outlines
         if guided_params.regex is not None:
             fallback_or_error(
                 guided_params,
                 "xgrammar does not support regex guided decoding.", "outlines")
-
         # xgrammar doesn't support some JSON schema features
         elif (guided_params.json is not None
               and has_xgrammar_unsupported_json_features(guided_params.json)):
@@ -96,9 +88,9 @@ def maybe_backend_fallback(
 
     if (guided_params.backend_name == "outlines"
             and guided_params.json_object is not None):
-        # outlines doesn't support json_object, fallback to xgrammar
+        # outlines doesn't support json_object, fallback to guidance
         fallback_or_error(guided_params,
-                          "outlines does not support json_object.", "xgrammar")
+                          "outlines does not support json_object.", "guidance")
 
     return guided_params
 
@@ -109,7 +101,11 @@ async def get_guided_decoding_logits_processor(
         model_config: ModelConfig,
         reasoning_backend: str | None = None) -> LogitsProcessor | None:
 
-    reasoner = get_reasoner(tokenizer, reasoning_backend)
+    reasoner = None
+    if reasoning_backend is not None:
+        reasoner_class = ReasoningParserManager.get_reasoning_parser(
+            reasoning_backend)
+        reasoner = reasoner_class(tokenizer)
 
     guided_params = maybe_backend_fallback(guided_params)
 
@@ -130,10 +126,15 @@ async def get_guided_decoding_logits_processor(
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
             guided_params, tokenizer, model_config, reasoner)
-
+    if guided_params.backend_name == 'guidance':
+        from vllm.model_executor.guided_decoding.guidance_decoding import (
+            get_local_guidance_guided_decoding_logits_processor)
+        return get_local_guidance_guided_decoding_logits_processor(
+            guided_params, tokenizer)
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
-        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar'")
+        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar', 'guidance'"
+    )
 
 
 def get_local_guided_decoding_logits_processor(
@@ -143,8 +144,11 @@ def get_local_guided_decoding_logits_processor(
         reasoning_backend: str | None = None) -> LogitsProcessor | None:
     guided_params = maybe_backend_fallback(guided_params)
 
-    # Get the reasoner if needed, it will be None if reasoning_
-    reasoner = get_reasoner(tokenizer, reasoning_backend)
+    reasoner = None
+    if reasoning_backend is not None:
+        reasoner_class = ReasoningParserManager.get_reasoning_parser(
+            reasoning_backend)
+        reasoner = reasoner_class(tokenizer)
 
     # CFG grammar not supported by LMFE, so we use outlines instead
     if guided_params.backend_name == 'outlines':
@@ -163,7 +167,13 @@ def get_local_guided_decoding_logits_processor(
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
             guided_params, tokenizer, model_config, reasoner)
+    if guided_params.backend_name == 'guidance':
+        from vllm.model_executor.guided_decoding.guidance_decoding import (
+            get_local_guidance_guided_decoding_logits_processor)
+        return get_local_guidance_guided_decoding_logits_processor(
+            guided_params, tokenizer)
 
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
-        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar'")
+        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar', 'guidance'"
+    )

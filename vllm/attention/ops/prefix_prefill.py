@@ -725,6 +725,7 @@ if triton.__version__ >= "2.1.0":
                               b_loc,
                               b_start_loc,
                               b_seq_len,
+                              max_seq_len,
                               max_input_len,
                               k_scale: torch.Tensor,
                               v_scale: torch.Tensor,
@@ -752,7 +753,7 @@ if triton.__version__ >= "2.1.0":
             assert (v_cache.dtype == torch.uint8)
 
             if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-                target_dtype = torch.float8_e4m3fn
+                target_dtype = current_platform.fp8_dtype()
             elif kv_cache_dtype == "fp8_e5m2":
                 target_dtype = torch.float8_e5m2
             else:

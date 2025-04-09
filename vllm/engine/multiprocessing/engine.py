@@ -9,6 +9,7 @@ import cloudpickle
 import zmq
 
 from vllm import AsyncEngineArgs, SamplingParams
+from vllm.config import VllmConfig
 from vllm.engine.llm_engine import LLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -17,6 +18,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
+                                         RPCIsSleepingRequest,
+                                         RPCIsSleepingResponse,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
                                          RPCResetPrefixCacheRequest,
@@ -26,6 +29,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
 from vllm.worker.model_runner_base import InputProcessingError
 
@@ -39,12 +44,12 @@ class MQLLMEngine:
     """A multiprocessing wrapper for :class:`LLMEngine`.
 
     This class is used to wrap the :class:`LLMEngine` class to enable use
-    in concurrnet manner. It runs a background loop and uses zeromq to 
+    in concurrnet manner. It runs a background loop and uses zeromq to
     receive new requests and stream outputs incrementally via ipc.
-    
+
     The :class:`LLMEngine` generate or encode process is kicked off when a new
     RPCProcessRequest is received by the input_socket.
-    
+
     The self.engine_loop checks the input_socket for new requests,
     adds them to the LLMEngine if there are any, calls the internal
     :class:`LLMEngine.step()`, and sends the RequestOutputs back over
@@ -110,25 +115,39 @@ class MQLLMEngine:
             return ENGINE_DEAD_ERROR()
 
     @classmethod
-    def from_engine_args(cls, engine_args: AsyncEngineArgs,
-                         usage_context: UsageContext, ipc_path: str):
-        """Creates an MQLLMEngine from the engine arguments."""
+    def from_vllm_config(cls, vllm_config: VllmConfig,
+                         usage_context: UsageContext,
+                         disable_log_requests: bool, disable_log_stats: bool,
+                         ipc_path: str) -> "MQLLMEngine":
         # Setup plugins for each process
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
-        engine_config = engine_args.create_engine_config(usage_context)
-        executor_class = LLMEngine._get_executor_cls(engine_config)
+        use_async_sockets = vllm_config.model_config.use_async_output_proc
 
-        use_async_sockets = engine_config.model_config.use_async_output_proc
+        return cls(
+            vllm_config=vllm_config,
+            executor_class=LLMEngine._get_executor_cls(vllm_config),
+            ipc_path=ipc_path,
+            usage_context=usage_context,
+            use_async_sockets=use_async_sockets,
+            log_requests=(not disable_log_requests),
+            log_stats=(not disable_log_stats),
+        )
 
-        return cls(ipc_path=ipc_path,
-                   use_async_sockets=use_async_sockets,
-                   vllm_config=engine_config,
-                   executor_class=executor_class,
-                   log_requests=not engine_args.disable_log_requests,
-                   log_stats=not engine_args.disable_log_stats,
-                   usage_context=usage_context)
+    @staticmethod
+    def from_engine_args(engine_args: AsyncEngineArgs,
+                         usage_context: UsageContext, ipc_path: str):
+        """Creates an MQLLMEngine from the engine arguments."""
+
+        vllm_config = engine_args.create_engine_config(usage_context)
+        return MQLLMEngine.from_vllm_config(
+            ipc_path=ipc_path,
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            disable_log_requests=engine_args.disable_log_requests,
+            disable_log_stats=engine_args.disable_log_stats,
+        )
 
     def start(self):
         try:
@@ -255,7 +274,9 @@ class MQLLMEngine:
                 elif isinstance(request, RPCSleepRequest):
                     self.sleep(request.value)
                 elif isinstance(request, RPCWakeUpRequest):
-                    self.wake_up()
+                    self.wake_up(request.tags)
+                elif isinstance(request, RPCIsSleepingRequest):
+                    self._handle_is_sleeping_request(request)
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -321,6 +342,12 @@ class MQLLMEngine:
         # Otherwise, send back the successful load message
         self._send_outputs(
             RPCAdapterLoadedResponse(request_id=request.request_id))
+
+    def _handle_is_sleeping_request(self, request: RPCIsSleepingRequest):
+        is_sleeping = self.is_sleeping()
+        self._send_outputs(
+            RPCIsSleepingResponse(request_id=request.request_id,
+                                  is_sleeping=is_sleeping))
 
     def _health_check(self):
         # Send unhealthy if engine has already errored
@@ -388,20 +415,30 @@ class MQLLMEngine:
     def sleep(self, level: int = 1) -> None:
         self.engine.sleep(level)
 
-    def wake_up(self) -> None:
-        self.engine.wake_up()
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        self.engine.wake_up(tags)
+
+    def is_sleeping(self) -> bool:
+        return self.engine.is_sleeping()
 
 
 def signal_handler(*_) -> None:
     raise KeyboardInterrupt("MQLLMEngine terminated")
 
 
-def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
-                  ipc_path: str, engine_alive):
+def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
+                  ipc_path: str, disable_log_stats: bool,
+                  disable_log_requests: bool, engine_alive):
     try:
-        engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
-                                              usage_context=usage_context,
-                                              ipc_path=ipc_path)
+        # Ensure we can serialize transformer config before spawning
+        maybe_register_config_serialize_by_value()
+
+        engine = MQLLMEngine.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            disable_log_stats=disable_log_stats,
+            disable_log_requests=disable_log_requests,
+            ipc_path=ipc_path)
 
         signal.signal(signal.SIGTERM, signal_handler)
 

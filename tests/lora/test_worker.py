@@ -52,6 +52,7 @@ def test_worker_apply_lora(sql_lora_files):
             seed=0,
             dtype="float16",
             revision=None,
+            enforce_eager=True,
         ),
         load_config=LoadConfig(
             download_dir=None,

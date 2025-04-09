@@ -14,6 +14,15 @@ from ....conftest import (IMAGE_ASSETS, VIDEO_ASSETS, PromptImageInput,
                           PromptVideoInput, VllmRunner)
 from ...utils import check_logprobs_close
 
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    V1 Test: batch_make_xxxxx_embeddings calls a V0 internal
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 models = ["Qwen/Qwen2-VL-2B-Instruct"]
 target_dtype = "half"
 
@@ -118,6 +127,7 @@ def batch_make_image_embeddings(
             return visual(pixel_values_on_device,
                           grid_thw=image_grid_thw_on_device)
 
+    # V1 Test: this calls a V0 internal.
     image_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
@@ -201,6 +211,7 @@ def batch_make_video_embeddings(
             return visual(pixel_values_on_device,
                           grid_thw=video_grid_thw_on_device)
 
+    # V1 Test: this calls a V0 internal.
     video_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
@@ -253,7 +264,6 @@ def run_embedding_input_test(
 
     processor = AutoProcessor.from_pretrained(model)
 
-    # NOTE:
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      task="generate",

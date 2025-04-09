@@ -124,8 +124,9 @@ def _construct_expected_sampling_metadata(
         if req.sampling_params.allowed_token_ids:
             allowed_token_ids_mask[index_in_input_batch][
                 req.sampling_params.allowed_token_ids] = True
-        bad_words_token_ids[
-            index_in_input_batch] = req.sampling_params.bad_words_token_ids
+        if req.sampling_params.bad_words_token_ids:
+            bad_words_token_ids[
+                index_in_input_batch] = req.sampling_params.bad_words_token_ids
 
     return SamplingMetadata(
         temperature=torch.tensor(temperature, dtype=torch.float,

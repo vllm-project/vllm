@@ -34,7 +34,8 @@ Further update the model as follows:
             image_features = self.vision_encoder(image_input)
             return self.multi_modal_projector(image_features)
 
-        def get_multimodal_embeddings(self, **kwargs: object) -> Optional[NestedTensors]:
+        def get_multimodal_embeddings(
+                self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 
             # Validate the multimodal input keyword arguments
             image_input = self._parse_and_validate_image_input(**kwargs)
@@ -61,7 +62,7 @@ Further update the model as follows:
         def get_input_embeddings(
             self,
             input_ids: torch.Tensor,
-            multimodal_embeddings: Optional[NestedTensors] = None,
+            multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         ) -> torch.Tensor:
 
             # `get_input_embeddings` should already be implemented for the language 
@@ -859,8 +860,8 @@ prompt_tokens, prompts_length = _tokenize_prompts_with_image_and_batch(
 )
 ```
 
-To accommodate this, instead of a string you can return an instance of {class}`~vllm.multimodal.processing.PromptUpdateDetails`
-with different `full` and `feature` attributes:
+To assign the vision embeddings to only the image tokens, instead of a string
+you can return an instance of {class}`~vllm.multimodal.processing.PromptUpdateDetails`:
 
 ```python
 hf_config = self.info.get_hf_config()
@@ -878,9 +879,9 @@ def get_replacement_fuyu(item_idx: int):
     image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
                     [_NEWLINE_TOKEN_ID]) * nrows
 
-    return PromptUpdateDetails(
-        full=image_tokens + [bos_token_id],
-        features=image_tokens,
+    return PromptUpdateDetails.select_token_id(
+        image_tokens + [bos_token_id],
+        embed_token_id=_IMAGE_TOKEN_ID,
     )
 ```
 
@@ -913,9 +914,9 @@ def _get_prompt_updates(
         image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
                         [_NEWLINE_TOKEN_ID]) * nrows
 
-        return PromptUpdateDetails(
-            full=image_tokens + [bos_token_id],
-            features=image_tokens,
+        return PromptUpdateDetails.select_token_id(
+            image_tokens + [bos_token_id],
+            embed_token_id=_IMAGE_TOKEN_ID,
         )
 
     return [

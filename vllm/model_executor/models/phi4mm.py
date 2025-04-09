@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, SiglipVisionConfig
 from transformers.utils import logging
 
 from vllm.config import VllmConfig
@@ -28,14 +28,14 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalInputs, NestedTensors
+from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
-from .interfaces import SupportsLoRA, SupportsMultiModal
+from .idefics2_vision_model import Idefics2VisionTransformer
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsV0Only
 from .phi4mm_audio import AudioEmbedding
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
-from .vision_siglip_navit import get_siglip_vision_model
 
 # <|endoftext10|> (see vocab.json in hf model)
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
@@ -339,6 +339,33 @@ def preprocess(images, dynamic_hd_size, vit_resolution, vit_patch_size):
     return data
 
 
+def get_navit_vision_model(layer_idx: int = -1, **kwargs):
+    vision_config = {
+        "hidden_size": 1152,
+        "image_size": 448,
+        "intermediate_size": 4304,
+        "model_type": "siglip_vision_model",
+        "num_attention_heads": 16,
+        "num_hidden_layers": 27,
+        "patch_size": 14,
+    }
+
+    model_config = SiglipVisionConfig(**vision_config, **kwargs)
+    if layer_idx < 0:
+        num_hidden_layers = model_config.num_hidden_layers \
+            + layer_idx + 1
+    else:
+        num_hidden_layers = layer_idx + 1
+
+    vision_model = Idefics2VisionTransformer(
+        config=model_config,
+        require_post_norm=False,
+        num_hidden_layers_override=num_hidden_layers,
+    )
+
+    return vision_model
+
+
 class Phi4MMImageEncoder(nn.Module):
     """Image embedding."""
 
@@ -362,8 +389,7 @@ class Phi4MMImageEncoder(nn.Module):
             self.layer_idx = -2
             self.type_feature = 'patch'
 
-        self.img_processor = get_siglip_vision_model(
-            _flash_attn_2_enabled=True)
+        self.img_processor = get_navit_vision_model(layer_idx=self.layer_idx)
 
         pe_weight = self.img_processor.embeddings.position_embedding.weight
         L, D = pe_weight.size()
@@ -430,16 +456,11 @@ class Phi4MMImageEncoder(nn.Module):
     def get_img_features(self,
                          img_embeds: torch.FloatTensor,
                          attention_mask=None) -> torch.FloatTensor:
-        LAYER_IDX = self.layer_idx
-        TYPE_FEATURE = self.type_feature
 
-        img_processor_output = self.img_processor(
-            img_embeds,
-            output_hidden_states=True,
-            patch_attention_mask=attention_mask)
-        img_feature = img_processor_output.hidden_states[LAYER_IDX]
+        img_feature = self.img_processor(img_embeds,
+                                         patch_attention_mask=attention_mask)
 
-        if TYPE_FEATURE == "patch":
+        if self.type_feature == "patch":
             patch_feature = img_feature
 
             use_token_compression = self.image_token_compression is not None
@@ -1298,9 +1319,9 @@ def dummy_data_for_phi4mm(ctx: InputContext, seq_len: int,
 
 
 def input_mapper_for_phi4mm_audio(ctx: InputContext,
-                                  data: object) -> MultiModalInputs:
+                                  data: object) -> MultiModalKwargs:
     """
-    This function is used to create the MultiModalInputs for the Phi4MM 
+    This function is used to create the MultiModalKwargs for the Phi4MM 
     (audio) model.
     Specifically, for audio, we extract the audio features from the sound 
     file and create pairs of audio features and audio embed lengths (the
@@ -1317,13 +1338,13 @@ def input_mapper_for_phi4mm_audio(ctx: InputContext,
         data (object): Audio data.
 
     Returns:
-        MultiModalInputs: Multi-modal inputs.
+        MultiModalKwargs: Multi-modal inputs.
     """
     if not isinstance(data, list):
         data = [data]
 
     if len(data) == 0:
-        return MultiModalInputs()
+        return MultiModalKwargs()
 
     audio_features = []
     for audio_input in data:
@@ -1344,7 +1365,7 @@ def input_mapper_for_phi4mm_audio(ctx: InputContext,
             [single_audio_embed_size],
         )
         audio_features.append(single_audio_feature_audio_len_pair)
-    return MultiModalInputs({"audio_features": audio_features})
+    return MultiModalKwargs({"audio_features": audio_features})
 
 
 def input_mapper_for_phi4mm_image(ctx: InputContext, data: object):
@@ -1352,7 +1373,7 @@ def input_mapper_for_phi4mm_image(ctx: InputContext, data: object):
         data = [data]
     # data: list of PIL images
     if len(data) == 0:
-        return MultiModalInputs()
+        return MultiModalKwargs()
     hf_config = ctx.get_hf_config()
     vision_encoder_name = hf_config.img_processor
     if vision_encoder_name is None:
@@ -1364,7 +1385,7 @@ def input_mapper_for_phi4mm_image(ctx: InputContext, data: object):
 
     image_input_dict = preprocess(data, dynamic_hd_size, vit_image_size,
                                   vit_patch_size)
-    return MultiModalInputs({
+    return MultiModalKwargs({
         "pixel_values":
         image_input_dict["pixel_values"],
         "image_sizes":
@@ -1412,7 +1433,8 @@ def cat_with_pad(tensors, dim, padding_value=0):
     "image", get_max_phi4mm_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4mm)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi4mm)
-class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
+class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
+                        SupportsV0Only):
     """
     Implements the Phi-4-multimodal-instruct model in vLLM.
     """

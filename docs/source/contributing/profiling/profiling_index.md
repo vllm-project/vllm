@@ -124,3 +124,52 @@ nsys stats report1.nsys-rep
 GUI example:
 
 <img width="1799" alt="Screenshot 2025-03-05 at 11 48 42 AM" src="https://github.com/user-attachments/assets/c7cff1ae-6d6f-477d-a342-bd13c4fc424c" />
+
+## Profiling vLLM Python Code
+
+The Python standard library includes
+[cProfile](https://docs.python.org/3/library/profile.html) for profiling Python
+code. vLLM includes a couple of helpers that make it easy to apply it to a section of vLLM.
+Both the `vllm.utils.cprofile` and `vllm.utils.cprofile_context` functions can be
+used to profile a section of code.
+
+### Example usage - decorator
+
+The first helper is a Python decorator that can be used to profile a function.
+If a filename is specified, the profile will be saved to that file. If no filename is
+specified, profile data will be printed to stdout.
+
+```python
+import vllm.utils
+
+@vllm.utils.cprofile("expensive_function.prof")
+def expensive_function():
+    # some expensive code
+    pass
+```
+
+### Example Usage - context manager
+
+The second helper is a context manager that can be used to profile a block of
+code. Similar to the decorator, the filename is optional.
+
+```python
+import vllm.utils
+
+def another_function():
+    # more expensive code
+    pass
+
+with vllm.utils.cprofile_context("another_function.prof"):
+    another_function()
+```
+
+### Analyzing Profile Results
+
+There are multiple tools available that can help analyze the profile results.
+One example is [snakeviz](https://jiffyclub.github.io/snakeviz/).
+
+```bash
+pip install snakeviz
+snakeviz expensive_function.prof
+```

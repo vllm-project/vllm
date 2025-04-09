@@ -13,13 +13,12 @@ from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               cached_tokenizer_from_config)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
                         resolve_mm_processor_kwargs)
 
 from .data import ProcessorInputs, SingletonInputs
-from .parse import is_encoder_decoder_inputs
+from .parse import split_enc_dec_inputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -329,17 +328,27 @@ class InputRegistry:
         from vllm.model_executor.model_loader import get_model_architecture
         from vllm.multimodal import MultiModalKwargs
         from vllm.multimodal.profiling import MultiModalProfiler
+        from vllm.sequence import SequenceData
 
         if mm_registry.has_processor(model_config):
-            tokenizer = cached_tokenizer_from_config(model_config)
             processor = mm_registry.create_processor(model_config,
-                                                     tokenizer,
                                                      disable_cache=True)
             profiler = MultiModalProfiler(processor)
-            dummy_data_factory = (profiler.get_encoder_dummy_data
-                                  if is_encoder_data else
-                                  profiler.get_decoder_dummy_data)
-            dummy_data = dummy_data_factory(seq_len)
+
+            dummy_data_v1 = (profiler.get_encoder_dummy_data(seq_len)
+                             if is_encoder_data else
+                             profiler.get_decoder_dummy_data(seq_len))
+            _seq_data = SequenceData.from_seqs(
+                dummy_data_v1.prompt_token_ids)  # type: ignore[attr-defined]
+
+            dummy_data = DummyData(
+                seq_data=_seq_data,
+                multi_modal_data=getattr(dummy_data_v1, "multi_modal_data",
+                                         None),
+                multi_modal_placeholders=getattr(dummy_data_v1,
+                                                 "multi_modal_placeholders",
+                                                 None),
+            )
         else:
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:
@@ -348,7 +357,11 @@ class InputRegistry:
                 dummy_factory = self._get_dummy_data_factory(model_cls)
             mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-                dummy_factory, overrides=model_config.mm_processor_kwargs)
+                dummy_factory,
+                overrides=model_config.mm_processor_kwargs,
+                requires_kw_only=False,
+                allow_var_kwargs=True,
+            )
 
             dummy_data = dummy_factory(InputContext(model_config), seq_len,
                                        _MultiModalCounts(mm_counts),
@@ -381,6 +394,7 @@ class InputRegistry:
         self,
         ctx: InputContext,
         inputs: ProcessorInputs,
+        **kwargs: object,
     ) -> ProcessorInputs:
         """The default input processor is a no-op."""
         return inputs
@@ -447,6 +461,8 @@ class InputRegistry:
             model_config.mm_processor_kwargs,
             inputs.get("mm_processor_kwargs", {}),  # type: ignore
             processor,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
         )
 
         processed_inputs = processor(
@@ -455,13 +471,11 @@ class InputRegistry:
             **mm_processor_kwargs,
         )
 
-        if is_encoder_decoder_inputs(processed_inputs):
-            self._ensure_mm_kwargs(processed_inputs["encoder"],
-                                   mm_processor_kwargs)
-            self._ensure_mm_kwargs(processed_inputs["decoder"],
-                                   mm_processor_kwargs)
-        else:
-            self._ensure_mm_kwargs(processed_inputs, mm_processor_kwargs)
+        encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
+        if encoder_inputs is not None:
+            self._ensure_mm_kwargs(encoder_inputs, mm_processor_kwargs)
+        if decoder_inputs is not None:
+            self._ensure_mm_kwargs(decoder_inputs, mm_processor_kwargs)
 
         return processed_inputs
 

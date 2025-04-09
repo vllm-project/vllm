@@ -201,6 +201,9 @@ class cmake_build_ext(build_ext):
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
+        # Make sure we use the nvcc from CUDA_HOME
+        if _is_cuda():
+            cmake_args += [f'-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc']
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp)
@@ -294,26 +297,28 @@ class repackage_wheel(build_ext):
             ]).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
 
-            # Check if the local main branch is up-to-date. This is to ensure
-            # the base commit we found is the most recent commit on the main
-            # branch.
-            local_main_commit = subprocess.check_output(
-                ["git", "rev-parse", "main"]).decode("utf-8").strip()
-            if local_main_commit != upstream_main_commit:
-                raise ValueError(
-                    f"Local main branch ({local_main_commit}) is not "
-                    "up-to-date with upstream main branch "
-                    f"({upstream_main_commit}). Please pull the latest "
-                    "changes from upstream main branch first.")
+            # Check if the upstream_main_commit exists in the local repo
+            try:
+                subprocess.check_output(
+                    ["git", "cat-file", "-e", f"{upstream_main_commit}"])
+            except subprocess.CalledProcessError:
+                # If not present, fetch it from the remote repository.
+                # Note that this does not update any local branches,
+                # but ensures that this commit ref and its history are
+                # available in our local repo.
+                subprocess.check_call([
+                    "git", "fetch", "https://github.com/vllm-project/vllm",
+                    "main"
+                ])
 
             # Then get the commit hash of the current branch that is the same as
             # the upstream main commit.
             current_branch = subprocess.check_output(
                 ["git", "branch", "--show-current"]).decode("utf-8").strip()
 
-            base_commit = subprocess.check_output(
-                ["git", "merge-base", "main",
-                 current_branch]).decode("utf-8").strip()
+            base_commit = subprocess.check_output([
+                "git", "merge-base", f"{upstream_main_commit}", current_branch
+            ]).decode("utf-8").strip()
             return base_commit
         except ValueError as err:
             raise ValueError(err) from None
@@ -447,10 +452,6 @@ def _is_cpu() -> bool:
     return VLLM_TARGET_DEVICE == "cpu"
 
 
-def _is_openvino() -> bool:
-    return VLLM_TARGET_DEVICE == "openvino"
-
-
 def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
@@ -570,8 +571,6 @@ def get_vllm_version() -> str:
         if gaudi_sw_version != MAIN_CUDA_VERSION:
             gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
             version += f"{sep}gaudi{gaudi_sw_version}"
-    elif _is_openvino():
-        version += f"{sep}openvino"
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
@@ -596,9 +595,8 @@ def get_requirements() -> list[str]:
         for line in requirements:
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
-            elif line.startswith("--"):
-                continue
-            else:
+            elif not line.startswith("--") and not line.startswith(
+                    "#") and line.strip() != "":
                 resolved_requirements.append(line)
         return resolved_requirements
 
@@ -621,8 +619,6 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("neuron.txt")
     elif _is_hpu():
         requirements = _read_requirements("hpu.txt")
-    elif _is_openvino():
-        requirements = _read_requirements("openvino.txt")
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
@@ -632,7 +628,7 @@ def get_requirements() -> list[str]:
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
-            "OpenVINO, or CPU.")
+            "or CPU.")
     return requirements
 
 
@@ -646,11 +642,10 @@ if _is_hip():
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.0"):
-        # FA3 requires CUDA 12.0 or later
+    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
+        # FA3 requires CUDA 12.3 or later
         ext_modules.append(
             CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
-    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
         # Optional since this doesn't get built (produce an .so file) when
         # not targeting a hopper system
         ext_modules.append(
@@ -686,9 +681,10 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
+        "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
-        "video": ["decord"]  # Required for video processing
+        "video": []  # Kept for backwards compatibility
     },
     cmdclass=cmdclass,
     package_data=package_data,

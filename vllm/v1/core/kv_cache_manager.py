@@ -5,10 +5,12 @@ from collections.abc import Iterable
 from typing import Optional
 
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
+from vllm.v1.core.specialized_manager import get_specialized_manager
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
@@ -19,20 +21,24 @@ class KVCacheManager:
 
     def __init__(
         self,
-        block_size: int,
-        num_gpu_blocks: int,
+        kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        sliding_window: Optional[int] = None,
         enable_caching: bool = True,
+        caching_hash_algo: str = "builtin",
         num_preallocate_tokens: int = 64,
         log_stats: bool = False,
     ) -> None:
-        self.block_size = block_size
-        self.num_gpu_blocks = num_gpu_blocks
+        assert len(kv_cache_config.kv_cache_groups) == 1, (
+            "KVCacheManager does not support hybrid models with more than 1 "
+            "kv cache group")
+        kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        self.block_size = kv_cache_spec.block_size
+        self.num_gpu_blocks = kv_cache_config.num_blocks
         self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
-        self.sliding_window = sliding_window
+        self.max_num_blocks_per_req = cdiv(max_model_len, self.block_size)
+
         self.enable_caching = enable_caching
+        self.caching_hash_fn = sha256 if caching_hash_algo == "sha256" else hash
         # FIXME: make prefix cache stats conditional on log_stats
         self.log_stats = log_stats
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
@@ -46,9 +52,15 @@ class KVCacheManager:
         # further allocation. When it uses up all the N empty blocks, it gets
         # N new empty blocks.
         self.num_preallocate_tokens = num_preallocate_tokens
-        self.num_preallocate_blocks = cdiv(num_preallocate_tokens, block_size)
+        self.num_preallocate_blocks = cdiv(num_preallocate_tokens,
+                                           self.block_size)
 
-        self.block_pool = BlockPool(num_gpu_blocks, enable_caching)
+        self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching)
+
+        self.specialized_manager = get_specialized_manager(
+            kv_cache_spec=kv_cache_spec,
+            block_pool=self.block_pool,
+        )
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -109,34 +121,44 @@ class KVCacheManager:
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
-            block_hashes = hash_request_tokens(self.block_size, request)
+            block_hashes = hash_request_tokens(self.caching_hash_fn,
+                                               self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         self.prefix_cache_stats.requests += 1
-        if request.sampling_params.prompt_logprobs is None:
-            # Check for cache hits
-            computed_blocks = []
-            for block_hash in block_hashes:
-                # block_hashes is a chain of block hashes. If a block hash
-                # is not in the cached_block_hash_to_id, the following
-                # block hashes are not computed yet for sure.
-                if cached_block := self.block_pool.get_cached_block(
-                        block_hash):
-                    computed_blocks.append(cached_block)
-                else:
-                    break
-
-            self.prefix_cache_stats.queries += len(block_hashes)
-            self.prefix_cache_stats.hits += len(computed_blocks)
-
-            # NOTE(woosuk): Since incomplete blocks are not eligible for
-            # sharing, `num_computed_tokens` is always a multiple of
-            # `block_size`.
-            num_computed_tokens = len(computed_blocks) * self.block_size
-            return computed_blocks, num_computed_tokens
-        else:
-            # Skip cache hits for prompt logprobs
+        # When the request requires prompt logprobs, we skip prefix caching.
+        if request.sampling_params.prompt_logprobs is not None:
             return [], 0
+
+        if len(block_hashes) * self.block_size == request.num_tokens:
+            # When prompt length is divisible by the block size and all
+            # blocks are cached, we need to recompute the last token. This
+            # have to be achieved by re-computing an entire block because
+            # allocate_slots() assumes num_computed_tokens is always a
+            # multiple of the block size. To achieve this, remove the last
+            # block hash from the block_hashes for find_longest_cache_hit
+            # This limitation can potentially be removed in the future to
+            # slightly improve the performance.
+            last_block_hash = block_hashes.pop()
+        else:
+            last_block_hash = None
+
+        computed_blocks = (
+            self.specialized_manager.find_longest_cache_hit(block_hashes))
+        self.prefix_cache_stats.queries += len(block_hashes)
+        self.prefix_cache_stats.hits += len(computed_blocks)
+
+        if last_block_hash is not None:
+            # Add back the last block hash if it was removed.
+            # NOTE: Because block_hashes is cached in req_to_block_hashes,
+            # we shouldn't modify it directly.
+            block_hashes.append(last_block_hash)
+
+        # NOTE(woosuk): Since incomplete blocks are not eligible for
+        # sharing, `num_computed_tokens` is always a multiple of
+        # `block_size`.
+        num_computed_tokens = len(computed_blocks) * self.block_size
+        return computed_blocks, num_computed_tokens
 
     def allocate_slots(
         self,
@@ -173,13 +195,24 @@ class KVCacheManager:
 
         new_computed_blocks = new_computed_blocks or []
 
+        req_blocks = self.req_to_blocks[request.request_id]
+
+        # Free the blocks that are skipped during the attention computation
+        # (e.g., tokens outside the sliding window).
+        # We can do this even if we cannot schedule this request due to
+        # insufficient free blocks.
+        # Should call this function before allocating new blocks to reduce
+        # the number of evicted blocks.
+        removed_blocks = self.specialized_manager.remove_skipped_blocks(
+            req_blocks, request.num_computed_tokens)
+        self.block_pool.free_blocks(removed_blocks)
+
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                len(new_computed_blocks) * self.block_size)
         num_required_blocks = cdiv(num_computed_tokens + num_tokens,
                                    self.block_size)
-        req_blocks = self.req_to_blocks[request.request_id]
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
 
@@ -247,6 +280,7 @@ class KVCacheManager:
             num_cached_blocks=num_cached_blocks,
             num_full_blocks=num_full_blocks_after_append,
             block_size=self.block_size,
+            hash_fn=self.caching_hash_fn,
         )
 
         self.num_cached_block[

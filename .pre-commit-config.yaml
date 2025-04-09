@@ -1,3 +1,6 @@
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
@@ -53,7 +56,7 @@ repos:
     entry: tools/mypy.sh 0 "local"
     language: python
     types: [python]
-    additional_dependencies: &mypy_deps [mypy==1.11.1, types-setuptools, types-PyYAML, types-requests]
+    additional_dependencies: &mypy_deps [mypy==1.11.1, types-cachetools, types-setuptools, types-PyYAML, types-requests]
     stages: [pre-commit] # Don't run in CI
   - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.9

@@ -12,7 +12,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
-from vllm.model_executor.guided_decoding.reasoner import Reasoner
+from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import GuidedDecodingParams
 
 
@@ -61,7 +61,7 @@ _MAX_THREADPOOL_WORKERS = 16
 async def get_outlines_guided_decoding_logits_processor(
     guided_params: GuidedDecodingParams,
     tokenizer: PreTrainedTokenizerBase,
-    reasoner: Optional[Reasoner],
+    reasoner: Optional[ReasoningParser],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
            None]:
     """
@@ -92,7 +92,7 @@ async def get_outlines_guided_decoding_logits_processor(
 def get_local_outlines_guided_decoding_logits_processor(
     guided_params: GuidedDecodingParams,
     tokenizer: PreTrainedTokenizerBase,
-    reasoner: Optional[Reasoner],
+    reasoner: Optional[ReasoningParser],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
            None]:
     """
@@ -141,7 +141,7 @@ def _get_logits_processor(
     tokenizer: PreTrainedTokenizerBase,
     mode: GuidedDecodingMode,
     whitespace_pattern: Union[str, None],
-    reasoner: Optional[Reasoner],
+    reasoner: Optional[ReasoningParser],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor]:
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern,

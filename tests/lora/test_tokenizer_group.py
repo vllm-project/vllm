@@ -24,12 +24,10 @@ async def test_tokenizer_group_lora(sql_lora_files, tokenizer_group_type):
     )
     lora_request = LoRARequest("1", 1, sql_lora_files)
     assert reference_tokenizer.encode("prompt") == tokenizer_group.encode(
-        request_id="request_id", prompt="prompt", lora_request=lora_request)
+        prompt="prompt", lora_request=lora_request)
     assert reference_tokenizer.encode(
         "prompt") == await tokenizer_group.encode_async(
-            request_id="request_id",
-            prompt="prompt",
-            lora_request=lora_request)
+            prompt="prompt", lora_request=lora_request)
     assert isinstance(tokenizer_group.get_lora_tokenizer(None),
                       PreTrainedTokenizerBase)
     assert tokenizer_group.get_lora_tokenizer(

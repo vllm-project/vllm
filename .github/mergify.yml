@@ -19,7 +19,7 @@ pull_request_rules:
       - files~=\.buildkite/
       - files~=^cmake/
       - files=CMakeLists.txt
-      - files~=^Dockerfile
+      - files~=^docker/Dockerfile
       - files~=^requirements.*\.txt
       - files=setup.py
   actions:
@@ -87,6 +87,20 @@ pull_request_rules:
     label:
       add:
         - v1
+
+- name: label-tpu
+  description: Automatically apply tpu label
+  conditions:
+    - or:
+      - files~=tpu.
+      - files~=_tpu
+      - files~=tpu_
+      - files~=/tpu/
+      - files~=pallas
+  actions:
+    label:
+      add:
+        - tpu
 
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:

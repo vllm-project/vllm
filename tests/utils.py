@@ -7,12 +7,14 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union
 
+import cloudpickle
 import openai
 import pytest
 import requests
@@ -101,6 +103,9 @@ class RemoteOpenAIServer:
         args = parser.parse_args(["--model", model, *vllm_serve_args])
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
+
+        self.show_hidden_metrics = \
+            args.show_hidden_metrics_for_version is not None
 
         # download the model before starting the server to avoid timeout
         is_local = os.path.isdir(model)
@@ -315,6 +320,37 @@ def _test_completion_close(
     return results
 
 
+def _test_chat(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+):
+    results = []
+
+    messages = [{
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": prompt
+        }]
+    }]
+
+    # test with text prompt
+    chat_response = client.chat.completions.create(model=model,
+                                                   messages=messages,
+                                                   max_tokens=5,
+                                                   temperature=0.0)
+
+    results.append({
+        "test": "completion_close",
+        "text": chat_response.choices[0].message.content,
+        "finish_reason": chat_response.choices[0].finish_reason,
+        "usage": chat_response.usage,
+    })
+
+    return results
+
+
 def _test_embeddings(
     client: openai.OpenAI,
     model: str,
@@ -510,6 +546,8 @@ def compare_all_settings(model: str,
                 results += _test_completion(client, model, prompt, token_ids)
             elif method == "generate_close":
                 results += _test_completion_close(client, model, prompt)
+            elif method == "generate_chat":
+                results += _test_chat(client, model, prompt)
             elif method == "generate_with_image":
                 results += _test_image_text(
                     client, model,
@@ -566,6 +604,7 @@ def init_test_distributed_environment(
 
 
 def multi_process_parallel(
+    monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
     pp_size: int,
     test_target: Any,
@@ -576,13 +615,28 @@ def multi_process_parallel(
     # as compared to multiprocessing.
     # NOTE: We need to set working_dir for distributed tests,
     # otherwise we may get import errors on ray workers
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
+    # NOTE: Force ray not to use gitignore file as excluding, otherwise
+    # it will not move .so files to working dir.
+    # So we have to manually add some of large directories
+    os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
+    ray.init(
+        runtime_env={
+            "working_dir": VLLM_PATH,
+            "excludes":
+            ["build", ".git", "cmake-build-*", "shellcheck", "dist"]
+        })
 
     distributed_init_port = get_open_port()
     refs = []
     for rank in range(tp_size * pp_size):
         refs.append(
-            test_target.remote(tp_size, pp_size, rank, distributed_init_port))
+            test_target.remote(
+                monkeypatch,
+                tp_size,
+                pp_size,
+                rank,
+                distributed_init_port,
+            ), )
     ray.get(refs)
 
     ray.shutdown()
@@ -696,16 +750,88 @@ def fork_new_process_for_each_test(
     return wrapper
 
 
+def spawn_new_process_for_each_test(
+        f: Callable[_P, None]) -> Callable[_P, None]:
+    """Decorator to spawn a new process for each test function.
+    """
+
+    @functools.wraps(f)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        # Check if we're already in a subprocess
+        if os.environ.get('RUNNING_IN_SUBPROCESS') == '1':
+            # If we are, just run the function directly
+            return f(*args, **kwargs)
+
+        import torch.multiprocessing as mp
+        with suppress(RuntimeError):
+            mp.set_start_method('spawn')
+
+        # Get the module
+        module_name = f.__module__
+
+        # Create a process with environment variable set
+        env = os.environ.copy()
+        env['RUNNING_IN_SUBPROCESS'] = '1'
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            output_filepath = os.path.join(tempdir, "new_process.tmp")
+
+            # `cloudpickle` allows pickling complex functions directly
+            input_bytes = cloudpickle.dumps((f, output_filepath))
+
+            cmd = [sys.executable, "-m", f"{module_name}"]
+
+            returned = subprocess.run(cmd,
+                                      input=input_bytes,
+                                      capture_output=True,
+                                      env=env)
+
+            # check if the subprocess is successful
+            try:
+                returned.check_returncode()
+            except Exception as e:
+                # wrap raised exception to provide more information
+                raise RuntimeError(f"Error raised in subprocess:\n"
+                                   f"{returned.stderr.decode()}") from e
+
+    return wrapper
+
+
+def create_new_process_for_each_test(
+    method: Optional[Literal["spawn", "fork"]] = None
+) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
+    """Creates a decorator that runs each test function in a new process.
+
+    Args:
+        method: The process creation method. Can be either "spawn" or "fork". 
+               If not specified,
+               it defaults to "spawn" on ROCm platforms and "fork" otherwise.
+
+    Returns:
+        A decorator to run test functions in separate processes.
+    """
+    if method is None:
+        method = "spawn" if current_platform.is_rocm() else "fork"
+
+    assert method in ["spawn",
+                      "fork"], "Method must be either 'spawn' or 'fork'"
+
+    if method == "fork":
+        return fork_new_process_for_each_test
+
+    return spawn_new_process_for_each_test
+
+
 def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     """
     Get a pytest mark, which skips the test if the GPU doesn't meet
     a minimum memory requirement in GB.
-    
+
     This can be leveraged via `@large_gpu_test` to skip tests in environments
     without enough resources, or called when filtering tests to run directly.
     """
     try:
-        if current_platform.is_cpu() or current_platform.is_openvino():
+        if current_platform.is_cpu():
             memory_gb = 0
         else:
             memory_gb = current_platform.get_device_total_memory() / GB_bytes
@@ -755,7 +881,7 @@ def multi_gpu_test(*, num_gpus: int):
     marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        func = fork_new_process_for_each_test(f)
+        func = create_new_process_for_each_test()(f)
         for mark in reversed(marks):
             func = mark(func)
 

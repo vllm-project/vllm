@@ -36,16 +36,16 @@ class NVLMProcessor(BaseInternVLProcessor):
     def image_token_id(self) -> int:
         return self.tokenizer.get_vocab()[IMG_PAD]
 
-    def get_image_repl_features(
+    def get_image_repl(
         self,
         feature_size: int,
         num_patches: Optional[int],
-    ) -> str:
+    ) -> PromptUpdateDetails[str]:
         if num_patches is None:
             raise NotImplementedError("Embedding inputs are not supported")
 
         tile_pos_identifiers = [f"<tile_{i}>" for i in range(1, num_patches)]
-        if self.use_thumbnail and num_patches != 1:
+        if self.use_thumbnail:
             tile_pos_identifiers += ["<tile_global_thumbnail>"]
 
         context_size = feature_size // num_patches
@@ -55,14 +55,9 @@ class NVLMProcessor(BaseInternVLProcessor):
         # We include the start and end as well because "<Image><tile" is
         # tokenized as ["<Image", "><", "tile"], resulting in assertion error
         # when trying to find "<tile" as a subsequence of "<Image><tile"
-        return "<Image>" + features + "</Image>"
+        repl = "<Image>" + features + "</Image>"
 
-    def get_image_repl_full(
-        self,
-        feature_size: int,
-        num_patches: Optional[int],
-    ) -> str:
-        return self.get_image_repl_features(feature_size, num_patches)
+        return PromptUpdateDetails.select_text(repl, IMG_PAD)
 
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
@@ -88,31 +83,6 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )
-
-    def get_max_image_tokens(self) -> int:
-        hf_processor = self.get_hf_processor()
-        tokenizer = hf_processor.tokenizer
-
-        max_num_patches = hf_processor.max_dynamic_patch
-        # we need +1 here because max_dynamic_patch in config doesn't
-        # include the thumbnail patch
-        tile_pos_identifiers = [
-            f"<tile_{i+1}>" for i in range(max_num_patches)
-        ]
-        if hf_processor.use_thumbnail and max_num_patches != 1:
-            tile_pos_identifiers += ["<tile_global_thumbnail>"]
-
-        # "<Image><tile" is tokenized as ["<Image", "><", "tile"]
-        # so we include <tile_1> in the start_str
-        start_str = "<Image>" + tile_pos_identifiers.pop(0)
-        end_str = "</Image>"
-        start_token_len = len(tokenizer.encode(start_str))
-        end_token_len = len(tokenizer.encode(end_str))
-        tile_token_len = sum(
-            len(tokenizer.encode(identifier))
-            for identifier in tile_pos_identifiers)
-        non_image_tokens_num = start_token_len + end_token_len + tile_token_len
-        return super().get_max_image_tokens() + non_image_tokens_num
 
 
 class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
@@ -180,12 +150,9 @@ class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return PromptUpdateDetails(
-                full=hf_processor.get_image_repl_full(feature_size,
-                                                      num_patches) + "\n",
-                features=hf_processor.get_image_repl_features(
-                    feature_size, num_patches) + "\n",
-            )
+            repl = hf_processor.get_image_repl(feature_size, num_patches)
+
+            return PromptUpdateDetails.select_text(repl.full + "\n", IMG_PAD)
 
         # See note in dummy data regarding why we have the extra newline
         return [

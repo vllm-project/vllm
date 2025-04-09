@@ -43,7 +43,7 @@ vLLM is flexible and easy to use with:
 - Tensor parallelism and pipeline parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
-- Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs, Gaudi® accelerators and GPUs, PowerPC CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
+- Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs, Gaudi® accelerators and GPUs, IBM Power CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
 - Prefix caching support
 - Multi-lora support
 
@@ -67,6 +67,8 @@ getting_started/quickstart
 getting_started/examples/examples_index
 getting_started/troubleshooting
 getting_started/faq
+getting_started/v1_user_guide
+
 :::
 
 % What does vLLM support?
@@ -75,9 +77,9 @@ getting_started/faq
 :caption: Models
 :maxdepth: 1
 
+models/supported_models
 models/generative_models
 models/pooling_models
-models/supported_models
 models/extensions/index
 :::
 

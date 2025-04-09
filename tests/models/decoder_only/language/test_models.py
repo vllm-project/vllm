@@ -3,11 +3,35 @@
 
 Run `pytest tests/models/test_models.py`.
 """
+
 import pytest
+import torch
+
+from vllm.platforms import current_platform
 
 from ...utils import check_logprobs_close
 
+# These have unsupported head_dim for FA. We do not
+# not have a clean way to fall back, so we fail with
+# a clear msg when it happens.
+# https://github.com/vllm-project/vllm/issues/14524
+REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
 
+# This list contains the model that are using AITER kernel.
+# Skip model that are not using AITER tests.
+# When more AITER kernels are added, this list will not be
+# needed as all the models will be calling AITER kernels
+# in parts of the operators
+AITER_MODEL_LIST = [
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "openbmb/MiniCPM3-4B",
+    "Qwen/Qwen-7B",
+    "Qwen/Qwen2.5-0.5B-Instruct",
+    "ehristoforu/Falcon3-MoE-2x7B-Insruct",
+]
+
+
+# @maybe_test_rocm_aiter
 @pytest.mark.parametrize(
     "model",
     [
@@ -63,15 +87,23 @@ from ...utils import check_logprobs_close
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+def test_models(hf_runner, vllm_runner, example_prompts, model: str,
+                dtype: str, max_tokens: int, num_logprobs: int,
+                use_rocm_aiter: bool, monkeypatch) -> None:
+
+    if model in REQUIRES_V0:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
+
+    if use_rocm_aiter and (model in AITER_MODEL_LIST):
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    elif use_rocm_aiter and model not in AITER_MODEL_LIST:
+        # Skip model that are not using AITER tests.
+        # When more AITER kernels are added, this list will not be
+        # needed as all the models will be calling AITER kernels
+        # in parts of the operators
+        pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
     with hf_runner(model, dtype=dtype) as hf_model:
         if model.startswith("THUDM/chatglm3"):
@@ -85,16 +117,16 @@ def test_models(
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-        # This test is for verifying whether the model's extra_repr
-        # can be printed correctly.
-        def print_model(model):
-            print(model)
-
-        vllm_model.apply_model(print_model)
-
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
     )
+    if use_rocm_aiter:
+        # this is to ensure that vllm engine
+        # has deallocated the memory before running the next
+        # unit tests. On ROCm, when using AITER
+        # the memory might not be deallocated completely
+        # before running the next test case
+        torch.cuda.synchronize()

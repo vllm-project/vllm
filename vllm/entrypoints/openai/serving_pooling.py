@@ -6,6 +6,7 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Final, Literal, Optional, Union, cast
 
+import jinja2
 import numpy as np
 from fastapi import Request
 from typing_extensions import assert_never
@@ -135,7 +136,7 @@ class OpenAIServingPooling(OpenAIServing):
                      truncate_prompt_tokens=truncate_prompt_tokens,
                      add_special_tokens=request.add_special_tokens,
                  )
-        except ValueError as e:
+        except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 

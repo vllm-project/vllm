@@ -17,7 +17,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               is_quantized_kv_cache)
 # yapf: enable
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.attention.ops.ipex_attn import PagedAttention
+from vllm.attention.ops.ipex_attn import PagedAttention, _use_ipex
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.logger import init_logger
 from vllm.utils import make_tensor_with_pad
@@ -404,6 +404,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -411,6 +412,10 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         if logits_soft_cap is not None:
             logger.warning_once("Torch SPDA does not support logits soft cap. "
                                 "Outputs may be slightly off.")
+        if use_irope:
+            logger.warning_once(
+                "Using irope in Torch SPDA is not supported yet, it will fall"
+                " back to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -431,10 +436,11 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {supported_head_sizes}.")
-        if is_quantized_kv_cache(kv_cache_dtype):
+
+        if is_quantized_kv_cache(kv_cache_dtype) and not _use_ipex:
             raise NotImplementedError(
-                "Torch SDPA backend does not support FP8 KV cache. "
-                "Please use xFormers backend instead.")
+                "Torch SDPA backend FP8 KV cache requires "
+                "intel_extension_for_pytorch support.")
         self.attn_type = attn_type
 
     def forward(

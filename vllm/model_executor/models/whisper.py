@@ -34,8 +34,8 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
-from .interfaces import (SupportsMultiModal, SupportsTranscription,
-                         SupportsV0Only)
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
+                         SupportsTranscription, SupportsV0Only)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     make_layers)
 
@@ -580,6 +580,10 @@ class WhisperMultiModalProcessor(
         feature_extractor = self.info.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
+    @property
+    def pad_dummy_encoder_prompt(self) -> bool:
+        return True
+
     def create_encoder_prompt(
         self,
         prompt: Union[str, list[int]],
@@ -689,8 +693,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         return decoder_outputs
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         # TODO: This method does not obey the interface for SupportsMultiModal.
         # Refactor this once encoder/decoder support is implemented in V1.
         audio_input = self._parse_and_validate_audio_input(**kwargs)

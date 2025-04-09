@@ -54,6 +54,15 @@ def merge_attn_states_kernel(
 
     p_lse = tl.load(prefix_lse + head_idx * num_tokens + token_idx)
     s_lse = tl.load(suffix_lse + head_idx * num_tokens + token_idx)
+
+    # FA2 and FA3 have different behavior for when the sum-exp is 0, this namely
+    # arises with 0 len seqlens. FA3 returns -inf here while FA2 returns inf.
+    # If we see an inf assume FA2 and convert inf to -inf for consistency
+    # and correctness. Inf generally doesn't make sense in this context outside
+    # of undefined-behavior/FA2-case, so I think this a safe assumption.
+    p_lse = float('-inf') if p_lse == float('inf') else p_lse
+    s_lse = float('-inf') if s_lse == float('inf') else s_lse
+
     max_lse = tl.maximum(p_lse, s_lse)
     p_lse = p_lse - max_lse
     s_lse = s_lse - max_lse

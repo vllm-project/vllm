@@ -16,7 +16,8 @@ from PIL.Image import Image
 from transformers import BatchFeature
 from typing_extensions import NotRequired, TypeAlias
 
-from vllm.utils import JSONTree, full_groupby, is_list_of, json_map_leaves
+from vllm.jsontree import JSONTree, json_map_leaves
+from vllm.utils import full_groupby, is_list_of
 
 if TYPE_CHECKING:
     from .hasher import MultiModalHashDict
@@ -108,7 +109,8 @@ The built-in modalities are defined by :class:`MultiModalDataBuiltins`.
 """
 
 
-class PlaceholderRange(TypedDict):
+@dataclass(frozen=True)
+class PlaceholderRange:
     """
     Placeholder location information for multi-modal data.
 
@@ -120,8 +122,8 @@ class PlaceholderRange(TypedDict):
 
         .. code-block::
 
-            A: { "offset": 0, "length": 4 }
-            B: { "offset": 5, "length": 4 }
+            A: PlaceholderRange(offset=0, length=4)
+            B: PlaceholderRange(offset=5, length=4)
     """
 
     offset: int
@@ -129,6 +131,31 @@ class PlaceholderRange(TypedDict):
 
     length: int
     """The length of the placeholder."""
+
+    is_embed: Optional[torch.Tensor] = None
+    """
+    A boolean mask of shape `(length,)` indicating which positions
+    between `offset` and `offset + length` to assign embeddings to.
+    """
+
+    def get_num_embeds(self) -> int:
+        if self.is_embed is None:
+            return self.length
+
+        return int(self.is_embed.sum().item())
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, self.__class__):
+            return False
+        if not (self.offset, self.length) == (other.offset, other.length):
+            return False
+
+        if self.is_embed is None:
+            return other.is_embed is None
+        if other.is_embed is None:
+            return self.is_embed is None
+
+        return nested_tensors_equal(self.is_embed, other.is_embed)
 
 
 NestedTensors = Union[list["NestedTensors"], list[torch.Tensor], torch.Tensor,
@@ -433,6 +460,10 @@ class MultiModalFieldConfig:
             :func:`MultiModalFieldConfig.flat`
         """
 
+        if size_per_item.ndim != 1:
+            raise ValueError("size_per_item should be a 1-D tensor, "
+                             f"but found shape: {size_per_item.shape}")
+
         slice_idxs = [0, *accumulate(size_per_item)]
         slices = [
             slice(slice_idxs[i], slice_idxs[i + 1])
@@ -660,6 +691,13 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
         return cast(BatchedTensorInputs, json_mapped)
 
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key)
+
+        for items in self._items_by_modality.values():
+            for item in items:
+                item.pop(key, None)
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False
@@ -731,7 +769,7 @@ class MultiModalInputs(TypedDict):
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: NotRequired[Optional["MultiModalHashDict"]]
+    mm_hashes: Optional["MultiModalHashDict"]
     """The hashes of the multi-modal data."""
 
     mm_placeholders: MultiModalPlaceholderDict

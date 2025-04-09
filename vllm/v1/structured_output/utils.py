@@ -26,10 +26,6 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if "pattern" in obj:
             return True
 
-        # Check for enum restrictions
-        if "enum" in obj:
-            return True
-
         # Check for numeric ranges
         if obj.get("type") in ("integer", "number") and any(
                 key in obj
@@ -239,7 +235,7 @@ def choice_as_grammar(choice: list[str]) -> str:
     return grammar
 
 
-def validate_structured_output_request(
+def validate_structured_output_request_xgrammar(
         sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
@@ -251,7 +247,11 @@ def validate_structured_output_request(
     gd_params = sampling_params.guided_decoding
 
     if gd_params.regex:
-        raise ValueError("Regex structured output is not supported.")
+        try:
+            xgr.Grammar.from_regex(gd_params.regex)
+        except Exception as err:
+            raise ValueError("Failed to transform regex into a grammar: "
+                             f"{err}") from err
 
     if gd_params.choice:
         choice_grammar = choice_as_grammar(gd_params.choice)

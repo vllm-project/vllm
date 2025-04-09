@@ -20,7 +20,7 @@ NUM_SAMPLE_LOGPROBS_UNDER_TEST = 5
 # Number of prompt logprobs to request when testing prompt logprobs
 NUM_PROMPT_LOGPROBS_UNDER_TEST = 7
 
-TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
+TOKENIZER_NAME = "meta-llama/Llama-3.2-1B"
 
 FULL_STRINGS = [
     "My name is Robert from Neural Magic and I love working on vLLM so much!",
@@ -330,13 +330,21 @@ class MockEngineCore:
         # each matrix has dimensions
         # (num prompt toks) x (num prompt logprobs+1)
         prompt_logprobs_raw: Optional[list[LogprobsTensors]] = None,
+        eos_token_id: Optional[int] = None,
+        stop_token_ids: Optional[list[int]] = None,
+        ignore_eos: bool = False,
     ) -> None:
+        self.num_requests = len(tokens_list)
         self.tokens_list = tokens_list
         self.current_idx = 0
         self.generated_logprobs_raw = generated_logprobs_raw
         self.do_logprobs = generated_logprobs_raw is not None
         self.prompt_logprobs_raw = prompt_logprobs_raw
         self.do_prompt_logprobs = prompt_logprobs_raw is not None
+        self.request_finished = [False for _ in range(self.num_requests)]
+        self.eos_token_id = eos_token_id
+        self.stop_token_ids = stop_token_ids
+        self.ignore_eos = ignore_eos
 
     def get_outputs(self) -> list[EngineCoreOutput]:
         do_logprobs = self.do_logprobs
@@ -345,7 +353,7 @@ class MockEngineCore:
 
         outputs = []
         for req_idx, token_ids in enumerate(self.tokens_list):
-            if len(token_ids) > token_idx:
+            if not self.request_finished[req_idx]:
                 if do_logprobs:
                     assert self.generated_logprobs_raw is not None
                     (logprobs_token_ids_, logprobs_, sampled_token_ranks_) = (
@@ -365,14 +373,23 @@ class MockEngineCore:
                         prompt_logprobs = None
                 else:
                     prompt_logprobs = None
+                new_token_id = token_ids[token_idx]
                 output = EngineCoreOutput(
                     request_id=f"request-{req_idx}",
-                    new_token_ids=[token_ids[token_idx]],
+                    new_token_ids=[new_token_id],
                     new_logprobs=logprobs,
                     new_prompt_logprobs_tensors=prompt_logprobs,
                 )
                 if token_idx == len(token_ids) - 1:
+                    output.finish_reason = FinishReason.LENGTH
+                    self.request_finished[req_idx] = True
+                if not self.ignore_eos and new_token_id == self.eos_token_id:
                     output.finish_reason = FinishReason.STOP
+                    self.request_finished[req_idx] = True
+                if new_token_id in (self.stop_token_ids or ()):
+                    output.finish_reason = FinishReason.STOP
+                    output.stop_reason = new_token_id
+                    self.request_finished[req_idx] = True
                 outputs.append(output)
 
         self.current_idx += 1

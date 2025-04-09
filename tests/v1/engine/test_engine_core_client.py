@@ -3,12 +3,13 @@
 import asyncio
 import time
 import uuid
+from threading import Thread
 from typing import Optional
 
+import psutil
 import pytest
 from transformers import AutoTokenizer
 
-from tests.utils import fork_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -18,6 +19,8 @@ from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
                                         SyncMPClient)
 from vllm.v1.executor.abstract import Executor
+
+from ...utils import create_new_process_for_each_test
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -88,9 +91,10 @@ def echo(self, msg: str, err_msg: Optional[str] = None) -> str:
     return msg
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
-def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
+def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
+                            multiprocessing_mode: bool):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -165,17 +169,17 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
             core_client: SyncMPClient = client
 
-            result = core_client._call_utility("echo", "testarg")
+            result = core_client.call_utility("echo", "testarg")
             assert result == "testarg"
 
             with pytest.raises(Exception) as e_info:
-                core_client._call_utility("echo", None, "help!")
+                core_client.call_utility("echo", None, "help!")
 
             assert str(e_info.value) == "Call to echo method failed: help!"
 
 
 @pytest.mark.asyncio(loop_scope="function")
-async def test_engine_core_client_asyncio(monkeypatch):
+async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -236,10 +240,49 @@ async def test_engine_core_client_asyncio(monkeypatch):
 
         core_client: AsyncMPClient = client
 
-        result = await core_client._call_utility_async("echo", "testarg")
+        result = await core_client.call_utility_async("echo", "testarg")
         assert result == "testarg"
 
         with pytest.raises(Exception) as e_info:
-            await core_client._call_utility_async("echo", None, "help!")
+            await core_client.call_utility_async("echo", None, "help!")
 
         assert str(e_info.value) == "Call to echo method failed: help!"
+
+
+@pytest.mark.timeout(10)
+def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
+
+    with monkeypatch.context() as m, pytest.raises(Exception) as e_info:
+        m.setenv("VLLM_USE_V1", "1")
+
+        engine_args = EngineArgs(model=MODEL_NAME)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT)
+        executor_class = Executor.get_class(vllm_config)
+
+        # Start another thread to wait for engine core process to start
+        # and kill it - simulate fatal uncaught process exit.
+        this_proc = psutil.Process()
+        children_before = set(this_proc.children())
+
+        def kill_first_child():
+            while True:
+                time.sleep(0.5)
+                children = set(this_proc.children()) - children_before
+                if children:
+                    child = children.pop()
+                    print("Killing child core process", child.pid)
+                    child.kill()
+                    break
+
+        Thread(target=kill_first_child, daemon=True).start()
+
+        _core_client = EngineCoreClient.make_client(
+            multiprocess_mode=True,
+            asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=True,
+        )
+
+    assert "Engine core initialization failed" in str(e_info.value)
