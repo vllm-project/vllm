@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from typing import List, Set, Tuple
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
@@ -16,8 +17,8 @@ class NeuronExecutor(ExecutorBase):
     uses_ray: bool = False
 
     def _init_executor(self) -> None:
-        assert (self.lora_config is
-                None), "LoRA is not supported for Neuron backend."
+        assert (self.lora_config
+                is None), "LoRA is not supported for Neuron backend."
 
         # Instantiate the worker and load the model to the device.
         self._init_worker()
