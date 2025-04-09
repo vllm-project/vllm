@@ -26,7 +26,7 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core_client import AsyncMPClient
+from vllm.v1.engine.core_client import AsyncMPClient, DPAsyncMPClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.output_processor import (OutputProcessor,
                                              RequestOutputCollector)
@@ -96,7 +96,11 @@ class AsyncLLM(EngineClient):
                                                 log_stats=self.log_stats)
 
         # EngineCore (starts the engine in background process).
-        self.engine_core = AsyncMPClient(
+        core_client_class = AsyncMPClient if (
+            vllm_config.parallel_config.data_parallel_size
+            == 1) else DPAsyncMPClient
+
+        self.engine_core = core_client_class(
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=self.log_stats,
@@ -280,8 +284,6 @@ class AsyncLLM(EngineClient):
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() or await q.get()
-                if isinstance(out, Exception):
-                    raise out
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
@@ -355,9 +357,8 @@ class AsyncLLM(EngineClient):
                     iteration_stats=iteration_stats,
                 )
 
-        except Exception as e:
-            logger.error("AsyncLLM output_handler got an Exception:",
-                         exc_info=e)
+        except Exception:
+            logger.exception("AsyncLLM output_handler failed.")
             self.output_processor.propagate_error(EngineDeadError())
 
     async def abort(self, request_id: str) -> None:
@@ -463,11 +464,8 @@ class AsyncLLM(EngineClient):
 
     @property
     def is_running(self) -> bool:
-        # Have not started the loop yet.
-        if self.output_handler is None:
-            return True
-
-        return not self.output_handler.done()
+        # Is None before the loop is started.
+        return self.output_handler is None or not self.output_handler.done()
 
     @property
     def is_stopped(self) -> bool:
@@ -475,7 +473,7 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
-        return (self.engine_core.is_engine_dead or not self.is_running)
+        return self.engine_core.is_engine_dead or not self.is_running
 
     @property
     def dead_error(self) -> BaseException:

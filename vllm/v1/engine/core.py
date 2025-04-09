@@ -317,32 +317,28 @@ class EngineCoreProc(EngineCore):
         log_stats: bool,
         engine_index: int = 0,
     ):
-        try:
-            super().__init__(vllm_config, executor_class, log_stats)
+        super().__init__(vllm_config, executor_class, log_stats)
 
-            self.errored_sent_event = threading.Event()
-            self.step_fn = (self.step if self.batch_queue is None else
-                            self.step_with_batch_queue)
-            self.global_unfinished_reqs = False
+        self.errored_sent_event = threading.Event()
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
+        self.global_unfinished_reqs = False
 
-            # Background Threads and Queues for IO. These enable us to
-            # overlap ZMQ socket IO with GPU since they release the GIL,
-            # and to overlap some serialization/deserialization with the
-            # model forward pass.
-            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-            self.input_queue: queue.Queue[tuple[EngineCoreRequestType,
-                                                Any]] = queue.Queue()
-            self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
-            threading.Thread(target=self.process_input_socket,
-                             args=(input_path, engine_index),
-                             daemon=True).start()
-            threading.Thread(target=self.process_output_socket,
-                             args=(output_path, engine_index),
-                             daemon=True).start()
-
-        except Exception as e:
-            logger.exception("Error during EngineCore initialization.")
-            raise e
+        # Background Threads and Queues for IO. These enable us to
+        # overlap ZMQ socket IO with GPU since they release the GIL,
+        # and to overlap some serialization/deserialization with the
+        # model forward pass.
+        # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+        self.input_queue: queue.Queue[tuple[EngineCoreRequestType,
+                                            Any]] = queue.Queue()
+        self.output_queue: queue.Queue[Union[EngineCoreOutputs,
+                                             bytes]] = queue.Queue()
+        threading.Thread(target=self.process_input_socket,
+                         args=(input_path, engine_index),
+                         daemon=True).start()
+        threading.Thread(target=self.process_output_socket,
+                         args=(output_path, engine_index),
+                         daemon=True).start()
 
     @staticmethod
     def run_engine_core(*args,
@@ -370,7 +366,6 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGINT, signal_handler)
 
         engine_core: Optional[EngineCoreProc] = None
-        startup_failed = True
         try:
             parallel_config: ParallelConfig = kwargs[
                 "vllm_config"].parallel_config
@@ -382,21 +377,18 @@ class EngineCoreProc(EngineCore):
             else:
                 engine_core = EngineCoreProc(*args, **kwargs)
 
-            startup_failed = False
             engine_core.run_busy_loop()
 
         except SystemExit:
-            logger.debug("EngineCore interrupted.")
+            logger.debug("EngineCore exiting.")
+
         except Exception as e:
-            if startup_failed:
-                logger.exception("EngineCore got error at startup:",
-                                 exc_info=e)
-                # TODO need to send failure here
-                raise e
+            if engine_core is None:
+                logger.exception("EngineCore failed to start.")
             else:
-                assert engine_core is not None
-                logger.exception("EngineCore got an Exception:", exc_info=e)
+                logger.exception("EngineCore encountered a fatal error.")
                 engine_core._send_engine_dead()
+            raise e
         finally:
             if engine_core is not None:
                 engine_core.shutdown()
@@ -486,11 +478,11 @@ class EngineCoreProc(EngineCore):
     def _send_engine_dead(self):
         """Send EngineDead status to the EngineCoreClient."""
 
-        # Put ENGINE_CORE_DEAD to the front of the queue.
+        # Put ENGINE_CORE_DEAD in the queue.
         self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
 
         # Wait until msg sent by the daemon before shutdown.
-        if not self.errored_sent_event.wait(timeout=10.):
+        if not self.errored_sent_event.wait(timeout=5.):
             logger.fatal("vLLM shutdown signal from EngineCore failed "
                          "to send. Please report this issue.")
 
@@ -536,7 +528,7 @@ class EngineCoreProc(EngineCore):
             while True:
                 outputs = self.output_queue.get()
                 if outputs == EngineCoreProc.ENGINE_CORE_DEAD:
-                    socket.send_multipart((outputs, ), copy=False)
+                    socket.send(outputs, copy=False)
                     break
                 assert not isinstance(outputs, bytes)
                 outputs.engine_index = engine_index
