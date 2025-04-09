@@ -367,7 +367,6 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.config = config
         self.lora_config = lora_config
-        self.quant_config = quant_config  # Required by MixtralForCausalLM
 
         self.model = GraniteMoeModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))

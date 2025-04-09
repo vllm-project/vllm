@@ -270,7 +270,6 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.config = config
         self.lora_config = lora_config
-        self.quant_config = quant_config
 
         self.model = GraniteMoeSharedModel(vllm_config=vllm_config,
                                            prefix=maybe_prefix(
