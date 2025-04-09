@@ -5,6 +5,7 @@ from typing import Callable, Optional, Tuple
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.platforms import current_platform
 
 
@@ -65,7 +66,7 @@ def rocm_unquantized_gemm(x: torch.Tensor,
                           weight: torch.Tensor,
                           bias: Optional[torch.Tensor] = None):
     k = weight.shape[1]
-    use_skinny = (current_platform.is_rocm_skinny_gemm_enabled() and \
+    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and \
                     x.dtype in [torch.float16, torch.bfloat16] \
                     and k % 8 == 0 and bias is None)
 

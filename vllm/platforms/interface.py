@@ -394,13 +394,6 @@ class Platform:
         return False
 
     @classmethod
-    def is_rocm_skinny_gemm_enabled(cls) -> bool:
-        """
-        Return if skinny gemms enabled on rocm
-        """
-        raise NotImplementedError
-
-    @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
         """
         Returns the total number of compute units (CU) on single GPU.

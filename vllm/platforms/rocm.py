@@ -319,10 +319,3 @@ class RocmPlatform(Platform):
     def get_cu_count(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(
             device_id).multi_processor_count
-
-    @classmethod
-    def is_rocm_skinny_gemm_enabled(cls) -> bool:
-        """
-        Return if skinny gemms enabled on rocm
-        """
-        return envs.VLLM_ROCM_USE_SKINNY_GEMM
