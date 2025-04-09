@@ -318,17 +318,33 @@ class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                                    num_images=num_images)
         }
 
+        # 计算每个图像需要的标记数量
+        num_tokens_per_image = self.info.get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height
+        )
+        
+        # 为每个图像重复 <image> 标记相应的次数
+        prompt_text = "<image>" * (num_tokens_per_image * num_images)
+
         return ProcessorInputs(
-            prompt_text="<image>" * num_images,
+            prompt_text=prompt_text,
             mm_data=mm_data,
         )
         
     def _get_dummy_images(self, width: int, height: int, num_images: int) -> list[npt.NDArray]:
-        """Get dummy images for profiling."""
-        # 使用与 MiniMaxVL01Processor 期望的大小相匹配的图像尺寸
-        # 这里我们使用 2016x2016 的图像，这是 MiniMaxVL01 支持的最大尺寸之一
-        # 这样可以确保生成的图像标记数量足够
-        dummy_image = np.full((1024, 1024, 3), 255, dtype=np.uint8)
+        """Get dummy images for profiling.
+        
+        Args:
+            width: Target width of the dummy images
+            height: Target height of the dummy images
+            num_images: Number of dummy images to generate
+            
+        Returns:
+            A list of dummy images as numpy arrays with shape (height, width, 3)
+        """
+        # 使用传入的目标尺寸创建 dummy 图像
+        dummy_image = np.full((height, width, 3), 255, dtype=np.uint8)
         return [dummy_image] * num_images
 
 @MULTIMODAL_REGISTRY.register_processor(
