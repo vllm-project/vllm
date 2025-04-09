@@ -279,6 +279,15 @@ def compute_alibi_tensor(alibi_slopes, seqlen_q, seqlen_k):
 
 
 @triton.jit
+def quant_fp8(x, scale):
+    FP8_MIN: tl.constexpr = DEFAULT_FP8_MIN
+    FP8_MAX: tl.constexpr = DEFAULT_FP8_MAX
+    x *= scale
+    x = tl.clamp(x, FP8_MIN, FP8_MAX)
+    return x
+
+
+@triton.jit
 def _attn_fwd_inner(
     acc,
     l_i,
@@ -325,8 +334,6 @@ def _attn_fwd_inner(
     EIGHT_BIT_KV: tl.constexpr,
     EIGHT_BIT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
 ):
-    FP8_MIN: tl.constexpr = DEFAULT_FP8_MIN
-    FP8_MAX: tl.constexpr = DEFAULT_FP8_MAX
 
     # loop over k, v, and update accumulator
     for start_n in range(block_min, block_max, BLOCK_N):
@@ -425,8 +432,7 @@ def _attn_fwd_inner(
 
         if EIGHT_BIT_GEMM:
             if USE_P_SCALE:
-                p = tl.clamp(p * p_scale, FP8_MIN, FP8_MAX).to(EIGHT_BIT_DTYPE)
-                # They are all eight bit
+                p = quant_fp8(p, p_scale).to(EIGHT_BIT_DTYPE)
                 acc += tl.dot(p, v)
             else:
                 # v is in eight_bit but p is not, we want the gemm in p's type
@@ -708,8 +714,6 @@ def attn_fwd(
     EIGHT_BIT_KV: tl.constexpr,
     EIGHT_BIT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
 ):
-    FP8_MIN: tl.constexpr = DEFAULT_FP8_MIN
-    FP8_MAX: tl.constexpr = DEFAULT_FP8_MAX
 
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
         NUM_WG = NUM_CU * GRID_CU_MULTIP  # number of workgroups launched
@@ -1091,8 +1095,8 @@ def attn_fwd(
                 causal_start_idx = seqlen_q - seqlen_k
                 if EIGHT_BIT and not EIGHT_BIT_KV:  # noqa: SIM102
                     if o_descale_ptr is not None:
-                        acc *= o_descale
-                        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
+                        acc = quant_fp8(acc, o_descale)
+
                 acc = acc.to(Out.type.element_ty)
                 if IS_CAUSAL:  # noqa: SIM102
                     if (causal_start_idx > start_m_idx
