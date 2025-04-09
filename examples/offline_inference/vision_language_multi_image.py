@@ -395,7 +395,7 @@ def load_ovis2(question: str, image_urls: list[str]) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         trust_remote_code=True,
         dtype="half",
@@ -403,7 +403,7 @@ def load_ovis2(question: str, image_urls: list[str]) -> ModelRequestData:
         hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
     )
 
-    placeholder = "<image>\n" * len(image_urls)
+    placeholder = '\n'.join([f'Image {i+1}: <image>' for i in range(len(image_urls))]) + '\n'
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
              f"<|im_start|>user\n{placeholder}"
              f"{question}<|im_end|>\n"

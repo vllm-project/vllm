@@ -460,15 +460,10 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            if isinstance(pixel_values, torch.Tensor) and pixel_values.dim() == 6:
-                # if is [tensor_batch, 1, num_segments, ch, w, h]
-                # we need -> [tensor_batch, num_segments, ch, w, h]
-                pixel_values = flatten_bn(pixel_values)
-
             return Ovis2ImagePatchInputs(
                 type="image_patches",
-                flat_data=flatten_bn(pixel_values, concat=True),
-                patches_per_image=[x.shape[0] for x in pixel_values],
+                flat_data=flatten_bn(flatten_bn(pixel_values), concat=True),
+                patches_per_image=[x.shape[0] for x in flatten_bn(pixel_values)],
             )
 
         raise AssertionError("This line should be unreachable.")
