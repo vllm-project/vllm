@@ -1194,7 +1194,7 @@ def apply_mistral_chat_template(
     )
 
     try:
-        tokens_ids = tokenizer.apply_chat_template(
+        return tokenizer.apply_chat_template(
         messages=messages,
         tools=tools,
         **kwargs,
@@ -1205,4 +1205,3 @@ def apply_mistral_chat_template(
     # are properly caught in the preprocessing_input step
     except AssertionError as e:
         raise ValueError from e
-    return tokens_ids
