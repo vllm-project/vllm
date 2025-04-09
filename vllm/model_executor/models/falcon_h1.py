@@ -15,28 +15,46 @@ from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.mamba_mixer2 import (MambaMixer2,
-                                                           extra_groups_for_head_shards)
+from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+    MambaMixer2,
+    extra_groups_for_head_shards,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (DEFAULT_VOCAB_PADDING_SIZE,
-                                                                 ParallelLMHead,
-                                                                 VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE,
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
-                                                    MambaCacheParams)
+from vllm.model_executor.models.mamba_cache import (
+    MambaCacheManager,
+    MambaCacheParams,
+)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP, SupportsV0Only
-from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from .interfaces import (
+    HasInnerState,
+    IsHybrid,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsV0Only,
+)
+from .utils import (
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
+
 
 class FalconH1MLP(nn.Module):
     def __init__(
@@ -70,7 +88,7 @@ class FalconH1MLP(nn.Module):
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        x[:, :self.intermediate_size // self.tp_size] *= self.gate_multiplier
+        x[:, : self.intermediate_size // self.tp_size] *= self.gate_multiplier
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         x = x * self.down_multiplier
@@ -90,8 +108,12 @@ class FalconH1SSMDecoderLayer(nn.Module):
         self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        self.d_ssm = (int(config.mamba_expand * config.hidden_size) if config.mamba_d_ssm is None else config.mamba_d_ssm) 
-        
+        self.d_ssm = (
+            int(config.mamba_expand * config.hidden_size)
+            if config.mamba_d_ssm is None
+            else config.mamba_d_ssm
+        )
+
         self.mamba = MambaMixer2(
             hidden_size=config.hidden_size,
             ssm_state_size=config.mamba_d_state,
@@ -106,24 +128,26 @@ class FalconH1SSMDecoderLayer(nn.Module):
             activation=config.hidden_act,
             chunk_size=config.mamba_chunk_size,
             quant_config=quant_config,
-            use_rms_norm=config.mamba_rms_norm
+            use_rms_norm=config.mamba_rms_norm,
         )
         # n_groups is overriden later by `MambaMixer2`
-        self.groups_time_state_size = (self.mamba.n_groups * config.mamba_d_state) 
+        self.groups_time_state_size = self.mamba.n_groups * config.mamba_d_state
         self.zxbcdt_multipliers = config.ssm_multipliers
         self._init_mup_vector()
 
     def _init_mup_vector(self):
         """
-        Non learnable per-block scaling vector composed of element-wise multipliers
-        applied to each separate contiguous block of the output of the linear
-        projection (in_proj) before further processing(gating, convolution, SSM):
+        Non learnable per-block scaling vector composed of element-wise 
+        multipliersapplied to each separate contiguous block of the output 
+        of the linear projection (in_proj) before further processing
+        (gating, convolution, SSM):
 
-            - Z block:      [0 : d_ssm]                          → zxbcdt_multipliers[0]
-            - X block:      [d_ssm : 2 * d_ssm]                  → zxbcdt_multipliers[1]
-            - B block:      [2 * d_ssm : 2 * d_ssm + G * S]      → zxbcdt_multipliers[2]
-            - C block:      [2 * d_ssm + G * S : 2 * d_ssm + 2 * G * S] → zxbcdt_multipliers[3]
-            - dt block:     [2 * d_ssm + 2 * G * S : end]        → zxbcdt_multipliers[4]
+            - Z block:  [0 : d_ssm]                      → zxbcdt_multipliers[0]
+            - X block:  [d_ssm : 2 * d_ssm]              → zxbcdt_multipliers[1]
+            - B block:  [2 * d_ssm : 2 * d_ssm + G * S]  → zxbcdt_multipliers[2]
+            - C block:  [2 * d_ssm + G * S : 2 * d_ssm + 2 * G * S] 
+                        → zxbcdt_multipliers[3]
+            - dt block: [2 * d_ssm + 2 * G * S : end]    → zxbcdt_multipliers[4]
 
         where:
             - d_ssm:     Dimension of state-space model latent
@@ -132,26 +156,40 @@ class FalconH1SSMDecoderLayer(nn.Module):
             - All indices are divided by tp_size to support tensor parallelism
         """
         vector_shape = (
-            2 * self.d_ssm + 2 * self.groups_time_state_size + self.config.mamba_n_heads
+            2 * self.d_ssm
+            + 2 * self.groups_time_state_size
+            + self.config.mamba_n_heads
         ) // self.tp_size
         mup_vector = torch.ones(1, vector_shape)
         # Z vector 0 -> d_ssm
-        mup_vector[:, : self.d_ssm // self.tp_size] *= self.zxbcdt_multipliers[0]
+        mup_vector[:, : self.d_ssm // self.tp_size] *= self.zxbcdt_multipliers[
+            0
+        ]
         # X vector d_ssm -> 2 * d_ssm
-        mup_vector[:, (self.d_ssm // self.tp_size): (2 * self.d_ssm // self.tp_size)] *= self.zxbcdt_multipliers[1]
+        mup_vector[
+            :, (self.d_ssm // self.tp_size) : (2 * self.d_ssm // self.tp_size)
+        ] *= self.zxbcdt_multipliers[1]
         # B vector 2 * d_ssm -> 2 * d_ssm + (n_group * d_state)
         mup_vector[
-            :, (2 * self.d_ssm)  // self.tp_size : (2 * self.d_ssm + self.groups_time_state_size)  // self.tp_size
+            :,
+            (2 * self.d_ssm)
+            // self.tp_size : (2 * self.d_ssm + self.groups_time_state_size)
+            // self.tp_size,
         ] *= self.zxbcdt_multipliers[2]
-        # C vector 2 * d_ssm + (n_group * d_state) -> 2 * d_ssm + 2 * (n_group * d_state)
+        # C vector 2 * d_ssm + (n_group * d_state) 
+        # -> 2 * d_ssm + 2 * (n_group * d_state)
         mup_vector[
             :,
-            (2 * self.d_ssm + self.groups_time_state_size)  // self.tp_size : (2 * self.d_ssm
-            + 2 * self.groups_time_state_size)  // self.tp_size,
+            (2 * self.d_ssm + self.groups_time_state_size)
+            // self.tp_size : (2 * self.d_ssm + 2 * self.groups_time_state_size)
+            // self.tp_size,
         ] *= self.zxbcdt_multipliers[3]
-        # dt vector 2 * d_ssm + 2 * (n_group * d_state) -> 2 * d_ssm + 2 * (n_group * d_state) + n_heads
+        # dt vector 2 * d_ssm + 2 * (n_group * d_state) 
+        # -> 2 * d_ssm + 2 * (n_group * d_state) + n_heads
         mup_vector[
-            :, (2 * self.d_ssm + 2 * self.groups_time_state_size)  // self.tp_size:
+            :,
+            (2 * self.d_ssm + 2 * self.groups_time_state_size)
+            // self.tp_size :,
         ] *= self.zxbcdt_multipliers[4]
 
         self.register_buffer("mup_vector", mup_vector, persistent=False)
@@ -168,7 +206,7 @@ class FalconH1SSMDecoderLayer(nn.Module):
             hidden_states,
             mamba_cache_params,
             sequence_idx,
-            mup_vector=self.mup_vector
+            mup_vector=self.mup_vector,
         )
         return hidden_states, residual
 
@@ -185,7 +223,9 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         super().__init__()
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        max_position_embeddings = getattr(
+            config, "max_position_embeddings", 8192
+        )
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
@@ -201,10 +241,14 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = config.hidden_size // self.total_num_heads if getattr(config, "head_dim", None) is None else config.head_dim
+        self.head_dim = (
+            config.hidden_size // self.total_num_heads
+            if getattr(config, "head_dim", None) is None
+            else config.head_dim
+        )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
@@ -323,9 +367,12 @@ class FalconH1ParallelHybrid(nn.Module):
 
         self.feed_forward = FalconH1MLP(config)
 
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
+        self.input_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.pre_ff_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -349,7 +396,7 @@ class FalconH1ParallelHybrid(nn.Module):
         )
 
         # Process input through the SSM branch.
-        # FalconH1SSMDecoderLayer expects hidden_states, attn_metadata, 
+        # FalconH1SSMDecoderLayer expects hidden_states, attn_metadata,
         # residual, mamba_cache_params, and sequence_idx.
         ssm_hidden, _ = self.mamba(
             hidden_states=hidden_states * self.ssm_in_multiplier,
@@ -362,7 +409,9 @@ class FalconH1ParallelHybrid(nn.Module):
         # Sum the outputs from both branches.
         # We assume both branches produce outputs of the same
         # dimensionality (config.hidden_size).
-        hidden_states = (attn_hidden * self.attn_out_multiplier) + (ssm_hidden * self.ssm_out_multiplier)
+        hidden_states = (attn_hidden * self.attn_out_multiplier) + (
+            ssm_hidden * self.ssm_out_multiplier
+        )
         hidden_states = hidden_states + residual
 
         # feed-forward
@@ -392,9 +441,9 @@ class FalconH1Model(nn.Module):
         self.org_vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size, 
-            config.hidden_size, 
-            org_num_embeddings=config.vocab_size
+            self.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
         )
         self.embedding_multiplier = config.embedding_multiplier
 
@@ -412,11 +461,15 @@ class FalconH1Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size
+            )
         )
 
-        self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.final_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -438,7 +491,10 @@ class FalconH1Model(nn.Module):
         if attn_metadata.num_prefills > 0:
             seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
             for i, (srt, end) in enumerate(
-                zip(attn_metadata.query_start_loc, attn_metadata.query_start_loc[1:])
+                zip(
+                    attn_metadata.query_start_loc,
+                    attn_metadata.query_start_loc[1:],
+                )
             ):
                 seq_idx[srt:end] = i
             seq_idx.unsqueeze_(0)
@@ -448,7 +504,8 @@ class FalconH1Model(nn.Module):
                 hidden_states = inputs_embeds * self.embedding_multiplier
             else:
                 hidden_states = (
-                    self.get_input_embeddings(input_ids) * self.embedding_multiplier
+                    self.get_input_embeddings(input_ids)
+                    * self.embedding_multiplier
                 )
             residual = None
         else:
@@ -527,21 +584,25 @@ class FalconH1ForCausalLM(
             self.unpadded_vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
+            padding_size=(
+                DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config
+                else lora_config.lora_vocab_padding_size
+            ),
         )
         self.tie_word_embeddings = config.tie_word_embeddings
         self.lm_head_multiplier = config.lm_head_multiplier
         if self.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(
-                self.model.embed_tokens)
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         # Used to track and store by the Mamba cache between steps.
         self.mamba_cache: Optional[MambaCacheManager] = None
 
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, scale=config.lm_head_multiplier
+            self.unpadded_vocab_size,
+            config.vocab_size,
+            scale=config.lm_head_multiplier,
         )
         self.sampler = get_sampler()
 
@@ -579,7 +640,9 @@ class FalconH1ForCausalLM(
         return hidden_states
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.mamba_cache.copy_inputs_before_cuda_graphs(input_buffers, **kwargs)
+        return self.mamba_cache.copy_inputs_before_cuda_graphs(
+            input_buffers, **kwargs
+        )
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
@@ -590,7 +653,11 @@ class FalconH1ForCausalLM(
 
         conv_state_shape, temporal_state_shape = None, None
 
-        intermediate_size = int(self.config.mamba_expand * hidden_size) if self.config.mamba_d_ssm is None else self.config.mamba_d_ssm
+        intermediate_size = (
+            int(self.config.mamba_expand * hidden_size)
+            if self.config.mamba_d_ssm is None
+            else self.config.mamba_d_ssm
+        )
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
@@ -600,7 +667,10 @@ class FalconH1ForCausalLM(
 
         # - heads and n_groups are TP-ed
         conv_dim = intermediate_size + 2 * n_groups * self.config.mamba_d_state
-        conv_state_shape = (divide(conv_dim, world_size), self.config.mamba_d_conv - 1)
+        conv_state_shape = (
+            divide(conv_dim, world_size),
+            self.config.mamba_d_conv - 1,
+        )
 
         # These are not TP-ed as they depend on A, dt_bias, D
         # - they are typically small
@@ -617,17 +687,22 @@ class FalconH1ForCausalLM(
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(
+            self.lm_head, hidden_states, sampling_metadata
+        )
         return logits
 
     def sample(
-        self, logits: Optional[torch.Tensor], sampling_metadata: SamplingMetadata
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+    def load_weights(
+        self, weights: Iterable[Tuple[str, torch.Tensor]]
+    ) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -674,7 +749,9 @@ class FalconH1ForCausalLM(
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
