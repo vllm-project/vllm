@@ -149,8 +149,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 self.fused_scaled_dot_product_attention = ModuleFusedSDPA(
                     FusedSDPA)
             except ImportError:
-                logger().warning("Could not import HPU FusedSDPA kernel. "
-                                 "vLLM will use native implementation.")
+                logger.warning("Could not import HPU FusedSDPA kernel. "
+                               "vLLM will use native implementation.")
 
         suppored_head_sizes = HPUPagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
