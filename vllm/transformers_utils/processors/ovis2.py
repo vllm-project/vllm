@@ -21,7 +21,7 @@ from typing import List, Union
 
 import PIL
 import torch
-from transformers import AutoProcessor, BatchFeature
+from transformers import AutoProcessor, BatchFeature, Qwen2Tokenizer, Qwen2TokenizerFast
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import TextInput, PreTokenizedInput
@@ -61,7 +61,7 @@ class OvisProcessor(ProcessorMixin):
     valid_kwargs = ["chat_template"]
 
     image_processor_class = "AutoImageProcessor"
-    tokenizer_class = ("Qwen2Tokenizer", "Qwen2TokenizerFast")
+    tokenizer_class = "Qwen2Tokenizer"
 
     def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):
         self.image_token = "<|image_pad|>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
@@ -224,7 +224,7 @@ class OvisProcessor(ProcessorMixin):
         return height, width
 
     def get_token_value(self, tok):
-        return self.tokenizer(self.extra_special_tokens[tok])["input_ids"][0]
+        return self.tokenizer.vocab[self.extra_special_tokens[tok]]
 
     def construct_image_placeholders(self, grid):
 
@@ -240,7 +240,21 @@ class OvisProcessor(ProcessorMixin):
                 if r < grid[0] - 1:
                     image_placeholders.append(self.get_token_value('image_row_sep'))
         image_placeholders.append(self.get_token_value('image_end'))
-        return image_placeholders
+        # return image_placeholders
+
+        padded_placeholder_tokens = []
+        image_atom_token_id = self.get_token_value('image_atom')
+        # Extract the padding token ID from tokenizer
+        image_padding_token_id = self.get_token_value('image_pad')
+
+        # Create a new list with padding tokens inserted
+        padded_placeholder_tokens = []
+        for token in image_placeholders:
+            padded_placeholder_tokens.append(token)
+            if token == image_atom_token_id:
+                # Add 255 padding tokens after each image atom token
+                padded_placeholder_tokens.extend([image_padding_token_id] * 255)
+        return padded_placeholder_tokens
 
     def preprocess_image(self, image: PIL.Image.Image, max_partition, covering_threshold, convert_to_rgb, return_tensors):
         def _preprocess(img: PIL.Image.Image, side):

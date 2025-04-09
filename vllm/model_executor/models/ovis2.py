@@ -38,7 +38,6 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models import SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.aimv2 import Aimv2VisualTokenizer
 from vllm.model_executor.models.utils import maybe_prefix, flatten_bn, AutoWeightsLoader, init_vllm_registered_model
@@ -56,6 +55,9 @@ from vllm.transformers_utils.configs.ovis2 import OvisConfig
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.transformers_utils.processors.ovis2 import OvisProcessor
 from collections import defaultdict
+
+from .utils import merge_multimodal_embeddings
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 
 # Cannot find the following number from hf config.
 IGNORE_ID = -100
@@ -213,22 +215,23 @@ class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
             grid = out_mm_kwargs["grids"][item_idx]
 
             hf_processor = self.info.get_hf_processor()
-            # Get the base placeholder tokens
-            placeholder_tokens = hf_processor.construct_image_placeholders(grid)
-            image_atom_token_id = IMAGE_ATOM_ID
+            return hf_processor.construct_image_placeholders(grid)
+            # # Get the base placeholder tokens
+            # placeholder_tokens = hf_processor.construct_image_placeholders(grid)
+            # image_atom_token_id = hf_processor.get_token_value('image_atom')
 
-            # Extract the padding token ID from tokenizer
-            image_padding_token_id = hf_processor.get_token_value('image_pad')
+            # # Extract the padding token ID from tokenizer
+            # image_padding_token_id = hf_processor.get_token_value('image_pad')
 
-            # Create a new list with padding tokens inserted
-            padded_placeholder_tokens = []
-            for token in placeholder_tokens:
-                padded_placeholder_tokens.append(token)
-                if token == image_atom_token_id:
-                    # Add 255 padding tokens after each image atom token
-                    padded_placeholder_tokens.extend([image_padding_token_id] * 255)
+            # # Create a new list with padding tokens inserted
+            # padded_placeholder_tokens = []
+            # for token in placeholder_tokens:
+            #     padded_placeholder_tokens.append(token)
+            #     if token == image_atom_token_id:
+            #         # Add 255 padding tokens after each image atom token
+            #         padded_placeholder_tokens.extend([image_padding_token_id] * 255)
 
-            return padded_placeholder_tokens
+            # return padded_placeholder_tokens
 
         return [
             PromptReplacement(
@@ -277,12 +280,23 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # tokenizer = AutoTokenizer.from_pretrained(config.name_or_path)
         tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
 
+        self.extra_special_tokens = {
+            "image_token": "<image>",
+            "image_atom": "<image_atom>",
+            "image_start": "<img>",
+            "image_prefix": "<pre>",
+            "image_col_sep": "<col>",
+            "image_row_sep": "<row>",
+            "image_end": "</img>",
+            'image_pad': '<image_pad>',
+        }
+
         self.extra_token_mapping = {
-            k: tokenizer(v)['input_ids'][0] for k, v in tokenizer.extra_special_tokens.items()
+            k: tokenizer(v)['input_ids'][0] for k, v in self.extra_special_tokens.items()
         }
 
         self.extra_token_mapping_for_substitution = {
-            k: tokenizer(v)['input_ids'][0] for k, v in tokenizer.extra_special_tokens.items() if k in
+            k: tokenizer(v)['input_ids'][0] for k, v in self.extra_special_tokens.items() if k in
                                                                                                   {'image_atom',
                                                                                                    'image_pad'}
         }
@@ -437,13 +451,65 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             return output_list
         else:
             return [tensor for tensor in input] if input.dim() > 1 else [input]
+    
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Ovis2ImagePatchInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        if pixel_values is not None and not isinstance(pixel_values, list):
+            if pixel_values.dim() == 6:
+                # if is [tensor_batch, 1, num_segments, ch, w, h] we need -> [tensor_batch, num_segments, ch, w, h]
+                pixel_values = pixel_values.squeeze(1)
+                pixel_values = [pixel_value.to(self.config.torch_dtype) for pixel_value in pixel_values]
+            else:
+                pixel_values = [pixel_values]
+
+            return Ovis2ImagePatchInputs(
+                type="image_patches",
+                flat_data=torch.cat(
+                    [x for x in pixel_values if x is not None],
+                    dim=0).to(self.visual_tokenizer.dtype),
+                patches_per_image=[x.shape[0] for x in pixel_values]
+            )
+
+        return None
+    
+    def _process_image_input(
+            self, image_input: Ovis2ImagePatchInputs) -> MultiModalEmbeddings:
+        self._init_embed_representation()
+        image_patches_flat = image_input["flat_data"]
+        patches_per_image = image_input["patches_per_image"]
+
+        visual_tokens = self.visual_tokenizer(image_patches_flat)
+        visual_embeds = self.vte(visual_tokens)  # 1:1 numeric eq.
+
+        return visual_embeds.split(patches_per_image, dim=0)
+    
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+
+        image_features = self._process_image_input(image_input)
+
+        return image_features
+    
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.llm.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds,
+                multimodal_embeddings, [151672, 151666])
+        return inputs_embeds
 
     def forward(
             self,
             input_ids: torch.Tensor,
             positions: torch.Tensor,
-            kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata,
             intermediate_tensors: Optional[IntermediateTensors] = None,
             inputs_embeds: Optional[torch.Tensor] = None,
             **kwargs: object,
@@ -453,17 +519,17 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
-        elif inputs_embeds is None and 'pixel_values' in kwargs:  # vllm batches the input or make it a list but does not have a attn mask
-            inputs_embeds = self.merge_multimodal(text_input_ids=self.get_tensor_formatted(input_ids),
-                                                  pixel_values=kwargs['pixel_values'], )
-            # is_testing = kv_caches[0].numel() == 0) valid approach but probably not needed
-            # input_ids = None
+        elif inputs_embeds is None:  # vllm batches the input or make it a list but does not have a attn mask
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
+            print(inputs_embeds.mean())
+
         # up until here we have a inputs_embeds 100% numerical identity between the OG HF Transformers implementation and ours
         hidden_states = self.llm(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
