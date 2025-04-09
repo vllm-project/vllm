@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Literal, Optional, Union
 
 from vllm.config import VllmConfig
@@ -19,6 +19,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.utils import (
@@ -46,6 +47,8 @@ class Processor:
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)
+
+        self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
 
         # Multi-modal hasher (for images)
         self.use_hash = (
@@ -138,11 +141,6 @@ class Processor:
         else:
             params.guided_decoding.backend = engine_level_backend
 
-        from vllm.platforms import current_platform
-        if not current_platform.supports_structured_output():
-            raise ValueError("Structured output is not supported on "
-                             f"{current_platform.device_name}.")
-
         # Request content validation
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
@@ -184,6 +182,11 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
+        from vllm.platforms import current_platform
+        current_platform.validate_request(
+            prompt=prompt,
+            params=params,
+        )
         self._validate_lora(lora_request)
         self._validate_params(params)
         if priority != 0:
@@ -231,7 +234,7 @@ class Processor:
             self.tokenizer.get_lora_tokenizer(lora_request))
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[list[MultiModalKwargs]] = None
+        sorted_mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
         if decoder_inputs["type"] == "multimodal":
@@ -256,19 +259,27 @@ class Processor:
             # are multiple modalities.
             unique_modalities = set(sorted_item_modalities)
             if len(unique_modalities) > 1:
-                sorted_mm_inputs = []
+                orig_sorted_mm_inputs = []
                 used_indices = {modality: 0 for modality in unique_modalities}
+
                 for modality in sorted_item_modalities:
                     items = decoder_mm_inputs.get_items(modality)
                     item = items[used_indices[modality]]
-                    sorted_mm_inputs.append(MultiModalKwargs.from_items([item
-                                                                         ]))
+
+                    orig_sorted_mm_inputs.append(
+                        MultiModalKwargs.from_items([item]))
                     used_indices[modality] += 1
             else:
-                sorted_mm_inputs = [
+                orig_sorted_mm_inputs = [
                     MultiModalKwargs.from_items([item]) for item in
                     decoder_mm_inputs.get_items(sorted_item_modalities[0])
                 ]
+
+            if sorted_mm_hashes is not None:
+                sorted_mm_inputs = self.mm_input_cache_client.get_and_update_p0(
+                    orig_sorted_mm_inputs, sorted_mm_hashes)
+            else:
+                sorted_mm_inputs = orig_sorted_mm_inputs
 
         return EngineCoreRequest(
             request_id=request_id,
