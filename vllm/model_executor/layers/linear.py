@@ -1492,9 +1492,9 @@ class QKVCrossParallelLinear(LinearBase):
         key_to_ignore = ["weight_loader", "_weight_loader"]
         if is_hpu and type(map_param) is HabanaParameterWrapper and type(
                 src_param) is torch.nn.parameter.Parameter:
-             has_same_type_name = True
+            has_same_type_name = True
         else:
-             has_same_type_name = type(src_param) is type(map_param)
+            has_same_type_name = type(src_param) is type(map_param)
         src_param_attrs = {
             k: v
             for k, v in src_param.__dict__.items() if k not in key_to_ignore
