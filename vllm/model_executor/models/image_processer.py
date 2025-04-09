@@ -376,10 +376,18 @@ class ImageProcessor(BaseImageProcessor):
             self.image_std = (0.26862954, 0.26130258, 0.27577711)
             
         for image in images:
-            # 将self.size元组解包为两个单独的参数
-            width, height = self.size
-            resized_image = image.resize((width, height), Image.BICUBIC)
-            transform_img = _transform(height, width, self.image_mean, self.image_std)(resized_image)
+            # 检查 image 是否为 NumPy 数组
+            if isinstance(image, np.ndarray):
+                # 如果是 NumPy 数组，直接使用它
+                img_array = image
+            else:
+                # 如果是 PIL 图像，调整大小
+                width, height = self.size
+                resized_image = image.resize((width, height), Image.BICUBIC)
+                img_array = to_numpy_array(resized_image)
+                
+            # 应用变换
+            transform_img = _transform(self.size[1], self.size[0], self.image_mean, self.image_std)(Image.fromarray(img_array))
             all_images.append(to_numpy_array(transform_img))
 
         images = [
