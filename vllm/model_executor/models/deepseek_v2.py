@@ -30,10 +30,10 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
+                         get_current_vllm_config)
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -56,8 +56,6 @@ from .interfaces import SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
-
-SHARE_FUSION_REPLICA = envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS
 
 
 class DeepseekV2MLP(nn.Module):
@@ -107,7 +105,9 @@ class DeepseekV2MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
-        self.num_share_fusion_replicas = SHARE_FUSION_REPLICA
+        vllm_config = get_current_vllm_config()
+        self.num_share_fusion_replicas = \
+            vllm_config.parallel_config.num_share_fusion_replicas
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
@@ -546,7 +546,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
@@ -700,7 +699,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.num_share_fusion_replicas = SHARE_FUSION_REPLICA
+        self.num_share_fusion_replicas = \
+            vllm_config.parallel_config.num_share_fusion_replicas
         self.model = DeepseekV2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:

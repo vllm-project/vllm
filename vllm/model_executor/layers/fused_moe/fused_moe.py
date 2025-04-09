@@ -1451,7 +1451,8 @@ def fused_moe(
     w2_zp: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
+    block_shape: Optional[List[int]] = None,
+    num_share_fusion_replicas: int = 0,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -1498,7 +1499,8 @@ def fused_moe(
         a2.
     - block_shape: (Optional[list[int]]): Optional block size for block-wise
         quantization.
-
+    - num_share_fusion_replicas (int): indicate if enable share expert fusion,
+      and if enabled, how many share expert replicas are there in MoE.
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
@@ -1512,7 +1514,7 @@ def fused_moe(
             renormalize,
             num_expert_group,
             topk_group,
-            num_share_fusion_replicas=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS)
+            num_share_fusion_replicas=num_share_fusion_replicas)
     elif custom_routing_function is None:
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             hidden_states, gating_output, topk, renormalize)

@@ -1747,6 +1747,13 @@ class ParallelConfig:
     """Backend to use for data parallel, either "mp" or "ray"."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+
+    num_share_fusion_replicas: int = 0
+    """num_share_fusion_replicas: This value control how many replicas
+    the user want to have to fuse expert in deepseek v2 style models
+    set it to 0 disable share expert fusion and set it to > 0 values
+    to enable. Larger value consume more GPU memory but is faster"""
+
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
@@ -1858,6 +1865,7 @@ class ParallelConfig:
         factors.append(self.enable_expert_parallel)
         factors.append(self.data_parallel_size)
         factors.append(envs.VLLM_ALL2ALL_BACKEND)
+        factors.append(self.num_share_fusion_replicas)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
