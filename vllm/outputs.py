@@ -43,6 +43,7 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    spec_token_acceptance_counts: Optional[list[int]] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -133,6 +134,9 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
+        self.spec_token_acceptance_counts = [
+            o.spec_token_acceptance_counts for o in outputs
+        ]
 
     def add(self, next_output: "RequestOutput") -> None:
         """Merge subsequent RequestOutput into this one"""
