@@ -37,6 +37,7 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaDummyInputsBuilder, LlavaLikeConfig,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
+from .llava_next import (LlavaNextMultiModalProcessor, LlavaNextProcessingInfo, LlavaNextImageEmbeddingInputs, LlavaNextImagePixelInputs)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
@@ -45,312 +46,11 @@ from vllm.multimodal.processing import BaseProcessingInfo
 import numpy as np
 import numpy.typing as npt
 
-# Register the processors
-AutoImageProcessor.register("minimax_vl_01", ImageProcessor)
-AutoProcessor.register("minimax_vl_01", ImageProcessor)
-class LlavaNextImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    Shape:
-    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
-
-    Note that `num_patches` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
-    """
-
-
-class LlavaNextImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: torch.Tensor
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
-    """
-
-
-LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
-                             LlavaNextImageEmbeddingInputs]
-
-
-class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
-    image_grid_pinpoints: Final[list[list[int]]]
-
-
-class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
-
-    def get_hf_config(self) -> LlavaNextLikeConfig:
-        from vllm.transformers_utils.configs.configuration_minimax_vl_01 import MiniMaxVL01Config
-        return self.ctx.get_hf_config(MiniMaxVL01Config)
-
-    def get_hf_processor(self, **kwargs: object):
-        if "image_processor" not in kwargs:
-            kwargs["image_processor"] = self.get_image_processor(**kwargs)
-        if "tokenizer" not in kwargs:
-            from transformers import AutoTokenizer
-            kwargs["tokenizer"] = AutoTokenizer.from_pretrained(self.ctx.model_config.tokenizer)
-        return MiniMaxVL01Processor(**kwargs)
-
-    def get_image_processor(self, **kwargs: object) -> ImageProcessor:
-        return ImageProcessor(**kwargs)
-
-    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
-        hf_config = self.get_hf_config()
-        vision_encoder_info = self.get_vision_encoder_info()
-
-        base_feature_size = self._apply_feature_select_strategy(
-            hf_config.vision_feature_select_strategy,
-            vision_encoder_info.get_num_image_tokens(
-                image_width=image_width,
-                image_height=image_height,
-            ),
-        )
-
-        num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-            image_size=(image_height, image_width),
-            grid_pinpoints=hf_config.image_grid_pinpoints,
-            patch_size=vision_encoder_info.get_image_size(),
-        )
-
-        (
-            unpadded_feature_size,
-            newline_feature_size,
-        ) = self._get_num_unpadded_features(
-            original_height=image_height,
-            original_width=image_width,
-            npatches=vision_encoder_info.get_patch_grid_length(),
-            num_patch_height=num_patch_height,
-            num_patch_width=num_patch_width,
-        )
-
-        return unpadded_feature_size + newline_feature_size + base_feature_size
-
-    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
-    def _get_num_unpadded_features(
-        self,
-        *,
-        original_height: int,
-        original_width: int,
-        npatches: int,
-        num_patch_height: int,
-        num_patch_width: int,
-    ) -> tuple[int, int]:
-        current_height = npatches * num_patch_height
-        current_width = npatches * num_patch_width
-
-        aspect_ratio = original_width / original_height
-        current_aspect_ratio = current_width / current_height
-
-        if aspect_ratio > current_aspect_ratio:
-            new_height = (original_height * current_width) // original_width
-            padding = (current_height - new_height) // 2
-            current_height = current_height - (2 * padding)
-        else:
-            new_width = (original_width * current_height) // original_height
-            padding = (current_width - new_width) // 2
-            current_width = current_width - (2 * padding)
-
-        unpadded_features = current_height * current_width
-        newline_features = current_height
-
-        return (unpadded_features, newline_features)
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        hf_config = self.get_hf_config()
-
-        largest_feature_size, largest_feature_pinpoint = 0, None
-        for (height, width) in hf_config.image_grid_pinpoints:
-            feat_size = self.get_num_image_tokens(image_width=width,
-                                                  image_height=height)
-            if feat_size > largest_feature_size:
-                largest_feature_size = feat_size
-                largest_feature_pinpoint = ImageSize(width=width,
-                                                     height=height)
-
-        if largest_feature_size == 0 or largest_feature_pinpoint is None:
-            raise ValueError("Cannot have a largest feature size of 0!")
-
-        return largest_feature_pinpoint
-
-_I = TypeVar("_I", bound=LlavaNextProcessingInfo)
-
-
-class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
-
-    # Copied from BaseMultiModalProcessor
-    @abstractmethod
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        raise NotImplementedError
-
-
-class LlavaNextMultiModalProcessor(
-        BaseLlavaNextMultiModalProcessor[LlavaNextProcessingInfo]):
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
-        )
-
-    def _process_image_input(
-        self,
-        image_input: LlavaNextImageInputs,
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
-        if image_input["type"] == "image_embeds":
-            return [image_input["data"]]
-
-        patch_embeddings = self._process_image_pixels(image_input)
-
-        image_sizes = image_input.get("image_sizes")
-        if image_sizes is None:
-            batch_size = len(image_input["data"])
-            vision_config = self.config.vision_config
-            default_height = default_width = vision_config.image_size
-            image_sizes = torch.as_tensor([[default_height, default_width]
-                                           for _ in range(batch_size)])
-
-        return [
-            self._merge_image_patch_embeddings(image_sizes[i],
-                                               patch_features_batch,
-                                               strategy="spatial_unpad")
-            for i, patch_features_batch in enumerate(patch_embeddings)
-        ]
-
-    def _merge_image_patch_embeddings(self, image_size: torch.Tensor,
-                                      patch_embeddings: torch.Tensor, *,
-                                      strategy: str) -> torch.Tensor:
-        if strategy == "flat":
-            return patch_embeddings.flatten(0, 1)
-
-        if strategy.startswith("spatial"):
-            height = width = self.config.vision_config.image_size \
-                // self.config.vision_config.patch_size
-
-            base_patch_embeds = patch_embeddings[0]
-            if height * width != base_patch_embeds.shape[0]:
-                raise ValueError(
-                    "The number of patches is not consistent with the "
-                    "image size.")
-
-            if patch_embeddings.shape[0] > 1:
-                other_patch_embeds = patch_embeddings[1:]
-
-                # Move to CPU to avoid floating-point errors
-                orig_height, orig_width = image_size.tolist()
-
-                # image_aspect_ratio == "anyres"
-                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-                    (orig_height, orig_width),
-                    self.config.image_grid_pinpoints,
-                    self.config.vision_config.image_size,
-                )
-                num_patches = num_patch_height * num_patch_width
-
-                # Image patches might be padded for batch processing
-                other_patch_embeds = other_patch_embeds[:num_patches] \
-                    .view(num_patch_height, num_patch_width, height, width, -1)
-
-                if "unpad" in strategy:
-                    other_patch_embeds = other_patch_embeds \
-                        .permute(4, 0, 2, 1, 3).contiguous() \
-                        .flatten(1, 2).flatten(2, 3)
-                    other_patch_embeds = unpad_image(other_patch_embeds,
-                                                     (orig_height, orig_width))
-                    other_patch_embeds = torch.cat((
-                        other_patch_embeds,
-                        self.image_newline[:, None, None] \
-                            .expand(*other_patch_embeds.shape[:-1], 1) \
-                            .to(other_patch_embeds.device),
-                    ), dim=-1)
-                    other_patch_embeds = other_patch_embeds \
-                        .flatten(1, 2).transpose(0, 1)
-                else:
-                    other_patch_embeds = other_patch_embeds \
-                        .permute(0, 2, 1, 3, 4).contiguous() \
-                        .flatten(0, 3)
-
-                merged_patch_embeddings = torch.cat(
-                    (base_patch_embeds, other_patch_embeds), dim=0)
-            else:
-                if "unpad" in strategy:
-                    merged_patch_embeddings = torch.cat(
-                        (base_patch_embeds,
-                         self.image_newline[None] \
-                            .to(base_patch_embeds.device)
-                    ), dim=0)
-                else:
-                    merged_patch_embeddings = base_patch_embeds
-
-            return merged_patch_embeddings
-
-        raise ValueError(f"Unexpected patch merge strategy: {strategy}")
-
-class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
-
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
-        num_images = mm_counts.get("image", 0)
-
-        mm_data = {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images)
-        }
-
-        # 计算每个图像需要的标记数量
-        num_tokens_per_image = self.info.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height
-        )
-        
-        # 为每个图像重复 <image> 标记相应的次数
-        prompt_text = "<image>" * (num_tokens_per_image * num_images)
-
-        return ProcessorInputs(
-            prompt_text=prompt_text,
-            mm_data=mm_data,
-        )
-        
-    def _get_dummy_images(self, width: int, height: int, num_images: int) -> list[npt.NDArray]:
-        """Get dummy images for profiling.
-        
-        Args:
-            width: Target width of the dummy images
-            height: Target height of the dummy images
-            num_images: Number of dummy images to generate
-            
-        Returns:
-            A list of dummy images as numpy arrays with shape (height, width, 3)
-        """
-        # 使用传入的目标尺寸创建 dummy 图像
-        dummy_image = np.full((height, width, 3), 255, dtype=np.uint8)
-        return [dummy_image] * num_images
 
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaNextMultiModalProcessor,
     info=LlavaNextProcessingInfo,
-    dummy_inputs=MiniMaxVLDummyInputsBuilder)
+    dummy_inputs=LlavaDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
@@ -599,7 +299,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _process_image_pixels(
         self,
-        inputs: LlavaNextImagePixelInputs,
+        inputs,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         assert self.vision_tower is not None
 
@@ -635,7 +335,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _process_image_input(
         self,
-        image_input: LlavaNextImageInputs,
+        image_input,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         if image_input["type"] == "image_embeds":
             return [image_input["data"]]
