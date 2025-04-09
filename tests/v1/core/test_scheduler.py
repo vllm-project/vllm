@@ -2,12 +2,15 @@
 from typing import Optional
 
 import pytest
+import torch
 
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
@@ -21,6 +24,7 @@ def create_scheduler(
     max_num_batched_tokens: int = 8192,
     enable_prefix_caching: Optional[bool] = None,
     long_prefill_token_threshold: int = 0,
+    disable_chunked_mm_input: bool = False,
 ) -> Scheduler:
     '''Create scheduler under test.
 
@@ -40,6 +44,7 @@ def create_scheduler(
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_num_batched_tokens,
         long_prefill_token_threshold=long_prefill_token_threshold,
+        disable_chunked_mm_input=disable_chunked_mm_input,
     )
     model_config = ModelConfig(
         model=model,
@@ -66,12 +71,21 @@ def create_scheduler(
         model_config=model_config,
         cache_config=cache_config,
     )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10000,  # A large number of blocks to hold all requests
+        tensors={},
+        kv_cache_groups=[
+            KVCacheGroupSpec(['layer'],
+                             FullAttentionSpec(16, 1, 1, torch.float32, False))
+        ],
+    )
     cache_config.num_gpu_blocks = 10000
     return Scheduler(
         scheduler_config,
         model_config,
         cache_config,
         lora_config=None,
+        kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
@@ -264,6 +278,49 @@ def test_schedule_partial_requests():
     assert output.num_scheduled_tokens[requests[0].request_id] == 1
     assert output.num_scheduled_tokens[requests[1].request_id] == 700
     assert requests[2].request_id not in output.num_scheduled_tokens
+
+
+def test_no_mm_input_chunking():
+    # Disable multimodal input chunking.
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        disable_chunked_mm_input=True,
+    )
+    mm_positions = [[PlaceholderRange(offset=400, length=800)]]
+    requests = create_requests(num_requests=1,
+                               num_tokens=1200,
+                               mm_positions=mm_positions)
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert len(output.scheduled_cached_reqs) == 0
+    assert len(output.finished_req_ids) == 0
+    # We want to only see the 400 text tokens at the start scheduled
+    assert output.num_scheduled_tokens[requests[0].request_id] == 400
+
+    req_to_index = {
+        request.request_id: i
+        for i, request in enumerate(requests)
+    }
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[] for _ in range(len(requests))],
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 1
+    assert len(output.scheduled_new_reqs) == 0
+    assert len(output.scheduled_cached_reqs) == 1
+    assert len(output.finished_req_ids) == 0
+    assert output.num_scheduled_tokens[requests[0].request_id] == 800
 
 
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
@@ -599,3 +656,99 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         prompt_logprobs_dict={},
     )
     scheduler.update_from_output(scheduler_output1, model_runner_output)
+
+
+# Note - these test cases mirror some of those in test_rejection_sampler.py
+@pytest.mark.parametrize(
+    "spec_tokens,output_tokens,expected",
+    [
+        ([[1, 2, 3]], [[1, 2, 3, 4]], (3, 3)),  # perfect match
+        ([[1, 2, 3]], [[1, 5]], (3, 1)),  # early mismatch
+        ([[1, 2], [3]], [[1, 2, 5], [3, 4]], (3, 3)),  # multiple sequences
+        ([[1]], [[1, 2]], (1, 1)),  # single token sequence
+        ([[]], [[5]], (0, 0)),  # empty sequence
+        ([[1, 2, 3], [4, 5, 6]], [[1, 2, 7], [4, 8]],
+         (6, 3)),  # multiple mismatches
+    ])
+def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
+    """Test scheduling behavior with speculative decoding.
+
+    This test verifies that:
+    1. Speculated tokens get scheduled correctly
+    2. Spec decoding stats properly count number of draft and accepted tokens
+    """
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=len(spec_tokens), num_tokens=1)
+    req_ids = []
+    req_to_index = {}
+    for i, request in enumerate(requests):
+        scheduler.add_request(request)
+        req_ids.append(request.request_id)
+        req_to_index[request.request_id] = i
+
+    # Schedule a decode, which will also draft speculative tokens
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == len(requests)
+    assert output.total_num_scheduled_tokens == len(requests)
+    for i in range(len(requests)):
+        req_id = requests[i].request_id
+        assert output.num_scheduled_tokens[req_id] == 1
+        assert req_id not in output.scheduled_spec_decode_tokens
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0] for _ in range(len(requests))],
+        spec_token_ids=spec_tokens,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+    engine_core_outputs = scheduler.update_from_output(output,
+                                                       model_runner_output)
+
+    for i in range(len(requests)):
+        running_req = scheduler.running[i]
+        # The prompt token
+        assert running_req.num_computed_tokens == 1
+        # The prompt token and the sampled token
+        assert running_req.num_tokens == 2
+        # The prompt token, the sampled token, and the speculated tokens
+        assert running_req.num_tokens_with_spec == 2 + len(spec_tokens[i])
+
+    # No draft or accepted tokens counted yet
+    assert engine_core_outputs.scheduler_stats.spec_decoding_stats is None
+
+    # Schedule the speculated tokens for validation
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 0
+    # The sampled token and speculated tokens
+    assert output.total_num_scheduled_tokens == \
+        len(requests) + sum(len(ids) for ids in spec_tokens)
+    for i in range(len(requests)):
+        req_id = requests[i].request_id
+        assert output.num_scheduled_tokens[req_id] == 1 + len(spec_tokens[i])
+        if spec_tokens[i]:
+            assert len(output.scheduled_spec_decode_tokens[req_id]) == \
+                len(spec_tokens[i])
+        else:
+            assert req_id not in output.scheduled_spec_decode_tokens
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_to_index,
+        sampled_token_ids=output_tokens,
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+    engine_core_outputs = scheduler.update_from_output(output,
+                                                       model_runner_output)
+
+    scheduler_stats = engine_core_outputs.scheduler_stats
+    if expected[0] == 0:
+        assert scheduler_stats.spec_decoding_stats is None
+    else:
+        assert scheduler_stats.spec_decoding_stats is not None
+        stats = scheduler_stats.spec_decoding_stats
+        assert stats.num_draft_tokens == expected[0]
+        assert stats.num_accepted_tokens == expected[1]

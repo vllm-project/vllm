@@ -582,15 +582,6 @@ class HuggingFaceDataset(BenchmarkDataset):
     ) -> None:
         super().__init__(dataset_path=dataset_path, **kwargs)
 
-        # Validate dataset path
-        if self.SUPPORTED_DATASET_PATHS and \
-            self.dataset_path not in self.SUPPORTED_DATASET_PATHS:
-            raise ValueError(
-                f"{self.__class__.__name__} "
-                f"only supports: {', '.join(self.SUPPORTED_DATASET_PATHS)}. "
-                "Please consider contributing if you would "
-                "like to add support for additional dataset formats.")
-
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
         self.load_data()
@@ -758,6 +749,55 @@ class InstructCoderDataset(HuggingFaceDataset):
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# AIMO Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class AIMODataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a AIMO dataset with reasoning questions.
+    """
+    SUPPORTED_DATASET_PATHS = {
+        "AI-MO/aimo-validation-aime", "AI-MO/NuminaMath-1.5",
+        "AI-MO/NuminaMath-CoT"
+    }
+
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
+               output_len: Optional[int] = None,
+               **kwargs) -> list:
+        sampled_requests = []
+        dynamic_output = output_len is None
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt, completion = item['problem'], item["solution"]
+
+            prompt_ids = tokenizer(prompt).input_ids
+            completion_ids = tokenizer(completion).input_ids
+            prompt_len = len(prompt_ids)
+            completion_len = len(completion_ids)
+            output_len = completion_len if dynamic_output else output_len
+            assert isinstance(output_len, int) and output_len > 0
+            if dynamic_output and not is_valid_sequence(prompt_len,
+                                                        completion_len,
+                                                        max_prompt_len=2048,
+                                                        max_total_len=32000):
+                continue
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=None,
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests

@@ -162,9 +162,9 @@ class PaliGemmaMultiModalProcessor(
                 modality="image",
                 target=PromptIndexTargets.prefix(
                     [bos_token_id] if tokenizer.add_bos_token else []),
-                insertion=PromptUpdateDetails(
-                    full=image_tokens + [bos_token_id],
-                    features=image_tokens,
+                insertion=PromptUpdateDetails.select_token_id(
+                    image_tokens + [bos_token_id],
+                    embed_token_id=image_token_id,
                 ),
             )
         ]
@@ -322,6 +322,9 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
 
         return self.multi_modal_projector(image_features)
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

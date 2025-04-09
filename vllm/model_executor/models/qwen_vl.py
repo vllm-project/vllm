@@ -647,9 +647,9 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             PromptReplacement(
                 modality="image",
                 target=[img_start_id, img_end_id],
-                replacement=PromptUpdateDetails(
-                    full=[img_start_id] + image_tokens + [img_end_id],
-                    features=image_tokens,
+                replacement=PromptUpdateDetails.select_token_id(
+                    [img_start_id] + image_tokens + [img_end_id],
+                    embed_token_id=img_pad_id,
                 ),
             )
         ]
@@ -739,6 +739,9 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
             return image_input["data"]
 
         return self.transformer.visual(image_input["data"])
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.transformer
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

@@ -580,6 +580,10 @@ class WhisperMultiModalProcessor(
         feature_extractor = self.info.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
+    @property
+    def pad_dummy_encoder_prompt(self) -> bool:
+        return True
+
     def create_encoder_prompt(
         self,
         prompt: Union[str, list[int]],
@@ -687,6 +691,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             positions=positions,
         )
         return decoder_outputs
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model.decoder
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
