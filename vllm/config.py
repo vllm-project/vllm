@@ -15,7 +15,6 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from importlib.util import find_spec
-from itertools import pairwise
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
                     Optional, Protocol, Union)
@@ -3829,6 +3828,20 @@ def get_current_vllm_config() -> VllmConfig:
     return _current_vllm_config
 
 
+def _pairwise(iterable):
+    """
+    Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
+    
+    Can be removed when Python 3.9 support is dropped.
+    """
+    iterator = iter(iterable)
+    a = next(iterator, None)
+
+    for b in iterator:
+        yield a, b
+        a = b
+
+
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     """
     Get any docstrings placed after attribute assignments in a class body.
@@ -3843,7 +3856,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     out = {}
 
     # Consider each pair of nodes.
-    for a, b in pairwise(cls_node.body):
+    for a, b in _pairwise(cls_node.body):
         # Must be an assignment then a constant string.
         if (not isinstance(a, ast.Assign | ast.AnnAssign)
                 or not isinstance(b, ast.Expr)
