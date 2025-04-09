@@ -73,7 +73,6 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
                        max_num_seqs=16,
                        max_loras=4,
                        max_lora_rank=64,
-                       tensor_parallel_size=1,
                        trust_remote_code=True,
                        fully_sharded_loras=fully_sharded)
     output_tp1 = do_sample(llm_tp1, baichuan_lora_files, lora_id=1)

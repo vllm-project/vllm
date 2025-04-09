@@ -53,7 +53,6 @@ def test_ilama_lora(ilama_lora_files):
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=16,
-                   tensor_parallel_size=1,
                    trust_remote_code=True,
                    enable_chunked_prefill=True)
 
