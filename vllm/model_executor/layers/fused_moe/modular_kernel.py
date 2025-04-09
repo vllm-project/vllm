@@ -60,14 +60,18 @@ def _moe_problem_size(
     E, N, _ = w1.shape
     K = w2.shape[1]
 
-    assert a1.dim() == 2
     assert topk_ids.dim() == 2
-    # Make sure we are using the correct a1 (pre-permute).
-    assert topk_ids.shape[0] == a1.shape[
-        0], f"{topk_ids.shape[0]} != {a1.shape[0]}"
-
-    M = a1.shape[0]
     topk = topk_ids.shape[1]
+
+    if a1.dim() == 2:
+        # Make sure we are using the correct a1 (pre-permute).
+        assert topk_ids.shape[0] == a1.shape[0], \
+            f"{topk_ids.shape[0]} != {a1.shape[0]}"
+        M = a1.shape[0]
+    else:
+        assert a1.dim() == 3
+        assert E == a1.shape[0]
+        M = a1.shape[1] # This is max_num_tokens
 
     return E, M, N, K, topk
 
@@ -310,6 +314,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         """
         a1 = hidden_states
         E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
+
+        #print(f"INIT shape: E={E}, M={M}, N={N}, K={K}, top_k={top_k}")
 
         if global_num_experts == -1:
             global_num_experts = E
