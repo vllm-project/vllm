@@ -904,7 +904,7 @@ class TPUModelRunner:
                                        device=self.device,
                                        dtype=self._hidden_states_dtype)
             # The first dimension of dummy_hidden cannot be mark_dynamic because
-            # there're some operations in the sampler require it to be static.
+            # some operations in the sampler require it to be static.
             for all_greedy in [False, True]:
                 generate_params_if_all_greedy = not all_greedy
                 sampling_metadata = (
