@@ -323,6 +323,9 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return self.multi_modal_projector(image_features)
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
