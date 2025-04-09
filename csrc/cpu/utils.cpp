@@ -4,6 +4,11 @@
   #include <string>
   #include <sched.h>
 #endif
+#if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
+  #include <unistd.h>
+  #include <sys/syscall.h>
+  #define gettid() syscall(SYS_gettid)
+#endif
 
 #include "cpu_types.hpp"
 
