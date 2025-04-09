@@ -196,14 +196,14 @@ class Qwen2_5_VisionMLP(nn.Module):
         return x_down
 
 
-def all_gather_interleave(local_tensor, tp_size: int):
+def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
     """All-gather the input tensor interleavely across model parallel group."""
     import torch.distributed as dist
     gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(tp_size)]
     dist.all_gather(gathered_tensors, local_tensor)
 
     gathered_tensors_split = [
-        torch.split(tensor, local_tensor.shape[-1] // tp_size, -1)
+        torch.split(tensor, hidden_size // tp_size, -1)
         for tensor in gathered_tensors
     ]
     ordered_tensors = [
@@ -258,7 +258,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         # [s, b, 3 * head * head_dim]
         seq_len, bs, _ = qkv.shape
         if self.tp_size > 1:
-            qkv = all_gather_interleave(qkv, self.tp_size)
+            qkv = all_gather_interleave(qkv, self.qkv.hidden_size,
+                                        self.tp_size)
 
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
         q, k, v = qkv.chunk(3, dim=2)
