@@ -308,29 +308,30 @@ class RandomDataset(BenchmarkDataset):
         output_len: int = DEFAULT_OUTPUT_LEN,
         **kwargs,
     ) -> list[SampleRequest]:
+        # Enforce range_ratio < 1
+        assert range_ratio < 1.0, "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+
         vocab_size = tokenizer.vocab_size
 
         prefix_token_ids = (np.random.randint(
             0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
 
-        # Fix input length range
-        input_low = max(1, int(input_len / range_ratio))
-        input_high = int(input_len * range_ratio) + 1
-        if input_low >= input_high:
-            input_low = max(1, input_high - 1)
+        # New sampling logic: [X * (1 - b), X * (1 + b)]
+        input_low = int(input_len * (1 - range_ratio))
+        input_high = int(input_len * (1 + range_ratio))
+        output_low = int(output_len * (1 - range_ratio))
+        output_high = int(output_len * (1 + range_ratio))
+
+        # Add logging for debugging
+        logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
+        logger.info("Sampling output_len from [%s, %s]", output_low, output_high)
+
         input_lens = np.random.randint(input_low,
-                                       input_high,
+                                       input_high + 1,
                                        size=num_requests)
-
-        # Fix output length range
-        output_low = max(1, int(output_len / range_ratio))
-        output_high = int(output_len * range_ratio) + 1
-        if output_low >= output_high:
-            output_low = max(1, output_high - 1)
         output_lens = np.random.randint(output_low,
-                                        output_high,
+                                        output_high + 1,
                                         size=num_requests)
-
         offsets = np.random.randint(0, vocab_size, size=num_requests)
 
         requests = []
