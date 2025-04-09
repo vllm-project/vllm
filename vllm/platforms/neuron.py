@@ -68,10 +68,6 @@ class NeuronPlatform(Platform):
         return True
 
     @classmethod
-    def supports_structured_output(cls) -> bool:
-        return True
-
-    @classmethod
     @lru_cache
     def is_neuronx_distributed_inference(cls) -> bool:
         try:
