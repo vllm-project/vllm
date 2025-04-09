@@ -2036,6 +2036,7 @@ class SpeculativeConfig:
     prompt_lookup_min: Optional[int] = None
     posterior_threshold: Optional[float] = None
     posterior_alpha: Optional[float] = None
+    speculative_token_tree: Optional[str] = None
 
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
@@ -2199,10 +2200,11 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.platforms import current_platform
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  EAGLEConfig) or current_platform.is_neuron():
                         pass
                     else:
                         eagle_config = EAGLEConfig(
