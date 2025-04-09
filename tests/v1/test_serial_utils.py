@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections import UserDict
 from dataclasses import dataclass
+from typing import Optional
 
+import msgspec
 import numpy as np
 import torch
 
@@ -65,6 +67,9 @@ def test_encode_decode():
     assert_equal(decoded2, obj)
 
 
+class MyRequest(msgspec.Struct):
+    mm: Optional[list[MultiModalKwargs]]
+
 def test_multimodal_kwargs():
     d = { 
           "foo": torch.zeros(1000, dtype=torch.float16),
@@ -72,22 +77,23 @@ def test_multimodal_kwargs():
           "baz": ( torch.zeros(256, dtype=torch.int64), "i'm a tuple" )
          }
 
-    mm = MultiModalKwargs(d)
-    # print(mm)
+    # pack mm kwargs into a mock request so that it can be decoded properly
+    req = MyRequest(mm = [ MultiModalKwargs(d) ] )
 
     encoder = MsgpackEncoder()
-    decoder = MsgpackDecoder()
+    decoder = MsgpackDecoder(MyRequest)
 
-    encoded = encoder.encode(mm)
+    encoded = encoder.encode(req)
+
     # 5 total tensors + top level buffer
     assert len(encoded) == 6
 
     total_len = sum([len(x) for x in encoded])
     
-    # expected total encoding length, give some flex for minor changes
-    assert total_len >= 4400 and total_len <= 4500
+    # expected total encoding length, should be 4384, +-20 for minor changes
+    assert total_len >= 4364 and total_len <= 4404
 
-    decoded: MultiModalKwargs = decoder.decode(encoded)
+    decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
     assert torch.equal(d["foo"], decoded["foo"])
 
 

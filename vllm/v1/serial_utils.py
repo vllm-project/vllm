@@ -18,7 +18,6 @@ from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
-CUSTOM_TYPE_MMDICT = 3
 
 logger = init_logger(__name__)
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
@@ -30,7 +29,7 @@ class CustomArray(msgspec.Struct):
     i: int
 
 # msgspec confuses lists and tuples, so we need explicit fields rather than an union
-class NestedArray(msgspec.Struct):
+class NestedArray(msgspec.Struct, omit_defaults=True):
     a: CustomArray = None
     l: list[CustomArray] = None
     t: tuple[CustomArray, ...] = None
@@ -69,9 +68,7 @@ class MsgpackEncoder:
         
         if isinstance(obj, MultiModalKwargs):
             d = { k: self._encode_nested(obj[k]) for k in obj }
-            # returning d here should just work, but it seems that if 
-            # it's a top-level object, msgspec just ignores the decoder hook.
-            return msgpack.Ext(CUSTOM_TYPE_MMDICT, msgpack.encode(d))
+            return d
 
         if isinstance(obj, FunctionType):
             return msgpack.Ext(CUSTOM_TYPE_CLOUDPICKLE, cloudpickle.dumps(obj))
@@ -122,10 +119,8 @@ class MsgpackDecoder:
         if isclass(t):
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
-            # Note: this is not used - it doesn't seem to work for top-level MultiModalKwargs
-            # (dec_hook is not invoked). Instead we use Ext, see ext_hook below. 
             if issubclass(t, MultiModalKwargs):
-                return MultiModalKwargs({ k: self._decode_nested(obj[k]) for k in obj })
+               return MultiModalKwargs({ k: self._decode_nested(obj[k]) for k in obj })
             if issubclass(t, torch.Tensor):
                 return torch.from_numpy(self._decode_ndarray(obj))
         return obj
@@ -140,16 +135,14 @@ class MsgpackDecoder:
 
     def _decode_nested(self, na: NestedArray) -> NestedTensors:
         if isinstance(na, dict):
-            na = NestedArray(na['a'], na['l'], na['t'])
+            na = NestedArray(na.get('a', None), na.get('l', None), na.get('t', None))
         if na.a: #array
             return torch.from_numpy(self._decode_ndarray(na.a))
-        # tuples get converted to lists
         if na.l: #list
             return [self._decode_nested(x) for x in na.l]
-        if na.t:
-            lst = list(na.t)
-            lst[0] = torch.from_numpy(self._decode_ndarray(lst[0]))
-            return tuple(lst)
+        if na.t: #tuple
+            na.t[0] = torch.from_numpy(self._decode_ndarray(na.t[0]))
+            return tuple(na.t)
         raise TypeError(f"Unexpected NestedArray contents: {na}")
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
@@ -157,9 +150,6 @@ class MsgpackDecoder:
             return pickle.loads(data)
         if code == CUSTOM_TYPE_CLOUDPICKLE:
             return cloudpickle.loads(data)
-        if code == CUSTOM_TYPE_MMDICT:
-             obj = msgpack.decode(data)
-             return MultiModalKwargs({ k: self._decode_nested(obj[k]) for k in obj })
 
         raise NotImplementedError(
             f"Extension type code {code} is not supported")
