@@ -129,14 +129,18 @@ class P2pNcclPipe:
         logger.info("Recv From %s, tensor_id: %s", remote_address, tensor_id)
 
         if remote_address is None:
+            start_time = time.time()
             with self.recv_store_cv:
-                start_time = time.time()
                 while tensor_id not in self.recv_store:
                     self.recv_store_cv.wait()
-                duration = time.time() - start_time
-                logger.info("Recv From %s, tensor_id: %s, duration: %f",
-                               remote_address, tensor_id, duration)
-                return self.recv_store.pop(tensor_id)
+                tensor = self.recv_store.pop(tensor_id)
+            duration = time.time() - start_time
+            logger.info(
+                "🚧🚧🚧 Recv From %s, tensor_id: %s, shape: %s, "
+                "duration: %.3fms, size: %.3fGB", remote_address, tensor_id,
+                tensor.shape, duration * 1000,
+                tensor.element_size() * tensor.numel() / 1024**3)
+            return tensor
 
         if remote_address not in self.socks:
             self._create_connect(remote_address)
