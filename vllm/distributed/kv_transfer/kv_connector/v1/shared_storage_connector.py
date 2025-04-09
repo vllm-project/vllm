@@ -267,7 +267,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 request,
                 need_to_allocate,
                 computed_blocks,
-                skip_preallocate=True)
+                skip_preallocate=True,
+                skip_inc_ref_count=True)
             request.request_id = old_req_id
             kv_cache_manager.req_to_blocks.pop("temp-req-id-for-connector")
             kv_cache_manager.num_cached_block.pop("temp-req-id-for-connector")

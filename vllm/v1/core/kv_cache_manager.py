@@ -178,6 +178,7 @@ class KVCacheManager:
         num_tokens: int,
         new_computed_blocks: Optional[list[KVCacheBlock]] = None,
         skip_preallocate: bool = False,
+        skip_inc_ref_count: bool = False,
     ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -189,6 +190,9 @@ class KVCacheManager:
                 prefix caching.
             skip_preallocate: Whether to skip preallocating blocks for 
                 the request.
+            skip_preallocate: Whether to skip incrementing the ref count. This
+                is useful for the KVConnector to allocate blocks which will be
+                filled by the remote KVs for a single model step().
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -242,7 +246,7 @@ class KVCacheManager:
             return None
 
         # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching:
+        if self.enable_caching and not skip_inc_ref_count:
             self.block_pool.touch(new_computed_blocks)
         else:
             assert not new_computed_blocks, (
