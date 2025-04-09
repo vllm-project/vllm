@@ -191,8 +191,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
             Assume the shape of the layer is (2, num_pages, page_size, xxx).
             """
-            # TODO(rob): make this compatible with MLA.
-
+            # TODO: make this compatible with MLA.
             assert layer.shape[0] == 2
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
@@ -297,7 +296,6 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """
         meta = SharedStorageConnectorMetadata()
         for request in scheduler_output.scheduled_new_reqs:
-            # T^T, why there is both req_id and request_id????
             if request.req_id in self._requests_need_load:
                 meta.add_request(request, self._block_size, is_store=False)
             else:
