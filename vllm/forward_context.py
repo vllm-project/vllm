@@ -11,8 +11,9 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import (get_kv_transfer_group, has_kv_transfer_group,
-                              is_v1_kv_transfer_group)
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group,
+                                          is_v1_kv_transfer_group)
 # yapf: disable
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 # yapf: enable
