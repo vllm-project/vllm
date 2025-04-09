@@ -536,16 +536,6 @@ class LLM:
                                          tokenizer.eos_token_id,
                                          length_penalty)
 
-        # TODO - fix handling of multimodal data for beam search; we pass it
-        # through in the async version on the abstract EngineClient, but not
-        # here.
-        if any("multi_modal_data" in prompt
-               and prompt["multi_modal_data"] is not None
-               for prompt in prompts):
-            logger.warning(
-                "Multimodal data appears to have been provided, but is not"
-                " currently being passed through in LLM.beam_search()!")
-
         tokenizer = self.get_tokenizer()
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
@@ -556,11 +546,23 @@ class LLM:
         instances: list[BeamSearchInstance] = []
 
         for prompt in prompts:
+
+            # TODO Probably need to handle different prompt types
+            multi_modal_kwargs = {}
+            if "multi_modal_data" in prompt:
+                multi_modal_kwargs["multi_modal_data"] = prompt[
+                    "multi_modal_data"]
+            if "mm_processor_kwargs" in prompt:
+                multi_modal_kwargs["mm_processor_kwargs"] = prompt[
+                    "mm_processor_kwargs"]
+
             if is_token_prompt(prompt):
                 prompt_tokens = prompt["prompt_token_ids"]
             else:
                 prompt_tokens = tokenizer.encode(prompt["prompt"])
-            instances.append(BeamSearchInstance(prompt_tokens))
+
+            instances.append(
+                BeamSearchInstance(prompt_tokens, **multi_modal_kwargs))
 
         for _ in range(max_tokens):
             all_beams: list[BeamSearchSequence] = list(
@@ -575,8 +577,11 @@ class LLM:
                 break
 
             prompts_batch = [
-                TokensPrompt(prompt_token_ids=beam.tokens)
-                for beam in all_beams
+                TokensPrompt(
+                    prompt_token_ids=beam.tokens,
+                    multi_modal_data=beam.multi_modal_data,
+                    mm_processor_kwargs=beam.mm_processor_kwargs,
+                ) for beam in all_beams
             ]
 
             # only runs for one step
@@ -602,7 +607,10 @@ class LLM:
                                 tokens=current_beam.tokens + [token_id],
                                 logprobs=current_beam.logprobs + [logprobs],
                                 cum_logprob=current_beam.cum_logprob +
-                                logprob_obj.logprob)
+                                logprob_obj.logprob,
+                                multi_modal_data=current_beam.multi_modal_data,
+                                mm_processor_kwargs=current_beam.
+                                mm_processor_kwargs)
 
                             if token_id == tokenizer.eos_token_id and \
                                 not ignore_eos:
