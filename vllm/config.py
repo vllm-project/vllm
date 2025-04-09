@@ -5,14 +5,17 @@ import copy
 import enum
 import hashlib
 import importlib.metadata
+import inspect
 import json
 import sys
+import textwrap
 import warnings
 from collections import Counter
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from importlib.util import find_spec
+from itertools import pairwise
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
                     Optional, Protocol, Union)
@@ -1438,55 +1441,63 @@ class LoadConfig:
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
-    pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
-    tensor_parallel_size: int = 1  # Number of tensor parallel groups.
-    data_parallel_size: int = 1  # Number of data parallel groups.
-    data_parallel_rank: int = 0  # Rank of the data parallel group.
-    # Local rank of the data parallel group, defaults to global rank.
+    pipeline_parallel_size: int = 1
+    """Number of pipeline parallel groups."""
+    tensor_parallel_size: int = 1
+    """Number of tensor parallel groups."""
+    data_parallel_size: int = 1
+    """Number of data parallel groups. MoE layers will be sharded according to
+    the product of the tensor parallel size and data parallel size."""
+    data_parallel_rank: int = 0
+    """Rank of the data parallel group."""
     data_parallel_rank_local: Optional[int] = None
-    # IP of the data parallel master.
+    """Local rank of the data parallel group, defaults to global rank."""
     data_parallel_master_ip: str = "127.0.0.1"
-    data_parallel_master_port: int = 29500  # Port of the data parallel master.
-    enable_expert_parallel: bool = False  # Use EP instead of TP for MoE layers.
+    """IP of the data parallel master."""
+    data_parallel_master_port: int = 29500
+    """Port of the data parallel master."""
+    enable_expert_parallel: bool = False
+    """Use expert parallelism instead of tensor parallelism for MoE layers."""
 
-    # Maximum number of multiple batches
-    # when load model sequentially. To avoid RAM OOM when using tensor
-    # parallel and large models.
     max_parallel_loading_workers: Optional[int] = None
+    """Maximum number of parallal loading workers when loading model
+    sequentially in multiple batches. To avoid RAM OOM when using tensor
+    parallel and large models."""
 
-    # Disable the custom all-reduce kernel and fall back to NCCL.
     disable_custom_all_reduce: bool = False
+    """Disable the custom all-reduce kernel and fall back to NCCL."""
 
-    # Config for the tokenizer pool. If None, will use synchronous tokenization.
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
+    """Config for the tokenizer pool. If None, will use synchronous
+    tokenization."""
 
-    # Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     ray_workers_use_nsight: bool = False
+    """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
-    # ray distributed model workers placement group.
     placement_group: Optional["PlacementGroup"] = None
+    """ray distributed model workers placement group."""
 
-    # Backend to use for distributed model
-    # workers, either "ray" or "mp" (multiprocessing). If the product
-    # of pipeline_parallel_size and tensor_parallel_size is less than
-    # or equal to the number of GPUs available, "mp" will be used to
-    # keep processing on a single host. Otherwise, this will default
-    # to "ray" if Ray is installed and fail otherwise. Note that tpu
-    # and hpu only support Ray for distributed inference.
     distributed_executor_backend: Optional[Union[str,
                                                  type["ExecutorBase"]]] = None
+    """Backend to use for distributed model
+    workers, either "ray" or "mp" (multiprocessing). If the product
+    of pipeline_parallel_size and tensor_parallel_size is less than
+    or equal to the number of GPUs available, "mp" will be used to
+    keep processing on a single host. Otherwise, this will default
+    to "ray" if Ray is installed and fail otherwise. Note that tpu
+    and hpu only support Ray for distributed inference."""
 
-    # the full name of the worker class to use. If "auto", the worker class
-    # will be determined based on the platform.
     worker_cls: str = "auto"
+    """The full name of the worker class to use. If "auto", the worker class
+    will be determined based on the platform."""
     sd_worker_cls: str = "auto"
     worker_extension_cls: str = ""
 
-    # world_size is TPxPP, it affects the number of workers we create.
     world_size: int = field(init=False)
-    # world_size_across_dp is TPxPPxDP, it is the size of the world
-    # including data parallelism.
+    """world_size is TPxPP, it affects the number of workers we create."""
     world_size_across_dp: int = field(init=False)
+    """world_size_across_dp is TPxPPxDP, it is the size of the world
+    including data parallelism."""
 
     rank: int = 0
 
@@ -3816,3 +3827,41 @@ def get_current_vllm_config() -> VllmConfig:
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config
+
+
+def get_attr_docs(cls: type[Any]) -> dict[str, str]:
+    """
+    Get any docstrings placed after attribute assignments in a class body.
+
+    https://davidism.com/mit-license/
+    """
+    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+
+    if not isinstance(cls_node, ast.ClassDef):
+        raise TypeError("Given object was not a class.")
+
+    out = {}
+
+    # Consider each pair of nodes.
+    for a, b in pairwise(cls_node.body):
+        # Must be an assignment then a constant string.
+        if (not isinstance(a, ast.Assign | ast.AnnAssign)
+                or not isinstance(b, ast.Expr)
+                or not isinstance(b.value, ast.Constant)
+                or not isinstance(b.value.value, str)):
+            continue
+
+        doc = inspect.cleandoc(b.value.value)
+
+        # An assignment can have multiple targets (a = b = v), but an
+        # annotated assignment only has one target.
+        targets = a.targets if isinstance(a, ast.Assign) else [a.target]
+
+        for target in targets:
+            # Must be assigning to a plain name.
+            if not isinstance(target, ast.Name):
+                continue
+
+            out[target.id] = doc
+
+    return out

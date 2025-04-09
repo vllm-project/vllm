@@ -19,7 +19,7 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          ModelConfig, ModelImpl, ObservabilityConfig,
                          ParallelConfig, PoolerConfig, PromptAdapterConfig,
                          SchedulerConfig, SpeculativeConfig, TaskOption,
-                         TokenizerPoolConfig, VllmConfig)
+                         TokenizerPoolConfig, VllmConfig, get_attr_docs)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -111,14 +111,15 @@ class EngineArgs:
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
-    distributed_executor_backend: Optional[Union[str,
-                                                 Type[ExecutorBase]]] = None
+    distributed_executor_backend: Optional[Union[
+        str, Type[ExecutorBase]]] = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
-    pipeline_parallel_size: int = 1
-    tensor_parallel_size: int = 1
-    data_parallel_size: int = 1
-    enable_expert_parallel: bool = False
-    max_parallel_loading_workers: Optional[int] = None
+    pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
+    tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    data_parallel_size: int = ParallelConfig.data_parallel_size
+    enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    max_parallel_loading_workers: Optional[
+        int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
     prefix_caching_hash_algo: str = "builtin"
@@ -145,7 +146,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
-    disable_custom_all_reduce: bool = False
+    disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     tokenizer_pool_size: int = 0
     # Note: Specifying a tokenizer pool by passing a class
     # is intended for expert use only. The API may change without
@@ -170,7 +171,7 @@ class EngineArgs:
     device: str = 'auto'
     num_scheduler_steps: int = 1
     multi_step_stream_outputs: bool = True
-    ray_workers_use_nsight: bool = False
+    ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
@@ -197,8 +198,8 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
-    worker_cls: str = "auto"
-    worker_extension_cls: str = ""
+    worker_cls: str = ParallelConfig.worker_cls
+    worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
@@ -411,52 +412,51 @@ class EngineArgs:
             '* "transformers" will use the Transformers model '
             'implementation.\n')
         # Parallel arguments
-        parser.add_argument(
+        parallel_docs = get_attr_docs(ParallelConfig)
+        parallel_group = parser.add_argument_group(
+            title="ParallelConfig",
+            description=ParallelConfig.__doc__,
+        )
+        parallel_group.add_argument(
             '--distributed-executor-backend',
             choices=['ray', 'mp', 'uni', 'external_launcher'],
-            default=EngineArgs.distributed_executor_backend,
-            help='Backend to use for distributed model '
-            'workers, either "ray" or "mp" (multiprocessing). If the product '
-            'of pipeline_parallel_size and tensor_parallel_size is less than '
-            'or equal to the number of GPUs available, "mp" will be used to '
-            'keep processing on a single host. Otherwise, this will default '
-            'to "ray" if Ray is installed and fail otherwise. Note that tpu '
-            'only supports Ray for distributed inference.')
-
-        parser.add_argument('--pipeline-parallel-size',
-                            '-pp',
-                            type=int,
-                            default=EngineArgs.pipeline_parallel_size,
-                            help='Number of pipeline stages.')
-        parser.add_argument('--tensor-parallel-size',
-                            '-tp',
-                            type=int,
-                            default=EngineArgs.tensor_parallel_size,
-                            help='Number of tensor parallel replicas.')
-        parser.add_argument('--data-parallel-size',
-                            '-dp',
-                            type=int,
-                            default=EngineArgs.data_parallel_size,
-                            help='Number of data parallel replicas. '
-                            'MoE layers will be sharded according to the '
-                            'product of the tensor-parallel-size and '
-                            'data-parallel-size.')
-        parser.add_argument(
+            default=ParallelConfig.distributed_executor_backend,
+            help=parallel_docs["distributed_executor_backend"])
+        parallel_group.add_argument(
+            '--pipeline-parallel-size',
+            '-pp',
+            type=int,
+            default=ParallelConfig.pipeline_parallel_size,
+            help=parallel_docs["pipeline_parallel_size"])
+        parallel_group.add_argument(
+            '--tensor-parallel-size',
+            '-tp',
+            type=int,
+            default=ParallelConfig.tensor_parallel_size,
+            help=parallel_docs["tensor_parallel_size"])
+        parallel_group.add_argument('--data-parallel-size',
+                                    '-dp',
+                                    type=int,
+                                    default=ParallelConfig.data_parallel_size,
+                                    help=parallel_docs["data_parallel_size"])
+        parallel_group.add_argument(
             '--enable-expert-parallel',
             action='store_true',
-            help='Use expert parallelism instead of tensor parallelism '
-            'for MoE layers.')
-        parser.add_argument(
+            help=parallel_docs["enable_expert_parallel"])
+        parallel_group.add_argument(
             '--max-parallel-loading-workers',
             type=int,
-            default=EngineArgs.max_parallel_loading_workers,
-            help='Load model sequentially in multiple batches, '
-            'to avoid RAM OOM when using tensor '
-            'parallel and large models.')
-        parser.add_argument(
+            default=ParallelConfig.max_parallel_loading_workers,
+            help=parallel_docs["max_parallel_loading_workers"])
+        parallel_group.add_argument(
             '--ray-workers-use-nsight',
             action='store_true',
-            help='If specified, use nsight to profile Ray workers.')
+            help=parallel_docs["ray_workers_use_nsight"])
+        parallel_group.add_argument(
+            '--disable-custom-all-reduce',
+            action='store_true',
+            default=ParallelConfig.disable_custom_all_reduce,
+            help=parallel_docs["disable_custom_all_reduce"])
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
@@ -639,10 +639,6 @@ class EngineArgs:
                             'Additionally for encoder-decoder models, if the '
                             'sequence length of the encoder input is larger '
                             'than this, we fall back to the eager mode.')
-        parser.add_argument('--disable-custom-all-reduce',
-                            action='store_true',
-                            default=EngineArgs.disable_custom_all_reduce,
-                            help='See ParallelConfig.')
         parser.add_argument('--tokenizer-pool-size',
                             type=int,
                             default=EngineArgs.tokenizer_pool_size,
