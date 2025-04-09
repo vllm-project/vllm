@@ -31,7 +31,6 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
@@ -47,9 +46,6 @@ from .interfaces import SupportsLoRA, SupportsPP
 from .llama import LlamaMLP as Glm4MLP
 from .llama import LlamaModel
 from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
-
-logger = init_logger(__name__)
-
 
 class Glm4Attention(nn.Module):
 
@@ -90,7 +86,6 @@ class Glm4Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-        print(partial_rotary_factor, self.rotary_dim)
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
