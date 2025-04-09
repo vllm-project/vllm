@@ -28,6 +28,7 @@ logger = init_logger(__name__)
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
 
+
 class MsgpackEncoder:
     """Encoder with custom torch tensor and numpy array serialization.
 
