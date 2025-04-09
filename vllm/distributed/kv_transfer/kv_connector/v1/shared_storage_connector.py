@@ -221,7 +221,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """Get the external prefix cache blocks from the connector.
 
         This function may change the state of the connector, which will be 
-        used by `attach_connector_meta` later.
+        used by `build_connector_meta` later.
 
         Args:
             request (Request): the request object.
@@ -283,12 +283,11 @@ class SharedStorageConnector(KVConnectorBase_V1):
         else:
             return computed_blocks
 
-    def attach_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> SchedulerOutput:
-        """Attach the connector metadata to the request object.
+    def build_connector_meta(
+            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+        """Build the connector metadata for this step.
 
-        This function should NOT modify other fields in the scheduler_output 
-        except the `kv_connector_metadata` field.
+        This function should NOT modify any fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
 
         Args:
@@ -304,10 +303,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # store and load status
                 if not self.found_match_for_request(request):
                     meta.add_request(request, self._block_size, is_store=True)
-        scheduler_output.kv_connector_metadata = meta
 
         self._requests_need_load.clear()
-        return scheduler_output
+        return meta
 
     # ==============================
     # Helper functions

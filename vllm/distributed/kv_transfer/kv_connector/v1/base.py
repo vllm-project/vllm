@@ -159,7 +159,7 @@ class KVConnectorBase_V1(ABC):
         Get the external prefix cache blocks from the connector.
 
         This function may change the state of the connector, which will
-        be used by `attach_connector_meta` later.
+        be used by `build_connector_meta` later.
 
         This function will also allocate/free the blocks dynamically when  
         there is remote cache hit.
@@ -178,13 +178,12 @@ class KVConnectorBase_V1(ABC):
         pass
 
     @abstractmethod
-    def attach_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> SchedulerOutput:
+    def build_connector_meta(
+            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """
-        Attach the connector metadata to the request object.
+        Build the connector metadata for this step.
 
-        This function should NOT modify other fields in the scheduler_output 
-        except the `connector_metadata` field.
+        This function should NOT modify fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
 
         Args:
