@@ -1449,6 +1449,12 @@ class ParallelConfig:
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
     enable_expert_parallel: bool = False  # Use EP instead of TP for MoE layers.
 
+    # num_share_fusion_replicas: This value control how many replicas
+    # the user want to have to fuse expert in deepseek v2 style models
+    # set it to 0 disable share expert fusion and set it to > 0 values
+    # to enable. Larger value consume more GPU memory but is faster
+    num_share_fusion_replicas: int = envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS
+
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor
     # parallel and large models.
@@ -1542,6 +1548,7 @@ class ParallelConfig:
         factors: list[Any] = []
         factors.append(self.pipeline_parallel_size)
         factors.append(self.tensor_parallel_size)
+        factors.append(self.num_share_fusion_replicas)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:

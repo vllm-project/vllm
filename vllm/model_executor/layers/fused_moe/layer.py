@@ -160,6 +160,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
         routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         return self.forward(
@@ -178,6 +179,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            num_share_fusion_replicas=num_share_fusion_replicas,
             routed_scaling_factor=routed_scaling_factor,
         )
 
@@ -198,6 +200,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
         routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -211,7 +214,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            num_share_fusion_replicas=envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS,
+            num_share_fusion_replicas=num_share_fusion_replicas,
             routed_scaling_factor=routed_scaling_factor,
         )
 
@@ -446,6 +449,8 @@ class FusedMoE(torch.nn.Module):
         vllm_config = get_current_vllm_config()
         use_ep = (vllm_config.parallel_config.enable_expert_parallel
                   and self.tp_size * self.dp_size > 1)
+        num_share_fusion_replicas = \
+            vllm_config.parallel_config.num_share_fusion_replicas
 
         # For smuggling this layer into the fused moe custom op
         self.use_direct_call = self.dp_size == 1
@@ -463,14 +468,13 @@ class FusedMoE(torch.nn.Module):
             self.tp_rank = 0
             self.ep_size = self.tp_size * self.dp_size
             self.tp_size = 1
-            if (envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS > 0 and self.ep_size
-                    != envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS):
+            if (num_share_fusion_replicas > 0
+                    and self.ep_size != num_share_fusion_replicas):
                 logger.warning(
                     "With EP enabled and share expert fusion enabled"
                     ", share expert replica should be same as ep_size"
                     "got share expert replica = %d"
-                    "and ep_size = %d",
-                    envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS, ep_size)
+                    "and ep_size = %d", num_share_fusion_replicas, ep_size)
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
