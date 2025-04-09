@@ -741,7 +741,7 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
         return self.transformer.visual(image_input["data"])
 
     def get_language_model(self) -> torch.nn.Module:
-        return self.transformer.h
+        return self.transformer
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
