@@ -199,34 +199,34 @@ async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
     responses_float = await client.embeddings.create(input=input_texts,
                                                      model=model_name,
                                                      encoding_format="float")
+    float_data = [d.embedding for d in responses_float.data]
 
     responses_base64 = await client.embeddings.create(input=input_texts,
                                                       model=model_name,
                                                       encoding_format="base64")
-
-    decoded_responses_base64_data = []
+    base64_data = []
     for data in responses_base64.data:
-        decoded_responses_base64_data.append(
+        base64_data.append(
             np.frombuffer(base64.b64decode(data.embedding),
                           dtype="float32").tolist())
 
     check_embeddings_close(
-        embeddings_0_lst=[d.embedding for d in responses_float.data],
-        embeddings_1_lst=decoded_responses_base64_data,
+        embeddings_0_lst=float_data,
+        embeddings_1_lst=base64_data,
         name_0="float",
         name_1="base64",
-        tol=1e-2,
     )
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(input=input_texts,
                                                        model=model_name)
+    default_data = [d.embedding for d in responses_default.data]
+
     check_embeddings_close(
-        embeddings_0_lst=[d.embedding for d in responses_float.data],
-        embeddings_1_lst=[d.embedding for d in responses_default.data],
+        embeddings_0_lst=float_data,
+        embeddings_1_lst=default_data,
         name_0="float",
         name_1="default",
-        tol=1e-2,
     )
 
 
