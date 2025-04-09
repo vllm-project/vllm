@@ -181,7 +181,7 @@ class MultiModalProfiler(Generic[_I]):
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         total_placeholders_by_modality = {
-            modality: sum(item["length"] for item in placeholders)
+            modality: sum(item.get_num_embeds() for item in placeholders)
             for modality, placeholders in placeholders_by_modality.items()
         }
         expected_placeholders_by_modality = {
@@ -213,25 +213,25 @@ class MultiModalProfiler(Generic[_I]):
 
         total_len = len(encoder_prompt_token_ids)
 
-        # Encoder-decoder multimodal models only support v0
-        if total_len > seq_len:
-            # `max_num_batched_tokens` is defined by `SchedulerConfig`
-            logger.warning(
-                "The encoder sequence length used for profiling ("
-                "max_num_batched_tokens / max_num_seqs = %d) is too short "
-                "to hold the multi-modal embeddings in the worst case "
-                "(%d tokens in total, out of which %s are reserved for "
-                "multi-modal embeddings). This may cause certain "
-                "multi-modal inputs to fail during inference, even when "
-                "the input text is short. To avoid this, you should "
-                "increase `max_model_len`, reduce `max_num_seqs`, "
-                "and/or reduce `mm_counts`.", seq_len, total_len,
-                total_placeholders_by_modality)
-
         processor = cast(EncDecMultiModalProcessor, self.processor)
         if processor.pad_dummy_encoder_prompt:
             num_tokens_to_pad = max(total_len, seq_len) - total_len
             encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
+        # NOTE: Whisper allows total_len > seq_len.
+        elif total_len > seq_len and not envs.VLLM_USE_V1:
+            # `max_num_batched_tokens` is defined by `SchedulerConfig`
+            logger.warning_once(
+                "The encoder sequence length used for profiling ("
+                f"max_num_batched_tokens / max_num_seqs = {seq_len}) "
+                " is too short "
+                "to hold the multi-modal embeddings in the worst case "
+                f"({total_len} tokens in total, out of which "
+                f"{total_placeholders_by_modality} are reserved for "
+                "multi-modal embeddings). This may cause certain "
+                "multi-modal inputs to fail during inference, even when "
+                "the input text is short. To avoid this, you should "
+                "increase `max_model_len`, reduce `max_num_seqs`, "
+                "and/or reduce `mm_counts`.")
 
         return DummyEncoderData(encoder_prompt_token_ids)
 
@@ -251,17 +251,18 @@ class MultiModalProfiler(Generic[_I]):
         # V0 does not support chunked prefill.
         if total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
-            logger.warning(
+            logger.warning_once(
                 "The sequence length used for profiling ("
-                "max_num_batched_tokens / max_num_seqs = %d) is too short "
+                f"max_num_batched_tokens / max_num_seqs = {seq_len}) "
+                "is too short "
                 "to hold the multi-modal embeddings in the worst case "
-                "(%d tokens in total, out of which %s are reserved for "
+                f"({total_len} tokens in total, out of which "
+                f"{total_placeholders_by_modality} are reserved for "
                 "multi-modal embeddings). This may cause certain "
                 "multi-modal inputs to fail during inference, even when "
                 "the input text is short. To avoid this, you should "
                 "increase `max_model_len`, reduce `max_num_seqs`, "
-                "and/or reduce `mm_counts`.", seq_len, total_len,
-                total_placeholders_by_modality)
+                "and/or reduce `mm_counts`.")
 
         if total_len < seq_len:
             prompt_token_ids.extend([0] * (seq_len - total_len))

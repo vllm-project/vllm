@@ -105,8 +105,14 @@ def run(command):
     else:
         enc = locale.getpreferredencoding()
     output = raw_output.decode(enc)
+    if command == 'nvidia-smi topo -m':
+        # don't remove the leading whitespace of `nvidia-smi topo -m`
+        #   because they are meaningful
+        output = output.rstrip()
+    else:
+        output = output.strip()
     err = raw_err.decode(enc)
-    return rc, output.strip(), err.strip()
+    return rc, output, err.strip()
 
 
 def run_and_read_all(run_lambda, command):

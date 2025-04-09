@@ -1,23 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from collections.abc import Mapping
-from typing import Optional, Union
+from collections.abc import Mapping, Sequence
+from typing import Literal, Optional, Union
 
 from vllm.config import VllmConfig
-from vllm.inputs import ProcessorInputs, PromptType
+from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
 from vllm.multimodal.inputs import PlaceholderRange
+from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.utils import (
@@ -45,6 +47,8 @@ class Processor:
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)
+
+        self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
 
         # Multi-modal hasher (for images)
         self.use_hash = (
@@ -230,7 +234,7 @@ class Processor:
             self.tokenizer.get_lora_tokenizer(lora_request))
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[list[MultiModalKwargs]] = None
+        sorted_mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
         if decoder_inputs["type"] == "multimodal":
@@ -255,19 +259,27 @@ class Processor:
             # are multiple modalities.
             unique_modalities = set(sorted_item_modalities)
             if len(unique_modalities) > 1:
-                sorted_mm_inputs = []
+                orig_sorted_mm_inputs = []
                 used_indices = {modality: 0 for modality in unique_modalities}
+
                 for modality in sorted_item_modalities:
                     items = decoder_mm_inputs.get_items(modality)
                     item = items[used_indices[modality]]
-                    sorted_mm_inputs.append(MultiModalKwargs.from_items([item
-                                                                         ]))
+
+                    orig_sorted_mm_inputs.append(
+                        MultiModalKwargs.from_items([item]))
                     used_indices[modality] += 1
             else:
-                sorted_mm_inputs = [
+                orig_sorted_mm_inputs = [
                     MultiModalKwargs.from_items([item]) for item in
                     decoder_mm_inputs.get_items(sorted_item_modalities[0])
                 ]
+
+            if sorted_mm_hashes is not None:
+                sorted_mm_inputs = self.mm_input_cache_client.get_and_update_p0(
+                    orig_sorted_mm_inputs, sorted_mm_hashes)
+            else:
+                sorted_mm_inputs = orig_sorted_mm_inputs
 
         return EngineCoreRequest(
             request_id=request_id,
@@ -287,41 +299,62 @@ class Processor:
                                lora_request: Optional[LoRARequest] = None):
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
-        # For encoder-decoder multimodal models, the max_prompt_len
-        # restricts the decoder prompt length
-        if self.model_config.is_multimodal_model:
-            prompt_inputs = decoder_inputs
-        else:
-            prompt_inputs = encoder_inputs or decoder_inputs
+        if encoder_inputs is not None:
+            self._validate_model_input(encoder_inputs,
+                                       lora_request,
+                                       prompt_type="encoder")
+
+        self._validate_model_input(decoder_inputs,
+                                   lora_request,
+                                   prompt_type="decoder")
+
+    def _validate_model_input(
+        self,
+        prompt_inputs: SingletonInputs,
+        lora_request: Optional[LoRARequest],
+        *,
+        prompt_type: Literal["encoder", "decoder"],
+    ):
+        tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
+
+        if prompt_type == "encoder":
+            model_config = self.model_config
+
+            if model_config.is_multimodal_model:
+                mm_registry = self.input_preprocessor.mm_registry
+                mm_processor = mm_registry.create_processor(
+                    model_config, tokenizer=tokenizer)
+                assert isinstance(mm_processor, EncDecMultiModalProcessor)
+
+                if mm_processor.pad_dummy_encoder_prompt:
+                    return  # Skip encoder length check for Whisper
 
         prompt_ids = prompt_inputs["prompt_token_ids"]
 
-        if prompt_ids is None or len(prompt_ids) == 0:
-            raise ValueError("Prompt cannot be empty")
+        if not prompt_ids:
+            raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
         max_input_id = max(prompt_ids)
-        max_allowed = self.tokenizer.get_lora_tokenizer(
-            lora_request).max_token_id
-        if max_input_id > max_allowed:
-            raise ValueError(
-                "Token id {} is out of vocabulary".format(max_input_id))
+        if max_input_id > tokenizer.max_token_id:
+            raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
-        if len(prompt_ids) >= self.model_config.max_model_len:
-            raise ValueError(
-                f"Prompt length of {len(prompt_ids)} is longer than the "
-                f"maximum model length of {self.model_config.max_model_len}.")
-
-        if self.model_config.is_multimodal_model:
-            max_prompt_len = self.model_config.max_model_len
-
-            if len(prompt_ids) > max_prompt_len:
-                raise ValueError(
-                    f"The prompt (total length {len(prompt_ids)}) is too long "
-                    f"to fit into the model (context length {max_prompt_len}). "
+        max_prompt_len = self.model_config.max_model_len
+        if len(prompt_ids) >= max_prompt_len:
+            if self.model_config.is_multimodal_model:
+                suggestion = (
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
                     "of images, and possibly their aspect ratios as well.")
+            else:
+                suggestion = (
+                    "Make sure that `max_model_len` is no smaller than the "
+                    "number of text tokens.")
+
+            raise ValueError(
+                f"The {prompt_type} prompt (length {len(prompt_ids)}) is "
+                f"longer than the maximum model length of {max_prompt_len}. "
+                f"{suggestion}")
 
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
