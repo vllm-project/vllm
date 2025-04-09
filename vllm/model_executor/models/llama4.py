@@ -227,13 +227,12 @@ class Llama4Attention(nn.Module):
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
         if self.q_norm is not None:
-            q = self.q_norm(q.float().reshape(-1, self.num_heads,
-                                              self.head_dim)).reshape(
-                                                  -1, self.q_size).to(q.dtype)
+            q_reshaped = q.float().reshape(-1, self.num_heads, self.head_dim)
+            q = self.q_norm(q_reshaped).reshape(-1, self.q_size).to(q.dtype)
         if self.k_norm is not None:
-            k = self.k_norm(k.float().reshape(-1, self.num_kv_heads,
-                                              self.head_dim)).reshape(
-                                                  -1, self.kv_size).to(k.dtype)
+            k_reshaped = k.float().reshape(-1, self.num_kv_heads,
+                                           self.head_dim)
+            k = self.k_norm(k_reshaped).reshape(1, self.kv_size).to(k.dtype)
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
         # to NoPE layers, where the inference-time temperature tuning function
