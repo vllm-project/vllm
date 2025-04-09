@@ -325,7 +325,10 @@ class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         
     def _get_dummy_images(self, width: int, height: int, num_images: int) -> list[npt.NDArray]:
         """Get dummy images for profiling."""
-        dummy_image = np.full((height, width, 3), 255, dtype=np.uint8)
+        # 使用与 MiniMaxVL01Processor 期望的大小相匹配的图像尺寸
+        # 这里我们使用 2016x2016 的图像，这是 MiniMaxVL01 支持的最大尺寸之一
+        # 这样可以确保生成的图像标记数量足够
+        dummy_image = np.full((1024, 1024, 3), 255, dtype=np.uint8)
         return [dummy_image] * num_images
 
 @MULTIMODAL_REGISTRY.register_processor(
