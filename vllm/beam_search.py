@@ -38,9 +38,14 @@ class BeamSearchOutput:
 
 class BeamSearchInstance:
 
-    def __init__(self, prompt_tokens: list[int]):
+    def __init__(self, prompt_tokens: list[int], **kwargs):
+        logprobs = kwargs.pop("logprobs", [])
         self.beams: list[BeamSearchSequence] = [
-            BeamSearchSequence(tokens=prompt_tokens, logprobs=[])
+            BeamSearchSequence(
+                tokens=prompt_tokens,
+                logprobs=logprobs,
+                **kwargs,
+            )
         ]
         self.completed: list[BeamSearchSequence] = []
 
