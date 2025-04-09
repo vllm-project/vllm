@@ -62,14 +62,14 @@ def register_quantization_config(quantization: str):
     """  # noqa: E501
 
     def _wrapper(quant_config_cls):
-        if quantization in QUANTIZATION_METHODS:
-            raise ValueError(
-                f"The quantization method `{quantization}` is already exists.")
         if not issubclass(quant_config_cls, QuantizationConfig):
             raise ValueError("The quantization config must be a subclass of "
                              "`QuantizationConfig`.")
+        if quantization in QUANTIZATION_METHODS:
+            logger.warning("The quantization config {quantization} will be rewritten.")
+        else:
+            QUANTIZATION_METHODS.append(quantization)
         _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[quantization] = quant_config_cls
-        QUANTIZATION_METHODS.append(quantization)
         return quant_config_cls
 
     return _wrapper
