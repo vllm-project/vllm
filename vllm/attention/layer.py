@@ -353,6 +353,7 @@ def maybe_save_kv_layer_to_connector(
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
+
     connector = get_kv_transfer_group()
 
     forward_context: ForwardContext = get_forward_context()
@@ -370,7 +371,7 @@ def unified_attention(
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    # wait_for_kv_layer_from_connector(layer_name)
+    wait_for_kv_layer_from_connector(layer_name)
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata

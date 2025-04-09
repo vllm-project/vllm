@@ -197,12 +197,11 @@ class SharedStorageConnector(KVConnectorBase_V1):
             Assume the shape of the layer is (2, num_pages, page_size, xxx).
             """
             num_pages, page_size = layer.shape[1], layer.shape[2]
-            reshaped = layer.reshape(2, num_pages * page_size, -1)
             print(f"{layer.shape=}")
-            print(f"{reshaped.shape=}")
-            print(f"{slot_mapping}")
-
-            return reshaped[:, slot_mapping, ...]
+            print(f"{layer.reshape(2, num_pages * page_size, -1)=}")
+            print(f"{slot_mapping.shape=}")
+            return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
+                                                               ...]
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, SharedStorageConnectorMetadata)
@@ -212,8 +211,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids)
                 kv_cache = extract_kv_from_layer(kv_layer,
                                                  request.slot_mapping)
-                assert False
-                # torch.ops.save_lib.save_safetensors(kv_cache, filename)
+                tensors = {"kv_cache": kv_cache.detach().cpu()}
+                safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):
         return
@@ -366,21 +365,3 @@ def align_to_block_size(num_tokens: int, block_size) -> int:
     """Align the number of tokens to the block size.
     """
     return (num_tokens - 1) // block_size * block_size
-
-
-# Register a custom library and print operator
-import torch
-from torch.library import Library, impl
-
-lib = Library("save_lib", "DEF")
-lib.define("save_safetensors(Tensor kv_cache, str filename) -> ()")
-
-
-@impl(lib, "save_safetensors", "CompositeExplicitAutograd")
-def save_safetensors(kv_cache, filename):
-    # tensors = {"kv_cache": kv_cache.detach().cpu()}
-    # kv_cache = kv_cache.cpu()
-    # tensors = {"kv_cache": kv_cache}
-    # safetensors.torch.save_file(tensors, filename)
-    a = torch.empty(10)
-    return
