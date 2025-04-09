@@ -68,14 +68,14 @@ class MultiprocExecutor(Executor):
         success = False
         try:
             for rank in range(self.world_size):
-                unready_worker = WorkerProc.make_worker_process(
-                    vllm_config=self.vllm_config,
-                    local_rank=rank,
-                    rank=rank,
-                    distributed_init_method=distributed_init_method,
-                    input_shm_handle=scheduler_output_handle,
-                )
-                unready_workers.append(unready_worker)
+                unready_workers.append(
+                    WorkerProc.make_worker_process(
+                        vllm_config=self.vllm_config,
+                        local_rank=rank,
+                        rank=rank,
+                        distributed_init_method=distributed_init_method,
+                        input_shm_handle=scheduler_output_handle,
+                    ))
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -90,8 +90,8 @@ class MultiprocExecutor(Executor):
         finally:
             if not success:
                 # Clean up the worker procs if there was a failure.
-                for handle in unready_workers:
-                    handle.proc.kill()
+                self._ensure_worker_termination(
+                    [w.proc for w in unready_workers])
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -133,7 +133,8 @@ class MultiprocExecutor(Executor):
             # Re-raise any other exceptions
             raise e
 
-    def _ensure_worker_termination(self):
+    @staticmethod
+    def _ensure_worker_termination(worker_procs: list[BaseProcess]):
         """Ensure that all worker processes are terminated. Assumes workers have
         received termination requests. Waits for processing, then sends
         termination and kill signals if needed."""
@@ -151,7 +152,7 @@ class MultiprocExecutor(Executor):
             return False
 
         # Send SIGTERM if still running
-        active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
+        active_procs = [proc for proc in worker_procs if proc.is_alive()]
         for p in active_procs:
             p.terminate()
         if not wait_for_termination(active_procs, 4):
@@ -166,7 +167,7 @@ class MultiprocExecutor(Executor):
             self.shutting_down = True
             for w in self.workers:
                 w.worker_response_mq = None
-            self._ensure_worker_termination()
+            self._ensure_worker_termination([w.proc for w in self.workers])
 
         self.rpc_broadcast_mq = None
 
@@ -204,7 +205,6 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
-    FAILED_STR = "FAILED"
 
     def __init__(
         self,
@@ -213,55 +213,38 @@ class WorkerProc:
         rank: int,
         distributed_init_method: str,
         input_shm_handle: Handle,
-        ready_pipe: tuple[Connection, Connection],
     ):
-        reader, writer = ready_pipe
-        reader.close()
-        try:
-            self.rank = rank
-            wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
-            # TODO: move `init_worker` to executor level as a collective rpc
-            # call
-            all_kwargs: list[dict] = [
-                {} for _ in range(vllm_config.parallel_config.world_size)
-            ]
-            all_kwargs[rank] = {
-                "vllm_config": vllm_config,
-                "local_rank": local_rank,
-                "rank": rank,
-                "distributed_init_method": distributed_init_method,
-                "is_driver_worker": rank == 0,
-            }
-            wrapper.init_worker(all_kwargs)
-            self.worker = wrapper
+        self.rank = rank
+        wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
+        # TODO: move `init_worker` to executor level as a collective rpc
+        # call
+        all_kwargs: list[dict] = [
+            {} for _ in range(vllm_config.parallel_config.world_size)
+        ]
+        all_kwargs[rank] = {
+            "vllm_config": vllm_config,
+            "local_rank": local_rank,
+            "rank": rank,
+            "distributed_init_method": distributed_init_method,
+            "is_driver_worker": rank == 0,
+        }
+        wrapper.init_worker(all_kwargs)
+        self.worker = wrapper
 
-            pid = os.getpid()
-            _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
-            _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
+        pid = os.getpid()
+        _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
+        _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
 
-            # Initialize MessageQueue for receiving SchedulerOutput
-            self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-                input_shm_handle, self.worker.rank)
+        # Initialize MessageQueue for receiving SchedulerOutput
+        self.rpc_broadcast_mq = MessageQueue.create_from_handle(
+            input_shm_handle, self.worker.rank)
 
-            # Initializes a message queue for sending the model output
-            self.worker_response_mq = MessageQueue(1, 1)
-            worker_response_mq_handle = self.worker_response_mq.export_handle()
+        # Initializes a message queue for sending the model output
+        self.worker_response_mq = MessageQueue(1, 1)
 
-            # Send READY once we know everything is loaded
-            writer.send({
-                "status": WorkerProc.READY_STR,
-                "handle": worker_response_mq_handle,
-            })
-
-            # Initialize device and loads weights
-            self.worker.init_device()
-            self.worker.load_model()
-
-        except Exception:
-            logger.exception("WorkerProc startup failed.")
-
-        finally:
-            writer.close()
+        # Initialize device and loads weights
+        self.worker.init_device()
+        self.worker.load_model()
 
     @staticmethod
     def make_worker_process(
@@ -358,13 +341,26 @@ class WorkerProc:
         signal.signal(signal.SIGINT, signal_handler)
 
         worker = None
+        # tuple[Connection, Connection]
+        reader, ready_writer = kwargs.pop("ready_pipe")
         try:
+            reader.close()
             worker = WorkerProc(*args, **kwargs)
+
+            # Send READY once we know everything is loaded
+            ready_writer.send({
+                "status":
+                WorkerProc.READY_STR,
+                "handle":
+                worker.worker_response_mq.export_handle(),
+            })
 
             # Ensure message queues are ready. Will deadlock if re-ordered.
             # Must be kept consistent with the Executor
             worker.rpc_broadcast_mq.wait_until_ready()
             worker.worker_response_mq.wait_until_ready()
+            ready_writer.close()
+            ready_writer = None
 
             worker.worker_busy_loop()
 
@@ -374,7 +370,10 @@ class WorkerProc:
             # which triggers system shutdown.
             # TODO(rob): handle case where the MQ itself breaks.
 
-            logger.exception("WorkerProc got an Exception.")
+            if ready_writer is not None:
+                logger.exception("WorkerProc failed to start.")
+            else:
+                logger.exception("WorkerProc failed.")
 
             # The parent sends a SIGTERM to all worker processes if
             # any worker dies. Set this value so we don't re-throw
@@ -382,10 +381,11 @@ class WorkerProc:
             shutdown_requested = True
 
         finally:
+            if ready_writer is not None:
+                ready_writer.close()
             # Clean up once worker exits busy loop
             if worker is not None:
                 worker.shutdown()
-                worker = None
 
     class ResponseStatus(Enum):
         SUCCESS = auto()
