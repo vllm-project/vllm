@@ -448,6 +448,10 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden.append(
                 self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
                                    attn_metadata))
+        
+        if not hidden:
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+            
         hidden = torch.concat(hidden, dim=0).contiguous()
         return hidden
 
