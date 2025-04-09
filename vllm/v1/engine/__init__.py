@@ -2,6 +2,7 @@
 
 import enum
 import time
+from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import msgspec
@@ -52,7 +53,7 @@ class EngineCoreRequest(
     # Detokenizer, but set to None when it is added to EngineCoreClient.
     prompt: Optional[str]
     prompt_token_ids: list[int]
-    mm_inputs: Optional[list[MultiModalKwargs]]
+    mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]
     mm_hashes: Optional[list[str]]
     mm_placeholders: Optional[list[PlaceholderRange]]
     sampling_params: SamplingParams
