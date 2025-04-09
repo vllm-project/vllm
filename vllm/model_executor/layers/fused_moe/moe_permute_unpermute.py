@@ -12,7 +12,8 @@ def moe_permute(
     n_expert: int,
     n_local_expert:int,
     expert_map: Optional[torch.Tensor] = None,
-    align_block_size:Optional[int]=None
+    align_block_size:Optional[int]=None,
+    fill_invalid_expert:int = -1
 ) -> list[torch.Tensor]:
     """
     This function expands and permutes activation to gather uncontinuous tokens 
@@ -29,6 +30,7 @@ def moe_permute(
         from the global expert space to the local expert space of the expert 
         parallel shard.
     - align_block_size (Optional[int]): align group gemm block size for deepgemm
+    - fill_invalid_expert(int): fill expert id in m_indices for invalid expert
     Returns:
     - permuted_hidden_states (torch.Tensor): permuted activation.
     - expert_first_token_offset (torch.Tensor): offset of the first token
@@ -50,7 +52,7 @@ def moe_permute(
     )
     m_indices = torch.empty(permuted_row_size,
                             dtype=torch.int32,
-                            device=hidden_states.device,).fill_(-1)
+                            device=hidden_states.device,).fill_(fill_invalid_expert)
     expert_first_token_offset = torch.empty(
         n_local_expert + 1, dtype=torch.int64, device=hidden_states.device
     )
