@@ -206,6 +206,16 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
 
         return grid_w * grid_h + 1
 
+    def _get_image_token(
+            self,
+            processor: Optional[Idefics3Processor]) -> tuple[str, str, str]:
+        if processor is None:
+            processor = self.get_hf_processor()
+        image_token = processor.image_token.content
+        fake_image_token = processor.fake_image_token.content
+        global_image_token = processor.global_image_tag
+        return image_token, fake_image_token, global_image_token
+
     def get_image_repl(
         self,
         *,
@@ -216,9 +226,8 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         if processor is None:
             processor = self.get_hf_processor()
 
-        image_token = processor.image_token.content
-        fake_image_token = processor.fake_image_token.content
-        global_img_token = processor.global_image_tag
+        image_token, fake_image_token, global_img_token = self._get_image_token(
+            processor)
         image_seq_len = processor.image_seq_len
         grid_placeholder = "<row_{n_h}_col_{n_w}>"
 
@@ -300,7 +309,7 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
         hf_processor = self.info.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         longest_edge = image_processor.max_image_size['longest_edge']
-        image_token = hf_processor.image_token.content
+        image_token, _, _ = self.info._get_image_token(hf_processor)
 
         mm_data = {
             "image":
@@ -382,7 +391,7 @@ class Idefics3MultiModalProcessor(
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token = hf_processor.image_token.content
+        image_token, _, _ = self.info._get_image_token(hf_processor)
 
         def get_replacement_idefics3(item_idx: int) -> PromptUpdateDetails:
             images = mm_items.get_items("image", ImageProcessorItems)

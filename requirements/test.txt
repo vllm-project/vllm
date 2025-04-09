@@ -101,6 +101,8 @@ dill==0.3.8
     #   multiprocess
 dnspython==2.7.0
     # via email-validator
+docopt==0.6.2
+    # via num2words
 docutils==0.16
     # via awscli
 einops==0.8.0
@@ -263,6 +265,8 @@ networkx==3.2.1
     # via torch
 nltk==3.9.1
     # via rouge-score
+num2words==0.5.14
+    # via -r requirements/test.in
 numba==0.61.0
     # via
     #   -r requirements/test.in
