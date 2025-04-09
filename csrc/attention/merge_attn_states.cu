@@ -11,8 +11,7 @@ namespace vllm {
 
 // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 // can be used to combine partial attention results (in the split-KV case)
-template <typename scalar_t, vllm::Fp8KVCacheDataType KV_DTYPE,
-          bool LOOP_OVER_HEAD>
+template <typename scalar_t, bool kLoopOverHead>
 __global__ void merge_attn_states_kernel(
     scalar_t* output,   // [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
     float* output_lse,  // [NUM_HEADS, NUM_TOKENS]
@@ -26,11 +25,8 @@ __global__ void merge_attn_states_kernel(
     const uint num_heads,                        // NUM QUERY HEADS
     const uint head_size  // HEAD_SIZE, 32,48,64,...,512,etc
 ) {
-  // TODO(DefTruth): may need to support fp8?
-  static_assert(KV_DTYPE == Fp8KVCacheDataType::kAuto,
-                "Currently merge_attn_states_kernel is not support for FP8.");
-
-  if constexpr (LOOP_OVER_HEAD) {
+  // TODO(DefTruth): May need to support fp8?
+  if constexpr (kLoopOverHead) {
     // May loop over num heads for large NUM_TOKENS
     const uint token_idx = blockIdx.x;
     const uint thread_idx = threadIdx.x;
@@ -167,33 +163,32 @@ __global__ void merge_attn_states_kernel(
 
 // The following macro is used to dispatch the conversion function based on
 // the output data type. The FN is a macro that calls a function with
-// template<typename SCALAR_T, KV_DTYPE>.
+// template<typename SCALAR_T>.
 #define DISPATCH_BY_SCALAR_DTYPE(SCALAR_DTYPE, FN)                      \
   {                                                                     \
     if (SCALAR_DTYPE == at::ScalarType::Float) {                        \
-      FN(float, vllm::Fp8KVCacheDataType::kAuto);                       \
+      FN(float);                                                        \
     } else if (SCALAR_DTYPE == at::ScalarType::Half) {                  \
-      FN(uint16_t, vllm::Fp8KVCacheDataType::kAuto);                    \
+      FN(uint16_t);                                                     \
     } else if (SCALAR_DTYPE == at::ScalarType::BFloat16) {              \
-      FN(__nv_bfloat16, vllm::Fp8KVCacheDataType::kAuto);               \
+      FN(__nv_bfloat16);                                                \
     } else {                                                            \
       TORCH_CHECK(false, "Unsupported data type of O: ", SCALAR_DTYPE); \
     }                                                                   \
   }
 
-#define LAUNCH_MERGE_ATTN_STATES(SCALAR_T, KV_DTYPE, LOOP_OVER_HEAD)        \
-  {                                                                         \
-    vllm::merge_attn_states_kernel<SCALAR_T, KV_DTYPE, LOOP_OVER_HEAD>      \
-        <<<grid, block>>>(                                                  \
-            reinterpret_cast<SCALAR_T*>(output.data_ptr()), output_lse_ptr, \
-            reinterpret_cast<SCALAR_T*>(prefix_output.data_ptr()),          \
-            reinterpret_cast<float*>(prefix_lse.data_ptr()),                \
-            reinterpret_cast<SCALAR_T*>(suffix_output.data_ptr()),          \
-            reinterpret_cast<float*>(suffix_lse.data_ptr()), num_tokens,    \
-            num_heads, head_size);                                          \
+#define LAUNCH_MERGE_ATTN_STATES(SCALAR_T, kLoopOverHead)                     \
+  {                                                                           \
+    vllm::merge_attn_states_kernel<SCALAR_T, kLoopOverHead><<<grid, block>>>( \
+        reinterpret_cast<SCALAR_T*>(output.data_ptr()), output_lse_ptr,       \
+        reinterpret_cast<SCALAR_T*>(prefix_output.data_ptr()),                \
+        reinterpret_cast<float*>(prefix_lse.data_ptr()),                      \
+        reinterpret_cast<SCALAR_T*>(suffix_output.data_ptr()),                \
+        reinterpret_cast<float*>(suffix_lse.data_ptr()), num_tokens,          \
+        num_heads, head_size);                                                \
   }
 
-template <typename SCALAR_T, vllm::Fp8KVCacheDataType KV_DTYPE>
+template <typename SCALAR_T>
 void merge_attn_states_launcher(
     torch::Tensor& output,  // [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
     std::optional<torch::Tensor> output_lse,  // [NUM_HEADS, NUM_TOKENS]
@@ -215,24 +210,26 @@ void merge_attn_states_launcher(
   if (output_lse.has_value()) {
     output_lse_ptr = output_lse.value().data_ptr<float>();
   }
+  const bool skip_loop_over_head =
+      (num_tokens <= 1024 || num_heads >= 64 || disable_loop_over_head);
 
-  if (num_tokens <= 1024 || num_heads >= 64 || disable_loop_over_head) {
+  if (skip_loop_over_head) {
     dim3 grid(num_tokens, num_heads);
     dim3 block(head_size / pack_size);
-    LAUNCH_MERGE_ATTN_STATES(SCALAR_T, KV_DTYPE, false);
+    LAUNCH_MERGE_ATTN_STATES(SCALAR_T, false);
   } else {
-    // try loop over num heads for large NUM_TOKENS
+    // Try loop over num heads for large num_tokens
     dim3 grid(num_tokens);
     dim3 block(head_size / pack_size);
-    LAUNCH_MERGE_ATTN_STATES(SCALAR_T, KV_DTYPE, true);
+    LAUNCH_MERGE_ATTN_STATES(SCALAR_T, true);
   }
 }
 
-#define CALL_MERGE_ATTN_STATES_LAUNCHER(SCALAR_T, KV_DTYPE)           \
-  {                                                                   \
-    merge_attn_states_launcher<SCALAR_T, KV_DTYPE>(                   \
-        output, output_lse, prefix_output, prefix_lse, suffix_output, \
-        suffix_lse, disable_loop_over_head);                          \
+#define CALL_MERGE_ATTN_STATES_LAUNCHER(SCALAR_T)                             \
+  {                                                                           \
+    merge_attn_states_launcher<SCALAR_T>(output, output_lse, prefix_output,   \
+                                         prefix_lse, suffix_output,           \
+                                         suffix_lse, disable_loop_over_head); \
   }
 
 void merge_attn_states(

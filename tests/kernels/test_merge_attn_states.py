@@ -44,13 +44,13 @@ def merge_attn_states_torch(
     return output, output_lse
 
 
-NUM_TOKENS = [256, 512, 613, 1024, 1536, 4096]
-NUM_QUERY_HEADS = [4, 8, 16, 32]
-HEAD_SIZES = [64, 96, 128]
+NUM_BATCH_TOKENS = [256, 512, 613, 1024, 1536, 4096]
+NUM_QUERY_HEADS = [4, 8, 16, 32, 48, 64]
+HEAD_SIZES = [32, 48, 64, 96, 128, 256]
 DTYPES = [torch.float32, torch.half, torch.bfloat16]
 
 
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_tokens", NUM_BATCH_TOKENS)
 @pytest.mark.parametrize("num_query_heads", NUM_QUERY_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("output_dtype", DTYPES)
@@ -178,6 +178,7 @@ def test_merge_attn_states(num_tokens: int, num_query_heads: int,
         total_time_cuda_kernel += start.elapsed_time(end)
 
     avg_time_cuda_kernel = total_time_cuda_kernel / repeat_times
+
     # 3. Performance compare
     performance_improved = avg_time_triton_kernel / avg_time_cuda_kernel
     print(f" Torch time: {avg_time_torch_kernel:.6f}ms")
@@ -206,9 +207,9 @@ def test_merge_attn_states(num_tokens: int, num_query_heads: int,
                                atol=1e-3,
                                rtol=rtol)
     print("Output all match, max abs diff:")
-    print(f" (CUDA  vs Triton): {diff(output_ref, output_cuda)}")
     print(f"(Triton vs Torch) : {diff(output_torch, output_ref)}")
     print(f"  (CUDA vs Torch) : {diff(output_torch, output_cuda)}")
+    print(f"  (CUDA vs Triton): {diff(output_ref, output_cuda)}")
     print("-" * 100)
 
     torch.testing.assert_close(output_lse_cuda.float(),
@@ -218,7 +219,7 @@ def test_merge_attn_states(num_tokens: int, num_query_heads: int,
     print("Output LSE all match, max abs diff:")
     print(f"(Triton vs Torch) : {diff(output_lse_torch, output_lse_ref)}")
     print(f"  (CUDA vs Torch) : {diff(output_lse_torch, output_lse_cuda)}")
-    print(f" (CUDA  vs Triton): {diff(output_lse_ref, output_lse_cuda)}")
+    print(f"  (CUDA vs Triton): {diff(output_lse_ref, output_lse_cuda)}")
     print("-" * 100)
 
     print("All output values test passed! All inf values "
