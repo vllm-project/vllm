@@ -33,6 +33,9 @@ class MacheteLinearKernel(MPLinearKernel):
                           "when the input features are partitioned across "\
                           "devices"
 
+        if c.zero_points:
+            return False, "Zero points currently not supported by Machete"
+
         if c.weight_type not in query_machete_supported_quant_types(
                 c.zero_points):
             return False, f"Quant type ({c.weight_type}) not supported by "\
