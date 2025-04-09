@@ -2,7 +2,6 @@
 
 import torch
 
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -122,8 +121,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # These are used in the final Attention.forward()
         layer._q_scale.copy_(q_scale)
         layer._prob_scale.copy_(prob_scale)
-        if (q_scale == 1.0
-                or prob_scale == 1.0) and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN:
+        if q_scale == 1.0 or prob_scale == 1.0:
             logger.warning_once(
                 f"Using Q scale {q_scale} and prob scale {prob_scale} "
                 "with fp8 attention. This may cause accuracy issues. "
