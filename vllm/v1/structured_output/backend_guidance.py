@@ -4,7 +4,7 @@ import copy
 import json
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 
@@ -44,7 +44,7 @@ def _walk_json_for_additional_properties(data: object):
 
 
 def process_for_additional_properties(
-        guide_json: str | dict[str, Any]) -> dict[str, Any]:
+        guide_json: Union[str, dict[str, Any]]) -> dict[str, Any]:
     if isinstance(guide_json, str):
         guide_json_obj = json.loads(guide_json)
     else:
@@ -168,7 +168,7 @@ class GuidanceGrammar(StructuredOutputGrammar):
 
 def serialize_guidance_grammar(
     request_type: StructuredOutputOptions,
-    grammar_spec: str | dict[str, Any],
+    grammar_spec: Union[str, dict[str, Any]],
     disable_any_whitespace: bool = False,
     no_additional_properties: bool = False,
 ) -> str:
