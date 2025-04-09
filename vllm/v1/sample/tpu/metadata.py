@@ -92,9 +92,6 @@ class TPUSupportedSamplingMetadata:
             # Pad value is the default one.
             cpu_tensor[num_reqs:padded_num_reqs] = fill_val
 
-        # NOTE NickLucche The sync CPU-TPU graph we produce here must be
-        # consistent. We can't have flags to skip copies or we'll end up
-        # recompiling.
         fill_slice(input_batch.temperature_cpu_tensor,
                    DEFAULT_SAMPLING_PARAMS["temperature"])
         # TODO Temporarily disabled until sampling options are enabled
@@ -107,7 +104,6 @@ class TPUSupportedSamplingMetadata:
         return cls(
             temperature=input_batch.temperature_cpu_tensor[:padded_num_reqs].
             to(xla_device),
-            # Scalar tensor for xla-friendly tracing.
             all_greedy=input_batch.all_greedy,
             # TODO enable more and avoid returning None values
             top_p=None,  # input_batch.top_p[:padded_num_reqs],

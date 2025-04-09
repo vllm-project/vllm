@@ -1016,7 +1016,7 @@ def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
     # assert min_req_size is power of 2
     assert (min_req_size & (min_req_size - 1) == 0) and min_req_size > 0
     paddings: list = []
-    num = min_req_size
+    num = max(MIN_NUM_SEQS, min_req_size)
     while num <= max_req_size and (len(paddings) == 0 or paddings[-1] != num):
         paddings.append(num)
         logger.info("    %d", num)
