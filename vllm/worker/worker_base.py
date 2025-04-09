@@ -129,6 +129,9 @@ class WorkerBase:
         """Get vocabulary size from model configuration."""
         return self.model_config.get_vocab_size()
 
+    def moe_load(self, op: str) -> None:
+        raise NotImplementedError
+
 
 class DelegateWorkerBase(WorkerBase):
     """

@@ -162,10 +162,16 @@ class RPCAdapterLoadedResponse:
     request_id: str
 
 
+class RPCMoELoadRequest(Enum):
+    ENABLE_COLLECT_LOAD = 1
+    DISABLE_COLLECT_LOAD = 2
+    DUMP_LOAD = 3
+
+
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
                       RPCResetPrefixCacheRequest, RPCSleepRequest,
-                      RPCWakeUpRequest, RPCIsSleepingRequest]
+                      RPCWakeUpRequest, RPCIsSleepingRequest, RPCMoELoadRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
                           RPCIsSleepingResponse, RPCError]

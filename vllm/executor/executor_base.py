@@ -274,6 +274,10 @@ class ExecutorBase(ABC):
         exception."""
         self.check_health()
 
+    def moe_load(self, op: int) -> None:
+        """moe_load mainly for collecting moe expert load."""
+        return
+
 
 class DistributedExecutorBase(ExecutorBase):
     """Abstract superclass of distributed executor implementations."""

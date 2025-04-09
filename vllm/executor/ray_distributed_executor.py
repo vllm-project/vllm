@@ -698,3 +698,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # Assume that the Ray workers are healthy.
         # TODO: check the health of the Ray workers
         return
+
+    def moe_load(self, op: int) -> None:
+        self._run_workers("moe_load", op)
+        return

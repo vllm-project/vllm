@@ -247,6 +247,9 @@ class ModelRunnerBase(ABC, Generic[T]):
 
         return self.generators
 
+    def moe_load(self, op: str) -> None:
+        raise NotImplementedError
+
 
 class ModelRunnerWrapperBase:
     """

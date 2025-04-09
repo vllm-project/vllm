@@ -491,6 +491,13 @@ class Worker(LocalOrDistributedWorkerBase):
                                                 self.model_config,
                                                 self.parallel_config)
 
+    def moe_load(self, op: str) -> None:
+        from contextlib import nullcontext
+        context = nullcontext()
+        with context:
+            self.model_runner.moe_load(op)
+        return
+
 
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,

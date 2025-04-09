@@ -295,3 +295,7 @@ class EngineClient(ABC):
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
+
+    async def moe_load(self, op: int) -> None:
+        """Dump moe load"""
+        ...

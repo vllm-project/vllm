@@ -803,6 +803,44 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
 
         return Response(status_code=200, content=response)
 
+if envs.VLLM_EP_LOAD_COLLECT:
+    """"
+    the op is from vllm/engine/multiprocessing/__init__.py
+    class RPCMoELoadRequest(Enum):
+        ENABLE_COLLECT_LOAD = 1
+        DISABLE_COLLECT_LOAD = 2
+        DUMP_LOAD = 3
+    """
+    @router.post("/v1/enable_collect_moe_load")
+    async def enable_collect_moe_load(raw_request: Request):
+        """
+        Enable collecting moe load.
+        """
+        logger.info("enable moe loads collecting ...")
+        await engine_client(raw_request).moe_load(op=1)
+        logger.info("enable moe loads collecting done.")
+        return Response(status_code=200)
+
+    @router.post("/v1/disable_collect_moe_load")
+    async def disable_collect_moe_load(raw_request: Request):
+        """
+        Disable collecting moe load.
+        """
+        logger.info("disable moe loads collecting...")
+        await engine_client(raw_request).moe_load(op=2)
+        logger.info("disable moe loads collecting done.")
+        return Response(status_code=200)
+
+    @router.post("/v1/dump_moe_load")
+    async def dump_moe_load(raw_request: Request):
+        """
+        Dump moe loads to local file
+        """
+        logger.info("dumping moe loads...")
+        await engine_client(raw_request).moe_load(op=3)
+        logger.info("dumping moe loads done.")
+        return Response(status_code=200)
+
 
 def build_app(args: Namespace) -> FastAPI:
     if args.disable_fastapi_docs:

@@ -241,3 +241,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
             for worker in self.non_driver_workers
         ]
         return await asyncio.gather(*coros)
+
+    def moe_load(self, op: int) -> None:
+        self._run_workers("moe_load", op)
+        return

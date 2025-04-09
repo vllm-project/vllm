@@ -34,7 +34,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
-                                         RPCUProfileRequest, RPCWakeUpRequest)
+                                         RPCUProfileRequest, RPCWakeUpRequest,
+                                         RPCMoELoadRequest)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
@@ -740,3 +741,7 @@ class MQLLMEngineClient(EngineClient):
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
+
+    async def moe_load(self, op: int) -> None:
+        return await self._send_one_way_rpc_request(
+            request=RPCMoELoadRequest(op), socket=self.input_socket)

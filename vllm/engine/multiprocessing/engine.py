@@ -25,7 +25,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
-                                         RPCUProfileRequest, RPCWakeUpRequest)
+                                         RPCUProfileRequest, RPCWakeUpRequest,
+                                         RPCMoELoadRequest)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -277,6 +278,8 @@ class MQLLMEngine:
                     self.wake_up(request.tags)
                 elif isinstance(request, RPCIsSleepingRequest):
                     self._handle_is_sleeping_request(request)
+                elif isinstance(request, RPCMoELoadRequest):
+                    self.moe_load(op=request.value)
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -420,6 +423,9 @@ class MQLLMEngine:
 
     def is_sleeping(self) -> bool:
         return self.engine.is_sleeping()
+
+    def moe_load(self, op: int):
+        return self.engine.moe_load(op)
 
 
 def signal_handler(*_) -> None:

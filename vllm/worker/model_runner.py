@@ -58,6 +58,9 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+from vllm.model_executor.layers.fused_moe.moe_load import (enable_collect_load,
+                                                           disable_collect_load,
+                                                           dump_load)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -1621,6 +1624,24 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+
+    def moe_load(self, op: int) -> None:
+        """"
+        the op is from vllm/engine/multiprocessing/__init__.py
+        class RPCMoELoadRequest(Enum):
+            ENABLE_COLLECT_LOAD = 1
+            DISABLE_COLLECT_LOAD = 2
+            DUMP_LOAD = 3
+        """
+        if op == 1:
+            enable_collect_load()
+        elif op == 2:
+            disable_collect_load()
+        elif op == 3:
+            dump_load()
+        else:
+            raise NotImplementedError
+        return
 
 
 class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
