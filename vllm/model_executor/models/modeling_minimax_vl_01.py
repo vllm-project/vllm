@@ -42,6 +42,8 @@ from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
 from .processing_minimax_vl_01 import MiniMaxVL01Processor
 from vllm.multimodal.processing import BaseProcessingInfo
+import numpy as np
+import numpy.typing as npt
 
 # Register the processors
 AutoImageProcessor.register("minimax_vl_01", ImageProcessor)
@@ -320,11 +322,16 @@ class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             prompt_text="<image>" * num_images,
             mm_data=mm_data,
         )
+        
+    def _get_dummy_images(self, width: int, height: int, num_images: int) -> list[npt.NDArray]:
+        """Get dummy images for profiling."""
+        dummy_image = np.full((height, width, 3), 255, dtype=np.uint8)
+        return [dummy_image] * num_images
 
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaNextMultiModalProcessor,
     info=LlavaNextProcessingInfo,
-    dummy_inputs=LlavaDummyInputsBuilder)
+    dummy_inputs=MiniMaxVLDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
