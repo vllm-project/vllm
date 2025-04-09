@@ -1024,6 +1024,9 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         input_ids: torch.Tensor,
     ) -> torch.Tensor:
         return self.model.embed_tokens(input_ids)
+    
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
 
     def set_input_embeddings(self, value):
         self.model.embed_tokens = value
