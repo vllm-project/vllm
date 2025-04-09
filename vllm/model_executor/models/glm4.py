@@ -44,11 +44,12 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .llama import LlamaModel
 from .llama import LlamaMLP as Glm4MLP
+from .llama import LlamaModel
 from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
 
 logger = init_logger(__name__)
+
 
 class Glm4Attention(nn.Module):
 
@@ -123,9 +124,9 @@ class Glm4Attention(nn.Module):
                               attn_type=attn_type)
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -148,7 +149,6 @@ class Glm4DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
-
 
         self.self_attn = Glm4Attention(
             config=config,
@@ -175,11 +175,11 @@ class Glm4DecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_self_attn_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_mlp_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
+        self.post_self_attn_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
+        self.post_mlp_layernorm = RMSNorm(config.hidden_size,
+                                          eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -223,7 +223,6 @@ ALL_DECODER_LAYER_TYPES = {
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
     })
-
 class Glm4Model(LlamaModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -240,6 +239,7 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             "v_proj",
         ],
     }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -251,7 +251,7 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.quant_config = quant_config
         self.model = Glm4Model(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
+                               prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
