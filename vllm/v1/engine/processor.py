@@ -244,7 +244,7 @@ class Processor:
             # from dictionaries to lists, and sort them by each item's position
             # in the input sequence.
             (
-                sorted_modalities,
+                sorted_item_modalities,
                 sorted_mm_positions,
                 sorted_mm_hashes,
             ) = merge_and_sort_multimodal_metadata(
@@ -257,12 +257,12 @@ class Processor:
             # This code flattens kwargs for individual items in a list and
             # sorts them by each item's position in the input sequence if there
             # are multiple modalities.
-            unique_modalities = set(sorted_modalities)
+            unique_modalities = set(sorted_item_modalities)
             if len(unique_modalities) > 1:
                 sorted_mm_inputs_ = []
                 used_indices = {modality: 0 for modality in unique_modalities}
 
-                for modality in sorted_modalities:
+                for modality in sorted_item_modalities:
                     items = decoder_mm_inputs.get_items(modality)
                     item = items[used_indices[modality]]
 
@@ -272,7 +272,7 @@ class Processor:
             else:
                 sorted_mm_inputs_ = [
                     MultiModalKwargs.from_items([item]) for item in
-                    decoder_mm_inputs.get_items(sorted_modalities[0])
+                    decoder_mm_inputs.get_items(sorted_item_modalities[0])
                 ]
 
             if sorted_mm_hashes is not None:
