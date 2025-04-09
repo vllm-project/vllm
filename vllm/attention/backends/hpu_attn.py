@@ -152,11 +152,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 logger.warning("Could not import HPU FusedSDPA kernel. "
                                "vLLM will use native implementation.")
 
-        suppored_head_sizes = HPUPagedAttention.get_supported_head_sizes()
-        if head_size not in suppored_head_sizes:
+        supported_head_sizes = HPUPagedAttention.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
-                f"Supported head sizes are: {suppored_head_sizes}.")
+                f"Supported head sizes are: {supported_head_sizes}.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "

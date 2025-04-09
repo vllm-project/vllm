@@ -231,7 +231,7 @@ class Platform:
                                 parser: Optional[FlexibleArgumentParser] = None
                                 ) -> None:
         """
-        Do some pre-registeration or update action for the current platform.
+        Do some pre-registration or update action for the current platform.
 
         This function is called before global VllmConfig is initialized or cli
         arguments are parsed. It's used for out-of-tree platforms to register or

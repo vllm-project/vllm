@@ -101,7 +101,7 @@ class RequestOutputKind(Enum):
     CUMULATIVE = 0
     # Return only deltas in each RequestOutput
     DELTA = 1
-    # Do not return intermediate RequestOuputs
+    # Do not return intermediate RequestOutput
     FINAL_ONLY = 2
 
 
