@@ -669,11 +669,8 @@ class TPUModelRunner:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-
-            # TODO: Apply vllm-project/vllm#16007
-            # so that we don't have to define `get_input_embeddings` in the
-            # multi-modal model once V0 is deprecated
-            inputs_embeds = self.model.get_input_embeddings(self.input_ids)
+            language_model = self.model.get_language_model()
+            inputs_embeds = language_model.get_input_embeddings(self.input_ids)
 
             if mm_embeds:
                 is_mm_embeds: torch.Tensor = ...  # TODO
