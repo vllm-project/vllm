@@ -304,6 +304,16 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
+    def paged_attention_v1_v2_threads(cls):
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        if "gfx1" in gcn_arch:
+            # Radeon
+            return 128
+
+        # Instinct
+        return 1024
+
+    @classmethod
     def supports_structured_output(cls) -> bool:
         return True
 

@@ -380,6 +380,13 @@ class Platform:
         return False
 
     @classmethod
+    def paged_attention_v1_v2_threads(cls) -> int:
+        """
+        Returns the number of threads to use for attention.
+        """
+        return 128
+
+    @classmethod
     def supports_structured_output(cls) -> bool:
         """
         Returns whether the current platform can support structured output.
