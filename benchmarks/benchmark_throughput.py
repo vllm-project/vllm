@@ -213,14 +213,17 @@ def run_hf(
     max_prompt_len = 0
     max_output_len = 0
     for i in range(len(requests)):
-        prompt, prompt_len, output_len = requests[i]
+        prompt = requests[i].prompt
+        prompt_len = requests[i].prompt_len
+        output_len = requests[i].expected_output_len
         # Add the prompt to the batch.
         batch.append(prompt)
         max_prompt_len = max(max_prompt_len, prompt_len)
         max_output_len = max(max_output_len, output_len)
         if len(batch) < max_batch_size and i != len(requests) - 1:
             # Check if we can add more requests to the batch.
-            _, next_prompt_len, next_output_len = requests[i + 1]
+            next_prompt_len = requests[i + 1].prompt_len
+            next_output_len = requests[i + 1].expected_output_len
             if (max(max_prompt_len, next_prompt_len) +
                     max(max_output_len, next_output_len)) <= 2048:
                 # We can add more requests to the batch.
