@@ -11,6 +11,7 @@ import requests
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+from ...models.embedding.utils import check_embeddings_close
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -190,43 +191,35 @@ async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
     responses_float = await client.embeddings.create(input=input_texts,
                                                      model=model_name,
                                                      encoding_format="float")
+    float_data = [d.embedding for d in responses_float.data]
 
     responses_base64 = await client.embeddings.create(input=input_texts,
                                                       model=model_name,
                                                       encoding_format="base64")
-
-    decoded_responses_base64_data = []
+    base64_data = []
     for data in responses_base64.data:
-        decoded_responses_base64_data.append(
+        base64_data.append(
             np.frombuffer(base64.b64decode(data.embedding),
                           dtype="float32").tolist())
 
-    rtol = 1e-3
-    atol = 1e-4
-
-    assert len(responses_float.data) == len(decoded_responses_base64_data)
-    assert np.allclose(responses_float.data[0].embedding,
-                       decoded_responses_base64_data[0],
-                       rtol=rtol,
-                       atol=atol)
-    assert np.allclose(responses_float.data[1].embedding,
-                       decoded_responses_base64_data[1],
-                       rtol=rtol,
-                       atol=atol)
+    check_embeddings_close(
+        embeddings_0_lst=float_data,
+        embeddings_1_lst=base64_data,
+        name_0="float",
+        name_1="base64",
+    )
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(input=input_texts,
                                                        model=model_name)
+    default_data = [d.embedding for d in responses_default.data]
 
-    assert len(responses_float.data) == len(responses_default.data)
-    assert np.allclose(responses_float.data[0].embedding,
-                       responses_default.data[0].embedding,
-                       rtol=rtol,
-                       atol=atol)
-    assert np.allclose(responses_float.data[1].embedding,
-                       responses_default.data[1].embedding,
-                       rtol=rtol,
-                       atol=atol)
+    check_embeddings_close(
+        embeddings_0_lst=float_data,
+        embeddings_1_lst=default_data,
+        name_0="float",
+        name_1="default",
+    )
 
 
 @pytest.mark.asyncio
