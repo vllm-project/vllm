@@ -260,12 +260,33 @@ class OpenAIServingModels:
                     return existing
 
             # Try to resolve using available resolvers
+            unique_id = abs(hash(lora_name))
             for resolver in self.lora_resolvers:
                 lora_request = await resolver.resolve_lora(lora_name)
-                if lora_request is not None:
-                    self.lora_requests.append(lora_request)
-                    return lora_request
 
+                if lora_request is not None:
+                    lora_request.lora_int_id = unique_id
+
+                    try:
+                        await self.engine_client.add_lora(lora_request)
+                        # Successfully added, append and return
+                        self.lora_requests.append(lora_request)
+                        logger.info(
+                            "Resolved and loaded LoRA adapter '%s' using %s",
+                            lora_name, resolver.__class__.__name__)
+                        return lora_request
+                    except BaseException as e:
+                        # Log the error and try the next resolver
+                        logger.warning(
+                            "Failed to load LoRA '%s' resolved by %s: %s. "
+                            "Trying next resolver.", lora_name,
+                            resolver.__class__.__name__, e)
+                        continue  # Try the next resolver
+
+            # If no resolver could successfully resolve and load the LoRA
+            logger.warning(
+                "Could not resolve or load LoRA adapter '%s' with any "
+                "available resolver.", lora_name)
             return None
 
 
