@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class kv_helper:
+class model_aware_kv_ops_helper:
 
     def __init__(self, config: VllmConfig):
         self.is_deepseek_mla = config.model_config.is_deepseek_mla

@@ -14,8 +14,8 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_connector.model_aware_kv_ops_utils import (
-    kv_helper)
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    model_aware_kv_ops_helper as kv_helper)
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
     SimpleBuffer)
 from vllm.logger import init_logger
