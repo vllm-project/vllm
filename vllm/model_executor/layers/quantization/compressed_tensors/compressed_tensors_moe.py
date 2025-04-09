@@ -6,7 +6,8 @@ from typing import Callable, List, Optional
 
 import torch
 from compressed_tensors import CompressionFormat
-from compressed_tensors.quantization import QuantizationStrategy
+from compressed_tensors.quantization import (ActivationOrdering,
+                                             QuantizationStrategy)
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
@@ -55,12 +56,13 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             # Prefer to use the non-marlin kernel when:
             # 1. Many experts (MarlinMoE gives poor performance when >= 16)
             # 2. Non-FP16 dtype (MarlinMoE only supports FP16)
-            # 3. Actorder is not dynamic (g_idx is unsupported)
+            # 3. Actorder is not group/dynamic (g_idx is unsupported)
             # 4. Scaled are grouped (channelwise is unsupported)
             if ((layer.local_num_experts >= 16
-                 or layer.params_dtype != torch.float16)
-                    and weight_quant.actorder != "group"
-                    and weight_quant.strategy == "group"):
+                 or layer.params_dtype != torch.float16) and
+                    weight_quant.actorder not in (ActivationOrdering.GROUP,
+                                                  ActivationOrdering.DYNAMIC)
+                    and weight_quant.strategy in QuantizationStrategy.GROUP):
                 return CompressedTensorsWNA16MoEMethod(quant_config)
             else:
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
