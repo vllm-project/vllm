@@ -373,25 +373,6 @@ class CompressedTensorsW8A8Fp8MoEAiterMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-        device = w13_weight.device
-        # TODO strides can be shared across multiple layers
-        self.ab_strides1 = torch.full((num_experts, ),
-                                      hidden_size,
-                                      device=device,
-                                      dtype=torch.int64)
-        self.c_strides1 = torch.full((num_experts, ),
-                                     2 * intermediate_size_per_partition,
-                                     device=device,
-                                     dtype=torch.int64)
-        self.ab_strides2 = torch.full((num_experts, ),
-                                      intermediate_size_per_partition,
-                                      device=device,
-                                      dtype=torch.int64)
-        self.c_strides2 = torch.full((num_experts, ),
-                                     hidden_size,
-                                     device=device,
-                                     dtype=torch.int64)
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Fp8 moe kernels require a single activation scale.
         # We take the max of all the scales in case they differ.
@@ -491,8 +472,7 @@ class CompressedTensorsW8A8Fp8MoEAiterMethod(CompressedTensorsMoEMethod):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-        print("===========apply===============")
-        print(apply_router_weight_on_input)
+
         return rocm_aiter_fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
