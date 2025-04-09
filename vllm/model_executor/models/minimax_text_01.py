@@ -80,6 +80,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         super().__init__()
         self.tp_world = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+        self.hidden_size = hidden_size
         self.weight = nn.Parameter(torch.ones(hidden_size // self.tp_world))
 
         self.weight.weight_loader = self.weight_loader
@@ -110,7 +111,14 @@ class MiniMaxText01RMSNormTP(CustomOp):
             variance = tensor_model_parallel_all_reduce(
                 variance) / self.tp_world
         x = x * torch.rsqrt(variance + self.variance_epsilon)
-        weight = self.weight.view(1, -1)
+        # 确保权重维度与输入张量匹配
+        # 打印调试信息
+        # print(f"x shape: {x.shape}, weight shape: {self.weight.shape}")
+        # 根据输入张量的形状调整权重
+        if len(x.shape) == 2:  # (batch_size, hidden_size)
+            weight = self.weight.view(1, -1)
+        else:  # 其他情况，保持原始形状
+            weight = self.weight
         x = x.to(orig_dtype) * weight
         return x
 
