@@ -8,8 +8,10 @@
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
 import dataclasses
+import gc
+import os
 from contextlib import contextmanager
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 
@@ -97,7 +99,7 @@ def use_memory_pool_with_allocator(
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
     mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
     with torch.cuda.memory.use_mem_pool(mem_pool):
-        yield mem_pool
+        yield mem_pool, new_alloc
 
 
 class CuMemAllocator:
@@ -140,8 +142,15 @@ class CuMemAllocator:
         return CuMemAllocator.instance
 
     def __init__(self):
+        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        assert "expandable_segments:True" not in conf, \
+            ("Expandable segments are not compatible with memory pool. "
+            "Please track https://github.com/pytorch/pytorch/issues/147851 "
+            "for the latest updates.")
+
         self.pointer_to_data: Dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
+        self.allocator_and_pools: Dict[str, Any] = {}
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
@@ -167,7 +176,7 @@ class CuMemAllocator:
                                          str]] = None) -> None:
         """
         Put the allocator in sleep mode.
-        All data in the memory allocation with the specified tag will be 
+        All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
 
         :param offload_tags: The tags of the memory allocation that will be
@@ -196,28 +205,37 @@ class CuMemAllocator:
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
 
-    def wake_up(self):
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU 
-        memory, and the rest of the data will have empty memory."""
+        memory, and the rest of the data will have empty memory.
+        
+        :param tags: The tags of the memory allocation that will be loaded
+            back to GPU memory. If None, all memory allocation will be loaded
+            back to GPU memory.
+        """
         for ptr, data in self.pointer_to_data.items():
-            handle = data.handle
-            create_and_map(handle)
-            if data.cpu_backup_tensor is not None:
-                cpu_backup_tensor = data.cpu_backup_tensor
-                if cpu_backup_tensor is not None:
-                    size_in_bytes = cpu_backup_tensor.numel(
-                    ) * cpu_backup_tensor.element_size()
-                    cpu_ptr = cpu_backup_tensor.data_ptr()
-                    libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                    data.cpu_backup_tensor = None
+            if tags is None or data.tag in tags:
+                handle = data.handle
+                create_and_map(handle)
+                if data.cpu_backup_tensor is not None:
+                    cpu_backup_tensor = data.cpu_backup_tensor
+                    if cpu_backup_tensor is not None:
+                        size_in_bytes = cpu_backup_tensor.numel(
+                        ) * cpu_backup_tensor.element_size()
+                        cpu_ptr = cpu_backup_tensor.data_ptr()
+                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
+                        data.cpu_backup_tensor = None
 
     @contextmanager
     def use_memory_pool(self, tag: Optional[str] = None):
         """
         A context manager to use the memory pool.
-        All memory allocation created inside the context will be allocated 
+        All memory allocation created inside the context will be allocated
         in the memory pool, and has the specified tag.
 
         :param tag: The tag of the memory allocation. If None, the default tag
@@ -231,7 +249,13 @@ class CuMemAllocator:
         old_tag = self.current_tag
         self.current_tag = tag
         with use_memory_pool_with_allocator(self.python_malloc_callback,
-                                            self.python_free_callback):
+                                            self.python_free_callback) as data:
+            # start to hit another PyTorch bug in PyTorch 2.6,
+            # possibly because of gc-related issue w.r.t. the allocator and
+            # the memory pool.
+            # to avoid the issue, we keep a reference of the data.
+            # see https://github.com/pytorch/pytorch/issues/146431 .
+            self.allocator_and_pools[tag] = data
             yield
             # PyTorch's bug, calling torch.cuda.empty_cache() will error
             # when using pluggable allocator, see

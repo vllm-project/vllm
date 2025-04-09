@@ -31,13 +31,14 @@ model = models.data[0].id
 
 # Round 1
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
+# For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
 response = client.chat.completions.create(model=model, messages=messages)
 
 reasoning_content = response.choices[0].message.reasoning_content
 content = response.choices[0].message.content
 
-print("reasoning_content:", reasoning_content)
-print("content:", content)
+print("reasoning_content for Round 1:", reasoning_content)
+print("content for Round 1:", content)
 
 # Round 2
 messages.append({"role": "assistant", "content": content})
@@ -50,5 +51,5 @@ response = client.chat.completions.create(model=model, messages=messages)
 reasoning_content = response.choices[0].message.reasoning_content
 content = response.choices[0].message.content
 
-print("reasoning_content:", reasoning_content)
-print("content:", content)
+print("reasoning_content for Round 2:", reasoning_content)
+print("content for Round 2:", content)

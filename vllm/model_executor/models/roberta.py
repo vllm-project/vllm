@@ -1,50 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 import torch
 from torch import nn
 from transformers import RobertaConfig
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import CrossEncodingPooler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .interfaces import SupportsCrossEncoding
-
-
-def roberta_task_weights_filter(
-    all_weights: Iterable[Tuple[str, torch.Tensor]]
-) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str,
-                                                              torch.Tensor]]]:
-    """
-    Separate task-specific weights that are applied on top
-    of the encoder-decoder bert base.
-    To do so, return two generators over the original iterator.
-    Also, remove the "roberta." prefix to make it loadable
-    from vanilla BertModel.
-    """
-    # Copy of a lazy iterator without in-memory overhead so both
-    # iterators can be iterated upon independently.
-    all_weights1, all_weights2 = itertools.tee(all_weights)
-
-    def encoder_decoder_weights():
-        for name, weight in all_weights1:
-            if name.startswith("roberta."):
-                yield (name[len("roberta."):], weight)
-
-    return encoder_decoder_weights(), ((n, w) for n, w in all_weights2
-                                       if not n.startswith("roberta."))
+from .interfaces import SupportsCrossEncoding, SupportsV0Only
 
 
 class RobertaEmbedding(nn.Module):
@@ -121,30 +96,6 @@ class RobertaEmbedding(nn.Module):
 
 
 # Adapted from transformers
-def create_position_ids_from_input_ids(input_ids,
-                                       padding_idx,
-                                       past_key_values_length=0):
-    """
-    Replace non-padding symbols with their position numbers.
-    Position numbers begin at padding_idx+1. Padding symbols
-    are ignored. This is modified from fairseq's `utils.make_positions`.
-
-    Args:
-        x: torch.Tensor x:
-
-    Returns: torch.Tensor
-    """
-    # The series of casts and type-conversions here are carefully
-    # balanced to both work with ONNX export and XLA.
-    mask = input_ids.ne(padding_idx).int()
-
-    incremental_indices = (torch.cumsum(mask, dim=0).type_as(mask) +
-                           past_key_values_length) * mask
-
-    return incremental_indices.long() + padding_idx
-
-
-# Adapted from transformers
 class RobertaClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
 
@@ -175,15 +126,38 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
     def _build_model(self,
                      vllm_config: VllmConfig,
                      prefix: str = "") -> BertModel:
-        return BertModel(vllm_config=vllm_config,
-                         prefix=prefix,
-                         embedding_class=RobertaEmbedding)
+        if (vllm_config.model_config.hf_config.position_embedding_type ==
+                "rotary"):
+            config = vllm_config.model_config.hf_config
+            head_dim = config.hidden_size // config.num_attention_heads
+
+            rotary_kwargs = {
+                "head_size": head_dim,
+                "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+                "max_position": config.max_position_embeddings,
+                "base": config.rotary_emb_base,
+                "rope_scaling": getattr(config, "rope_scaling", None)
+            }
+
+            return BertModel(vllm_config=vllm_config,
+                             rotary_kwargs=rotary_kwargs,
+                             prefix=prefix)
+        else:
+            return BertModel(vllm_config=vllm_config,
+                             prefix=prefix,
+                             embedding_class=RobertaEmbedding)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        if getattr(self.config, "lora_rank", 0) > 0:
+            scaling = self.config.lora_alpha / self.config.lora_rank
+            weights = jina_merge_lora_weights(weights, scaling)
+
         weights = self.hf_to_vllm_mapper.apply(weights)
         # Separate weights in "roberta"-prefixed and all else (not in memory).
         # For use with models like FacebookAI/roberta-base.
         bert_weights, task_weights = roberta_task_weights_filter(weights)
+        bert_weights = jina_to_vllm_mapper.apply(bert_weights)
+
         loaded = self.model.load_weights(bert_weights)
         if not len(loaded):
             # Fix for models like `sentence-transformers/stsb-roberta-base-v2`
@@ -192,7 +166,8 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         assert len(loaded), "Unable to load RobertaEmbeddingModel"
 
 
-class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
+class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
+                                       SupportsV0Only):
     """A model that uses Roberta to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -219,8 +194,9 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self._pooler = CrossEncodingPooler(config, self.classifier)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-
         bert_weights, task_weights = roberta_task_weights_filter(weights)
+        bert_weights = jina_to_vllm_mapper.apply(bert_weights)
+
         self.roberta.load_weights(bert_weights)
 
         params_dict = dict(self.named_parameters())
@@ -243,16 +219,114 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.roberta(input_ids=input_ids,
                             position_ids=positions,
-                            kv_caches=kv_caches,
                             inputs_embeds=inputs_embeds,
                             intermediate_tensors=intermediate_tensors,
-                            attn_metadata=attn_metadata,
                             token_type_ids=token_type_ids)
+
+
+# Adapted from transformers
+def create_position_ids_from_input_ids(input_ids,
+                                       padding_idx,
+                                       past_key_values_length=0):
+    """
+    Replace non-padding symbols with their position numbers.
+    Position numbers begin at padding_idx+1. Padding symbols
+    are ignored. This is modified from fairseq's `utils.make_positions`.
+
+    Args:
+        x: torch.Tensor x:
+
+    Returns: torch.Tensor
+    """
+    # The series of casts and type-conversions here are carefully
+    # balanced to both work with ONNX export and XLA.
+    mask = input_ids.ne(padding_idx).int()
+
+    incremental_indices = (torch.cumsum(mask, dim=0).type_as(mask) +
+                           past_key_values_length) * mask
+
+    return incremental_indices.long() + padding_idx
+
+
+def roberta_task_weights_filter(
+    all_weights: Iterable[Tuple[str, torch.Tensor]]
+) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str,
+                                                              torch.Tensor]]]:
+    """
+    Separate task-specific weights that are applied on top
+    of the encoder-decoder bert base.
+    To do so, return two generators over the original iterator.
+    Also, remove the "roberta." prefix to make it loadable
+    from vanilla BertModel.
+    """
+    # Copy of a lazy iterator without in-memory overhead so both
+    # iterators can be iterated upon independently.
+    all_weights1, all_weights2 = itertools.tee(all_weights)
+
+    def encoder_decoder_weights():
+        for name, weight in all_weights1:
+            if name.startswith("roberta."):
+                yield (name[len("roberta."):], weight)
+
+    return encoder_decoder_weights(), ((n, w) for n, w in all_weights2
+                                       if not n.startswith("roberta."))
+
+
+jina_to_vllm_mapper = WeightsMapper(
+    orig_to_new_substr={
+        'emb_ln': "embeddings.LayerNorm",
+        'layers': "layer",
+        'mixer.Wqkv': "attention.self.qkv_proj",
+        'mixer.out_proj': "attention.output.dense",
+        'norm1': "attention.output.LayerNorm",
+        'mlp.fc1': "intermediate.dense",
+        'mlp.fc2': "output.dense",
+        'norm2': "output.LayerNorm",
+    })
+
+
+@torch.inference_mode()
+def jina_merge_lora_weights(weights: Iterable[Tuple[str, torch.Tensor]],
+                            scaling: float = 1.0):
+    # use for jina-embeddings-v3
+    # Merge Lora weights into a single weight tensor.
+    # This is a temporary solution until we have a better way to handle
+
+    weights = {name: weight for name, weight in weights}
+
+    o = ".original"
+    a = ".0.lora_A"
+    b = ".0.lora_B"
+
+    # text-matching
+    i = -1
+
+    for name in list(weights.keys()):
+        if o in name:
+            dtype = weights[name].dtype
+            shape = weights[name].shape
+            weight_name = name[:-len(o)]
+
+            if "embeddings" in weight_name:
+                B = weights[weight_name + a][i].cuda().float()
+                A = weights[weight_name + b][i].cuda().float()
+            else:
+                B = weights[weight_name + b][i].cuda().float()
+                A = weights[weight_name + a][i].cuda().float()
+
+            weight = (weights[weight_name + o].cuda() +
+                      torch.matmul(B, A).view(shape) * scaling)
+            weight = weight.cpu().to(dtype)
+
+            weights[weight_name.replace(".parametrizations", "")] = weight
+
+            del weights[weight_name + o], weights[weight_name +
+                                                  a], weights[weight_name + b]
+
+    return [(name, weight) for name, weight in weights.items()]

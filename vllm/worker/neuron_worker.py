@@ -14,7 +14,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.utils import NeuronFramework, get_neuron_framework_to_use
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase, WorkerBase,
+                                     LoRANotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 logger = init_logger(__name__)
@@ -24,7 +24,7 @@ DEFAULT_NEURON_RANK_ID = "0"
 DEFAULT_ENABLE_NEURON_MULTI_NODE = "False"
 
 
-class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
+class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
     """
 
@@ -116,7 +116,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # Set the number of GPU blocks to be the same as the maximum number of
         # sequences that can be processed in a single batch. This is equivalent
         # to schedule without PagedAttention.
-        num_gpu_blocks = self.scheduler_config.max_num_seqs
+        num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
 
         # Swap not yet supported with Neuron backend.
         num_cpu_blocks = 0
@@ -130,7 +130,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         # Different values are not tested.
         assert num_cpu_blocks == 0
-        assert num_gpu_blocks == self.scheduler_config.max_num_seqs
+        assert num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks

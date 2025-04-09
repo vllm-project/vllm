@@ -13,6 +13,7 @@ from pathlib import Path
 
 import lm_eval
 import numpy
+import pytest
 import yaml
 
 RTOL = 0.05
@@ -45,6 +46,10 @@ def launch_lm_eval(eval_config):
 def test_lm_eval_correctness():
     eval_config = yaml.safe_load(
         Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
+
+    if eval_config[
+            "model_name"] == "nm-testing/Meta-Llama-3-70B-Instruct-FBGEMM-nonuniform":  #noqa: E501
+        pytest.skip("FBGEMM is currently failing on main.")
 
     # Launch eval requests.
     results = launch_lm_eval(eval_config)

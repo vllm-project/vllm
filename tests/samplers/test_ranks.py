@@ -4,7 +4,13 @@ import pytest
 
 from vllm import SamplingParams
 
-MODELS = ["facebook/opt-125m"]
+MODELS = ["distilbert/distilgpt2"]
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    """We can run both engines for this test."""
+    pass
 
 
 @pytest.mark.parametrize("model", MODELS)

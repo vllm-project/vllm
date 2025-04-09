@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import warnings
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Any, Optional, Union
 
 import torch
 
@@ -9,7 +10,9 @@ from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
-TokensText = Tuple[List[int], str]
+from .registry import HF_EXAMPLE_MODELS
+
+TokensText = tuple[list[int], str]
 
 
 def check_outputs_equal(
@@ -46,7 +49,7 @@ def check_outputs_equal(
 # * List of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
+TokensTextLogprobs = tuple[list[int], str, Optional[Union[list[dict[int,
                                                                     float]],
                                                           SampleLogprobs]]]
 
@@ -57,8 +60,8 @@ TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
 # * Optional list of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TextTextLogprobs = Tuple[List[str], str, Optional[Union[List[Dict[str, float]],
-                                                        List[Dict[str,
+TextTextLogprobs = tuple[list[str], str, Optional[Union[list[dict[str, float]],
+                                                        list[dict[str,
                                                                   Logprob]]]]]
 
 # Representation of generated sequence as a tuple of
@@ -68,9 +71,9 @@ TextTextLogprobs = Tuple[List[str], str, Optional[Union[List[Dict[str, float]],
 # * Optional list of top prompt logprobs for each prompt token
 #
 # Allows prompt logprobs to be requested.
-TokensTextLogprobsPromptLogprobs = Tuple[
-    List[int], str, Optional[Union[List[Dict[int, float]], SampleLogprobs]],
-    Optional[Union[List[Optional[Dict[int, float]]], PromptLogprobs]]]
+TokensTextLogprobsPromptLogprobs = tuple[
+    list[int], str, Optional[Union[list[dict[int, float]], SampleLogprobs]],
+    Optional[Union[list[Optional[dict[int, float]]], PromptLogprobs]]]
 
 
 def check_logprobs_close(
@@ -248,19 +251,19 @@ def check_logprobs_close(
                     warnings.warn(fail_msg, stacklevel=2)
 
 
-def build_model_context(model_name: str,
-                        task: TaskOption = "auto",
-                        tokenizer_name: Optional[str] = None,
-                        trust_remote_code: bool = False,
-                        dtype: Optional[Union[str, torch.dtype]] = None,
-                        mm_processor_kwargs: Optional[Dict] = None,
-                        limit_mm_per_prompt: Optional[Dict] = None):
+def build_model_context(
+    model_id: str,
+    task: TaskOption = "auto",
+    dtype: Union[str, torch.dtype] = "auto",
+    model_config_kwargs: Optional[dict[str, Any]] = None,
+    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    limit_mm_per_prompt: Optional[dict[str, int]] = None,
+    disable_mm_preprocessor_cache: bool = True,
+):
     """Creates an InputContext for a given model.
 
     Args:
-        model_name: Name of the model being considered.
-        tokenizer_name: Name of the tokenizer being considered.
-        trust_remote_code: Whether or not to allow loading remote code.
+        model_id: ID of the model being considered.
         mm_processor_kwargs: optional processor kwargs for to be leveraged
             in the input processor, mapper, dummy data creation, etc.
         limit_mm_per_prompt: Multimodal limits.
@@ -268,20 +271,23 @@ def build_model_context(model_name: str,
     Returns:
         InputContext for the model being considered.
     """
-    if tokenizer_name is None:
-        tokenizer_name = model_name
-    if dtype is None:
-        dtype = "half"
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
 
+    model_config_kwargs = model_config_kwargs or {}
     model_config = ModelConfig(
-        model_name,
+        model_id,
         task=task,
-        tokenizer=tokenizer_name,
-        tokenizer_mode="auto",
-        trust_remote_code=trust_remote_code,
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
         dtype=dtype,
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
+        disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+        hf_overrides=model_info.hf_overrides,
+        **model_config_kwargs,
     )
     return InputContext(model_config)

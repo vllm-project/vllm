@@ -11,8 +11,11 @@ import torch
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
 from vllm.attention.backends.abstract import AttentionType
+from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import ModelRunnerBase

@@ -7,9 +7,7 @@
 - Models: llama-3.1 8B, llama-3 70B, mixtral 8x7B.
 - Evaluation metrics: end-to-end latency (mean, median, p99).
 
-
 {latency_tests_markdown_table}
-
 
 ## Throughput tests
 
@@ -19,9 +17,7 @@
 - Models: llama-3.1 8B, llama-3 70B, mixtral 8x7B.
 - Evaluation metrics: throughput.
 
-
 {throughput_tests_markdown_table}
-
 
 ## Serving tests
 
@@ -33,13 +29,11 @@
 - We also added a speculative decoding test for llama-3 70B, under QPS 2
 - Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
 
-
 {serving_tests_markdown_table}
-
 
 ## json version of the benchmarking tables
 
-This section contains the data of the markdown tables above in JSON format. 
+This section contains the data of the markdown tables above in JSON format.
 You can load the benchmarking tables into pandas dataframes as follows:
 
 ```python
@@ -54,9 +48,9 @@ serving_results = pd.DataFrame.from_dict(benchmarking_results["serving"])
 ```
 
 The json string for all benchmarking tables:
+
 ```json
 {benchmarking_results_in_json_string}
 ```
 
 You can also check the raw experiment data in the Artifact tab of the Buildkite page.
-

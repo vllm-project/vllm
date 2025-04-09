@@ -2,9 +2,14 @@
 
 # Engine Arguments
 
-Below, you can find an explanation of every engine argument for vLLM:
+Engine arguments control the behavior of the vLLM engine.
 
-<!--- pyml disable-num-lines 7 no-space-in-emphasis-->
+- For [offline inference](#offline-inference), they are part of the arguments to `LLM` class.
+- For [online serving](#openai-compatible-server), they are part of the arguments to `vllm serve`.
+
+Below, you can find an explanation of every engine argument:
+
+<!--- pyml disable-num-lines 7 no-space-in-emphasis -->
 ```{eval-rst}
 .. argparse::
     :module: vllm.engine.arg_utils
@@ -15,9 +20,9 @@ Below, you can find an explanation of every engine argument for vLLM:
 
 ## Async Engine Arguments
 
-Below are the additional arguments related to the asynchronous engine:
+Additional arguments are available to the asynchronous engine which is used for online serving:
 
-<!--- pyml disable-num-lines 7 no-space-in-emphasis-->
+<!--- pyml disable-num-lines 7 no-space-in-emphasis -->
 ```{eval-rst}
 .. argparse::
     :module: vllm.engine.arg_utils

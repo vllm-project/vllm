@@ -12,15 +12,21 @@ extern "C" {
 #include <cuda_runtime_api.h>
 #include <cuda.h>
 
-#define CUDA_CHECK(condition)                                                  \
-  do {                                                                         \
-    CUresult error = condition;                                                \
-    if (error != 0) {                                                          \
-      char* error_string;                                                      \
-      cuGetErrorString(error, (const char**)&error_string);                    \
-      std::cerr << "CUDA Error: " << error_string << " at " << __FILE__ << ":" \
-                << __LINE__ << std::endl;                                      \
-    }                                                                          \
+char error_msg[10240];  // 10KB buffer to store error messages
+CUresult no_error = CUresult(0);
+CUresult error_code = no_error;  // store error code
+
+#define CUDA_CHECK(condition)                                           \
+  do {                                                                  \
+    CUresult error = condition;                                         \
+    if (error != 0) {                                                   \
+      error_code = error;                                               \
+      char* error_string;                                               \
+      cuGetErrorString(error, (const char**)&error_string);             \
+      snprintf(error_msg, sizeof(error_msg), "CUDA Error: %s at %s:%d", \
+               error_string, __FILE__, __LINE__);                       \
+      std::cerr << error_msg << std::endl;                              \
+    }                                                                   \
   } while (0)
 
 // Global references to Python callables
@@ -54,14 +60,22 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 
   // Allocate memory using cuMemCreate
   CUDA_CHECK(cuMemCreate(p_memHandle, size, &prop, 0));
+  if (error_code != 0) {
+    return;
+  }
   CUDA_CHECK(cuMemMap(d_mem, size, 0, *p_memHandle, 0));
-
+  if (error_code != 0) {
+    return;
+  }
   CUmemAccessDesc accessDesc = {};
   accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   accessDesc.location.id = device;
   accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
 
   CUDA_CHECK(cuMemSetAccess(d_mem, size, &accessDesc, 1));
+  if (error_code != 0) {
+    return;
+  }
   // std::cout << "create_and_map: device=" << device << ", size=" << size << ",
   // d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
 }
@@ -73,7 +87,13 @@ void unmap_and_release(unsigned long long device, ssize_t size,
   // ", d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
   ensure_context(device);
   CUDA_CHECK(cuMemUnmap(d_mem, size));
+  if (error_code != 0) {
+    return;
+  }
   CUDA_CHECK(cuMemRelease(*p_memHandle));
+  if (error_code != 0) {
+    return;
+  }
 }
 
 PyObject* create_tuple_from_c_integers(unsigned long long a,
@@ -121,12 +141,16 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   size_t granularity;
   CUDA_CHECK(cuMemGetAllocationGranularity(&granularity, &prop,
                                            CU_MEM_ALLOC_GRANULARITY_MINIMUM));
-
+  if (error_code != 0) {
+    return nullptr;
+  }
   size_t alignedSize = ((size + granularity - 1) / granularity) * granularity;
 
   CUdeviceptr d_mem;
   CUDA_CHECK(cuMemAddressReserve(&d_mem, alignedSize, 0, 0, 0));
-
+  if (error_code != 0) {
+    return nullptr;
+  }
   // allocate the CUmemGenericAllocationHandle
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)malloc(
@@ -208,6 +232,9 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
 
   // free address and the handle
   CUDA_CHECK(cuMemAddressFree(d_mem, size));
+  if (error_code != 0) {
+    return;
+  }
   free(p_memHandle);
 }
 
@@ -258,6 +285,12 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
 
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle);
 
+  if (error_code != 0) {
+    error_code = no_error;
+    PyErr_SetString(PyExc_RuntimeError, error_msg);
+    return nullptr;
+  }
+
   Py_RETURN_NONE;
 }
 
@@ -281,6 +314,12 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
       (CUmemGenericAllocationHandle*)recv_p_memHandle;
 
   create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle);
+
+  if (error_code != 0) {
+    error_code = no_error;
+    PyErr_SetString(PyExc_RuntimeError, error_msg);
+    return nullptr;
+  }
 
   Py_RETURN_NONE;
 }

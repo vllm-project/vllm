@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
-
 import numpy as np
 import torch
 
@@ -15,13 +13,11 @@ class BlockTable:
     def __init__(
         self,
         max_num_reqs: int,
-        max_model_len: int,
         max_num_blocks_per_req: int,
         pin_memory: bool,
         device: torch.device,
     ):
         self.max_num_reqs = max_num_reqs
-        self.max_model_len = max_model_len
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.pin_memory = pin_memory
         self.device = device
@@ -42,24 +38,33 @@ class BlockTable:
 
     def append_row(
         self,
+        block_ids: list[int],
         row_idx: int,
-        start: int,
-        block_ids: List[int],
     ) -> None:
         if not block_ids:
             return
         num_blocks = len(block_ids)
+        start = self.num_blocks_per_row[row_idx]
+        self.num_blocks_per_row[row_idx] += num_blocks
         self.block_table_np[row_idx, start:start + num_blocks] = block_ids
-        self.num_blocks_per_row[row_idx] = start + num_blocks
 
-    def add_row(self, row_idx: int, block_ids: List[int]) -> None:
-        self.append_row(row_idx, 0, block_ids)
+    def add_row(self, block_ids: list[int], row_idx: int) -> None:
+        self.num_blocks_per_row[row_idx] = 0
+        self.append_row(block_ids, row_idx)
 
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
         self.block_table_np[tgt, :num_blocks] = self.block_table_np[
             src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
+
+    def swap_row(self, src: int, tgt: int) -> None:
+        num_blocks_src = self.num_blocks_per_row[src]
+        num_blocks_tgt = self.num_blocks_per_row[tgt]
+        self.num_blocks_per_row[src] = num_blocks_tgt
+        self.num_blocks_per_row[tgt] = num_blocks_src
+
+        self.block_table_np[[src, tgt]] = self.block_table_np[[tgt, src]]
 
     def commit(self, num_reqs: int) -> None:
         self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],

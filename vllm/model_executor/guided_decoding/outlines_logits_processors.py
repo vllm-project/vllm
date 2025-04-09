@@ -19,12 +19,12 @@ import copy
 import json
 from collections import defaultdict
 from functools import lru_cache
-from typing import Callable, DefaultDict, Dict, List, Union
+from typing import Callable, DefaultDict, Dict, List, Optional, Union
 
 import numpy as np
 import torch
 from outlines import grammars
-from outlines.caching import cache
+from outlines.caching import cache, disable_cache
 from outlines.fsm.guide import (CFGGuide, CFGState, Generate, Guide,
                                 RegexGuide, Write)
 from outlines.fsm.parsing import PartialLark
@@ -32,11 +32,26 @@ from outlines_core.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
+import vllm.envs as envs
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.reasoning import ReasoningParser
+
+logger = init_logger(__name__)
+
+if envs.VLLM_V0_USE_OUTLINES_CACHE:
+    logger.warning("Enabling outlines cache. This is an unbounded on-disk "
+                   "cache. It may consume a lot of disk space and should "
+                   "not be used with untrusted clients.")
+else:
+    disable_cache()
+
 
 class BaseLogitsProcessor:
 
-    def __init__(self, guide: Guide):
+    def __init__(self, guide: Guide, reasoner: Optional[ReasoningParser]):
         self._guide: Guide = guide
+        self._reasoner: Optional[ReasoningParser] = reasoner
         # CFGState is used for the FSM state for CFGGuide
         self._fsm_state: DefaultDict[int, Union[int,
                                                 CFGState]] = defaultdict(int)
@@ -44,6 +59,18 @@ class BaseLogitsProcessor:
     def __call__(self, input_ids: List[int],
                  scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
+
+        # Skip the structured logits processing if reasoning is not finished.
+        # reasoner is not None only when `--enable-reasoning` is set.
+        if self._reasoner is not None:
+            if not self._reasoner.is_reasoning_end(input_ids):
+                return scores
+            else:
+                # Remove the reasoning tokens from the input_ids
+                # We need this because our implementation relies on the
+                # hash of the input_ids to store the FSM state.
+                input_ids = self._reasoner.extract_content_ids(input_ids)
+
         seq_id = hash(tuple(input_ids))
 
         if len(input_ids) > 0:
@@ -91,7 +118,14 @@ class BaseLogitsProcessor:
         allowed_tokens = allowed_tokens.masked_select(
             allowed_tokens < scores.shape[-1])
         mask.index_fill_(0, allowed_tokens, 0)
-        scores.add_(mask)
+        if current_platform.is_hpu():
+            # Workaround for HPU bug where add_() raise RuntimeError:
+            # synNodeCreateWithId failed for node: strided_insert
+            # with synStatus 1 [Invalid argument], hopefully it will
+            # be fixed in the future releases of the HPU runtime.
+            scores = scores.add(mask)
+        else:
+            scores.add_(mask)
         return scores
 
 
@@ -104,7 +138,12 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
         tokenizer = _adapt_tokenizer(tokenizer)
         return RegexGuide.from_regex(regex_string, tokenizer)
 
-    def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase):
+    def __init__(
+        self,
+        regex_string: str,
+        tokenizer: PreTrainedTokenizerBase,
+        reasoner: Optional[ReasoningParser],
+    ):
         """Compile the FSM that drives the regex-structured generation.
 
         Parameters
@@ -116,14 +155,15 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
         """
         super().__init__(
-            RegexLogitsProcessor._get_guide(regex_string, tokenizer))
+            RegexLogitsProcessor._get_guide(regex_string, tokenizer), reasoner)
 
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
 
     def __init__(self, schema: Union[str, Dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
-                 whitespace_pattern: Union[str, None]):
+                 whitespace_pattern: Union[str, None],
+                 reasoner: Optional[ReasoningParser]):
         """Compile the FSM that drives the JSON-guided generation.
 
         Parameters
@@ -151,7 +191,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
                 f"a Pydantic object, a dictionary or a string that contains "
                 f"the JSON Schema specification")
         regex_string = build_regex_from_schema(schema_str, whitespace_pattern)
-        super().__init__(regex_string, tokenizer)
+        super().__init__(regex_string, tokenizer, reasoner)
 
 
 class CFGLogitsProcessor(BaseLogitsProcessor):
@@ -162,7 +202,8 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         tokenizer = _adapt_tokenizer(tokenizer)
         return CFGGuide(cfg, tokenizer)
 
-    def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase):
+    def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase,
+                 reasoner: Optional[ReasoningParser]):
         """Compile the FSM that drives the context free grammar generation.
 
         Parameters
@@ -173,7 +214,8 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        super().__init__(CFGLogitsProcessor._get_guide(cfg, tokenizer))
+        super().__init__(CFGLogitsProcessor._get_guide(cfg, tokenizer),
+                         reasoner)
         self._guide = self._guide.copy()
 
 

@@ -44,7 +44,7 @@ def vlm2vec():
 
 def dse_qwen2_vl(inp: dict):
     # Embedding an Image
-    if inp["dtype"] == "image":
+    if inp["type"] == "image":
         messages = [{
             "role":
             "user",
@@ -102,7 +102,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         "Script to call a specified VLM through the API. Make sure to serve "
         "the model with --task embed before running this.")
-    parser.add_argument("model",
+    parser.add_argument("--model",
                         type=str,
                         choices=["vlm2vec", "dse_qwen2_vl"],
                         required=True,
@@ -113,10 +113,10 @@ if __name__ == '__main__':
         vlm2vec()
     elif args.model == "dse_qwen2_vl":
         dse_qwen2_vl({
-            "dtye": "image",
+            "type": "image",
             "image_url": image_url,
         })
         dse_qwen2_vl({
-            "dtype": "text",
+            "type": "text",
             "content": "What is the weather like today?",
         })

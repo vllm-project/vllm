@@ -16,13 +16,13 @@
 # limitations under the License.
 """Inference-only Gemma model compatible with HuggingFace weights."""
 from functools import cache
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import GemmaConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -43,7 +43,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -183,13 +183,11 @@ class GemmaAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -233,8 +231,6 @@ class GemmaDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -247,8 +243,6 @@ class GemmaDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         # Fully Connected
@@ -298,8 +292,6 @@ class GemmaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -313,13 +305,10 @@ class GemmaModel(nn.Module):
         else:
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
@@ -329,85 +318,6 @@ class GemmaModel(nn.Module):
             })
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
-
-
-class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
-
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-
-    # Gemma does not apply LoRA to the embedding layer.
-    embedding_modules = {}
-    embedding_padding_modules = []
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-
-        self.config = config
-        # currently all existing Gemma models have `tie_word_embeddings` enabled
-        assert config.tie_word_embeddings
-        self.lora_config = lora_config
-
-        self.quant_config = quant_config
-        self.model = GemmaModel(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
-                                   inputs_embeds)
-        return hidden_states
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.model.embed_tokens, hidden_states,
-                                       sampling_metadata)
-        return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -436,10 +346,6 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # lm_head is not used in vllm as it is tied with embed_token.
-                # To prevent errors, skip loading lm_head.weight.
-                if "lm_head.weight" in name:
-                    continue
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -450,9 +356,78 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
-        unloaded_params = params_dict.keys() - loaded_params
-        if unloaded_params:
-            logger.warning(
-                "Some weights are not initialized from checkpoints: %s",
-                unloaded_params)
+
         return loaded_params
+
+
+class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
+        self.config = config
+        # currently all existing Gemma models have `tie_word_embeddings` enabled
+        assert config.tie_word_embeddings
+        self.lora_config = lora_config
+
+        self.quant_config = quant_config
+        self.model = GemmaModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.sampler = get_sampler()
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.model.embed_tokens, hidden_states,
+                                       sampling_metadata)
+        return logits
+
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)

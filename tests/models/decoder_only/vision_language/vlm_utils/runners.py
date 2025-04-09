@@ -3,7 +3,6 @@
 types / modalities.
 """
 from pathlib import PosixPath
-from typing import Type
 
 from .....conftest import HfRunner, VllmRunner, _ImageAssets, _VideoAssets
 from . import builders, core
@@ -13,8 +12,8 @@ from .types import ExpandableVLMTestArgs, VLMTestInfo
 ####### Entrypoints for running different test types
 def run_single_image_test(*, tmp_path: PosixPath, model_test_info: VLMTestInfo,
                           test_case: ExpandableVLMTestArgs,
-                          hf_runner: Type[HfRunner],
-                          vllm_runner: Type[VllmRunner],
+                          hf_runner: type[HfRunner],
+                          vllm_runner: type[VllmRunner],
                           image_assets: _ImageAssets):
     assert test_case.size_wrapper is not None
     inputs = builders.build_single_image_inputs_from_test_info(
@@ -36,8 +35,8 @@ def run_single_image_test(*, tmp_path: PosixPath, model_test_info: VLMTestInfo,
 
 def run_multi_image_test(*, tmp_path: PosixPath, model_test_info: VLMTestInfo,
                          test_case: ExpandableVLMTestArgs,
-                         hf_runner: Type[HfRunner],
-                         vllm_runner: Type[VllmRunner],
+                         hf_runner: type[HfRunner],
+                         vllm_runner: type[VllmRunner],
                          image_assets: _ImageAssets):
     assert test_case.size_wrapper is not None
     inputs = builders.build_multi_image_inputs_from_test_info(
@@ -59,8 +58,8 @@ def run_multi_image_test(*, tmp_path: PosixPath, model_test_info: VLMTestInfo,
 
 def run_embedding_test(*, model_test_info: VLMTestInfo,
                        test_case: ExpandableVLMTestArgs,
-                       hf_runner: Type[HfRunner],
-                       vllm_runner: Type[VllmRunner],
+                       hf_runner: type[HfRunner],
+                       vllm_runner: type[VllmRunner],
                        image_assets: _ImageAssets):
     assert test_case.size_wrapper is not None
     inputs, vllm_embeddings = builders.build_embedding_inputs_from_test_info(
@@ -85,8 +84,8 @@ def run_video_test(
     *,
     model_test_info: VLMTestInfo,
     test_case: ExpandableVLMTestArgs,
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
     video_assets: _VideoAssets,
 ):
     assert test_case.size_wrapper is not None
@@ -111,8 +110,8 @@ def run_video_test(
 
 def run_custom_inputs_test(*, model_test_info: VLMTestInfo,
                            test_case: ExpandableVLMTestArgs,
-                           hf_runner: Type[HfRunner],
-                           vllm_runner: Type[VllmRunner]):
+                           hf_runner: type[HfRunner],
+                           vllm_runner: type[VllmRunner]):
     # Custom test cases can provide inputs directly, but they need to
     # explicitly provided a CustomTestConfig, which wraps the inputs and
     # the limit_mm_per_prompt

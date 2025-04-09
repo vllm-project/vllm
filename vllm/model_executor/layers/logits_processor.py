@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_gather)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -51,11 +50,7 @@ class LogitsProcessor(nn.Module):
         # Soft cap the logits. Used in Gemma 2.
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
-
-        parallel_config = get_current_vllm_config().parallel_config
-        self.use_all_gather = current_platform.is_tpu() \
-            or envs.VLLM_USE_V1 \
-            or parallel_config.distributed_executor_backend == "external_launcher" # noqa
+        self.use_all_gather = current_platform.use_all_gather()
 
     def forward(
         self,
@@ -83,22 +78,14 @@ class LogitsProcessor(nn.Module):
                 logits *= self.scale
 
             # Apply logits processors (if any).
-            if sampling_metadata is not None:
+            if sampling_metadata is not None and \
+                sampling_metadata.seq_groups is not None:
                 logits = _apply_logits_processors(logits, sampling_metadata)
 
         return logits
 
-    def _get_logits(
-        self,
-        hidden_states: torch.Tensor,
-        lm_head: VocabParallelEmbedding,
-        embedding_bias: Optional[torch.Tensor],
-    ) -> Optional[torch.Tensor]:
-        # Get the logits for the next tokens.
-        logits = lm_head.linear_method.apply(lm_head,
-                                             hidden_states,
-                                             bias=embedding_bias)
-
+    def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """gather/all-gather the logits tensor across model parallel group."""
         if self.use_all_gather:
             # Gather is not supported for some devices such as TPUs.
             # Use all-gather instead.
@@ -109,6 +96,22 @@ class LogitsProcessor(nn.Module):
         else:
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
+        return logits
+
+    def _get_logits(
+        self,
+        hidden_states: torch.Tensor,
+        lm_head: VocabParallelEmbedding,
+        embedding_bias: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        # Get the logits for the next tokens.
+        logits = lm_head.quant_method.apply(lm_head,
+                                            hidden_states,
+                                            bias=embedding_bias)
+
+        # Gather logits for TP
+        logits = self._gather_logits(logits)
+
         # Remove paddings in vocab (if any).
         if logits is not None:
             logits = logits[..., :self.org_vocab_size]
