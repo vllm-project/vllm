@@ -137,7 +137,7 @@ payload = {
             "content": [
                 {
                     "type": "text",
-                    "text": "<image>\nWhat is for dinner?"
+                    "text": "What is for dinner?"
                 },
                 {
                     "type": "image_url",
