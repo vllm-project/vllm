@@ -93,7 +93,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             externally (before the next schedule() call)
         """
         # Sequences can be in RUNNING or FINISHED_ABORTED state
-        # once scheduled, as a sequence is moved to FINSIHED_ABORTED
+        # once scheduled, as a sequence is moved to FINISHED_ABORTED
         # if a client disconnects from the api server.
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
         if seqs is None:

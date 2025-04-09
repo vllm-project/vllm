@@ -83,8 +83,8 @@ spda_o = scaled_dot_product_attention(
 return spda_o @ W_O
 
 NOTE: in the actual code,
-    `kv_b_proj` is [W_UK; W_UV] concatnated per head
-    `q_b_proj` is [W_UQ; W_QR] concatnated per head
+    `kv_b_proj` is [W_UK; W_UV] concatenated per head
+    `q_b_proj` is [W_UQ; W_QR] concatenated per head
     `out_proj` is W_O
 
 
