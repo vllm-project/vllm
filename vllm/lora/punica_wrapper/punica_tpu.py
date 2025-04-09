@@ -40,6 +40,15 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self._sampler_indices_padded = self._sampler_indices_padded.to(
             dtype=torch.int32)
 
+        torch.ops.xla.dynamo_set_buffer_donor_(self._token_lora_indices, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._sampler_indices, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._sampler_indices_padded,
+                                               True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._embeddings_indices, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._long_lora_indices, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._lora_indices_per_batch,
+                                               True)
+
     def mark_compiled(self):
         torch._dynamo.mark_dynamic(self._token_lora_indices, 0)
         torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
@@ -340,18 +349,20 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             "cpu",
             long_lora_context,
         )
-        self._token_lora_indices[:base_indices.shape[0]].copy_(
-            base_indices.to(self.device))
-        self._sampler_indices[:sampler_indices.shape[0]].copy_(
-            sampler_indices.to(self.device))
-        self._sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
-            sampler_indices_padded.to(self.device))
+        self._token_lora_indices[:base_indices.shape[0]] = base_indices.to(
+            self.device)
+        self._sampler_indices[:sampler_indices.shape[0]] = sampler_indices.to(
+            self.device)
+        self._sampler_indices_padded[:sampler_indices_padded.
+                                     shape[0]] = sampler_indices_padded.to(
+                                         self.device)
         self._embeddings_indices[:embeddings_indices.
-                                 shape[0], :embeddings_indices.shape[1]].copy_(
-                                     embeddings_indices.to(self.device))
+                                 shape[0], :embeddings_indices.
+                                 shape[1]] = embeddings_indices.to(self.device)
         if long_lora_offsets_tensor is not None:
-            self._long_lora_indices[:long_lora_offsets_tensor.shape[0]].copy_(
-                long_lora_offsets_tensor.to(self.device))
+            self._long_lora_indices[:long_lora_offsets_tensor.
+                                    shape[0]] = long_lora_offsets_tensor.to(
+                                        self.device)
         else:
             self._long_lora_indices.zero_()
         self.indices_len[:] = indices_len
@@ -359,8 +370,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
         self.batch_size = 1
-        self._lora_indices_per_batch[:self.batch_size].copy_(
-            token_lora_tensor[:self.batch_size])
+        self._lora_indices_per_batch[:self.
+                                     batch_size] = token_lora_tensor[:self.
+                                                                     batch_size]
 
     def _pad_prompt_mapping(
             self, prompt_mapping: Tuple[int, ...]) -> Tuple[int, ...]:
