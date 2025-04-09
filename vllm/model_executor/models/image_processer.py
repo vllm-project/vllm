@@ -377,8 +377,9 @@ class ImageProcessor(BaseImageProcessor):
             
         for image in images:
             # 将self.size元组解包为两个单独的参数
-            resized_image = image.resize(self.size, Image.BICUBIC)
-            transform_img = _transform(self.size[1], self.size[0], self.image_mean, self.image_std)(resized_image)
+            width, height = self.size
+            resized_image = image.resize((width, height), Image.BICUBIC)
+            transform_img = _transform(height, width, self.image_mean, self.image_std)(resized_image)
             all_images.append(to_numpy_array(transform_img))
 
         images = [
