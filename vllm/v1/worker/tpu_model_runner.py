@@ -496,17 +496,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
-        if self.lora_config is not None:
-            # We need to respect padding when activating LoRA adapters
-            padded_num_scheduled_tokens_per_req = np.copy(
-                num_scheduled_tokens_per_req
-            )  # Copying to avoid accidental state corruption bugs
-            padded_num_scheduled_tokens_per_req[-1] += \
-                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
-
-            self.set_active_loras(self.input_batch,
-                                  padded_num_scheduled_tokens_per_req)
-
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -527,6 +516,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
+
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
         return attn_metadata, logits_indices
 
     def _scatter_placeholders(
@@ -891,6 +891,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
     def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping,
                           lora_requests) -> None:
+        xm.mark_step()  # Captures input updates
         super()._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                   lora_requests)
         xm.mark_step()  # Captures metadata updates
