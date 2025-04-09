@@ -30,8 +30,6 @@ def test_ragged_paged_attention():
         logits_soft_cap=logits_soft_cap,
         attn_type=AttentionType.DECODER,
     )
-    mock_vmem_limit_bytes = 1024
-    attn_impl.vmem_limit_bytes = mock_vmem_limit_bytes
 
     class FakeAttentionLayer:
         _k_scale_float: float
@@ -88,7 +86,7 @@ def test_ragged_paged_attention():
             ANY,  # num_seqs
             num_kv_pages_per_block=None,
             num_queries_per_block=None,
-            vmem_limit_bytes=mock_vmem_limit_bytes,
+            vmem_limit_bytes=None,
             use_kernel=True,
             sm_scale=scale,
             sliding_window=sliding_window,
