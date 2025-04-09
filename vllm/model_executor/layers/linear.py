@@ -1493,7 +1493,7 @@ class QKVCrossParallelLinear(LinearBase):
         if is_hpu and type(map_param) is HabanaParameterWrapper and type(
                 src_param) is torch.nn.parameter.Parameter:
              has_same_type_name = True
-         else:
+        else:
              has_same_type_name = type(src_param) is type(map_param)
         src_param_attrs = {
             k: v
