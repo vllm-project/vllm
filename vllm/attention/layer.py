@@ -409,7 +409,7 @@ def unified_attention_with_output(
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
-    # wait_for_kv_layer_from_connector(layer_name)
+    wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.no_compile_layers[layer_name]
