@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import multiprocessing
 import os
 import pickle
 import signal
@@ -65,31 +65,33 @@ class MultiprocExecutor(Executor):
 
         # Create workers
         unready_workers: list[UnreadyWorkerProcHandle] = []
-        for rank in range(self.world_size):
-            unready_worker = WorkerProc.make_worker_process(
-                vllm_config=self.vllm_config,
-                local_rank=rank,
-                rank=rank,
-                distributed_init_method=distributed_init_method,
-                input_shm_handle=scheduler_output_handle,
-            )
-            unready_workers.append(unready_worker)
+        success = False
+        try:
+            for rank in range(self.world_size):
+                unready_worker = WorkerProc.make_worker_process(
+                    vllm_config=self.vllm_config,
+                    local_rank=rank,
+                    rank=rank,
+                    distributed_init_method=distributed_init_method,
+                    input_shm_handle=scheduler_output_handle,
+                )
+                unready_workers.append(unready_worker)
 
-        # Workers must be created before wait_for_ready to avoid
-        # deadlock, since worker.init_device() does a device sync.
-        self.workers: list[WorkerProcHandle] = []
-        for unready_worker in unready_workers:
-            # NOTE: the WorkerProc wraps startup in a try ... catch
-            # so if there are any issues in loading in a WorkerProcess
-            # (e.g. OOM), an Exception will be caught here.
-            worker = WorkerProc.wait_for_ready(unready_worker)
-            self.workers.append(worker)
+            # Workers must be created before wait_for_ready to avoid
+            # deadlock, since worker.init_device() does a device sync.
+            self.workers = WorkerProc.wait_for_ready(unready_workers)
 
-        # Ensure message queues are ready. Will deadlock if re-ordered
-        # Must be kept consistent with the WorkerProc
-        self.rpc_broadcast_mq.wait_until_ready()
-        for w in self.workers:
-            w.worker_response_mq.wait_until_ready()
+            # Ensure message queues are ready. Will deadlock if re-ordered
+            # Must be kept consistent with the WorkerProc.
+            self.rpc_broadcast_mq.wait_until_ready()
+            for w in self.workers:
+                w.worker_response_mq.wait_until_ready()
+            success = True
+        finally:
+            if not success:
+                # Clean up the worker procs if there was a failure.
+                for handle in unready_workers:
+                    handle.proc.kill()
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -178,7 +180,7 @@ class UnreadyWorkerProcHandle:
     """WorkerProcess handle before READY."""
     proc: BaseProcess
     rank: int
-    ready_pipe: tuple[Connection, Connection]
+    ready_pipe: Connection
 
 
 @dataclass
@@ -211,8 +213,10 @@ class WorkerProc:
         rank: int,
         distributed_init_method: str,
         input_shm_handle: Handle,
-        ready_pipe: Connection,
+        ready_pipe: tuple[Connection, Connection],
     ):
+        reader, writer = ready_pipe
+        reader.close()
         try:
             self.rank = rank
             wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
@@ -244,21 +248,20 @@ class WorkerProc:
             worker_response_mq_handle = self.worker_response_mq.export_handle()
 
             # Send READY once we know everything is loaded
-            ready_pipe.send({
+            writer.send({
                 "status": WorkerProc.READY_STR,
-                "handle": pickle.dumps(worker_response_mq_handle)
+                "handle": worker_response_mq_handle,
             })
 
             # Initialize device and loads weights
             self.worker.init_device()
             self.worker.load_model()
 
-        except Exception as e:
-            logger.exception("WorkerProc got error at startup:", exc_info=e)
-            ready_pipe.send({"status": WorkerProc.FAILED_STR})
+        except Exception:
+            logger.exception("WorkerProc startup failed.")
 
         finally:
-            ready_pipe.close()
+            writer.close()
 
     @staticmethod
     def make_worker_process(
@@ -270,7 +273,7 @@ class WorkerProc:
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # (reader, writer)
-        pipe_tuple = context.Pipe(duplex=False)
+        reader, writer = context.Pipe(duplex=False)
 
         process_kwargs = {
             "vllm_config": vllm_config,
@@ -278,7 +281,7 @@ class WorkerProc:
             "rank": rank,
             "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
-            "ready_pipe": pipe_tuple[1],
+            "ready_pipe": (reader, writer),
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.worker_main,
@@ -286,37 +289,47 @@ class WorkerProc:
                                daemon=True)
 
         proc.start()
-        return UnreadyWorkerProcHandle(proc, rank, pipe_tuple)
+        writer.close()
+        return UnreadyWorkerProcHandle(proc, rank, reader)
 
     @staticmethod
     def wait_for_ready(
-            unready_proc_handle: UnreadyWorkerProcHandle) -> WorkerProcHandle:
+        unready_proc_handles: list[UnreadyWorkerProcHandle]
+    ) -> list[WorkerProcHandle]:
 
         e = Exception("WorkerProc initialization failed due to "
                       "an exception in a background process. "
                       "See stack trace for root cause.")
 
-        ready_pipe = unready_proc_handle.ready_pipe[0]
-        try:
-            # Wait until the WorkerProc is ready.
-            response = ready_pipe.recv()
-            if response["status"] != "READY":
-                raise e
+        pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
+        ready_proc_handles = []
+        while pipes:
+            ready = multiprocessing.connection.wait(pipes.keys())
+            for pipe in ready:
+                assert isinstance(pipe, Connection)
+                try:
+                    # Wait until the WorkerProc is ready.
+                    unready_proc_handle = pipes.pop(pipe)
+                    response: dict[str, Any] = pipe.recv()
+                    if response["status"] != "READY":
+                        raise e
 
-            # Extract the message queue handle.
-            mq_handle = pickle.loads(response["handle"])
-            worker_response_mq = MessageQueue.create_from_handle(mq_handle, 0)
-            return WorkerProcHandle.from_unready_handle(
-                unready_proc_handle, worker_response_mq)
+                    # Extract the message queue handle.
+                    worker_response_mq = MessageQueue.create_from_handle(
+                        response["handle"], 0)
+                    ready_proc_handles.append(
+                        WorkerProcHandle.from_unready_handle(
+                            unready_proc_handle, worker_response_mq))
 
-        except EOFError:
-            e.__suppress_context__ = True
-            raise e from None
+                except EOFError:
+                    e.__suppress_context__ = True
+                    raise e from None
 
-        finally:
-            # Close connection.
-            unready_proc_handle.ready_pipe[0].close()
-            unready_proc_handle.ready_pipe[1].close()
+                finally:
+                    # Close connection.
+                    pipe.close()
+
+        return ready_proc_handles
 
     def shutdown(self):
         self.rpc_broadcast_mq = None
@@ -355,13 +368,13 @@ class WorkerProc:
 
             worker.worker_busy_loop()
 
-        except Exception as e:
+        except Exception:
             # NOTE: if an Exception arises in busy_loop, we send
             # a FAILURE message over the MQ RPC to notify the Executor,
             # which triggers system shutdown.
             # TODO(rob): handle case where the MQ itself breaks.
 
-            logger.exception("WorkerProc got an Exception:", exc_info=e)
+            logger.exception("WorkerProc got an Exception.")
 
             # The parent sends a SIGTERM to all worker processes if
             # any worker dies. Set this value so we don't re-throw
