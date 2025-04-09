@@ -1195,9 +1195,9 @@ def apply_mistral_chat_template(
 
     try:
         return tokenizer.apply_chat_template(
-        messages=messages,
-        tools=tools,
-        **kwargs,
+            messages=messages,
+            tools=tools,
+            **kwargs,
         )
     # mistral-common uses assert statements to stop processing of input
     # if input does not comply with the expected format.
