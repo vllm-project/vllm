@@ -324,7 +324,7 @@ class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaNextMultiModalProcessor,
     info=LlavaNextProcessingInfo,
-    dummy_inputs=MiniMaxVLDummyInputsBuilder)
+    dummy_inputs=LlavaDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
