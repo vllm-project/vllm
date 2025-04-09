@@ -446,7 +446,7 @@ def flash_paged_attention(
     IO tensor dtypes:
       - This kernel assumes all IO tensors have the same dtype except for
         block_tables (int32) and mask (int32)
-      - If mixed_percision is True, then all Tensor Engine operation will be
+      - If mixed_precision is True, then all Tensor Engine operation will be
         performed in bfloat16 and accumulation will be performed in float32.
         Otherwise the intermediates will be in the same type as the inputs.
 
