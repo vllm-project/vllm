@@ -89,13 +89,13 @@ class MsgpackEncoder:
 
     def _encode_nested(self, nt: NestedTensors) -> NestedArray:
         if isinstance(nt, torch.Tensor):
-            return NestedArray(a=self._encode_ndarray(nt.numpy()))
+            return NestedArray(A=self._encode_ndarray(nt.numpy()))
         if isinstance(nt, list):
-            return NestedArray(l=[self._encode_nested(x) for x in nt])
+            return NestedArray(L=[self._encode_nested(x) for x in nt])
         if isinstance(nt, tuple):
             lst = list(nt)
             lst[0] = self._encode_ndarray(lst[0].numpy())
-            return NestedArray(t=tuple(lst))
+            return NestedArray(T=tuple(lst))
         raise TypeError(f"Unexpected NestedTensors contents: {nt.type()}")
 
 
@@ -144,12 +144,12 @@ class MsgpackDecoder:
         if isinstance(na, dict):
             na = NestedArray(na.get('A', None), na.get('L', None),
                              na.get('T', None))
-        if na.a:  #array
-            return torch.from_numpy(self._decode_ndarray(na.a))
-        if na.l:  #list
-            return [self._decode_nested(x) for x in na.l]
-        if na.t:  #tuple
-            lst = list(na.t)
+        if na.A:  #array
+            return torch.from_numpy(self._decode_ndarray(na.A))
+        if na.L:  #list
+            return [self._decode_nested(x) for x in na.L]
+        if na.T:  #tuple
+            lst = list(na.T)
             lst[0] = torch.from_numpy(self._decode_ndarray(lst[0]))
             return tuple(lst)
         raise TypeError(f"Unexpected NestedArray contents: {na}")
