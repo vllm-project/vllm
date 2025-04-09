@@ -24,9 +24,8 @@ def get_local_guidance_guided_decoding_logits_processor(
     any_whitespace = 'disable-any-whitespace' not in \
         guided_params.backend_options()
     if (guide_json := guided_params.json) is not None:
-        # Optionally set additionalProperties to False at the top-level
-        # By default, other backends do not allow additional top-level
-        # properties, so this makes guidance more similar to other backends
+        # Optionally set additionalProperties to False by default
+        # This makes guidance more similar to other supported backends
         if 'no-additional-properties' in guided_params.backend_options():
             if not isinstance(guide_json, str):
                 guide_json = json.dumps(guide_json)

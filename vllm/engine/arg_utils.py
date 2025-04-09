@@ -22,7 +22,7 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          TokenizerPoolConfig, VllmConfig, get_attr_docs)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.guided_decoding import SUPPORTED_GUIDED_DECODING_V1
+from vllm.model_executor.guided_decoding import GUIDED_DECODING_BACKENDS_V1
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
@@ -1426,7 +1426,7 @@ class EngineArgs:
 
         # remove backend options when doing this check
         if self.guided_decoding_backend.split(':')[0] \
-            not in SUPPORTED_GUIDED_DECODING_V1:
+            not in GUIDED_DECODING_BACKENDS_V1:
             _raise_or_fallback(
                 feature_name=
                 f"--guided-decoding-backend={self.guided_decoding_backend}",

@@ -19,12 +19,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-SUPPORTED_GUIDED_DECODING_V0 = [
+GUIDED_DECODING_BACKENDS_V0 = [
     "outlines", "lm-format-enforcer", "xgrammar", "guidance"
 ]
-SUPPORTED_GUIDED_DECODING_V1 = ["xgrammar", "guidance", "auto"]
-SUPPORTED_GUIDED_DECODING = list(
-    set(SUPPORTED_GUIDED_DECODING_V0 + SUPPORTED_GUIDED_DECODING_V1))
+GUIDED_DECODING_BACKENDS_V1 = ["xgrammar", "guidance", "auto"]
 
 
 def maybe_backend_fallback(

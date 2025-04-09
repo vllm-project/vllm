@@ -27,8 +27,8 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
-from vllm.model_executor.guided_decoding import (SUPPORTED_GUIDED_DECODING_V0,
-                                                 SUPPORTED_GUIDED_DECODING_V1)
+from vllm.model_executor.guided_decoding import (GUIDED_DECODING_BACKENDS_V0,
+                                                 GUIDED_DECODING_BACKENDS_V1)
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
@@ -2982,7 +2982,6 @@ class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine"""
 
     # Which guided decoding algo to use.
-    # See vllm.model_executor.guided_decoding.SUPPORTED_GUIDED_DECODING
     guided_decoding_backend: str = "auto" if envs.VLLM_USE_V1 else "xgrammar"
 
     reasoning_backend: Optional[str] = None
@@ -3010,9 +3009,9 @@ class DecodingConfig:
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
         if envs.VLLM_USE_V1:
-            valid_guided_backends = SUPPORTED_GUIDED_DECODING_V1
+            valid_guided_backends = GUIDED_DECODING_BACKENDS_V1
         else:
-            valid_guided_backends = SUPPORTED_GUIDED_DECODING_V0
+            valid_guided_backends = GUIDED_DECODING_BACKENDS_V0
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
                              f" must be one of {valid_guided_backends}")
