@@ -2,40 +2,27 @@
 
 import pickle
 from collections.abc import Sequence
+from dataclasses import asdict
 from inspect import isclass
+from itertools import chain
 from types import FunctionType
 from typing import Any, Optional, Union
 
 import cloudpickle
-import msgspec
 import numpy as np
 import torch
 import zmq
 from msgspec import msgpack
 
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
+from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargs,
+                                    MultiModalKwargsItem, NestedTensors)
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
 
 logger = init_logger(__name__)
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
-
-
-# explicit representation of the encoded tensor information
-class CustomArray(msgspec.Struct):
-    d: str
-    s: tuple[int, ...]
-    i: int
-
-
-# msgspec confuses lists and tuples, so we need a struct rather than an union
-class NestedArray(msgspec.Struct,
-                  omit_defaults=True):  # type: ignore[call-arg]
-    A: Optional[CustomArray] = None
-    L: Optional[list[CustomArray]] = None
-    T: Optional[tuple[CustomArray, ...]] = None
 
 
 class MsgpackEncoder:
@@ -71,8 +58,23 @@ class MsgpackEncoder:
             return self._encode_ndarray(obj)
 
         if isinstance(obj, MultiModalKwargs):
-            d = {k: self._encode_nested(obj[k]) for k in obj}
-            return d
+            mm: MultiModalKwargs = obj
+            if mm.modalities:
+                # ignore the main dict, it will be re-indexed.
+                # pass a list of MultiModalKwargsItem, then see below
+                # Any tensors *not* indexed by modality will be ignored.
+                return [mm.get_items(m) for m in mm.modalities]
+            # just return the main dict if there are no modalities
+            return {k: v for k, v in obj.items()}
+
+        if isinstance(obj, MultiModalKwargsItem):
+            rd = {}
+            for k, v in obj.items():
+                vv = asdict(v)
+                vv['field'] = pickle.dumps(v.field,
+                                           protocol=pickle.HIGHEST_PROTOCOL)
+                rd[k] = vv
+            return rd
 
         if isinstance(obj, FunctionType):
             return msgpack.Ext(CUSTOM_TYPE_CLOUDPICKLE, cloudpickle.dumps(obj))
@@ -80,23 +82,12 @@ class MsgpackEncoder:
         return msgpack.Ext(CUSTOM_TYPE_PICKLE,
                            pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
 
-    def _encode_ndarray(self, obj: np.ndarray) -> CustomArray:
+    def _encode_ndarray(self, obj: np.ndarray) -> Any:
         assert self.aux_buffers is not None
         obj = np.ascontiguousarray(obj)
         index = len(self.aux_buffers)
         self.aux_buffers.append(obj.data)
-        return CustomArray(obj.dtype.str, obj.shape, index)
-
-    def _encode_nested(self, nt: NestedTensors) -> NestedArray:
-        if isinstance(nt, torch.Tensor):
-            return NestedArray(A=self._encode_ndarray(nt.numpy()))
-        if isinstance(nt, list):
-            return NestedArray(L=[self._encode_nested(x) for x in nt])
-        if isinstance(nt, tuple):
-            lst = list(nt)
-            lst[0] = self._encode_ndarray(lst[0].numpy())
-            return NestedArray(T=tuple(lst))
-        raise TypeError(f"Unexpected NestedTensors contents: {nt.type()}")
+        return (obj.dtype.str, obj.shape, index)
 
 
 class MsgpackDecoder:
@@ -123,36 +114,39 @@ class MsgpackDecoder:
         if isclass(t):
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
-            if issubclass(t, MultiModalKwargs):
+            if issubclass(t, MultiModalKwargs) and isinstance(obj, dict):
                 return MultiModalKwargs(
                     {k: self._decode_nested(obj[k])
                      for k in obj})
+            if issubclass(t, MultiModalKwargs) and isinstance(obj, list):
+                return MultiModalKwargs.from_items(self._decode_items(obj))
             if issubclass(t, torch.Tensor):
                 return torch.from_numpy(self._decode_ndarray(obj))
         return obj
 
-    def _decode_ndarray(self, arr: CustomArray) -> np.ndarray:
-        # msgspec doesn't reconstruct CustomArray properly, just returns a dict
-        if isinstance(arr, dict):
-            arr = CustomArray(arr['d'], arr['s'], arr['i'])
-        return np.ndarray(buffer=self.aux_buffers[arr.i],
-                          dtype=np.dtype(arr.d),
-                          shape=arr.s)
+    def _decode_ndarray(self, obj: Any) -> np.ndarray:
+        (dtype, shape, index) = obj
+        return np.ndarray(buffer=self.aux_buffers[index],
+                          dtype=np.dtype(dtype),
+                          shape=shape)
 
-    def _decode_nested(self, na: NestedArray) -> NestedTensors:
-        # same - NestedArray is not known to msgspec so it gets decoded as dict
-        if isinstance(na, dict):
-            na = NestedArray(na.get('A', None), na.get('L', None),
-                             na.get('T', None))
-        if na.A:  #array
-            return torch.from_numpy(self._decode_ndarray(na.A))
-        if na.L:  #list
-            return [self._decode_nested(x) for x in na.L]
-        if na.T:  #tuple
-            lst = list(na.T)
-            lst[0] = torch.from_numpy(self._decode_ndarray(lst[0]))
-            return tuple(lst)
-        raise TypeError(f"Unexpected NestedArray contents: {na}")
+    def _decode_items(self, obj: list) -> list[MultiModalKwargsItem]:
+        all = []
+        for item in chain.from_iterable(obj):
+            elems = []
+            for v in item.values():
+                v['data'] = self._decode_nested(v['data'])
+                v['field'] = pickle.loads(v['field'])
+                elems.append(MultiModalFieldElem(**v))
+            all.append(MultiModalKwargsItem.from_elems(elems))
+        return all
+
+    def _decode_nested(self, obj: Any) -> NestedTensors:
+        if isinstance(obj, list) and isinstance(obj[0], str):
+            return torch.from_numpy(self._decode_ndarray(obj))
+        if isinstance(obj, list):
+            return [self._decode_nested(x) for x in obj]
+        raise TypeError(f"Unexpected NestedArray contents: {obj}")
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_PICKLE:
