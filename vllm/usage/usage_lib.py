@@ -178,8 +178,9 @@ class UsageMessage:
             try:
                 import torch_xla.runtime as xr
                 from torch_xla.core import xla_model as xm
+                from torch_xla.tpu import tpu_type
                 self.gpu_count = xr.world_size()
-                self.gpu_type = xm.xla_device_hw(xm.xla_device())
+                self.gpu_type = tpu_type()
                 self.gpu_memory_per_device = xm.get_memory_info().bytes_limit
             except ImportError:
                 pass
