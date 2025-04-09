@@ -222,7 +222,8 @@ def run_hf(
         max_output_len = max(max_output_len, output_len)
         if len(batch) < max_batch_size and i != len(requests) - 1:
             # Check if we can add more requests to the batch.
-            _, next_prompt_len, next_output_len = requests[i + 1]
+            next_prompt_len = requests[i + 1].prompt_len
+            next_output_len = requests[i + 1].expected_output_len
             if (max(max_prompt_len, next_prompt_len) +
                     max(max_output_len, next_output_len)) <= 2048:
                 # We can add more requests to the batch.
