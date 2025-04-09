@@ -5,6 +5,7 @@ Configs are found in configs/$MODEL.yaml
 
 * export LM_EVAL_TEST_DATA_FILE=configs/Meta-Llama-3-70B-Instruct.yaml
 * export LM_EVAL_TP_SIZE=4 
+* export LM_EVAL_APC_ENABLED=true 
 * pytest -s test_lm_eval_correctness.py
 """
 import atexit
@@ -29,6 +30,7 @@ REPORT_PERFORMANCE = os.environ.get("LM_EVAL_REPORT_PERFORMANCE",
                                     "false") in ['1', 'true']
 
 TP_SIZE = os.environ.get("LM_EVAL_TP_SIZE", 1)
+APC_ENABLED = os.environ.get("LM_EVAL_APC_ENABLED", 'false')
 
 
 def setup_fp8():
@@ -47,6 +49,7 @@ def launch_lm_eval(eval_config):
     max_num_seqs = eval_config.get('max_num_seqs', 128)
     model_args = f"pretrained={eval_config['model_name']}," \
                  f"tensor_parallel_size={TP_SIZE}," \
+                 f"enable_prefix_caching={APC_ENABLED}," \
                  f"add_bos_token=true," \
                  f"dtype={dtype}," \
                  f"max_model_len=4096," \

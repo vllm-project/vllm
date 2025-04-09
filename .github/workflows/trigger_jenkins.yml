@@ -220,14 +220,14 @@ jobs:
             RELEASED_SYNAPSE_VERSION: ${{ vars.RELEASED_SYNAPSE_VERSION }}
             BASE_BRANCH: ${{ needs.read_codeowners.outputs.pr_branch }}      
           run: |
-            LOG_REDIRECTION=">"
+            LOG_REDIRECTION="\&>"
             version_regex='^v([0-9]+)\.([0-9]+)\.([0-9]+)_next$'
             if [[ $TARGET_BRANCH =~ $version_regex ]]; then
               synapse_version=${TARGET_BRANCH#v}
               synapse_version=${synapse_version%_*}
             else
               synapse_version=${RELEASED_SYNAPSE_VERSION#v}
-              LOG_REDIRECTION="\| tee"
+              LOG_REDIRECTION="2>\&1 \| tee"
             fi
             echo "Using SynapseAI version ${synapse_version}"            
             synapse_build=$(curl "https://dms.habana-labs.com/api/v1.1/branch/info/v$synapse_version" | jq -r ".release_id")
@@ -248,6 +248,7 @@ jobs:
           run: |
             random_string=$(tr -dc 'a-z0-9' </dev/urandom | head -c 10)
             pod_name="vllm-fork-${{github.event.issue.number}}-${random_string}"
+            set +e
             hlctl create containers \
                 --file=pod.yml \
                 --flavor=${{ matrix.tests.flavor}} \
@@ -255,7 +256,10 @@ jobs:
                 --namespace="framework" \
                 --retry \
                 --shm=10240
+            test_status=$?
+            set -e
             echo "Logs are available at https://logs-browser.k8s-infra.habana-labs.com/files/${pod_name}-tfjob"
+            exit $test_status
         - name: Create Commit Status(Failure)
           uses: actions/github-script@v7
           if: failure()
