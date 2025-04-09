@@ -196,6 +196,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
             Assume the shape of the layer is (2, num_pages, page_size, xxx).
             """
+            # TODO(rob): make this compatible with MLA.
+
+            assert layer.shape[0] == 2
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
                                                                ...]
@@ -208,7 +211,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids)
                 kv_cache = extract_kv_from_layer(kv_layer,
                                                  request.slot_mapping)
-                tensors = {"kv_cache": kv_cache.cpu().detach()}
+                tensors = {"kv_cache": kv_cache.detach().cpu()}
                 safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):
