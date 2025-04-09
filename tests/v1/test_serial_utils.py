@@ -32,7 +32,8 @@ def test_encode_decode():
         a_string="hello",
         list_of_tensors=[
             torch.rand((1, 10), dtype=torch.float32),
-            torch.rand((3, 5, 4), dtype=torch.float64)
+            torch.rand((3, 5, 4), dtype=torch.float64),
+            torch.tensor(1984),  # test scalar too
         ],
         numpy_array=np.arange(20),
         unrecognized=UnrecognizedType(33),
@@ -44,7 +45,7 @@ def test_encode_decode():
     encoded = encoder.encode(obj)
 
     # There should be the main buffer + 3 tensor buffers + one ndarray buffer
-    assert len(encoded) == 5
+    assert len(encoded) == 6
 
     decoded: MyType = decoder.decode(encoded)
 
@@ -56,7 +57,7 @@ def test_encode_decode():
 
     encoded2 = encoder.encode_into(obj, preallocated)
 
-    assert len(encoded2) == 5
+    assert len(encoded2) == 6
     assert encoded2[0] is preallocated
 
     decoded2: MyType = decoder.decode(encoded2)

@@ -58,10 +58,13 @@ class MsgpackEncoder:
 
     def _encode_ndarray(self, obj: np.ndarray) -> Any:
         assert self.aux_buffers is not None
+        # Must get shape before calling ascontiguousarray since it will
+        # convert scalars to arrays.
+        shape = obj.shape
         obj = np.ascontiguousarray(obj)
         index = len(self.aux_buffers)
         self.aux_buffers.append(obj.data)
-        return obj.dtype.str, obj.shape, index
+        return obj.dtype.str, shape, index
 
 
 class MsgpackDecoder:
