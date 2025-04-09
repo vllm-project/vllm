@@ -1428,7 +1428,11 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         for i in range(original_params.n):
             request_id_i = f"{request_id}_parallel_sample_{i}"
             group.seq_id_to_index[request_id_i] = i
-            params = copy.deepcopy(original_params)
+            
+            # Defensive copy of SamplingParams,
+            # this doesn't deep-copy LogitsProcessor objects
+            params = original_params.clone()
+            
             params.n = 1
             if params.seed is not None:
                 params.seed += i
