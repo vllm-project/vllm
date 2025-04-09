@@ -103,24 +103,16 @@ class MiniMaxText01RMSNormTP(CustomOp):
     def _forward(
         self,
         x: torch.Tensor,
+        weight: torch.Tensor,
     ) -> torch.Tensor:
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
-        if self.tp_world > 1:
-            variance = tensor_model_parallel_all_reduce(
-                variance) / self.tp_world
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        # 确保权重维度与输入张量匹配
-        # 打印调试信息
-        # print(f"x shape: {x.shape}, weight shape: {self.weight.shape}")
-        # 根据输入张量的形状调整权重
-        if len(x.shape) == 2:  # (batch_size, hidden_size)
-            weight = self.weight.view(1, -1)
-        else:  # 其他情况，保持原始形状
-            weight = self.weight
-        x = x.to(orig_dtype) * weight
-        return x
+        # 确保输入张量和权重张量的维度匹配
+        if x.size(-1) != weight.size(0):
+            # 如果维度不匹配，调整权重张量的大小
+            weight = weight[:x.size(-1)]
+        
+        var = torch.mean(x * x, dim=-1, keepdim=True)
+        x_norm = x * torch.rsqrt(var + self.variance_epsilon)
+        return weight * x_norm
 
     def forward(
         self,
@@ -128,7 +120,10 @@ class MiniMaxText01RMSNormTP(CustomOp):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         assert residual is None, "RMSNorm does not support residual connection."
-        return self._forward(x)
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+        result = self._forward(x, self.weight)
+        return result.to(orig_dtype)
 
 
 class MiniMaxText01RotaryEmbedding(CustomOp):
