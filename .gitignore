@@ -203,6 +203,3 @@ benchmarks/**/*.json
 # Linting
 actionlint
 shellcheck*/
-
-# Build artifacts
-build
