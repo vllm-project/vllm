@@ -47,7 +47,8 @@ logger = init_logger(__name__)
 class ToolHandler:
     """Handles tool-related logic for chat completion."""
 
-    def __init__(self, enable_auto_tools: bool, tool_parser: Callable):
+    def __init__(self, enable_auto_tools: bool,
+                 tool_parser: Optional[Callable]):
         self.enable_auto_tools = enable_auto_tools
         self.tool_parser = tool_parser
 
@@ -95,6 +96,7 @@ class ToolHandler:
                                 tokenizer: AnyTokenizer, role: str,
                                 reasoning_content: Optional[str],
                                 content: Optional[str]) -> ChatMessage:
+        assert self.tool_parser is not None
         tool_parser = self.tool_parser(tokenizer)
         tool_call_info = tool_parser.extract_tool_calls(
             content if content is not None else "", request=request)
@@ -119,7 +121,8 @@ class ToolHandler:
 class ChatMessageBuilder:
     """Builds ChatMessage objects based on request parameters."""
 
-    def __init__(self, enable_auto_tools: bool, tool_parser: Callable):
+    def __init__(self, enable_auto_tools: bool,
+                 tool_parser: Optional[Callable]):
         self.tool_handler = ToolHandler(enable_auto_tools, tool_parser)
 
     def build_message(self, request: ChatCompletionRequest,
@@ -168,9 +171,6 @@ class ToolChoiceProcessor:
 
     def __init__(self, enable_auto_tools: bool,
                  tool_parser: Optional[Callable]):
-        if enable_auto_tools and tool_parser is None:
-            raise TypeError("Error: --enable-auto-tool-choice requires "
-                            "--tool-call-parser to be set")
         self.message_builder = ChatMessageBuilder(enable_auto_tools,
                                                   tool_parser)
 
