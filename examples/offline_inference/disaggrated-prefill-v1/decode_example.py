@@ -28,9 +28,7 @@ llm = LLM(
 # 1ST generation (prefill instance)
 outputs = llm.generate(prompts, sampling_params)
 
-new_prompts = []
 for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    new_prompts.append(prompt + generated_text)
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
