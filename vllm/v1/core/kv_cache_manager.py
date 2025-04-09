@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections import defaultdict
-from collections.abc import Iterable
-from typing import Optional
+from typing import Optional, Iterable
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
@@ -67,6 +66,8 @@ class KVCacheManager:
         # is finished.
         self.req_to_blocks: defaultdict[str,
                                         list[KVCacheBlock]] = defaultdict(list)
+        # P/D: staging blocks for PWorker sending via NIXL.
+        self.req_to_staging_blocks: dict[str, list[KVCacheBlock]] = {}
 
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
@@ -164,8 +165,9 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[list[KVCacheBlock]] = None
-    ) -> Optional[list[KVCacheBlock]]:
+        new_computed_blocks: Optional[list[KVCacheBlock]] = None,
+        num_staging_tokens: int = 0,
+    ) -> Optional[tuple[list[KVCacheBlock], list[KVCacheBlock]]]:
         """Add slots for a request with new tokens to append.
 
         Args:
@@ -197,6 +199,10 @@ class KVCacheManager:
 
         req_blocks = self.req_to_blocks[request.request_id]
 
+        # Staging should only be requests on first iteration.
+        if num_staging_tokens > 0:
+            assert len(req_blocks) == 0
+
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
         # We can do this even if we cannot schedule this request due to
@@ -213,15 +219,17 @@ class KVCacheManager:
                                len(new_computed_blocks) * self.block_size)
         num_required_blocks = cdiv(num_computed_tokens + num_tokens,
                                    self.block_size)
+        num_staging_blocks = cdiv(num_staging_tokens, self.block_size)
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
+        num_required_blocks = num_staging_blocks + num_new_blocks
 
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it cannot be counted as a free block
         # when allocating this request.
         num_evictable_computed_blocks = sum(1 for blk in new_computed_blocks
                                             if blk.ref_cnt == 0)
-        if (num_new_blocks > self.block_pool.get_num_free_blocks() -
+        if (num_required_blocks > self.block_pool.get_num_free_blocks() -
                 num_evictable_computed_blocks):
             # Cannot allocate new blocks
             return None
@@ -238,8 +246,12 @@ class KVCacheManager:
         # avoid the case where the new blocks cannot be allocated.
         req_blocks.extend(new_computed_blocks)
 
-        # Start to handle new blocks
+        # Get staging blocks (for PrefillWorker in P/D).
+        staging_blocks = self.block_pool.get_new_blocks(num_staging_blocks)
+        assert request.request_id not in self.req_to_staging_blocks
+        self.req_to_staging_blocks[request.request_id] = staging_blocks
 
+        # Start to handle new blocks
         if num_new_blocks <= 0:
             # No new block is needed.
             new_blocks = []
@@ -261,7 +273,7 @@ class KVCacheManager:
             req_blocks.extend(new_blocks)
 
         if not self.enable_caching:
-            return new_blocks
+            return new_blocks, staging_blocks
 
         # Use `new_computed_blocks` for a new request, and `num_cached_block`
         # for a running request.
@@ -285,9 +297,9 @@ class KVCacheManager:
 
         self.num_cached_block[
             request.request_id] = num_full_blocks_after_append
-        return new_blocks
+        return new_blocks, staging_blocks
 
-    def free(self, request: Request) -> None:
+    def free(self, request_id: str) -> None:
         """Free the blocks allocated for the request.
         When caching is enabled, we free the blocks in reverse order so that
         the tail blocks are evicted first.
@@ -296,7 +308,7 @@ class KVCacheManager:
             request: The request to free the blocks.
         """
         # Default to [] in case a request is freed (aborted) before alloc.
-        blocks = self.req_to_blocks.pop(request.request_id, [])
+        blocks = self.req_to_blocks.pop(request_id, [])
         ordered_blocks: Iterable[KVCacheBlock] = blocks
         if self.enable_caching:
             # Free blocks in reverse order so that the tail blocks are
@@ -304,7 +316,7 @@ class KVCacheManager:
             ordered_blocks = reversed(blocks)
 
         self.block_pool.free_blocks(ordered_blocks)
-        self.num_cached_block.pop(request.request_id, None)
+        self.num_cached_block.pop(request_id, None)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -368,10 +380,10 @@ class KVCacheManager:
                 break
         return num_common_blocks
 
-    def free_block_hashes(self, request: Request) -> None:
+    def free_block_hashes(self, request_id: str) -> None:
         """Discard the block hashes for the request.
 
         NOTE: Unlike `free`, this method should be called only when the request
         is finished, not when it is preempted.
         """
-        self.req_to_block_hashes.pop(request.request_id, None)
+        self.req_to_block_hashes.pop(request_id, None)

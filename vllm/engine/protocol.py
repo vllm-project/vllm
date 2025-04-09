@@ -7,6 +7,7 @@ from typing import AsyncGenerator, List, Mapping, Optional
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
+from vllm.disaggregated.protocol import RemoteDecodeParams, RemotePrefillParams
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.inputs.preprocess import InputPreprocessor
@@ -56,6 +57,8 @@ class EngineClient(ABC):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        remote_prefill_params: Optional[RemotePrefillParams] = None,
+        remote_decode_params: Optional[RemoteDecodeParams] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...

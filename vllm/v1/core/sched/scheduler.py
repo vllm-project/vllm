@@ -13,6 +13,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.sched.disaggregated_utils import RequestTransferState
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -76,6 +77,9 @@ class Scheduler(SchedulerInterface):
         # Priority queues for requests.
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
+        # P/D: requests transfering from P -> D (NIXL).
+        self.transfering: set[str] = set()
+
         # The requests that have been scheduled and are being executed
         # by the executor.
         self.scheduled_req_ids: set[str] = set()
@@ -138,6 +142,7 @@ class Scheduler(SchedulerInterface):
         structured_output_request_ids: dict[str, int] = {}
 
         req_to_new_block_ids: dict[str, list[int]] = {}
+        req_to_staging_block_ids: dict[str, list[int]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -187,13 +192,13 @@ class Scheduler(SchedulerInterface):
                 new_encoder_budget = encoder_budget
 
             while True:
-                new_blocks = self.kv_cache_manager.allocate_slots(
+                blocks = self.kv_cache_manager.allocate_slots(
                     request, num_new_tokens)
-                if new_blocks is None:
+                if blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
-                    self.kv_cache_manager.free(preempted_req)
+                    self.kv_cache_manager.free(preempted_req.request_id)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
@@ -212,7 +217,11 @@ class Scheduler(SchedulerInterface):
                     break
             if not can_schedule:
                 break
-            assert new_blocks is not None
+            assert blocks is not None
+            new_blocks, staging_blocks = blocks
+            # Staging blocks should only be in the first prefill.
+            # i.e. in the WAITING -> RUNNING state transition.
+            assert len(staging_blocks) == 0
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -320,12 +329,30 @@ class Scheduler(SchedulerInterface):
                     encoder_inputs_to_schedule = None
                     new_encoder_budget = encoder_budget
 
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_blocks)
-                if new_blocks is None:
+                # P/D: PWorker allocates staging blocks for NIXL.
+                num_staging_tokens = (request.num_tokens 
+                                      if request.is_remote_prefill_worker else 0)
+
+                # Allocate slots.
+                blocks_tuple = self.kv_cache_manager.allocate_slots(
+                    request, num_new_tokens, computed_blocks, num_staging_tokens)
+                if blocks_tuple is None:
                     # The request cannot be scheduled.
                     break
+                new_blocks, staging_blocks = blocks_tuple
 
+                # P/D: PWorker tracks reqs until transfering is done.
+                if len(staging_blocks) > 0:
+                    # TODO: make sure we handle Preemption.
+                    # TODO: make sure we handle Sliding Window.
+                    assert request.status == RequestStatus.WAITING
+                    assert request.request_id not in self.transfering
+                    self.transfering.add(request.request_id)
+                    req_to_staging_block_ids[request.request_id] = [
+                        b.block_id for b in staging_blocks
+                    ]
+
+                # Add to running.
                 self.waiting.popleft()
                 if request.use_structured_output:
                     structured_output_request_ids[
@@ -394,9 +421,11 @@ class Scheduler(SchedulerInterface):
         )
         # Construct the scheduler output.
         new_reqs_data = [
-            NewRequestData.from_request(req,
-                                        req_to_new_block_ids[req.request_id])
-            for req in scheduled_new_reqs
+            NewRequestData.from_request(
+                request=req,
+                block_ids=req_to_new_block_ids[req.request_id],
+                staging_block_ids=req_to_staging_block_ids.get(req.request_id, None),
+            ) for req in scheduled_new_reqs
         ]
         resumed_reqs_data = [
             self._make_cached_request_data(
@@ -671,6 +700,15 @@ class Scheduler(SchedulerInterface):
             if not stopped:
                 new_running.append(request)
 
+        # P/D: PWorker requests that finished NIXL transfer.
+        for req_id in model_runner_output.transfer_done:
+            self._free_transfer_request(req_id)
+
+        # P/D: DWorker requests that just got prefill_ready.
+        for req_id in model_runner_output.remote_prefill_ready:
+            # TODO: handle this.
+            pass
+
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
@@ -721,12 +759,20 @@ class Scheduler(SchedulerInterface):
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
-        self.kv_cache_manager.free(request)
-        self.kv_cache_manager.free_block_hashes(request)
+        self.kv_cache_manager.free(request.request_id)
+        self.kv_cache_manager.free_block_hashes(request.request_id)
         self.encoder_cache_manager.free(request)
         self._cached_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
+
+    def _free_transfer_request(self, request_id: str) -> None:
+        # TODO(rob): make sure that we reject request_ids
+        # that have active transfers already.
+        assert request_id not in self.requests
+        self.transfering.remove(request_id)
+        self.kv_cache_manager.free(request_id)
+        self.kv_cache_manager.free_block_hashes(request_id)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)

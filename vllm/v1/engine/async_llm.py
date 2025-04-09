@@ -11,6 +11,8 @@ import numpy as np
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
+from vllm.disaggregated.protocol import (RemoteDecodeParams,
+                                         RemotePrefillParams)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
@@ -184,6 +186,8 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        remote_decode_params: Optional[RemoteDecodeParams] = None,
+        remote_prefill_params: Optional[RemoteDecodeParams] = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -241,6 +245,8 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        remote_decode_params: Optional[RemoteDecodeParams] = None,
+        remote_prefill_params: Optional[RemotePrefillParams] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
