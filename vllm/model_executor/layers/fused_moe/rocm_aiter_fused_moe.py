@@ -43,9 +43,9 @@ def rocm_aiter_fused_experts(
     import aiter.fused_moe_bf16_asm as rocm_aiter_asm_fmoe
 
     if activation == "silu":
-        aiter_activatation = rocm_aiter.ActivationType.Silu
+        aiter_activation = rocm_aiter.ActivationType.Silu
     elif activation == "gelu":
-        aiter_activatation = rocm_aiter.ActivationType.Gelu
+        aiter_activation = rocm_aiter.ActivationType.Gelu
     else:
         raise ValueError(f"The given activation: {activation}"
                          " is not supported in AITER.")
@@ -114,7 +114,7 @@ def rocm_aiter_fused_experts(
                                                 fc1_smooth_scale=None,
                                                 fc2_smooth_scale=None,
                                                 a16=False,
-                                                activation=aiter_activatation)
+                                                activation=aiter_activation)
 
     elif use_fp8_w8a8:
         return rocm_aiter_asm_fmoe.asm_moe(hidden_states=hidden_states,
@@ -127,7 +127,7 @@ def rocm_aiter_fused_experts(
                                            fc1_smooth_scale=None,
                                            fc2_smooth_scale=None,
                                            a16=False,
-                                           activation=aiter_activatation)
+                                           activation=aiter_activation)
 
     return rocm_aiter.ck_moe(hidden_states=hidden_states,
                              w1=w1,
