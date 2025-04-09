@@ -38,14 +38,14 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 
 from vllm.config import VllmConfig
-from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
+from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
@@ -196,6 +196,24 @@ class Qwen2_5_VisionMLP(nn.Module):
         return x_down
 
 
+def all_gather_interleave(local_tensor, world_size=2):
+    """All-gather the input tensor interleavely across model parallel group."""
+    import torch.distributed as dist
+    gathered_tensors = [
+        torch.zeros_like(local_tensor) for _ in range(world_size)
+    ]
+    dist.all_gather(gathered_tensors, local_tensor)
+
+    gathered_tensors_split = [
+        torch.split(tensor, 640, -1) for tensor in gathered_tensors
+    ]
+    ordered_tensors = [
+        tensor for pair in zip(*gathered_tensors_split) for tensor in pair
+    ]
+    result_tensor = torch.cat(ordered_tensors, dim=-1)
+    return result_tensor
+
+
 class Qwen2_5_VisionAttention(nn.Module):
 
     def __init__(
@@ -215,13 +233,14 @@ class Qwen2_5_VisionAttention(nn.Module):
         self.num_attention_heads_per_partition = dist_utils.divide(
             num_heads, self.tp_size)
 
-        self.qkv = MergedColumnParallelLinear(
-            input_size=embed_dim,
-            output_sizes=[projection_size] * 3,
+        self.qkv = QKVParallelLinear(
+            hidden_size=embed_dim,
+            head_size=self.hidden_size_per_attention_head,
+            total_num_heads=num_heads,
+            total_num_kv_heads=num_heads,
             bias=True,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv",
-        )
+            prefix=f"{prefix}.qkv")
         self.proj = RowParallelLinear(input_size=projection_size,
                                       output_size=embed_dim,
                                       quant_config=quant_config,
@@ -240,7 +259,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         # [s, b, 3 * head * head_dim]
         seq_len, bs, _ = qkv.shape
         if self.tp_size > 1:
-            qkv = tensor_model_parallel_all_gather(qkv)
+            qkv = all_gather_interleave(qkv, self.tp_size)
 
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
         q, k, v = qkv.chunk(3, dim=2)
@@ -698,9 +717,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("attn.qkv.", "attn.q.", 0),
-            ("attn.qkv.", "attn.k.", 1),
-            ("attn.qkv.", "attn.v.", 2),
+            ("attn.qkv.", "attn.q.", "q"),
+            ("attn.qkv.", "attn.k.", "k"),
+            ("attn.qkv.", "attn.v.", "v"),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
