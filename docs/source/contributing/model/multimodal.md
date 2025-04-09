@@ -79,6 +79,17 @@ Further update the model as follows:
             return inputs_embeds
     ```
 
+- Implement {meth}`~vllm.model_executor.models.interfaces.SupportsMultiModal.get_language_model` getter to provide stable access to the underlying language model.
+
+    ```python
+    class YourModelForImage2Seq(nn.Module):
+        ...
+
+        def get_language_model(self) -> torch.nn.Module:
+            # Change `language_model` according to your implementation.
+            return self.language_model
+    ```
+
 - Once the above steps are done, update the model class with the {class}`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
 
   ```diff
