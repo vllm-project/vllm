@@ -23,6 +23,7 @@ def cutlass_moe_fp8(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     out_dtype: torch.dtype = torch.half,
+    apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-quantized Mixture of Experts (MoE) layer
@@ -96,8 +97,14 @@ def cutlass_moe_fp8(
     n = w2_q.size(1)
 
     topk = topk_ids.size(1)
+
     per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
         a2_scale.numel() != 1 if a2_scale is not None else False)
+    if apply_router_weight_on_input:
+        assert topk == 1, \
+            "apply_router_weight_on_input is only implemented for topk=1"
+        # TODO: this only works for topK=1, will need to update for topK>1
+        a = a * topk_weights.to(out_dtype)
 
     a_q, a1_scale = ops.scaled_fp8_quant(
         a, a1_scale, use_per_token_if_dynamic=per_act_token)
@@ -139,6 +146,8 @@ def cutlass_moe_fp8(
     ops.cutlass_moe_mm(c2, intemediate_q, w2_q, a2_scale, w2_scale,
                        expert_offsets[:-1], problem_sizes2, ab_strides2,
                        ab_strides2, c_strides2)
-
-    return (c2[c_map].view(m, topk, k) *
-            topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)
+    # Gather tokens
+    c2 = c2[c_map].view(m, topk, k)
+    if not apply_router_weight_on_input:
+        c2 = c2 * topk_weights.view(m, topk, 1).to(out_dtype)
+    return c2.sum(dim=1)

@@ -229,9 +229,9 @@ class Qwen2AudioMultiModalProcessor(
 
             audio_tokens = [audio_token_id] * num_features
 
-            return PromptUpdateDetails(
-                full=[audio_bos_id] + audio_tokens + [audio_eos_id],
-                features=audio_tokens,
+            return PromptUpdateDetails.select_token_id(
+                [audio_bos_id] + audio_tokens + [audio_eos_id],
+                embed_token_id=audio_token_id,
             )
 
         return [
@@ -354,6 +354,9 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Split to tuple of embeddings for individual audio input.
         return torch.split(masked_audio_features,
                            audio_output_lengths.flatten().tolist())
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

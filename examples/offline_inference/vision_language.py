@@ -298,6 +298,34 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# SmolVLM2-2.2B-Instruct
+def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        enforce_eager=True,
+        mm_processor_kwargs={
+            "max_image_size": {
+                "longest_edge": 384
+            },
+        },
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
+    prompts = [
+        (f"<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:")
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -556,7 +584,7 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     # The configuration below has been confirmed to launch on a single L40 GPU.
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
@@ -579,6 +607,42 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
+    )
+
+
+def run_llama4(questions: list[str], modality: str):
+    assert modality == "image"
+
+    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=4,
+        tensor_parallel_size=8,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        gpu_memory_utilization=0.4,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [[{
+        "role":
+        "user",
+        "content": [{
+            "type": "image"
+        }, {
+            "type": "text",
+            "text": f"{question}"
+        }]
+    }] for question in questions]
+    prompts = tokenizer.apply_chat_template(messages,
+                                            add_generation_prompt=True,
+                                            tokenize=False)
+    stop_token_ids = None
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
     )
 
 
@@ -936,6 +1000,7 @@ model_example_map = {
     "minicpmv": run_minicpmv,
     "mistral3": run_mistral3,
     "mllama": run_mllama,
+    "llama4": run_llama4,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,
     "ovis2": run_ovis2,
@@ -948,6 +1013,7 @@ model_example_map = {
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
     "skywork_chat": run_skyworkr1v,
+    "smolvlm": run_smolvlm,
 }
 
 
@@ -1082,14 +1148,18 @@ def main(args):
         start_time = time.time()
         outputs = llm.generate(inputs, sampling_params=sampling_params)
         elapsed_time = time.time() - start_time
+        print("-" * 50)
         print("-- generate time = {}".format(elapsed_time))
+        print("-" * 50)
 
     else:
         outputs = llm.generate(inputs, sampling_params=sampling_params)
 
+    print("-" * 50)
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+        print("-" * 50)
 
 
 if __name__ == "__main__":

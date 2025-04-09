@@ -231,7 +231,7 @@ class Platform:
                                 parser: Optional[FlexibleArgumentParser] = None
                                 ) -> None:
         """
-        Do some pre-registeration or update action for the current platform.
+        Do some pre-registration or update action for the current platform.
 
         This function is called before global VllmConfig is initialized or cli
         arguments are parsed. It's used for out-of-tree platforms to register or
@@ -376,6 +376,13 @@ class Platform:
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         """Returns whether the current platform can support v1 for the supplied
         model configuration.
+        """
+        return False
+
+    @classmethod
+    def supports_structured_output(cls) -> bool:
+        """
+        Returns whether the current platform can support structured output.
         """
         return False
 

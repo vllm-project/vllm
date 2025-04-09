@@ -292,6 +292,14 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py
   parallelism: 4
 
+- label: PyTorch Compilation Unit Tests
+  source_file_dependencies:
+    - vllm/
+    - tests/compile
+  commands:
+    - pytest -v -s compile/test_pass_manager.py
+    - pytest -v -s compile/test_fusion.py
+
 - label: PyTorch Fullgraph Smoke Test # 9min
   source_file_dependencies:
   - vllm/
@@ -301,7 +309,6 @@ steps:
   # these tests need to be separated, cannot combine
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
-  - pytest -v -s compile/test_pass_manager.py
 
 - label: PyTorch Fullgraph Test # 18min
   source_file_dependencies:
@@ -389,7 +396,8 @@ steps:
     - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     # V1 Test: https://github.com/vllm-project/vllm/issues/14531
-    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4'
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'llama4'
 
 - label: Language Models Test (Standard) # 32min
   #mirror_hardwares: [amd]

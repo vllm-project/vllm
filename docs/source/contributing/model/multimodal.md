@@ -79,6 +79,17 @@ Further update the model as follows:
             return inputs_embeds
     ```
 
+- Implement {meth}`~vllm.model_executor.models.interfaces.SupportsMultiModal.get_language_model` getter to provide stable access to the underlying language model.
+
+    ```python
+    class YourModelForImage2Seq(nn.Module):
+        ...
+
+        def get_language_model(self) -> torch.nn.Module:
+            # Change `language_model` according to your implementation.
+            return self.language_model
+    ```
+
 - Once the above steps are done, update the model class with the {class}`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
 
   ```diff
@@ -860,8 +871,8 @@ prompt_tokens, prompts_length = _tokenize_prompts_with_image_and_batch(
 )
 ```
 
-To accommodate this, instead of a string you can return an instance of {class}`~vllm.multimodal.processing.PromptUpdateDetails`
-with different `full` and `feature` attributes:
+To assign the vision embeddings to only the image tokens, instead of a string
+you can return an instance of {class}`~vllm.multimodal.processing.PromptUpdateDetails`:
 
 ```python
 hf_config = self.info.get_hf_config()
@@ -879,9 +890,9 @@ def get_replacement_fuyu(item_idx: int):
     image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
                     [_NEWLINE_TOKEN_ID]) * nrows
 
-    return PromptUpdateDetails(
-        full=image_tokens + [bos_token_id],
-        features=image_tokens,
+    return PromptUpdateDetails.select_token_id(
+        image_tokens + [bos_token_id],
+        embed_token_id=_IMAGE_TOKEN_ID,
     )
 ```
 
@@ -914,9 +925,9 @@ def _get_prompt_updates(
         image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
                         [_NEWLINE_TOKEN_ID]) * nrows
 
-        return PromptUpdateDetails(
-            full=image_tokens + [bos_token_id],
-            features=image_tokens,
+        return PromptUpdateDetails.select_token_id(
+            image_tokens + [bos_token_id],
+            embed_token_id=_IMAGE_TOKEN_ID,
         )
 
     return [
