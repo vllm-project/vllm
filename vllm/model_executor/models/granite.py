@@ -275,6 +275,7 @@ class GraniteModel(nn.Module):
             )
         else:
             self.embed_tokens = PPMissingLayer()
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: GraniteDecoderLayer(config=config,
