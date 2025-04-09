@@ -90,10 +90,9 @@ pull_request_rules:
 
 - name: label-tpu
   description: Automatically apply tpu label
-  # Keep this list in sync with `label-tpu-remove` conditions
   conditions:
     - or:
-      - files~=tpu.py
+      - files~=tpu.
       - files~=_tpu
       - files~=tpu_
       - files~=/tpu/
@@ -101,21 +100,6 @@ pull_request_rules:
   actions:
     label:
       add:
-        - tpu
-
-- name: label-tpu-remove
-  description: Automatically remove tpu label
-  # Keep this list in sync with `label-tpu` conditions
-  conditions:
-    - and:
-      - -files~=tpu.py
-      - -files~=_tpu
-      - -files~=tpu_
-      - -files~=/tpu/
-      - -files~=pallas
-  actions:
-    label:
-      remove:
         - tpu
 
 - name: ping author on conflicts and add 'needs-rebase' label
