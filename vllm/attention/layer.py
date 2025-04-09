@@ -349,7 +349,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
 def maybe_save_kv_layer_to_connector(
     layer_name: str,
-    kv_cache: List[torch.Tensor],
+    kv_cache_layer: List[torch.Tensor],
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -361,7 +361,6 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None:
         return
 
-    kv_cache_layer = kv_cache[forward_context.virtual_engine]
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
