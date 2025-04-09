@@ -4,12 +4,8 @@ import importlib
 from typing import TYPE_CHECKING, Callable, Dict, Optional, Type, Union
 
 import vllm.envs as envs
-# NOTE(Kuntai): We prefer not to directly the classes with "_V1" suffix.
-# This makes it easier for us to deprecate code in v0 (which will happen soon).
-# yapf: disable
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
-# yapf: enable
 from vllm.logger import init_logger
 
 from .base import KVConnectorBase
