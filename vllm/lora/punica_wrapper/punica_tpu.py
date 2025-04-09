@@ -44,7 +44,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     @property
     def embeddings_indices(self) -> torch.Tensor:
         """
-        This property provides access to the indices used for lora embeddings, 
+        This property provides access to the indices used for lora embeddings,
         specifically for VocabParallelEmbeddingWithLoRA.
         """
         return self._embeddings_indices[:]
@@ -97,21 +97,16 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor for the operation
         """
 
+        torch.ops.xla.dynamo_set_buffer_donor_(y, True)
         x = x.view(-1, x.shape[-1])
 
-        new_y = []
-        # TODO fuse these kernels
         for slice_idx in range(len(lora_a_stacked)):
             y_s = y[slice_idx]
             lora_s = lora_a_stacked[slice_idx]
-
-            y_org = y_s
-            y_s = y_s.view(-1, y_s.shape[-1])
-
             y_s = self.shrink(y_s, x, lora_s, scale)
-            y_s = y_s.view_as(y_org)
-            new_y.append(y_s)
-        return tuple(new_y)
+            y[slice_idx, :, :] = y_s = y_s
+
+        return y
 
     def add_expand(self,
                    y: torch.Tensor,
