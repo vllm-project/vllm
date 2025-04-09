@@ -5,9 +5,6 @@ to generate structured outputs using vLLM. It shows how to apply
 different guided decoding techniques such as Choice, Regex, JSON schema, 
 and Grammar to produce structured and formatted results 
 based on specific prompts.
-
-Note that still not support `v1`:
-VLLM_USE_V1=0 python examples/offline_inference/structured_outputs.py
 """
 
 from enum import Enum
