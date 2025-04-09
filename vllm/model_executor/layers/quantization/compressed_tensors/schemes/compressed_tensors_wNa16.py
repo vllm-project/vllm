@@ -27,6 +27,7 @@ WNA16_SUPPORTED_TYPES_MAP = {
     4: scalar_types.uint4b8,
     8: scalar_types.uint8b128
 }
+WNA16_ZP_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4, 8: scalar_types.uint8}
 WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
 
@@ -37,7 +38,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                  strategy: str,
                  num_bits: int,
                  group_size: Optional[int] = None,
-                 actorder: Optional[ActivationOrdering] = None):
+                 actorder: Optional[ActivationOrdering] = None,
+                 zero_points: Optional[bool] = False):
 
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
@@ -54,7 +56,10 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 f"Unsupported num_bits = {num_bits}. "
                 f"Supported num_bits = {WNA16_SUPPORTED_TYPES_MAP.keys()}")
 
-        self.quant_type = WNA16_SUPPORTED_TYPES_MAP[num_bits]
+        self.quant_type = (WNA16_ZP_SUPPORTED_TYPES_MAP[num_bits]
+                           if zero_points else
+                           WNA16_SUPPORTED_TYPES_MAP[num_bits])
+        self.zero_points = zero_points
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -76,7 +81,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             weight_type=self.quant_type,
             act_type=params_dtype,
             group_size=self.group_size,
-            zero_points=False,
+            zero_points=self.zero_points,
             has_g_idx=self.has_g_idx
         )
 
