@@ -34,6 +34,21 @@ class KVConnectorFactory:
         cls._registry[name] = loader
 
     @classmethod
+    def create_connector_v0(cls, rank: int, local_rank: int,
+                            config: "VllmConfig") -> KVConnectorBase:
+        if envs.VLLM_USE_V1:
+            raise ValueError("Attempting to initialize a V0 Connector, "
+                             f"but found {envs.VLLM_USE_V1=}")
+
+        connector_name = config.kv_transfer_config.kv_connector
+        if connector_name not in cls._registry:
+            raise ValueError(f"Unsupported connector type: {connector_name}")
+
+        connector_cls = cls._registry[connector_name]()
+        assert issubclass(connector_cls, KVConnectorBase)
+        return connector_cls(rank, local_rank, config)
+
+    @classmethod
     def create_connector_v1(
         cls,
         config: "VllmConfig",
@@ -56,23 +71,6 @@ class KVConnectorFactory:
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
         return connector_cls(config, role)
-
-    @classmethod
-    def create_connector_v0(cls, rank: int, local_rank: int,
-                            config: "VllmConfig") -> KVConnectorBase:
-        if envs.VLLM_USE_V1:
-            raise ValueError("Attempting to initialize a V0 Connector, "
-                             f"but found {envs.VLLM_USE_V1=}")
-
-        connector_name = config.kv_transfer_config.kv_connector
-        if connector_name not in cls._registry:
-            raise ValueError(f"Unsupported connector type: {connector_name}")
-
-        assert rank is not None
-        assert local_rank is not None
-        connector_cls = cls._registry[connector_name]()
-        assert issubclass(connector_cls, KVConnectorBase)
-        return connector_cls(rank, local_rank, config)
 
 
 # Register various connectors here.
