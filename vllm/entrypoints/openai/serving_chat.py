@@ -47,17 +47,18 @@ logger = init_logger(__name__)
 class ToolHandler:
     """Handles tool-related logic for chat completion."""
 
-    def __init__(self, enable_auto_tools: bool,
-                 tool_parser: Optional[Callable]):
+    def __init__(self, enable_auto_tools: bool, tool_parser: Callable):
         self.enable_auto_tools = enable_auto_tools
         self.tool_parser = tool_parser
 
     def handle_named_tool_choice(self, request: ChatCompletionRequest,
                                  tokenizer: AnyTokenizer, role: str,
                                  reasoning_content: Optional[str],
-                                 content: str):
+                                 content: Optional[str]) -> ChatMessage:
         tool_call_class = (MistralToolCall if isinstance(
             tokenizer, MistralTokenizer) else ToolCall)
+        assert isinstance(request.tool_choice,
+                          ChatCompletionNamedToolChoiceParam)
         return ChatMessage(
             role=role,
             reasoning_content=reasoning_content,
@@ -72,7 +73,7 @@ class ToolHandler:
 
     def handle_required_tool_choice(self, request: ChatCompletionRequest,
                                     tokenizer: AnyTokenizer, role: str,
-                                    output_text: str):
+                                    output_text: str) -> ChatMessage:
         tool_call_class = (MistralToolCall if isinstance(
             tokenizer, MistralTokenizer) else ToolCall)
         # the fields of FunctionDefinition are a superset of the
@@ -93,7 +94,7 @@ class ToolHandler:
     def handle_auto_tool_choice(self, request: ChatCompletionRequest,
                                 tokenizer: AnyTokenizer, role: str,
                                 reasoning_content: Optional[str],
-                                content: str):
+                                content: Optional[str]) -> ChatMessage:
         tool_parser = self.tool_parser(tokenizer)
         tool_call_info = tool_parser.extract_tool_calls(
             content if content is not None else "", request=request)
@@ -118,13 +119,12 @@ class ToolHandler:
 class ChatMessageBuilder:
     """Builds ChatMessage objects based on request parameters."""
 
-    def __init__(self, enable_auto_tools: bool,
-                 tool_parser: Optional[Callable]):
+    def __init__(self, enable_auto_tools: bool, tool_parser: Callable):
         self.tool_handler = ToolHandler(enable_auto_tools, tool_parser)
 
     def build_message(self, request: ChatCompletionRequest,
                       tokenizer: AnyTokenizer, role: str,
-                      reasoning_content: Optional[str], content: str,
+                      reasoning_content: Optional[str], content: Optional[str],
                       output_text: str) -> ChatMessage:
         if (not self.tool_handler.enable_auto_tools
                 or not self.tool_handler.tool_parser) and (
@@ -168,12 +168,16 @@ class ToolChoiceProcessor:
 
     def __init__(self, enable_auto_tools: bool,
                  tool_parser: Optional[Callable]):
+        if enable_auto_tools and tool_parser is None:
+            raise TypeError("Error: --enable-auto-tool-choice requires "
+                            "--tool-call-parser to be set")
         self.message_builder = ChatMessageBuilder(enable_auto_tools,
                                                   tool_parser)
 
     def process_completion(self, request: ChatCompletionRequest,
                            tokenizer: AnyTokenizer, role: str,
-                           reasoning_content: Optional[str], content: str,
+                           reasoning_content: Optional[str],
+                           content: Optional[str],
                            output_text: str) -> ChatMessage:
         return self.message_builder.build_message(request, tokenizer, role,
                                                   reasoning_content, content,
