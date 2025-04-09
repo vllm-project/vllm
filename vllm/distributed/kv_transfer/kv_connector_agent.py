@@ -25,9 +25,6 @@ logger = init_logger(__name__)
 class KVConnectorAgent:
     """
     A class designated for distributed KV transfer
-
-    This class currently only wraps one KV connector. But in the future, it may
-    wrap multiple connectors to support more use cases.
     
     Target use cases:
         1. Disaggregated prefill
