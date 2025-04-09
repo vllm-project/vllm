@@ -269,6 +269,7 @@ class WorkerProc:
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.worker_main,
                                kwargs=process_kwargs,
+                               name=f"VllmWorker-{rank}",
                                daemon=True)
 
         proc.start()

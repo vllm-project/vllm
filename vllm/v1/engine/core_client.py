@@ -304,6 +304,10 @@ class BackgroundResources:
     input_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     shutdown_path: Optional[str] = None
 
+    # Set if any of the engines are dead. Here so that the output
+    # processing threads can access it without holding a ref to the client.
+    engine_dead: bool = False
+
     def __call__(self):
         """Clean up background resources."""
 
@@ -323,6 +327,11 @@ class BackgroundResources:
                 shutdown_sender.connect(self.shutdown_path)
                 # Send shutdown signal.
                 shutdown_sender.send(b'')
+
+    def validate_alive(self, buffer: Any):
+        if buffer == EngineCoreProc.ENGINE_CORE_DEAD:
+            self.engine_dead = True
+            raise EngineDeadError()
 
 
 class MPClient(EngineCoreClient):
@@ -369,7 +378,6 @@ class MPClient(EngineCoreClient):
                                                 bind=True)
             self.resources.input_socket = self.input_socket
 
-            self.is_engine_dead = False
             new_core_engine = lambda index, local_dp_rank=None: CoreEngine(
                 vllm_config, executor_class, log_stats, input_path, self.
                 output_path, index, local_dp_rank)
@@ -436,16 +444,14 @@ class MPClient(EngineCoreClient):
         # Terminate background resources.
         self._finalizer()
 
-    def _validate_alive(self, buffer: Any):
-        if buffer == EngineCoreProc.ENGINE_CORE_DEAD:
-            self.is_engine_dead = True
-            raise EngineDeadError()
-
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
-
         return EngineDeadError(
-            suppress_context=True) if self.is_engine_dead else e
+            suppress_context=True) if self.resources.engine_dead else e
+
+    def ensure_alive(self):
+        if self.resources.engine_dead:
+            raise EngineDeadError()
 
 
 def _process_utility_output(output: UtilityOutput,
@@ -482,9 +488,8 @@ class SyncMPClient(MPClient):
         outputs_queue = self.outputs_queue
 
         shutdown_path = get_open_zmq_inproc_path()
-        self.resources.shutdown_path = shutdown_path
-
-        self_weakref = weakref.ref(self)
+        resources = self.resources
+        resources.shutdown_path = shutdown_path
 
         def process_outputs_socket():
             shutdown_socket = ctx.socket(zmq.PAIR)
@@ -501,21 +506,16 @@ class SyncMPClient(MPClient):
                     if len(socks) == 2 or socks[0][0] == shutdown_socket:
                         # shutdown signal, exit thread.
                         break
-                    local_self = self_weakref()
-                    if local_self is None:
-                        # Instance is being gc'd, exit loop
-                        break
-                    try:
-                        frame = out_socket.recv(copy=False)
-                        local_self._validate_alive(frame.buffer)
-                        outputs = decoder.decode(frame.buffer)
-                    except Exception as e:
-                        local_self.outputs_queue.put_nowait(e)
+                    frame = out_socket.recv(copy=False)
+                    resources.validate_alive(frame.buffer)
+                    outputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
                     else:
                         outputs_queue.put_nowait(outputs)
+            except Exception as e:
+                outputs_queue.put_nowait(e)
             finally:
                 # Close sockets.
                 shutdown_socket.close(linger=0)
@@ -537,13 +537,11 @@ class SyncMPClient(MPClient):
         return outputs
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
-        try:
-            # (Identity, RequestType, SerializedRequest)
-            msg = (self.core_engine.identity, request_type.value,
-                   self.encoder.encode(request))
-            self.input_socket.send_multipart(msg, copy=False)
-        except Exception as e:
-            raise self._format_exception(e) from None
+        self.ensure_alive()
+        # (Identity, RequestType, SerializedRequest)
+        msg = (self.core_engine.identity, request_type.value,
+               self.encoder.encode(request))
+        self.input_socket.send_multipart(msg, copy=False)
 
     def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
@@ -642,13 +640,14 @@ class AsyncMPClient(MPClient):
         output_path = self.output_path
         output_socket = make_zmq_socket(self.ctx, output_path,
                                         zmq.constants.PULL)
-        self.resources.output_socket = output_socket
+        resources = self.resources
+        resources.output_socket = output_socket
 
         async def process_outputs_socket():
             try:
                 while True:
                     frame = await output_socket.recv(copy=False)
-                    self._validate_alive(frame.buffer)
+                    resources.validate_alive(frame.buffer)
                     outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
@@ -666,7 +665,7 @@ class AsyncMPClient(MPClient):
                     if outputs.outputs or outputs.scheduler_stats:
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
-                self.outputs_queue.put_nowait(e)
+                outputs_queue.put_nowait(e)
 
         self.queue_task = asyncio.create_task(process_outputs_socket(),
                                               name="EngineCoreOutputQueueTask")
@@ -691,22 +690,18 @@ class AsyncMPClient(MPClient):
                     request_type: EngineCoreRequestType,
                     request: Any,
                     engine: Optional[CoreEngine] = None) -> Awaitable[None]:
-        try:
-            if engine is None:
-                engine = self.core_engine
+        self.ensure_alive()
+        if engine is None:
+            engine = self.core_engine
 
-            message = (request_type.value, self.encoder.encode(request))
-            return self._send_input_message(message, engine)
-        except Exception as e:
-            raise self._format_exception(e) from None
+        message = (request_type.value, self.encoder.encode(request))
+        return self._send_input_message(message, engine)
 
     def _send_input_message(self, message: tuple[bytes, bytes],
                             engine: CoreEngine) -> Awaitable[None]:
-        try:
-            message = (engine.identity, ) + message  # type: ignore[assignment]
-            return self.input_socket.send_multipart(message, copy=False)
-        except Exception as e:
-            raise self._format_exception(e) from None
+        self.ensure_alive()
+        message = (engine.identity, ) + message  # type: ignore[assignment]
+        return self.input_socket.send_multipart(message, copy=False)
 
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method,
