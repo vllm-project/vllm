@@ -18,6 +18,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.mamba.mamba2_metadata import Mamba2Metadata
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
@@ -389,17 +390,20 @@ class MambaMixer2(CustomOp):
         hidden_states: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
-        chunk_indices: Optional[torch.Tensor] = None,
-        chunk_offsets: Optional[torch.Tensor] = None,
+        mamba2_metadata: Optional[Mamba2Metadata] = None,
     ):
         # For the mamba2 triton kernels to operate in continuous batching,
         # the sequence_idx is needed to be passed in. Also, for the kernels
-        # to operate in chunked prefill, the chunk_indices and chunk_offsets
-        # can be optionally passed in; it is more efficient to pre-compute
-        # once since they are common to all layers. If they are not provided
-        # then they will be derived from sequence_idx inside the kernels
-
+        # to operate in chunked prefill, the mamba2_metadata containing
+        # chunk_indices and chunk_offsets must be passed in; it is
+        # more efficient to pre-compute once since they are common to all
+        # layers.
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
+
+        chunk_indices, chunk_offsets = None, None
+        if mamba2_metadata is not None:
+            chunk_indices = mamba2_metadata.chunk_indices
+            chunk_offsets = mamba2_metadata.chunk_offsets
 
         seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
