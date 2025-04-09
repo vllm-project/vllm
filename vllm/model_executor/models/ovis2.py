@@ -121,7 +121,7 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {# 32k is model token limit at the moment
-            "image": self.get_hf_config().multimodal_max_length // (MAX_SEGMENTS *
+            "image": self.get_hf_config().multimodal_max_length // ((9 + 1) *
                                                                     NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT)}
 
     def get_mm_max_tokens_per_item(
@@ -130,8 +130,7 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
             mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
         return {
-            "image":
-                (mm_counts['image'] * MAX_SEGMENTS * 256) + 11
+            "image": (9 + 1) * NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT + 11
         }  # 6 image pos token
 
     def get_image_size(self) -> ImageSize:
@@ -253,13 +252,12 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
-        self.config = config
+        self.config: OvisConfig = config
         self.multimodal_config = multimodal_config
         self.padding_idx = config.pad_token_id
         self.llm = init_vllm_registered_model(
             vllm_config=vllm_config.with_hf_config(config.text_config),
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen2ForCausalLM"],
+            prefix=maybe_prefix(prefix, "llm"),
         )
 
         self.visual_tokenizer = Aimv2VisualTokenizer(
@@ -267,12 +265,11 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer",
             image_processor_name_or_path=config.visual_tokenizer_config.backbone_config.name_or_path,
-        ).to(self.config.torch_dtype)
+        )
 
         self.vte = VisualEmbedding(
             self.config.visual_tokenizer_config.vocab_size,
             self.config.hidden_size,
-            # device='cuda',
             dtype=self.visual_tokenizer.dtype
         )
 
@@ -455,23 +452,26 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Ovis2ImagePatchInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
-        if pixel_values is not None and not isinstance(pixel_values, list):
-            if pixel_values.dim() == 6:
-                # if is [tensor_batch, 1, num_segments, ch, w, h] we need -> [tensor_batch, num_segments, ch, w, h]
-                pixel_values = pixel_values.squeeze(1)
-                pixel_values = [pixel_value.to(self.config.torch_dtype) for pixel_value in pixel_values]
-            else:
-                pixel_values = [pixel_values]
+        if pixel_values is None:
+            return None
+        
+        if pixel_values is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+
+            if isinstance(pixel_values, torch.Tensor) and pixel_values.dim() == 6:
+                # if is [tensor_batch, 1, num_segments, ch, w, h]
+                # we need -> [tensor_batch, num_segments, ch, w, h]
+                pixel_values = flatten_bn(pixel_values)
 
             return Ovis2ImagePatchInputs(
                 type="image_patches",
-                flat_data=torch.cat(
-                    [x for x in pixel_values if x is not None],
-                    dim=0).to(self.visual_tokenizer.dtype),
-                patches_per_image=[x.shape[0] for x in pixel_values]
+                flat_data=flatten_bn(pixel_values, concat=True),
+                patches_per_image=[x.shape[0] for x in pixel_values],
             )
 
-        return None
+        raise AssertionError("This line should be unreachable.")
     
     def _process_image_input(
             self, image_input: Ovis2ImagePatchInputs) -> MultiModalEmbeddings:
@@ -479,7 +479,8 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         image_patches_flat = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"]
 
-        visual_tokens = self.visual_tokenizer(image_patches_flat)
+        target_dtype = self.visual_tokenizer.dtype
+        visual_tokens = self.visual_tokenizer(image_patches_flat.to(target_dtype))
         visual_embeds = self.vte(visual_tokens)  # 1:1 numeric eq.
 
         return visual_embeds.split(patches_per_image, dim=0)
@@ -524,7 +525,6 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
             input_ids = None
-            print(inputs_embeds.mean())
 
         # up until here we have a inputs_embeds 100% numerical identity between the OG HF Transformers implementation and ours
         hidden_states = self.llm(

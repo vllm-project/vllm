@@ -640,22 +640,18 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
 def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
-    model_name = "/data/LLM-model/Ovis2-1B"
+    model_name = "Isotr0py/Ovis2-1B-dev"
 
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=4096,
         max_num_seqs=2,
         trust_remote_code=True,
-        # dtype="half",
+        dtype="half",
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
         hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
     )
 
-    # prompts = [
-    #     f"<image>\n{question}"
-    #     for question in questions
-    # ]
     placeholder = "<image>\n"
     prompts = [
         ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
@@ -964,7 +960,7 @@ def get_multi_modal_input(args):
     """
     if args.modality == "image":
         # Input image and question
-        image = ImageAsset("stop_sign") \
+        image = ImageAsset("cherry_blossom") \
             .pil_image.convert("RGB")
         img_questions = [
             "What is the content of this image?",
