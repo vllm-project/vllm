@@ -12,6 +12,7 @@ from typing_extensions import assert_never
 from vllm.config import PoolerConfig
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
+from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
@@ -97,7 +98,7 @@ class SimplePooler(nn.Module):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.extract_states(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data)
+        pooled_data = self.head(pooled_data, pooling_metadata)
         pooled_outputs = [self.build_output(data) for data in pooled_data]
         return PoolerOutput(outputs=pooled_outputs)
 
@@ -217,14 +218,38 @@ class PoolerHead(nn.Module):
         self.normalize = normalize
         self.softmax = softmax
 
-    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor]):
-        if self.normalize:
-            if isinstance(pooled_data, list):
-                pooled_data = [
-                    F.normalize(data, p=2, dim=1) for data in pooled_data
-                ]
-            else:
-                pooled_data = F.normalize(pooled_data, p=2, dim=1)
+    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
+                pooling_metadata: PoolingMetadata):
+
+        pooling_params: list[PoolingParams] = [
+            pooling_param for _, pooling_param in pooling_metadata.seq_groups
+        ]
+
+        if not all(pooling_param.dimensions is None
+                   for pooling_param in pooling_params):
+            # for matryoshka representation
+            pooled_data_list = []
+            for vecs, pooling_param in zip(pooled_data, pooling_params):
+                assert isinstance(vecs, torch.Tensor)
+
+                if pooling_param.dimensions is not None:
+                    # matryoshka representation, always normalize
+                    vecs = vecs[:pooling_param.dimensions]
+                    vecs = F.normalize(vecs, p=2, dim=0)
+                    pooled_data_list.append(vecs)
+                else:
+                    if self.normalize:
+                        vecs = F.normalize(vecs, p=2, dim=0)
+                    pooled_data_list.append(vecs)
+            pooled_data = pooled_data_list
+        else:
+            if self.normalize:
+                if isinstance(pooled_data, list):
+                    pooled_data = [
+                        F.normalize(data, p=2, dim=1) for data in pooled_data
+                    ]
+                else:
+                    pooled_data = F.normalize(pooled_data, p=2, dim=1)
 
         if self.softmax:
             if isinstance(pooled_data, list):

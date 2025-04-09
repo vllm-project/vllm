@@ -1008,7 +1008,8 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # doc: end-embedding-extra-params
 
     def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
+        return PoolingParams(dimensions=self.dimensions,
+                             additional_data=self.additional_data)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1070,7 +1071,8 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
+        return PoolingParams(dimensions=self.dimensions,
+                             additional_data=self.additional_data)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]

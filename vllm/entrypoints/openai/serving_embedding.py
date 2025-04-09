@@ -80,9 +80,18 @@ class OpenAIServingEmbedding(OpenAIServing):
             return error_check_ret
 
         encoding_format = request.encoding_format
-        if request.dimensions is not None:
-            return self.create_error_response(
-                "dimensions is currently not supported")
+
+        # validating request.dimensions
+        if not self.model_config.is_matryoshka:
+            if request.dimensions is not None:
+                return self.create_error_response(
+                    f'Model "{self.model_config.served_model_name}" does not '
+                    f'support matryoshka representation, '
+                    f'changing output dimensions will lead to poor results.')
+        else:
+            if isinstance(request.dimensions, int) and request.dimensions < 1:
+                return self.create_error_response(
+                    "Dimensions must be greater than 0")
 
         model_name = self._get_model_name(request.model)
         request_id = f"embd-{self._base_request_id(raw_request)}"
@@ -159,6 +168,8 @@ class OpenAIServingEmbedding(OpenAIServing):
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
+
+                print("create_embedding", pooling_params)
 
                 generator = self.engine_client.encode(
                     engine_prompt,
