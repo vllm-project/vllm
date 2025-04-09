@@ -58,13 +58,15 @@ class MsgpackEncoder:
 
     def _encode_ndarray(self, obj: np.ndarray) -> Any:
         assert self.aux_buffers is not None
-        # Must get shape before calling ascontiguousarray since it will
-        # convert scalars to arrays.
-        shape = obj.shape
-        obj = np.ascontiguousarray(obj)
-        index = len(self.aux_buffers)
-        self.aux_buffers.append(obj.data)
-        return obj.dtype.str, shape, index
+        if not obj.shape or obj.nbytes <= 256:
+            # Encode small arrays and scalars inline.
+            data = obj.data
+        else:
+            # Otherwise encode index of backing buffer.
+            obj = np.ascontiguousarray(obj)
+            data = len(self.aux_buffers)
+            self.aux_buffers.append(obj.data)
+        return obj.dtype.str, obj.shape, data
 
 
 class MsgpackDecoder:
@@ -96,10 +98,9 @@ class MsgpackDecoder:
         return obj
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
-        dtype, shape, index = arr
-        return np.ndarray(buffer=self.aux_buffers[index],
-                          dtype=np.dtype(dtype),
-                          shape=shape)
+        dtype, shape, data = arr
+        buffer = self.aux_buffers[data] if isinstance(data, int) else data
+        return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_PICKLE:
