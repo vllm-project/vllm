@@ -618,7 +618,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         image_sizes = image_input.get("image_sizes")
         if image_sizes is None:
-            batch_size = len(image_input.get("data",0))
+            batch_size = len(image_input.get("data", []))
             vision_config = self.config.vision_config
             default_height = default_width = vision_config.image_size
             image_sizes = torch.as_tensor([[default_height, default_width]
