@@ -234,12 +234,17 @@ set(VLLM_EXT_SRC
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
-if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR ASIMD_FOUND)
+if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
         "csrc/cpu/quant.cpp"
         "csrc/cpu/shm.cpp"
         ${VLLM_EXT_SRC})
 elseif(POWER10_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+if (ASIMD_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/quant.cpp"
         ${VLLM_EXT_SRC})
