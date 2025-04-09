@@ -155,13 +155,7 @@ class Llama4Attention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.n_rep = self.num_heads // self.num_kv_heads
-        self.q_norm = RMSNorm(
-            hidden_size=self.head_dim,
-            eps=config.rms_norm_eps,
-            has_weight=False,
-            dtype=torch.float32,
-        ) if self.use_qk_norm else None
-        self.k_norm = RMSNorm(
+        self.qk_norm = RMSNorm(
             hidden_size=self.head_dim,
             eps=config.rms_norm_eps,
             has_weight=False,
@@ -226,13 +220,11 @@ class Llama4Attention(nn.Module):
 
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
-        if self.q_norm is not None:
-            q_reshaped = q.float().reshape(-1, self.num_heads, self.head_dim)
-            q = self.q_norm(q_reshaped).reshape(-1, self.q_size).to(q.dtype)
-        if self.k_norm is not None:
-            k_reshaped = k.float().reshape(-1, self.num_kv_heads,
-                                           self.head_dim)
-            k = self.k_norm(k_reshaped).reshape(1, self.kv_size).to(k.dtype)
+        if self.qk_norm is not None:
+            q = q.reshape(-1, self.num_heads, self.head_dim)
+            q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
+            k = k.reshape(-1, self.num_kv_heads, self.head_dim)
+            k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
         # to NoPE layers, where the inference-time temperature tuning function
