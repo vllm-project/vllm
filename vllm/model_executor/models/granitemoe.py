@@ -336,8 +336,7 @@ class GraniteMoeModel(nn.Module):
                 new_weights[gate_name] = p
             else:
                 new_weights[n] = p
-        return mixtral.MixtralForCausalLM.load_weights(self,
-                                                       new_weights.items())
+        return mixtral.MixtralModel.load_weights(self, new_weights.items())
 
 
 class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
