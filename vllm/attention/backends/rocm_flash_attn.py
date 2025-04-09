@@ -705,9 +705,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                                       and layer._v_scale and layer._prob_scale
                                       and self.kv_cache_dtype == "fp8")
                     full_scales = (
-                        layer._q_scale.item(), layer._k_scale.item(),
-                        layer._v_scale.item(),
-                        layer._prob_scale.item()) if use_fp8_scales else None
+                        layer._q_scale, layer._k_scale, layer._v_scale,
+                        layer._prob_scale) if use_fp8_scales else None
                     out, _ = self.attn_func(
                         query,
                         key,
