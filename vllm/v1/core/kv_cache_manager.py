@@ -30,7 +30,7 @@ class KVCacheManager:
         caching_hash_algo: str = "builtin",
         num_preallocate_tokens: int = 64,
         log_stats: bool = False,
-        connector: "KVConnectorBase_V1" = None,
+        connector: Optional["KVConnectorBase_V1"] = None,
     ) -> None:
         assert len(kv_cache_config.kv_cache_groups) == 1, (
             "KVCacheManager does not support hybrid models with more than 1 "

@@ -66,11 +66,10 @@ class Scheduler(SchedulerInterface):
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
+        self.connector = None
         if self.vllm_config.kv_transfer_config is not None:
-            self.connector = KVConnectorFactory.create_connector(
+            self.connector = KVConnectorFactory.create_connector_v1(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
-        else:
-            self.connector = None
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
