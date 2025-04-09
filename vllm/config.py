@@ -3858,7 +3858,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     # Consider each pair of nodes.
     for a, b in _pairwise(cls_node.body):
         # Must be an assignment then a constant string.
-        if (not isinstance(a, ast.Assign | ast.AnnAssign)
+        if (not isinstance(a, (ast.Assign, ast.AnnAssign))
                 or not isinstance(b, ast.Expr)
                 or not isinstance(b.value, ast.Constant)
                 or not isinstance(b.value.value, str)):
