@@ -22,6 +22,16 @@ QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg",
     "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/9/9d/Odonata_copulation.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/2/26/Ultramarine_Flycatcher_%28Ficedula_superciliaris%29_Naggar%2C_Himachal_Pradesh%2C_2013_%28cropped%29.JPG",
+    "https://upload.wikimedia.org/wikipedia/commons/f/ff/Expl0072_-_Flickr_-_NOAA_Photo_Library.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg/2560px-Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/d/d4/Starfish%2C_Caswell_Bay_-_geograph.org.uk_-_409413.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/6/69/Grapevinesnail_01.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0b/Texas_invasive_Musk_Thistle_1.jpg/1920px-Texas_invasive_Musk_Thistle_1.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7a/Huskiesatrest.jpg/2880px-Huskiesatrest.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg/1920px-Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/3/30/George_the_amazing_guinea_pig.jpg",
 ]
 
 
@@ -729,10 +739,14 @@ def main(args: Namespace):
     method = args.method
     seed = args.seed
 
+    num_repeats = args.num_images // len(IMAGE_URLS)
+    image_urls = IMAGE_URLS * (1 + num_repeats)
+    image_urls = image_urls[:args.num_images]
+
     if method == "generate":
-        run_generate(model, QUESTION, IMAGE_URLS, seed)
+        run_generate(model, QUESTION, image_urls, seed)
     elif method == "chat":
-        run_chat(model, QUESTION, IMAGE_URLS, seed)
+        run_chat(model, QUESTION, image_urls, seed)
     else:
         raise ValueError(f"Invalid method: {method}")
 
@@ -757,6 +771,11 @@ if __name__ == "__main__":
                         type=int,
                         default=None,
                         help="Set the seed when initializing `vllm.LLM`.")
+    parser.add_argument("--num-images",
+                        "-n",
+                        type=int,
+                        default=2,
+                        help="Number of images to use for the test.")
 
     args = parser.parse_args()
     main(args)
