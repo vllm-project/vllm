@@ -14,12 +14,12 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.model_aware_kv_ops_utils import (
+    kv_helper)
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
     SimpleBuffer)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
-
-from .model_aware_kv_ops import kv_helper
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
@@ -186,7 +186,7 @@ class SimpleConnector(KVConnectorBase):
 
             for layer_id in range(start_layer, end_layer):
                 kv_cache = kv_caches[layer_id - start_layer]
-                key_cache, value_cache = self.kv_helper.get_key_value_cache(
+                key_cache, value_cache = self.kv_helper.get_kv_from_cache(
                     kv_cache, num_heads, head_size)
 
                 current_slot_mapping = slot_mapping_flat[start_pos:end_pos]

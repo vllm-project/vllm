@@ -21,11 +21,11 @@ class kv_helper:
 
     def get_model_args(self, model_executable: torch.nn.Module):
 
-        self.model_config = model_executable.model.config
+        model_config = model_executable.model.config
         self.model_executable = model_executable
-        num_heads = int(self.model_config.num_key_value_heads / self.tp_size)
-        hidden_size = self.model_config.hidden_size
-        num_attention_heads = self.model_config.num_attention_heads
+        num_heads = int(model_config.num_key_value_heads / self.tp_size)
+        hidden_size = model_config.hidden_size
+        num_attention_heads = model_config.num_attention_heads
 
         # Deepseek's MLA (Multi-head Latent Attention) uses two different
         # kv_cache shapes based on whether VLLM_MLA_DISABLE is set to 0.
@@ -37,19 +37,19 @@ class kv_helper:
         # num_key_value_heads / tp, qk_nope_head_dim + qk_rope_head_dim].
         # For more details, see vllm/attention/backends/mla/common.py.
         if self.is_deepseek_mla and self.use_mla_opt:
-            head_size = self.model_config.kv_lora_rank + \
-                self.model_config.qk_rope_head_dim
+            head_size = model_config.kv_lora_rank + \
+                model_config.qk_rope_head_dim
             num_heads = 1
         elif self.is_deepseek_mla and not self.use_mla_opt:
-            head_size = self.model_config.qk_nope_head_dim + \
-                self.model_config.qk_rope_head_dim
+            head_size = model_config.qk_nope_head_dim + \
+                model_config.qk_rope_head_dim
         else:
-            head_size = getattr(self.model_config, "head_dim",
+            head_size = getattr(model_config, "head_dim",
                                 int(hidden_size // num_attention_heads))
 
         return num_heads, head_size
 
-    def get_key_value_cache(self, kv_cache, num_heads, head_size):
+    def get_kv_from_cache(self, kv_cache, num_heads, head_size):
         if self.is_deepseek_mla and self.use_mla_opt:
             key_cache = kv_cache.reshape(-1, num_heads, head_size)
             value_cache = kv_cache.reshape(-1, num_heads, head_size)
@@ -61,13 +61,13 @@ class kv_helper:
     def put_kv_to_cache(self, model_executable: torch.nn.Module, keys, values,
                         layer, kv_cache, slot_mapping, start_pos, end_pos):
 
-        self.model_config = model_executable.model.config
+        model_config = model_executable.model.config
 
         if self.is_deepseek_mla and self.use_mla_opt:
             layer.self_attn.attn = layer.self_attn.mla_attn
             k_c_normed_k_pe = keys.squeeze(1)
-            k_c_normed = k_c_normed_k_pe[:, :self.model_config.kv_lora_rank]
-            k_pe = k_c_normed_k_pe[:, self.model_config.kv_lora_rank:]
+            k_c_normed = k_c_normed_k_pe[:, :model_config.kv_lora_rank]
+            k_pe = k_c_normed_k_pe[:, model_config.kv_lora_rank:]
             ops.concat_and_cache_mla(
                 k_c_normed.to(kv_cache.device),
                 k_pe.to(kv_cache.device),
