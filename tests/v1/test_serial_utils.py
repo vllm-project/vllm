@@ -70,15 +70,16 @@ def test_encode_decode():
 class MyRequest(msgspec.Struct):
     mm: Optional[list[MultiModalKwargs]]
 
+
 def test_multimodal_kwargs():
-    d = { 
-          "foo": torch.zeros(1000, dtype=torch.float16),
-          "bar": [ torch.zeros(i * 1000, dtype=torch.int8) for i in range(3) ],
-          "baz": ( torch.zeros(256, dtype=torch.int64), "i'm a tuple" )
-         }
+    d = {
+        "foo": torch.zeros(1000, dtype=torch.float16),
+        "bar": [torch.zeros(i * 1000, dtype=torch.int8) for i in range(3)],
+        "baz": (torch.zeros(256, dtype=torch.int64), "i'm a tuple")
+    }
 
     # pack mm kwargs into a mock request so that it can be decoded properly
-    req = MyRequest(mm = [ MultiModalKwargs(d) ] )
+    req = MyRequest(mm=[MultiModalKwargs(d)])
 
     encoder = MsgpackEncoder()
     decoder = MsgpackDecoder(MyRequest)
@@ -89,7 +90,7 @@ def test_multimodal_kwargs():
     assert len(encoded) == 6
 
     total_len = sum([len(x) for x in encoded])
-    
+
     # expected total encoding length, should be 4384, +-20 for minor changes
     assert total_len >= 4364 and total_len <= 4404
 

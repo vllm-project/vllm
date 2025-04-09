@@ -22,17 +22,21 @@ CUSTOM_TYPE_CLOUDPICKLE = 2
 logger = init_logger(__name__)
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
+
 # explicit representation of the encoded tensor information
 class CustomArray(msgspec.Struct):
-    d: str  
+    d: str
     s: tuple[int, ...]
     i: int
 
-# msgspec confuses lists and tuples, so we need explicit fields rather than an union
-class NestedArray(msgspec.Struct, omit_defaults=True):
-    a: CustomArray = None
-    l: list[CustomArray] = None
-    t: tuple[CustomArray, ...] = None
+
+# msgspec confuses lists and tuples, so we need a struct rather than an union
+class NestedArray(msgspec.Struct,
+                  omit_defaults=True):  # type: ignore[call-arg]
+    A: Optional[CustomArray] = None
+    L: Optional[list[CustomArray]] = None
+    T: Optional[tuple[CustomArray, ...]] = None
+
 
 class MsgpackEncoder:
     """Encoder with custom torch tensor and numpy array serialization."""
@@ -65,9 +69,9 @@ class MsgpackEncoder:
         # Fall back to pickle for object or void kind ndarrays.
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
-        
+
         if isinstance(obj, MultiModalKwargs):
-            d = { k: self._encode_nested(obj[k]) for k in obj }
+            d = {k: self._encode_nested(obj[k]) for k in obj}
             return d
 
         if isinstance(obj, FunctionType):
@@ -82,16 +86,16 @@ class MsgpackEncoder:
         index = len(self.aux_buffers)
         self.aux_buffers.append(obj.data)
         return CustomArray(obj.dtype.str, obj.shape, index)
-    
+
     def _encode_nested(self, nt: NestedTensors) -> NestedArray:
         if isinstance(nt, torch.Tensor):
-            return NestedArray(a = self._encode_ndarray(nt.numpy()))
+            return NestedArray(a=self._encode_ndarray(nt.numpy()))
         if isinstance(nt, list):
-            return NestedArray(l = [self._encode_nested(x) for x in nt])
+            return NestedArray(l=[self._encode_nested(x) for x in nt])
         if isinstance(nt, tuple):
             lst = list(nt)
             lst[0] = self._encode_ndarray(lst[0].numpy())
-            return NestedArray(t = tuple(lst))
+            return NestedArray(t=tuple(lst))
         raise TypeError(f"Unexpected NestedTensors contents: {nt.type()}")
 
 
@@ -120,13 +124,15 @@ class MsgpackDecoder:
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
             if issubclass(t, MultiModalKwargs):
-               return MultiModalKwargs({ k: self._decode_nested(obj[k]) for k in obj })
+                return MultiModalKwargs(
+                    {k: self._decode_nested(obj[k])
+                     for k in obj})
             if issubclass(t, torch.Tensor):
                 return torch.from_numpy(self._decode_ndarray(obj))
         return obj
 
     def _decode_ndarray(self, arr: CustomArray) -> np.ndarray:
-        # for some reason, msgpack doesn't reconstruct CustomArray properly, but returns a dict
+        # msgspec doesn't reconstruct CustomArray properly, just returns a dict
         if isinstance(arr, dict):
             arr = CustomArray(arr['d'], arr['s'], arr['i'])
         return np.ndarray(buffer=self.aux_buffers[arr.i],
@@ -134,15 +140,18 @@ class MsgpackDecoder:
                           shape=arr.s)
 
     def _decode_nested(self, na: NestedArray) -> NestedTensors:
+        # same - NestedArray is not known to msgspec so it gets decoded as dict
         if isinstance(na, dict):
-            na = NestedArray(na.get('a', None), na.get('l', None), na.get('t', None))
-        if na.a: #array
+            na = NestedArray(na.get('A', None), na.get('L', None),
+                             na.get('T', None))
+        if na.a:  #array
             return torch.from_numpy(self._decode_ndarray(na.a))
-        if na.l: #list
+        if na.l:  #list
             return [self._decode_nested(x) for x in na.l]
-        if na.t: #tuple
-            na.t[0] = torch.from_numpy(self._decode_ndarray(na.t[0]))
-            return tuple(na.t)
+        if na.t:  #tuple
+            lst = list(na.t)
+            lst[0] = torch.from_numpy(self._decode_ndarray(lst[0]))
+            return tuple(lst)
         raise TypeError(f"Unexpected NestedArray contents: {na}")
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
