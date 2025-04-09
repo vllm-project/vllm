@@ -5,6 +5,7 @@ from types import FunctionType
 from typing import Any, Optional, Union
 
 import cloudpickle
+import msgspec
 import numpy
 import torch
 from msgspec import msgpack
@@ -44,40 +45,57 @@ class MsgpackDecoder:
         return self.decoder.decode(obj)
 
 
-NestedArrays = Union[list["NestedArrays"], list[numpy.ndarray], numpy.ndarray,
-                     tuple[numpy.ndarray, ...]]
+class CustomArray(msgspec.Struct):
+    dtype: str
+    shape: list[int]
+    buffer: msgspec.Raw
 
 
-def nested_tensors_to_numpy(nt: NestedTensors) -> NestedArrays:
+def encode_torch(t: torch.Tensor) -> CustomArray:
+    a = t.numpy()
+    return CustomArray(dtype = a.dtype.str,
+                       shape = list(a.shape),
+                       buffer = msgspec.Raw(b"foo"))
+
+
+def decode_torch(c: CustomArray) -> torch.Tensor:
+    a = numpy.ndarray(buffer=c.buffer,
+                      dtype=numpy.dtype(c.dtype),
+                      shape=tuple(c.shape))
+    return torch.from_numpy(a)
+
+
+NestedArrays = Union[list["NestedArrays"], list[CustomArray], CustomArray,
+                     tuple[CustomArray, ...]]
+
+
+def encode_nested_tensors(nt: NestedTensors) -> NestedArrays:
     if isinstance(nt, torch.Tensor):
-        return nt.numpy()
+        return encode_torch(nt)
     if isinstance(nt, list):
-        return [nested_tensors_to_numpy(x) for x in nt]
+        return [encode_nested_tensors(x) for x in nt]
     if isinstance(nt, tuple):
         lst = list(nt)
-        lst[0] = lst[0].numpy()
+        lst[0] = encode_torch(lst[0])
         return tuple(lst)
     raise TypeError(f"Unexpected NestedTensors contents: {nt.type()}")
 
 
-def numpy_to_nested_tensors(nt: NestedArrays) -> NestedTensors:
-    if isinstance(nt, numpy.ndarray):
-        return torch.from_numpy(nt)
-    if isinstance(nt, list):
-        return [numpy_to_nested_tensors(x) for x in nt]
-    if isinstance(nt, tuple):
-        lst = list(nt)
-        lst[0] = torch.from_numpy(lst[0])
+def decode_nested_tensors(na: NestedArrays) -> NestedTensors:
+    if isinstance(na, CustomArray):
+        return decode_torch(na)
+    if isinstance(na, list):
+        return [decode_nested_tensors(x) for x in na]
+    if isinstance(na, tuple):
+        lst = list(na)
+        lst[0] = decode_torch(lst[0])
         return tuple(lst)
-    raise TypeError(f"Unexpected NestedArrays contents: {nt.type()}")
+    raise TypeError(f"Unexpected NestedArrays contents: {na.type()}")
 
 
 def custom_enc_hook(obj: Any) -> Any:
     if isinstance(obj, torch.Tensor):
-        # NOTE(rob): it is fastest to use numpy + pickle
-        # when serializing torch tensors.
-        # https://gist.github.com/tlrmchlsmth/8067f1b24a82b6e2f90450e7764fa103 # noqa: E501
-        return msgpack.Ext(CUSTOM_TYPE_TENSOR, pickle.dumps(obj.numpy()))
+        return msgpack.Ext(CUSTOM_TYPE_TENSOR, msgpack.encode(encode_torch(obj)))
 
     # Clunkish workaround for https://github.com/vllm-project/vllm/issues/16185
     # if the object is multimodal kwargs, then convert to ndarrays before transmitting.
@@ -85,8 +103,8 @@ def custom_enc_hook(obj: Any) -> Any:
         adict = {}
         try:
             for key in obj:
-                adict[key] = nested_tensors_to_numpy(obj[key])
-            return msgpack.Ext(CUSTOM_TYPE_TENSORDICT, pickle.dumps(adict))
+                adict[key] = encode_nested_tensors(obj[key])
+            return msgpack.Ext(CUSTOM_TYPE_TENSORDICT, msgpack.encode(adict))
         except TypeError as err:
             # fall back to pickle serializer.
             logger.warning("Unable to convert MultiModalKwargs (%s), fall back to pickle", err)
@@ -100,15 +118,24 @@ def custom_enc_hook(obj: Any) -> Any:
 
 def custom_ext_hook(code: int, data: memoryview) -> Any:
     if code == CUSTOM_TYPE_TENSOR:
-        return torch.from_numpy(pickle.loads(data))
+        return decode_torch(msgpack.decode(data, type=CustomArray))
     if code == CUSTOM_TYPE_PICKLE:
         return pickle.loads(data)
     if code == CUSTOM_TYPE_CLOUDPICKLE:
         return cloudpickle.loads(data)
     if code == CUSTOM_TYPE_TENSORDICT:
-        numpydict = pickle.loads(data)
-        for key in numpydict:
-            numpydict[key] = numpy_to_nested_tensors(numpydict[key])
-        return MultiModalKwargs(numpydict)
+        adict = msgpack.decode(data, type=dict)
+        for key in adict:
+            adict[key] = decode_nested_tensors(adict[key])
+        return MultiModalKwargs(adict)
 
     raise NotImplementedError(f"Extension type code {code} is not supported")
+
+dd = { "foo": torch.zeros(1000) }
+mm = MultiModalKwargs(dd)
+zz = { "foo": encode_nested_tensors(dd["foo"]) }
+encoder = MsgpackEncoder()
+bb = encoder.encode(encode_torch(torch.zeros(1000)))
+decoder = MsgpackDecoder(CustomArray)
+ee = decoder.decode(bb)
+print(ee)
