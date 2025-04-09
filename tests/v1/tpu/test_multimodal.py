@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import tempfile
 
 import openai
 import pytest
@@ -36,8 +35,8 @@ def base64_encoded_image() -> dict[str, str]:
 @pytest.mark.skipif(not current_platform.is_tpu(),
                     reason="This test needs a TPU")
 @pytest.mark.parametrize("model_name", ["llava-hf/llava-1.5-7b-hf"])
-async def test_basic_vision(model_name: str, monkeypatch,
-                            base64_encoded_image: dict[str, str]):
+async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
+                                                                        str]):
 
     def whats_in_this_image_msg(b64):
         return [{
@@ -63,29 +62,26 @@ async def test_basic_vision(model_name: str, monkeypatch,
         "--chat-template", "examples/template_llava.jinja"
     ]
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        monkeypatch.setenv("VLLM_XLA_CACHE_PATH", temp_dir)
-        # Server will pre-compile on first startup (takes a long time).
-        with RemoteOpenAIServer(model_name, server_args,
-                                max_wait_seconds=600) as remote_server:
-            client: openai.AsyncOpenAI = remote_server.get_async_client()
+    # Server will pre-compile on first startup (takes a long time).
+    with RemoteOpenAIServer(model_name, server_args,
+                            max_wait_seconds=600) as remote_server:
+        client: openai.AsyncOpenAI = remote_server.get_async_client()
 
-            # Other requests now should be much faster
-            for image_url in TEST_IMAGE_URLS:
-                image_base64 = base64_encoded_image[image_url]
-                chat_completion_from_base64 = await client.chat.completions\
-                    .create(
-                    model=model_name,
-                    messages=whats_in_this_image_msg(image_base64),
-                    max_completion_tokens=24,
-                    temperature=0.0)
-                result = chat_completion_from_base64
-                assert result
-                choice = result.choices[0]
-                assert choice.finish_reason == "length"
+        # Other requests now should be much faster
+        for image_url in TEST_IMAGE_URLS:
+            image_base64 = base64_encoded_image[image_url]
+            chat_completion_from_base64 = await client.chat.completions\
+                .create(
+                model=model_name,
+                messages=whats_in_this_image_msg(image_base64),
+                max_completion_tokens=24,
+                temperature=0.0)
+            result = chat_completion_from_base64
+            assert result
+            choice = result.choices[0]
+            assert choice.finish_reason == "length"
 
-                message = choice.message
-                message = result.choices[0].message
-                assert message.content is not None and len(
-                    message.content) >= 10
-                assert message.role == "assistant"
+            message = choice.message
+            message = result.choices[0].message
+            assert message.content is not None and len(message.content) >= 10
+            assert message.role == "assistant"
