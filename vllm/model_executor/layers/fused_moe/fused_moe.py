@@ -1663,6 +1663,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             raise ValueError(
                 f"Unsupported compute_type: {hidden_states.dtype}")
 
+        #print(f"shape: E={E}, M={num_tokens}, N={N}, K={K}, top_k={top_k_num}")
+        #print(f"BLOCK_M = {self.block_m}")
+
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
         intermediate_cache1 = _resize_cache(workspace13,
@@ -1673,8 +1676,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                             (num_tokens, top_k_num, K))
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
-                                 global_num_experts, expert_map))
+            moe_align_block_size(
+                topk_ids,
+                config['BLOCK_SIZE_M'] if self.block_m is None else self.block_m,
+                global_num_experts, expert_map
+            ))
 
         invoke_fused_moe_kernel(hidden_states,
                                 w1,

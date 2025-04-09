@@ -33,7 +33,7 @@ from vllm.utils import direct_register_custom_op
 if current_platform.is_cuda_alike():
     from .dispatch_combine import StandardDispatchCombine
     from .fused_moe import TritonExperts, fused_experts
-    from .modular_kernel import FusedMoEModularKernel
+    from .modular_kernel import FusedMoEModularKernel, FusedMoEQuantizeDispatchCombine
     from .pplx_dispatch_combine import PplxDispatchCombine
 else:
     fused_experts = None  # type: ignore
@@ -85,6 +85,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                        params_dtype: torch.dtype, **extra_weight_attrs):
         raise NotImplementedError
 
+    def set_dispatch_combine(self, dispatch_combine: FusedMoEQuantizeDispatchCombine) -> bool:
+        return False
+
     @abstractmethod
     def apply(
         self,
@@ -126,7 +129,6 @@ class AllToAllCacheThreadSafe:
                 return instance
             else:
                 # Create new instance
-                print("CREATE AllToAll")
                 instance = pplx.AllToAll(**kwargs)
                 # Use a weakref.ref with a callback when reference is collected
                 refs = [
@@ -191,7 +193,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: MoEConfig):
         super().__init__()
-        self._moe = moe
+        self.fused_experts = fused_experts
+        self.moe = moe
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
@@ -298,6 +301,26 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input)
 
+    # Maybe extra args
+    def set_dispatch_combine(self, dispatch_combine: FusedMoEQuantizeDispatchCombine) -> bool:
+        block_m = MOE_DP_CHUNK_SIZE * (self.moe.ep_size // self.moe.dp_size)
+        print(f"block_m = {block_m}")
+
+        experts = TritonExperts(
+            use_fp8_w8a8 = False,
+            use_int8_w8a16 = False,
+            use_int4_w4a16 = False,
+            block_shape = None,
+            block_m = None, #block_m,
+        )
+
+        self.fused_experts = FusedMoEModularKernel(
+            dispatch_combine,
+            experts,
+        )
+
+        return True
+
     def forward_cuda(
         self,
         layer: torch.nn.Module,
@@ -337,18 +360,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 topk_ids=topk_ids,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
-
-        return fused_experts(
-            a1=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map)
+        else:
+            return fused_experts(
+                a1=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+            )
 
     def forward_cpu(
         self,
@@ -625,27 +649,67 @@ class FusedMoE(torch.nn.Module):
             from vllm_hpu_extension.ops import DynamicFusedMOE
             self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
+        moe = MoEConfig(
+            num_experts=self.global_num_experts,
+            experts_per_token=top_k, # ?  must be same as topk_ids.shape[1]
+            hidden_dim=hidden_size,
+            num_local_experts=self.local_num_experts,
+            dp_size=self.dp_size,
+            dp_rank=self.dp_rank,
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
+            #in_dtype = 0,
+            #out_dtype = 0,
+        )
+
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
+        quant_method: Optional[FusedMoEMethodBase] = None
+
         if quant_config is None:
-            moe = MoEConfig(
-                num_experts=self.global_num_experts,
-                experts_per_token=0,
-                hidden_dim=hidden_size,
-                num_local_experts=self.local_num_experts,
-                dp_size=self.dp_size,
-                dp_rank=self.dp_rank,
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                #in_dtype = 0,
-                #out_dtype = 0,
+            quant_method = UnquantizedFusedMoEMethod(moe)
+        else:
+            # moe?
+            # TODO: setup dispatcher on FusedMoE.  callees of this
+            # function can grab dispatcher from there?  Or add
+            # supports_dispatcher/set_dispatcher method on FusedMoeMethodBase
+            quant_method = quant_config.get_quant_method(self, prefix)
+            assert isinstance(quant_method, FusedMoEMethodBase)
+
+        assert quant_method is not None
+        self.quant_method = quant_method
+
+        # TODO: move to method?
+        if self.dp_size > 1:
+            all_to_all = get_all_to_all(
+                max_num_tokens=MOE_DP_CHUNK_SIZE, # // moe.dp_size,
+                num_experts=moe.num_experts,
+                experts_per_token=moe.experts_per_token, # has to be same as topk_ids.shape[1]
+                rank=moe.ep_rank,
+                world_size=moe.ep_size,
+                dp_size=moe.ep_size // moe.dp_size, # dp_size actually means TP.
+                hidden_dim=moe.hidden_dim,
+                hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
+                hidden_dim_scale_bytes=0,
             )
 
-            self.quant_method: Optional[QuantizeMethodBase] = (
-                UnquantizedFusedMoEMethod(moe))
-        else:
-            self.quant_method = quant_config.get_quant_method(self, prefix)
-        assert self.quant_method is not None
+            if False:
+                dispatch_combine = PplxDispatchCombine(
+                    all_to_all,
+                    MOE_DP_CHUNK_SIZE,
+                    moe.ep_size,
+                    moe.dp_size,
+                    moe.in_dtype,
+                )
+            else:
+                dispatch_combine = StandardDispatchCombine(
+                    moe.in_dtype,
+                    quant_config.weight_block_size if quant_config is not None else None,
+                )
+
+            success = self.quant_method.set_dispatch_combine(dispatch_combine)
+            if not success:
+                logger.warning("DP+EP not supported for %s.", type(self.quant_method))
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
@@ -989,12 +1053,15 @@ class FusedMoE(torch.nn.Module):
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):
+
         max_tokens_across_dp = get_forward_context(
         ).dp_metadata.max_tokens_across_dp
         cu_tokens_across_dp_cpu = get_forward_context(
         ).dp_metadata.cu_tokens_across_dp_cpu
         num_tokens_across_dp = get_forward_context(
         ).dp_metadata.num_tokens_across_dp
+
+        #print(f"max/num/rank_num = {max_tokens_across_dp}/{num_tokens_across_dp}/{get_forward_context().dp_metadata.dp_rank_num_tokens}")
 
         #In this function we define two ranges:
         # 1. chunk_range - The current iteration of the loops's range over the DP world tokens
