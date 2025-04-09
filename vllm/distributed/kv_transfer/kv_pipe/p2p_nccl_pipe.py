@@ -130,8 +130,12 @@ class P2pNcclPipe:
 
         if remote_address is None:
             with self.recv_store_cv:
+                start_time = time.time()
                 while tensor_id not in self.recv_store:
                     self.recv_store_cv.wait()
+                duration = time.time() - start_time
+                logger.info("Recv From %s, tensor_id: %s, duration: %f",
+                               remote_address, tensor_id, duration)
                 return self.recv_store.pop(tensor_id)
 
         if remote_address not in self.socks:
@@ -277,7 +281,7 @@ class P2pNcclPipe:
         while True:
             sock.send(msgpack.dumps(data))
             # logger.info("ping, zmq_address: %s", self.zmq_address)
-            time.sleep(1)
+            time.sleep(3)
 
     def _send(self, comm, tensor: torch.Tensor, dst: int, stream=None):
         assert tensor.device == self.device, (
