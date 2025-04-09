@@ -35,11 +35,20 @@ def rocm_aiter_fused_experts(
         w2_scale: Optional[torch.Tensor] = None,
         block_shape: Optional[List[int]] = None,
         expert_mask: Optional[torch.Tensor] = None,
+        activation: str = "silu",
         **kwagrs  # Ignore additional keyword arguments
 ) -> torch.Tensor:
 
     import aiter as rocm_aiter
     import aiter.fused_moe_bf16_asm as rocm_aiter_asm_fmoe
+
+    if activation == "silu":
+        aiter_activatation = rocm_aiter.ActivationType.Silu
+    elif activation == "gelu":
+        aiter_activatation = rocm_aiter.ActivationType.Gelu
+    else:
+        raise ValueError(f"The given activation: {activation}"
+                         " is not supported in AITER.")
 
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         per_token_group_quant_fp8)
@@ -94,38 +103,18 @@ def rocm_aiter_fused_experts(
         )
         return out_asm
 
-    elif envs.VLLM_ROCM_USE_AITER_FP8_CHANNEL_SCALED_MOE and use_fp8_w8a8:
-        print("============= AITER TKW1 =================")
-        from aiter.fused_moe_bf16_asm import asm_moe_tkw1
-
-        assert w1_scale is not None
-        assert w2_scale is not None
-
-        local_E = E = w1.shape[0]
-        if expert_mask is not None:
-            E = expert_mask.numel()
-
-        # Because CompressedTensorsW8A8Fp8MoEAiterMethod
-        # has no perform shuffling
-        # TODO: add shuffling logic into CompressedTensorsW8A8Fp8MoEAiterMethod
-        # w1b = shuffle_weight(w1)
-        # w2b = shuffle_weight(w2)
-
-        return asm_moe_tkw1(hidden_states, w1, w2, topk_weights, topk_ids,
-                            w1_scale.view(local_E, -1),
-                            w2_scale.view(local_E, -1))
-
     elif use_fp8_w8a8:
-        return rocm_aiter_asm_fmoe.asm_moe(hidden_states=hidden_states,
-                                           w1=w1,
-                                           w2=w2,
-                                           topk_weight=topk_weights,
-                                           topk_ids=topk_ids,
-                                           fc1_scale=w1_scale,
-                                           fc2_scale=w2_scale,
-                                           fc1_smooth_scale=None,
-                                           fc2_smooth_scale=None,
-                                           a16=False)
+        return rocm_aiter_asm_fmoe.asm_moe_tkw1(hidden_states=hidden_states,
+                                                w1=w1,
+                                                w2=w2,
+                                                topk_weight=topk_weights,
+                                                topk_ids=topk_ids,
+                                                fc1_scale=w1_scale,
+                                                fc2_scale=w2_scale,
+                                                fc1_smooth_scale=None,
+                                                fc2_smooth_scale=None,
+                                                a16=False,
+                                                activation=aiter_activatation)
 
     return rocm_aiter.ck_moe(hidden_states=hidden_states,
                              w1=w1,

@@ -13,6 +13,8 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    is_rocm_aiter_moe_enabled, rocm_aiter_fused_experts, shuffle_weights)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -56,7 +58,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
               and activation == "silu" and expert_map is None):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif (quant_config._is_fp8_w8a8(weight_quant, input_quant)
-              and activation == "silu" and expert_map is None):
+              and is_rocm_aiter_moe_enabled()):
             return CompressedTensorsW8A8Fp8MoEAiterMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
@@ -393,7 +395,6 @@ class CompressedTensorsW8A8Fp8MoEAiterMethod(CompressedTensorsMoEMethod):
         # Fp8 moe kernels require a single activation scale.
         # We take the max of all the scales in case they differ.
         if self.static_input_scales:
-            assert self.input_quant.strategy == QuantizationStrategy.TENSOR
             if (layer.w13_input_scale is None or layer.w2_input_scale is None):
                 raise ValueError(
                     "QuantConfig has static quantization, but found "
@@ -409,61 +410,74 @@ class CompressedTensorsW8A8Fp8MoEAiterMethod(CompressedTensorsMoEMethod):
             layer.w2_input_scale = torch.nn.Parameter(
                 layer.w2_input_scale.max(), requires_grad=False)
 
-        # For Per-TENSOR case, Fp8 moe kernel needs single weight scale
-        # for w13 per expert. Use max then dequant and requant each expert.
-        if self.weight_quant.strategy == QuantizationStrategy.TENSOR:
-            assert layer.w13_weight_scale is not None
-            shard_size = layer.intermediate_size_per_partition
-            max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.local_num_experts):
-                start = 0
-                for shard_id in range(2):
-                    dq_weight = per_tensor_dequantize(
-                        layer.w13_weight[expert_id][start:start +
-                                                    shard_size, :],
-                        layer.w13_weight_scale[expert_id][shard_id])
-                    layer.w13_weight[expert_id][
-                        start:start + shard_size, :], _ = ops.scaled_fp8_quant(
-                            dq_weight, max_w13_scales[expert_id])
-                    start += shard_size
-            layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
-                                                        requires_grad=False)
-
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            is_rocm_aiter_channel_scaled_moe_enabled, shuffle_weights)
-        if (self.weight_quant.strategy == QuantizationStrategy.CHANNEL
-                and is_rocm_aiter_channel_scaled_moe_enabled()):
-            # reshaping weights is required for aiter moe kernel.
-            shuffled_w13, shuffled_w2 = shuffle_weights(
-                layer.w13_weight.data, layer.w2_weight.data)
-
-            layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+        if current_platform.is_fp8_fnuz():
+            # Normalize the weights and scales
+            w13_weight, w13_weight_scale, w13_input_scale = \
+                normalize_e4m3fn_to_e4m3fnuz(
+                    layer.w13_weight, layer.w13_weight_scale,
+                    layer.w13_input_scale)
+            w2_weight, w2_weight_scale, w2_input_scale = \
+                normalize_e4m3fn_to_e4m3fnuz(
+                    layer.w2_weight, layer.w2_weight_scale,
+                    layer.w2_input_scale)
+            # Reset the parameter
+            layer.w13_weight = torch.nn.Parameter(w13_weight,
                                                   requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+            layer.w13_weight_scale = torch.nn.Parameter(w13_weight_scale,
+                                                        requires_grad=False)
+            if w13_input_scale is not None:
+                layer.w13_input_scale = torch.nn.Parameter(w13_input_scale,
+                                                           requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
+            layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale,
+                                                       requires_grad=False)
+            if w2_input_scale is not None:
+                layer.w2_input_scale = torch.nn.Parameter(w2_input_scale,
+                                                          requires_grad=False)
+
+        # Fp8 moe kernel needs single weight scale for w13 per expert.
+        # We take the max then dequant and requant each expert.
+        assert layer.w13_weight_scale is not None
+        shard_size = layer.intermediate_size_per_partition
+        max_w13_scales = layer.w13_weight_scale.max(dim=1).values
+        for expert_id in range(layer.local_num_experts):
+            start = 0
+            for shard_id in range(2):
+                dq_weight = per_tensor_dequantize(
+                    layer.w13_weight[expert_id][start:start + shard_size, :],
+                    layer.w13_weight_scale[expert_id][shard_id])
+                layer.w13_weight[expert_id][
+                    start:start + shard_size, :], _ = ops.scaled_fp8_quant(
+                        dq_weight, max_w13_scales[expert_id])
+                start += shard_size
+
+        # reshaping weights is required for aiter moe kernel.
+        shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
+                                                    layer.w2_weight.data)
+
+        layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                              requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            router_logits: torch.Tensor,
+            top_k: int,
+            renormalize: bool,
+            use_grouped_topk: bool = False,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            expert_map: Optional[torch.Tensor] = None,
+            custom_routing_function: Optional[Callable] = None,
+            scoring_func: str = "softmax",
+            e_score_correction_bias: Optional[torch.Tensor] = None,
+            apply_router_weight_on_input: bool = False,
+            activation: str = "silu",
+            **kwagrs  # Ignore additional keyword arguments
     ) -> torch.Tensor:
-
-        assert activation == "silu"
-        assert global_num_experts == layer.w13_weight.shape[0]
-        assert expert_map is None
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -477,24 +491,18 @@ class CompressedTensorsW8A8Fp8MoEAiterMethod(CompressedTensorsMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        from vllm.model_executor.layers.fused_moe import fused_experts
-
-        return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
+        return rocm_aiter_fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=True,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
             use_fp8_w8a8=True,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale)
+            activation=activation,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input)
 
 
 class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
