@@ -768,8 +768,9 @@ if __name__ == "__main__":
                         help="Set the seed when initializing `vllm.LLM`.")
     parser.add_argument("--num-images",
                         "-n",
-                        type=lambda x: int(x) if 0 < int(x) <= 10 else parser.
-                        error(f"expecting 0 < num-images <= 10, got {x}"),
+                        type=lambda x: int(x) if 0 < int(x) <= 10 else \
+                            parser.error(
+                                f"expecting 0 < num-images <= 10, got {x}"),
                         default=2,
                         help="Number of images to use for the test.")
 
