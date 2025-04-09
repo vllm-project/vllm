@@ -19,6 +19,7 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.ops.xla_ops import LORA_RANK_BLOCK_SIZE
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -37,6 +38,7 @@ from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
@@ -54,7 +56,7 @@ INVALID_TOKEN_ID = -1
 MIN_NUM_SEQS = 8
 
 
-class TPUModelRunner:
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -181,6 +183,12 @@ class TPUModelRunner:
             min_token_size=16,
             max_token_size=self.max_num_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+
+        if self.lora_config is not None:
+            # This makes us pad at initialisation time so we can avoid padding
+            # at runtime, which introduces long stalls
+            self.lora_config.max_lora_rank = _get_padded_lora_rank(
+                self.lora_config.max_lora_rank, self.lora_config.max_loras)
 
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
@@ -487,6 +495,17 @@ class TPUModelRunner:
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
+
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -795,6 +814,14 @@ class TPUModelRunner:
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
+        if self.lora_config is not None:
+            model = self.load_lora_model(model, self.model_config,
+                                         self.scheduler_config,
+                                         self.lora_config, self.device)
+            punica_wrapper = self.lora_manager._adapter_manager.punica_wrapper
+            if not self.enforce_eager:
+                punica_wrapper.mark_compiled()
+
         # Sync all pending XLA execution during model initialization and weight
         # loading.
         xm.mark_step()
@@ -844,6 +871,8 @@ class TPUModelRunner:
             num_seqs=num_seqs,
         )
 
+        xm.mark_step()  # Capture tensors created when setting up
+
         if self.is_multimodal_model:
             torch._dynamo.mark_dynamic(inputs_embeds, 0)
         else:
@@ -851,11 +880,20 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        with set_forward_context(attn_metadata, self.vllm_config, 0):
+        with self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                np.array([num_tokens], dtype=np.int32)), set_forward_context(
+                    attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
                              positions=position_ids,
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
+
+    def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping,
+                          lora_requests) -> None:
+        super()._set_active_loras(prompt_lora_mapping, token_lora_mapping,
+                                  lora_requests)
+        xm.mark_step()  # Captures metadata updates
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -877,6 +915,7 @@ class TPUModelRunner:
         start = time.perf_counter()
         hsize = self.model_config.get_hidden_size()
         device = self.device
+
         # Compile sampling step for different model+sampler outputs in bucketed
         # n_tokens x max_num_reqs. Graph is really small so this is fine.
         for num_tokens in self.num_tokens_paddings:
@@ -885,7 +924,7 @@ class TPUModelRunner:
                                        device=device,
                                        dtype=self._hidden_states_dtype)
             # Compile for [8, 16, .., 128,.., `self.max_num_reqs`]
-            while True:
+            while num_reqs_to_sample <= num_tokens:
                 indices = torch.zeros(
                     num_reqs_to_sample,
                     dtype=torch.int32,
@@ -896,7 +935,12 @@ class TPUModelRunner:
                     from_input_batch(self.input_batch, indices)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
-                out = self.sample_from_hidden(dummy_hidden, sampling_meta)
+
+                with self.maybe_dummy_run_with_lora(
+                        self.lora_config,
+                        _create_dummy_scheduled_tokens(num_tokens,
+                                                       num_reqs_to_sample)):
+                    out = self.sample_from_hidden(dummy_hidden, sampling_meta)
                 out = out.cpu()
                 # Requests can't be more than tokens. But do compile for the
                 # next bigger value in case num_tokens uses bucketed padding.
@@ -968,9 +1012,9 @@ class TPUModelRunner:
         sampling_metadata: TPUSupportedSamplingMetadata,
     ) -> torch.Tensor:
         """
-            Sample with xla-friendly function. This function is to be traced 
-            separately for lighter compilation overhead.
-            """
+        Sample with xla-friendly function. This function is to be traced
+        separately for lighter compilation overhead.
+        """
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
@@ -1004,13 +1048,13 @@ def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
 
 def _get_paddings(min_token_size: int, max_token_size: int,
                   padding_gap: int) -> list[int]:
-    """Generate a list of padding size, starting from min_token_size, 
+    """Generate a list of padding size, starting from min_token_size,
     ending with a number that can cover max_token_size
-    
+
     If padding_gap == 0 then:
         increase 2X each time (exponential)
     else:
-        first increase the size to twice, 
+        first increase the size to twice,
         then increase the padding size by padding_gap.
     """
     paddings = []
@@ -1044,3 +1088,25 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
+
+
+def _get_padded_lora_rank(max_lora_rank: int, max_num_loras: int) -> int:
+    max_num_loras += 1
+
+    # If we have enough LoRAs to use laning without padding
+    if max_lora_rank * max_num_loras >= LORA_RANK_BLOCK_SIZE:
+        return max_lora_rank
+
+    return 1 << (LORA_RANK_BLOCK_SIZE // max_num_loras).bit_length()
+
+
+def _create_dummy_scheduled_tokens(total_tokens: int,
+                                   num_prompts: int) -> np.ndarray:
+    assert num_prompts <= total_tokens, "Expected num_prompts < total_tokens"
+    base_tokens = total_tokens // num_prompts
+    leftover_tokens = total_tokens % num_prompts
+
+    tokens = np.full((num_prompts, ), base_tokens, dtype=np.int32)
+    tokens[-1] += leftover_tokens
+
+    return tokens
