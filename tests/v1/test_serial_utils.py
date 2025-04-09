@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
+from collections import UserDict
 from dataclasses import dataclass
 
 import numpy as np
@@ -8,12 +8,20 @@ import torch
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
+class UnrecognizedType(UserDict):
+
+    def __init__(self, an_int: int):
+        super().__init__()
+        self.an_int = an_int
+
+
 @dataclass
 class MyType:
     tensor1: torch.Tensor
     a_string: str
     list_of_tensors: list[torch.Tensor]
     numpy_array: np.ndarray
+    unrecognized: UnrecognizedType
 
 
 def test_encode_decode():
@@ -27,6 +35,7 @@ def test_encode_decode():
             torch.rand((3, 5, 4), dtype=torch.float64)
         ],
         numpy_array=np.arange(20),
+        unrecognized=UnrecognizedType(33),
     )
 
     encoder = MsgpackEncoder()
@@ -62,3 +71,4 @@ def assert_equal(obj1: MyType, obj2: MyType):
         torch.equal(a, b)
         for a, b in zip(obj1.list_of_tensors, obj2.list_of_tensors))
     assert np.array_equal(obj1.numpy_array, obj2.numpy_array)
+    assert obj1.unrecognized.an_int == obj2.unrecognized.an_int

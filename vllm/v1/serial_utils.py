@@ -90,8 +90,7 @@ class MsgpackDecoder:
                 return self._decode_ndarray(obj)
             if issubclass(t, torch.Tensor):
                 return torch.from_numpy(self._decode_ndarray(obj))
-
-        raise NotImplementedError(f"Type {t} is not supported")
+        return obj
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
         dtype, shape, index = arr
