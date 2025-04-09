@@ -498,7 +498,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                                               hf_config.image_token_index)
             if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
                               "internvl_chat", "skywork_chat", "NVLM_D",
-                              "h2ovl_chat", "idefics3"):
+                              "h2ovl_chat", "idefics3", "smolvlm"):
                 return "<image>"
             if model_type in ("mllama", "llama4"):
                 return "<|image|>"

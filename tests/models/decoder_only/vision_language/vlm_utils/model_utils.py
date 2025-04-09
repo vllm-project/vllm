@@ -204,6 +204,12 @@ def idefics3_trunc_hf_output(hf_output: RunnerOutput,
     return output_ids, output_str, out_logprobs
 
 
+def smolvlm_trunc_hf_output(hf_output: RunnerOutput,
+                            model: str) -> RunnerOutput:
+    # Based on Idefics3
+    return idefics3_trunc_hf_output(hf_output, model)
+
+
 def minicpmv_trunc_hf_output(hf_output: RunnerOutput,
                              model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
