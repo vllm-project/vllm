@@ -1350,8 +1350,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
         """
-        # cache = self.cache
-        cache = None
+        cache = self.cache
         model_id = self.info.model_id
 
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
