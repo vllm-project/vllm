@@ -30,7 +30,8 @@ def torch_permute(
     n_local_expert:int,
     start_expert:int,
     expert_map: Optional[torch.Tensor]=None,
-    align_block_size: Optional[int]=None
+    align_block_size: Optional[int]=None,
+    fill_invalid_expert:int=-1
 ) -> list[torch.Tensor]:
     # print(topk_ids)
     n_token, n_hidden  = hidden_states.shape[0], hidden_states.shape[1]
@@ -64,7 +65,7 @@ def torch_permute(
 
         permuted_hidden_states = hidden_states[dst_row_id2src_row_id_map % n_token, ...]
         permuted_row_size = permuted_hidden_states.shape[0]
-        m_indices = torch.empty(permuted_row_size, device="cuda",dtype=torch.int32).fill_(-1)
+        m_indices = torch.empty(permuted_row_size, device="cuda",dtype=torch.int32).fill_(fill_invalid_expert)
         for i in range(1, n_local_expert+1) :
             first_token_offset = expert_first_token_offset[i-1]
             last_token_offset = expert_first_token_offset[i]
@@ -83,7 +84,7 @@ def torch_permute(
                                                    dtype=torch.int32)
         align_expert_first_token_offset = torch.zeros_like(expert_first_token_offset)
         m_indices = torch.empty(permuted_row_size, device="cuda", 
-                                                   dtype=torch.int32).fill_(-1)
+                                                   dtype=torch.int32).fill_(fill_invalid_expert)
         # get align_permuted_hidden_states, valid row_idx and align_expert_first_token_offset
         for i in range(1, n_local_expert+1):
             first_token_offset = expert_first_token_offset[i-1]
@@ -144,6 +145,7 @@ def test_moe_permute_unpermute(
     n_token: int, n_hidden: int, topk: int, n_expert: int, ep_size: int, dtype: torch.dtype,
     align_block_size:Optional[int]
 ):
+    fill_invalid_expert = 0
     ep_rank= np.random.randint(0, ep_size)
     # print(f"ep rank {ep_rank}")
     expert_map = None
@@ -164,13 +166,14 @@ def test_moe_permute_unpermute(
                                         token_expert_indices, 
                                         topk, n_expert,n_local_expert,
                                         start_expert, expert_map=expert_map,
-                                        align_block_size=align_block_size)
+                                        align_block_size=align_block_size,
+                                        fill_invalid_expert=fill_invalid_expert)
 
     result0, result1, result2, result3 = moe_permute(hidden_states, 
                                             topk_weights, topk_ids, 
                                             token_expert_indices, 
                                             topk, n_expert, n_local_expert, expert_map,
-                                            align_block_size
+                                            align_block_size, fill_invalid_expert
                                             )
     # valid_row = (gold3 != -1) 
     # print(gold0, result0)
