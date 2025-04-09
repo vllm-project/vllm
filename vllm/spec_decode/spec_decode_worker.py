@@ -975,7 +975,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
         # B x K+1 x D
-        # if get_pp_group().is_last_rank:
         hidden_states = proposal_scores.hidden_states
         if hidden_states is not None:
             # Only get terminal hidden states for next step
