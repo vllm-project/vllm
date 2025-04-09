@@ -222,7 +222,6 @@ class MambaMixer2(CustomOp):
                  head_dim: int = 64,
                  rms_norm_eps: float = 1e-5,
                  activation="silu",
-                 chunk_size: int = 256,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
@@ -258,7 +257,6 @@ class MambaMixer2(CustomOp):
         self.ssm_state_size = ssm_state_size
         self.activation = activation
 
-        self.chunk_size = chunk_size
         self.intermediate_size = intermediate_size
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -389,8 +387,7 @@ class MambaMixer2(CustomOp):
         self,
         hidden_states: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
-        sequence_idx: Optional[torch.Tensor] = None,
-        mamba2_metadata: Optional[Mamba2Metadata] = None,
+        mamba2_metadata: Mamba2Metadata,
     ):
         # For the mamba2 triton kernels to operate in continuous batching,
         # the sequence_idx is needed to be passed in. Also, for the kernels
@@ -399,11 +396,6 @@ class MambaMixer2(CustomOp):
         # more efficient to pre-compute once since they are common to all
         # layers.
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
-
-        chunk_indices, chunk_offsets = None, None
-        if mamba2_metadata is not None:
-            chunk_indices = mamba2_metadata.chunk_indices
-            chunk_offsets = mamba2_metadata.chunk_offsets
 
         seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
@@ -496,13 +488,13 @@ class MambaMixer2(CustomOp):
                 self.A,
                 B.view(1, seq_len, self.n_groups // self.tp_size, -1),
                 C.view(1, seq_len, self.n_groups // self.tp_size, -1),
-                chunk_size=self.chunk_size,
+                chunk_size=mamba2_metadata.chunk_size,
                 D=self.D,
                 z=None,
                 dt_bias=self.dt_bias,
-                seq_idx=sequence_idx,
-                chunk_indices=chunk_indices,
-                chunk_offsets=chunk_offsets,
+                seq_idx=mamba2_metadata.seq_idx,
+                chunk_indices=mamba2_metadata.chunk_indices,
+                chunk_offsets=mamba2_metadata.chunk_offsets,
                 cu_seqlens=attn_metadata.query_start_loc,
                 initial_states=initial_states,
                 return_varlen_states=True,

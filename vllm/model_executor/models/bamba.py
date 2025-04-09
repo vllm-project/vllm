@@ -96,7 +96,6 @@ class BambaMixerDecoderLayer(nn.Module):
                                 head_dim=config.mamba_d_head,
                                 rms_norm_eps=config.rms_norm_eps,
                                 activation=config.hidden_act,
-                                chunk_size=config.mamba_chunk_size,
                                 quant_config=quant_config)
 
         self.feed_forward = BambaMLP(config, quant_config=quant_config)
@@ -110,7 +109,6 @@ class BambaMixerDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
-        sequence_idx: Optional[torch.Tensor] = None,
         mamba2_metadata: Optional[Mamba2Metadata] = None,
         **kwargs,
     ):
@@ -122,7 +120,7 @@ class BambaMixerDecoderLayer(nn.Module):
                 hidden_states, residual)
 
         hidden_states = self.mamba(hidden_states, mamba_cache_params,
-                                   sequence_idx, mamba2_metadata)
+                                   mamba2_metadata)
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(
             hidden_states, residual)
@@ -312,33 +310,14 @@ class BambaModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        # pass a sequence index tensor, that is required for
-        # proper continuous batching computation including
-        # chunked prefill
-        seq_idx = None
-        mamba2_metadata = None
         attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata.num_prefills > 0:
-            seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
-            for i, (srt, end) in enumerate(
-                    zip(
-                        attn_metadata.query_start_loc,
-                        attn_metadata.query_start_loc[1:],
-                    )):
-                seq_idx[srt:end] = i
-            seq_idx.unsqueeze_(0)
 
-            # compute metadata for chunked prefill.
-            # actually this is only needed if there are
-            # initial states, but this is determinable
-            # only from attention metadata yet
-            # unavailable from the current top-level forward.
-            # Rather than complicating things to extract said
-            # metadata, we simply just compute redundently and
-            # will be silently ignored inside the mamba kernels.
-            # if not needed.
-            mamba2_metadata = prepare_mamba2_metadata(
-                seq_idx, self.config.mamba_chunk_size)
+        mamba2_metadata = prepare_mamba2_metadata(
+            chunk_size=self.config.mamba_chunk_size,
+            has_prefills=attn_metadata.num_prefills > 0,
+            input_ids=input_ids,
+            query_start_loc=attn_metadata.query_start_loc,
+        )
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -368,7 +347,6 @@ class BambaModel(nn.Module):
                 hidden_states=hidden_states,
                 residual=residual,
                 mamba_cache_params=layer_mamba_cache_params,
-                sequence_idx=seq_idx,
                 mamba2_metadata=mamba2_metadata,
             )
 
