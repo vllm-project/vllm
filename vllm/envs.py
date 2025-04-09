@@ -107,6 +107,9 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
+    VLLM_EP_LOAD_COLLECT: bool = False
+    VLLM_EP_LOAD_COLLECT_MASTER_IP: str = ""
+    VLLM_EP_LOAD_COLLECT_MASTER_PORT: int = 37000
 
 
 def get_default_cache_root():
@@ -704,6 +707,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # It can be changed with this variable if needed for some reason.
     "VLLM_XGRAMMAR_CACHE_MB":
     lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
+
+    # Whether to collect expert parallel load
+    "VLLM_EP_LOAD_COLLECT":
+    lambda: bool(int(os.getenv("VLLM_EP_LOAD_COLLECT", "0"))),
+
+    # IP address of the master node when collecting the expert parallel load
+    "VLLM_EP_LOAD_COLLECT_MASTER_IP":
+        lambda: os.getenv("VLLM_EP_LOAD_MASTER_IP", ""),
+
+    # Port of the master node when collecting the expert parallel load
+    "VLLM_EP_LOAD_COLLECT_MASTER_PORT":
+        lambda: int(os.getenv("VLLM_EP_LOAD_MASTER_PORT", "37000")),
 }
 
 # end-env-vars-definition

@@ -23,6 +23,12 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
 
+from vllm.model_executor.layers.fused_moe.moe_load import (get_expert_load,
+                                                           new_expert_load,
+                                                           add_layer_to_expert_load,
+                                                           add_token_exper_list,
+                                                           set_current_layer_id)
+
 if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
 else:
@@ -448,6 +454,7 @@ class FusedMoE(torch.nn.Module):
             compilation_config.static_forward_context[prefix] = self
             self.layer_name = prefix
 
+        self.layer_id = prefix.split(sep='.')[-3]
         if use_ep:
             # Set TP size to 1 to adjust for EP and adjust EP size and rank
             # for DP attention.
@@ -460,6 +467,10 @@ class FusedMoE(torch.nn.Module):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
+
+            if get_expert_load() is not None or new_expert_load(ep_rank=self.ep_rank, ep_size=self.ep_size,
+                                                                global_expert_num=self.global_num_experts):
+                add_layer_to_expert_load(layer_id=self.layer_id, expert_map=self.expert_map)
         else:
             # Adjust TP size for DP attention
             self.tp_rank = tp_rank + self.tp_size * self.dp_rank
@@ -815,6 +826,7 @@ class FusedMoE(torch.nn.Module):
                 topk=top_k,
                 renormalize=renormalize)
 
+        add_token_exper_list(token_experts=topk_ids)
         return topk_weights, topk_ids
 
     def naive_multicast(self, x: torch.Tensor,
@@ -837,6 +849,8 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
+        set_current_layer_id(self.layer_id)
+
         if self.use_direct_call:
             return self.forward_impl(hidden_states, router_logits)
         else:
