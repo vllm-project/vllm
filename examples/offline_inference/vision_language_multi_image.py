@@ -30,6 +30,8 @@ IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7a/Huskiesatrest.jpg/2880px-Huskiesatrest.jpg",
     "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg/1920px-Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg",
     "https://upload.wikimedia.org/wikipedia/commons/3/30/George_the_amazing_guinea_pig.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1f/Oryctolagus_cuniculus_Rcdo.jpg/1920px-Oryctolagus_cuniculus_Rcdo.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/9/98/Horse-and-pony.jpg",
 ]
 
 
@@ -768,9 +770,9 @@ if __name__ == "__main__":
                         help="Set the seed when initializing `vllm.LLM`.")
     parser.add_argument("--num-images",
                         "-n",
-                        type=lambda x: int(x) if 0 < int(x) <= 10 else \
+                        type=lambda x: int(x) if 0 < int(x) <= 12 else \
                             parser.error(
-                                f"expecting 0 < num-images <= 10, got {x}"),
+                                f"expecting 0 < num-images <= 12, got {x}"),
                         default=2,
                         help="Number of images to use for the test.")
 
