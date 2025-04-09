@@ -355,6 +355,9 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         return torch.split(masked_audio_features,
                            audio_output_lengths.flatten().tolist())
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         audio_input = self._parse_and_validate_audio_input(**kwargs)

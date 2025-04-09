@@ -421,6 +421,9 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return [e.flatten(0, 1) for e in embeds]
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         video_input = self._parse_and_validate_video_input(**kwargs)
