@@ -41,6 +41,7 @@ from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
 from .processing_minimax_vl_01 import MiniMaxVL01Processor
+from vllm.multimodal.processing import BaseProcessingInfo
 
 # Register the processors
 AutoImageProcessor.register("minimax_vl_01", ImageProcessor)
@@ -174,7 +175,6 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
             raise ValueError("Cannot have a largest feature size of 0!")
 
         return largest_feature_pinpoint
-
 
 _I = TypeVar("_I", bound=LlavaNextProcessingInfo)
 
@@ -324,7 +324,7 @@ class MiniMaxVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaNextMultiModalProcessor,
     info=LlavaNextProcessingInfo,
-    dummy_inputs=LlavaDummyInputsBuilder)
+    dummy_inputs=MiniMaxVLDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
@@ -618,7 +618,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         image_sizes = image_input.get("image_sizes")
         if image_sizes is None:
-            batch_size = len(image_input.get("data", []))
+            batch_size = len(patch_embeddings)
             vision_config = self.config.vision_config
             default_height = default_width = vision_config.image_size
             image_sizes = torch.as_tensor([[default_height, default_width]
