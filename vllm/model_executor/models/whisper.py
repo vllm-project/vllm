@@ -692,6 +692,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         )
         return decoder_outputs
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model.decoder
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         # TODO: This method does not obey the interface for SupportsMultiModal.
