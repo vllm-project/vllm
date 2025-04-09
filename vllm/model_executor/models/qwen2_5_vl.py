@@ -196,16 +196,15 @@ class Qwen2_5_VisionMLP(nn.Module):
         return x_down
 
 
-def all_gather_interleave(local_tensor, world_size=2):
+def all_gather_interleave(local_tensor, tp_size: int):
     """All-gather the input tensor interleavely across model parallel group."""
     import torch.distributed as dist
-    gathered_tensors = [
-        torch.zeros_like(local_tensor) for _ in range(world_size)
-    ]
+    gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(tp_size)]
     dist.all_gather(gathered_tensors, local_tensor)
 
     gathered_tensors_split = [
-        torch.split(tensor, 640, -1) for tensor in gathered_tensors
+        torch.split(tensor, local_tensor.shape[-1] // tp_size, -1)
+        for tensor in gathered_tensors
     ]
     ordered_tensors = [
         tensor for pair in zip(*gathered_tensors_split) for tensor in pair
