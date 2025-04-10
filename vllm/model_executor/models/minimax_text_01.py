@@ -490,6 +490,10 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden = self._decode_infer(q, k, v, kv_cache,
                                         state_indices_tensor, attn_metadata)
 
+        # 如果 hidden 是空张量，直接返回
+        if hidden.size(0) == 0:
+            return hidden
+
         hidden = self.norm(hidden)
         gate, _ = self.output_gate(hidden_states)
         
