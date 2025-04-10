@@ -26,7 +26,8 @@ from .modeling_clip import CLIPVisionModel, CLIPVisionConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from .minimax_text_01 import MiniMaxText01ForCausalLM
 from vllm.transformers_utils.configs import MiniMaxText01Config, MiniMaxVL01Config
-from .llava import LlavaNextMultiModalProcessor, LlavaNextProcessingInfo, LlavaNextDummyInputsBuilder
+from .llava_next import LlavaNextMultiModalProcessor, LlavaNextProcessingInfo
+from .llava import LlavaDummyInputsBuilder
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "MiniMaxVL01Config"
@@ -331,7 +332,7 @@ MINIMAX_VL_01_INPUTS_DOCSTRING = r"""
 )
 @MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor, 
                                         info=LlavaNextProcessingInfo, 
-                                        dummy_inputs=LlavaNextDummyInputsBuilder)
+                                        dummy_inputs=LlavaDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel):
     def __init__(self, config: MiniMaxVL01Config):
         super().__init__(config)
