@@ -116,15 +116,29 @@ __global__ void merge_attn_states_kernel(
         num_heads, head_size);                                              \
   }
 
+/*@brief Merges the attention states from prefix and suffix
+ * into the output tensor.
+ *
+ * @param output [NUM_TOKENS, NUM_HEADS, HEAD_SIZE] The output
+ * tensor to store the merged attention states.
+ * @param output_lse [NUM_HEADS, NUM_TOKENS] Optional tensor to
+ * store the log-sum-exp values.
+ * @param prefix_output [NUM_TOKENS, NUM_HEADS, HEAD_SIZE] The
+ * prefix attention states.
+ * @param prefix_lse [NUM_HEADS, NUM_TOKENS] The log-sum-exp
+ * values for the prefix attention states.
+ * @param suffix_output [NUM_TOKENS, NUM_HEADS, HEAD_SIZE] The
+ * suffix attention states.
+ * @param suffix_lse [NUM_HEADS, NUM_TOKENS] The log-sum-exp
+ * values for the suffix attention states.
+ */
 template <typename scalar_t>
-void merge_attn_states_launcher(
-    torch::Tensor& output,  // [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    std::optional<torch::Tensor> output_lse,  // [NUM_HEADS, NUM_TOKENS]
-    const torch::Tensor& prefix_output,  // [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    const torch::Tensor& prefix_lse,     // [NUM_HEADS, NUM_TOKENS]
-    const torch::Tensor& suffix_output,  // [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    const torch::Tensor& suffix_lse      // [NUM_HEADS, NUM_TOKENS]
-) {
+void merge_attn_states_launcher(torch::Tensor& output,
+                                std::optional<torch::Tensor> output_lse,
+                                const torch::Tensor& prefix_output,
+                                const torch::Tensor& prefix_lse,
+                                const torch::Tensor& suffix_output,
+                                const torch::Tensor& suffix_lse) {
   constexpr uint NUM_THREADS = 128;
   const uint num_tokens = output.size(0);
   const uint num_heads = output.size(1);
