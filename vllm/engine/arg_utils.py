@@ -5,7 +5,7 @@ import dataclasses
 import json
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import MISSING, dataclass, fields
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
                     Tuple, Type, Union, cast, get_args)
 
@@ -233,6 +233,22 @@ class EngineArgs:
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
+
+        def get_kwargs(cls: type[Any]) -> Dict[str, Any]:
+            cls_docs = get_attr_docs(cls)
+            kwargs = {}
+            for field in fields(cls):
+                name = field.name
+                # One of these will always be present
+                default = (field.default_factory
+                           if field.default is MISSING else field.default)
+                kwargs[name] = {"default": default, "help": cls_docs[name]}
+                # When using action="store_true"
+                # add_argument doesn't accept type
+                if not isinstance(field.type, bool):
+                    kwargs[name]["type"] = field.type
+            return kwargs
+
         # Model arguments
         parser.add_argument(
             '--model',
@@ -412,7 +428,7 @@ class EngineArgs:
             '* "transformers" will use the Transformers model '
             'implementation.\n')
         # Parallel arguments
-        parallel_docs = get_attr_docs(ParallelConfig)
+        parallel_kwargs = get_kwargs(ParallelConfig)
         parallel_group = parser.add_argument_group(
             title="ParallelConfig",
             description=ParallelConfig.__doc__,
@@ -420,43 +436,29 @@ class EngineArgs:
         parallel_group.add_argument(
             '--distributed-executor-backend',
             choices=['ray', 'mp', 'uni', 'external_launcher'],
-            default=ParallelConfig.distributed_executor_backend,
-            help=parallel_docs["distributed_executor_backend"])
+            **parallel_kwargs["distributed_executor_backend"])
         parallel_group.add_argument(
-            '--pipeline-parallel-size',
-            '-pp',
-            type=int,
-            default=ParallelConfig.pipeline_parallel_size,
-            help=parallel_docs["pipeline_parallel_size"])
-        parallel_group.add_argument(
-            '--tensor-parallel-size',
-            '-tp',
-            type=int,
-            default=ParallelConfig.tensor_parallel_size,
-            help=parallel_docs["tensor_parallel_size"])
-        parallel_group.add_argument('--data-parallel-size',
-                                    '-dp',
-                                    type=int,
-                                    default=ParallelConfig.data_parallel_size,
-                                    help=parallel_docs["data_parallel_size"])
+            '--pipeline-parallel-size', '-pp',
+            **parallel_kwargs["pipeline_parallel_size"])
+        parallel_group.add_argument('--tensor-parallel-size', '-tp',
+                                    **parallel_kwargs["tensor_parallel_size"])
+        parallel_group.add_argument('--data-parallel-size', '-dp',
+                                    **parallel_kwargs["data_parallel_size"])
         parallel_group.add_argument(
             '--enable-expert-parallel',
             action='store_true',
-            help=parallel_docs["enable_expert_parallel"])
+            **parallel_kwargs["enable_expert_parallel"])
         parallel_group.add_argument(
             '--max-parallel-loading-workers',
-            type=int,
-            default=ParallelConfig.max_parallel_loading_workers,
-            help=parallel_docs["max_parallel_loading_workers"])
+            **parallel_kwargs["max_parallel_loading_workers"])
         parallel_group.add_argument(
             '--ray-workers-use-nsight',
             action='store_true',
-            help=parallel_docs["ray_workers_use_nsight"])
+            **parallel_kwargs["ray_workers_use_nsight"])
         parallel_group.add_argument(
             '--disable-custom-all-reduce',
             action='store_true',
-            default=ParallelConfig.disable_custom_all_reduce,
-            help=parallel_docs["disable_custom_all_reduce"])
+            **parallel_kwargs["disable_custom_all_reduce"])
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
