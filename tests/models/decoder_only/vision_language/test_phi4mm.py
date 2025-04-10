@@ -104,12 +104,12 @@ def run_test(
             enforce_eager=True,
     ) as vllm_model:
         lora_request = LoRARequest("vision", 1, vision_lora_path)
-        vllm_model.model.llm_engine.add_lora(lora_request=lora_request)
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=images)
+                                                images=images,
+                                                lora_request=lora_request)
             for prompts, images in inputs
         ]
 
@@ -151,7 +151,7 @@ def run_test(
         # Single-scale, batched
         [1.0, 1.0, 1.0],
         # Multi-scale
-        [0.7, 0.75, 1.0],
+        [0.25, 0.5, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
@@ -201,8 +201,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
 @pytest.mark.parametrize("max_model_len", [10000])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-@pytest.mark.xfail(
-    reason="Phi-4-MM multi-image inference is divergent with hf model.")
 def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
                              size_factors, dtype: str, max_model_len: int,
                              max_tokens: int, num_logprobs: int) -> None:
