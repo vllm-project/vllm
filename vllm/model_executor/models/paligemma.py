@@ -155,7 +155,7 @@ class PaliGemmaMultiModalProcessor(
         bos_token_id = tokenizer.bos_token_id
         assert isinstance(bos_token_id, int)
 
-        def get_replacement(item_idx: int):
+        def get_insertion(item_idx: int):
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems))
 
@@ -183,7 +183,7 @@ class PaliGemmaMultiModalProcessor(
                 modality="image",
                 target=PromptIndexTargets.prefix(
                     [bos_token_id] if tokenizer.add_bos_token else []),
-                insertion=get_replacement,
+                insertion=get_insertion,
             )
         ]
 
