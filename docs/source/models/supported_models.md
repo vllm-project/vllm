@@ -162,7 +162,7 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 
 #### Using a proxy
 
-Here are some tips for loading/downloading models from `Hugging Face` using a proxy:
+Here are some tips for loading/downloading models from  Hugging Face using a proxy:
 
 - Set the proxy globally for your session (or set it in the profile file):
 
