@@ -213,6 +213,7 @@ _SPECULATIVE_DECODING_MODELS = {
 
 _TRANSFORMERS_MODELS = {
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),
 }
 # yapf: enable
 
@@ -326,6 +327,7 @@ def _try_load_model_cls(
 ) -> Optional[Type[nn.Module]]:
     from vllm.platforms import current_platform
     current_platform.verify_model_arch(model_arch)
+    model.load_model_cls()
     try:
         return model.load_model_cls()
     except Exception:
@@ -438,7 +440,7 @@ class _ModelRegistry:
 
         # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):
-            normalized_arch.append("TransformersForCausalLM")
+            normalized_arch.extend(["TransformersForCausalLM", "TransformersForMultimodalLM"])
         return normalized_arch
 
     def inspect_model_cls(
