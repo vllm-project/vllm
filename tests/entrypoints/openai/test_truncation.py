@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-import pytest
+from typing import Any
 
-model_name = "sentence-transformers/all-MiniLM-L12-v2"
+import openai
+import pytest
+import pytest_asyncio
+
+from tests.utils import RemoteOpenAIServer
+
+MODEL_NAME = "sentence-transformers/all-MiniLM-L12-v2"
 max_model_len = 128
 
 input = """Immerse yourself in the enchanting chronicle of calculus, a 
@@ -16,71 +22,82 @@ input = """Immerse yourself in the enchanting chronicle of calculus, a
     This methodology laid crucial foundational work for integral calculus. 
     In the 17th century, both Newton and Leibniz independently pioneered 
     calculus, each contributing unique perspectives that would shape this new 
-    field. Sir Isaac Newton (1642-1727) introduced calculus-like methods in 
-    his seminal work, Mathematical Principles of Natural Philosophy, published 
-    in 1687. These methods were instrumental in explaining celestial mechanics 
-    and universal gravitation, featuring 'fluxions' (rates of change) and 
-    'fluents' (variable quantities) that echoed derivatives and integrals. 
-    Gottfried Wilhelm Leibniz, working independently yet concurrently, made a 
-    parallel yet distinct contribution. His 1684 publication not only 
-    introduced notation still used today—including symbols for derivatives
-    (d/dx) and integrals (∫)—but also offered a more general and symbolic 
-    approach to calculus, thereby widening its applicability across various 
-    fields. Throughout the 18th and 19th centuries, mathematicians such as 
-    Leonhard Euler, Joseph-Louis Lagrange, and Augustin-Louis Cauchy further 
-    refined and extended calculus. Euler's expansive body of work encompassed 
-    differential equations and the calculus of variations, among others. A 
-    pivotal moment in the formalization of calculus came with Augustin-Louis 
-    Cauchy's articulation of the concept of limits in the 19th century. This 
-    development provided a rigorous mathematical foundation for the 
-    infinitesimal methods used in calculus, thus enhancing its theoretical
-    underpinnings. In the 19th and 20th centuries, calculus spread its 
-    influence far and wide, becoming an indispensable tool in fields as diverse 
-    as physics, engineering, economics, and computer science. Its capacity to 
-    quantify change and motion has been instrumentl in propelling technological 
-    advancements and scientific discoveries that characterize our modern world. 
-    The historical journey of calculus—from its ancient origins to its 
-    contemporary applications—illustrates a discipline continuously enriched and
-    expanded by generations of mathematicians. Calculus's power to encapsulate 
-    the essence of change and motion has been critical in driving innovation."""
+    field."""
 
 
-def test_smaller_truncation_size(vllm_runner,
-                                 model_name=model_name,
-                                 max_model_len=max_model_len):
-    with vllm_runner(model_name, task="embed",
-                     max_model_len=max_model_len) as vllm_model:
-        truncation_size = 10
-        response = vllm_model.model.encode(
-            prompts=input, truncate_prompt_tokens=truncation_size)
+@pytest.fixture(scope="module")
+def server():
+    args = [
+        "--task",
+        "embed",
+        "--dtype",
+        "bfloat16",
+        "--enforce-eager",
+        "--max-model-len",
+        str(max_model_len),
+    ]
 
-    assert len(response[0].prompt_token_ids) == truncation_size
-
-
-def test_bigger_truncation_size(vllm_runner,
-                                model_name=model_name,
-                                max_model_len=max_model_len):
-
-    with vllm_runner(model_name, task="embed",
-                     max_model_len=max_model_len) as vllm_model:
-        truncation_size = max_model_len + 1
-
-        with pytest.raises(ValueError):
-            assert str(
-                vllm_model.model.encode(prompts=input,
-                                        truncate_prompt_tokens=truncation_size)
-            ) == f"""truncate_prompt_tokens value ({truncation_size})
-                    is greater than max_model_len ({max_model_len}).
-                    Please, select a smaller truncation size."""
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
 
 
-def test_max_truncation_size(vllm_runner,
-                             model_name=model_name,
-                             max_model_len=max_model_len):
-    with vllm_runner(model_name, task="embed",
-                     max_model_len=max_model_len) as vllm_model:
-        truncation_size = -1
-        response = vllm_model.model.encode(
-            prompts=input, truncate_prompt_tokens=truncation_size)
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
 
-    assert len(response[0].prompt_token_ids) == max_model_len
+
+@pytest.mark.asyncio
+async def test_smaller_truncation_size(client: openai.AsyncOpenAI):
+    truncation_size = 10
+    kwargs: dict[str, Any] = {
+        "model": MODEL_NAME,
+        "input": input,
+        "truncate_prompt_tokens": truncation_size
+    }
+
+    response = await client.post(path="embeddings",
+                                 cast_to=object,
+                                 body={**kwargs})
+
+    assert response["usage"]["prompt_tokens"] == truncation_size
+
+
+@pytest.mark.asyncio
+async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
+    truncation_size = max_model_len + 1
+    kwargs: dict[str, Any] = {
+        "model": MODEL_NAME,
+        "input": input,
+        "truncate_prompt_tokens": truncation_size
+    }
+
+    with pytest.raises(openai.BadRequestError) as err:
+        err = await client.post(path="embeddings",
+                                cast_to=object,
+                                body={**kwargs})
+
+        assert str(err) == f"""openai.BadRequestError: 
+                    Error code: 400 - {{'object': 'error', 
+                    'message': 'truncate_prompt_tokens value 
+                    ({truncation_size}) 
+                    is greater than max_model_len ({max_model_len}). 
+                    Please, select a smaller truncation size.', 
+                    'type': 'BadRequestError', 
+                    'param': None, 'code': 400}}"""
+
+
+@pytest.mark.asyncio
+async def test_max_truncation_size(client: openai.AsyncOpenAI):
+    truncation_size = -1
+    kwargs: dict[str, Any] = {
+        "model": MODEL_NAME,
+        "input": input,
+        "truncate_prompt_tokens": truncation_size
+    }
+
+    response = await client.post(path="embeddings",
+                                 cast_to=object,
+                                 body={**kwargs})
+
+    assert response["usage"]["prompt_tokens"] == max_model_len

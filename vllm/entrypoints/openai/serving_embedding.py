@@ -91,10 +91,9 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         truncate_prompt_tokens = request.truncate_prompt_tokens
 
-        truncate_prompt_tokens = _validate_truncation_size(
-            self.max_model_len, truncate_prompt_tokens)
-
         try:
+            truncate_prompt_tokens = _validate_truncation_size(
+                self.max_model_len, truncate_prompt_tokens)
             (
                 lora_request,
                 prompt_adapter_request,
