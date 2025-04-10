@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
 import vllm.envs as envs
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.pooling_params import PoolingParams
 else:
     ModelConfig = None
     VllmConfig = None
+    PoolingParams = None
 
 logger = init_logger(__name__)
 
@@ -135,6 +139,13 @@ class TpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_structured_output(cls) -> bool:
-        # Structured output is not supported on TPU.
-        return False
+    def validate_request(
+        cls,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+    ) -> None:
+        """Raises if this request is unsupported on this platform"""
+        if isinstance(params,
+                      SamplingParams) and params.guided_decoding is not None:
+            raise ValueError("Structured output is not supported on "
+                             f"{cls.device_name}.")
