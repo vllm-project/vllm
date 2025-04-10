@@ -67,8 +67,10 @@ class _HfExamplesInfo:
         If the installed transformers version does not meet the requirements,
         perform the given action.
         """
-        if (self.min_transformers_version is None
-                and self.max_transformers_version is None):
+        if (
+            self.min_transformers_version is None
+            and self.max_transformers_version is None
+        ):
             return
 
         current_version = TRANSFORMERS_VERSION
@@ -186,6 +188,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
+    "NGPTForCausalLM": _HfExamplesInfo("nvidia/NGPT-1.5B-Instruct"),  # FIXME: add nGPT transformers (HF) link.
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
     "Olmo2ForCausalLM": _HfExamplesInfo("shanearora/OLMo-7B-1124-hf"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
