@@ -29,12 +29,11 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         TokensPrompt, to_enc_dec_tuple_list,
-                         zip_enc_dec_prompts)
+                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils import cuda_device_count_stateless, is_list_of
+from vllm.utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
@@ -936,18 +935,20 @@ class VllmRunner:
 
     def generate_beam_search(
         self,
-        prompts: Union[list[str], list[list[int]]],
+        prompts: list[str],
         beam_width: int,
         max_tokens: int,
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
     ) -> list[tuple[list[list[int]], list[str]]]:
-        if is_list_of(prompts, str, check="all"):
-            prompts = [TextPrompt(prompt=prompt) for prompt in prompts]
-        else:
-            prompts = [
-                TokensPrompt(prompt_token_ids=tokens) for tokens in prompts
-            ]
+        inputs = self.get_inputs(prompts,
+                                 images=images,
+                                 videos=videos,
+                                 audios=audios)
+
         outputs = self.model.beam_search(
-            prompts,
+            inputs,
             BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
         returned_outputs = []
         for output in outputs:
