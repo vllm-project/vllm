@@ -474,7 +474,8 @@ class MambaMixer2(CustomOp):
         # 3. State Space Model sequence transformation
         if has_prefill:
             initial_states = None
-            if has_initial_states is not None:
+            if has_initial_states is not None and torch.any(
+                    has_initial_states):
                 # making a copy of the states
                 initial_states = torch.where(
                     has_initial_states[:, None, None, None],

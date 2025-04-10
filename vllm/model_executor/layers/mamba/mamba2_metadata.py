@@ -67,14 +67,13 @@ def prepare_mamba2_metadata(
         seq_idx.unsqueeze_(0)
 
         # compute metadata for chunked prefill.
-        # actually this is only needed if there are
-        # initial states, but this is determinable
-        # only from attention metadata yet
-        # unavailable from the top-level model forward.
-        # Rather than complicating things to extract said
-        # metadata, we simply just compute redundently and
-        # will be silently ignored inside the mamba kernels.
-        # if not needed.
+        # actually this is only needed if there are initial states,
+        # but this is determinable only from attention metadata yet
+        # unavailable from the top-level model forward. Rather than
+        # complicating things to extract said metadata, we simply just
+        # compute them once at the top level model forward and reuse
+        # them in mamba layers. If not needed, they will be ignored
+        # inside mamba kernels.
         chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
             seq_idx, chunk_size)
 
