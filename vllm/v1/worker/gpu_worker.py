@@ -9,7 +9,7 @@ import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
@@ -154,7 +154,8 @@ class Worker(WorkerBase):
         _, total_gpu_memory = torch.cuda.mem_get_info()
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        self.model_runner.profile_run()
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.profile_run()
 
         free_gpu_memory, _ = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same

@@ -468,7 +468,9 @@ class DefaultModelLoader(BaseModelLoader):
                         "Following weights were not initialized from "
                         f"checkpoint: {weights_not_loaded}")
 
-            _process_weights_after_loading(model, model_config, target_device)
+            with set_current_vllm_config(vllm_config):
+                _process_weights_after_loading(model, model_config,
+                                               target_device)
 
         return model.eval()
 
