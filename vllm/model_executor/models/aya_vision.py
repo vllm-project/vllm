@@ -20,7 +20,7 @@ from vllm.jsontree import json_map_leaves
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargs
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -28,7 +28,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalFieldConfig,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -146,28 +146,29 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
 class AyaVisionDummyInputsBuilder(
         BaseDummyInputsBuilder[AyaVisionProcessingInfo]):
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
 
+        return image_token * num_images
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         image_size = \
             self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=image_size.width,
                                    height=image_size.height,
                                    num_images=num_images)
         }
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
 
 
 class AyaVisionMultiModalProcessor(

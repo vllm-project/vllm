@@ -35,14 +35,14 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    NestedTensors)
 from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
                                    DictEmbeddingItems, ModalityData,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
-from vllm.multimodal.profiling import ProcessorInputs
 
 from .minicpmv import (_MAX_FRAMES_PER_VIDEO, MiniCPMV2_6,
                        MiniCPMVDummyInputsBuilder,
@@ -206,29 +206,31 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
 class MiniCPMODummyInputsBuilder(
         MiniCPMVDummyInputsBuilder[MiniCPMOProcessingInfo]):
 
-    def get_dummy_processor_inputs(
-            self, seq_len: int, mm_counts: Mapping[str,
-                                                   int]) -> ProcessorInputs:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_audios = mm_counts.get("audio", 0)
+
+        audio_prompt_texts = self.info.audio_pattern * num_audios
+
+        return super().get_dummy_text(mm_counts) + audio_prompt_texts
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         audio_len = self.info.get_max_audio_chunks_with_most_features() * \
             self.info.get_default_audio_sampling_rate()
 
-        processor_inputs = super().get_dummy_processor_inputs(
-            seq_len, mm_counts)
-
-        audio_prompt_texts = self.info.audio_pattern * num_audios
         audio_mm_data = {
             "audio":
             self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
 
-        return ProcessorInputs(
-            prompt_text=processor_inputs.prompt_text + audio_prompt_texts,
-            mm_data={
-                **processor_inputs.mm_data,
-                **audio_mm_data,
-            },
-        )
+        return {
+            **super().get_dummy_mm_data(seq_len, mm_counts),
+            **audio_mm_data,
+        }
 
 
 class MiniCPMOMultiModalProcessor(

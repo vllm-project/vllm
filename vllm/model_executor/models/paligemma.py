@@ -19,7 +19,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptIndexTargets,
                                         PromptInsertion, PromptUpdate,
                                         PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -90,28 +90,26 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
 class PaliGemmaDummyInputsBuilder(
         BaseDummyInputsBuilder[PaliGemmaProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
         max_image_size = vision_config.image_size
 
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=max_image_size,
                                    height=max_image_size,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="",
-            mm_data=mm_data,
-        )
 
 
 class PaliGemmaMultiModalProcessor(

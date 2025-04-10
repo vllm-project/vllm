@@ -43,14 +43,14 @@ from vllm.model_executor.model_loader.loader import _initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -619,28 +619,30 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
 
 class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.fake_image_token
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         (target_width,
          target_height) = self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        image_token = self.info.get_hf_processor().fake_image_token
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
