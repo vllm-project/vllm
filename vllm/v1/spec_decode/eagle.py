@@ -4,8 +4,11 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+from vllm.model_executor.models.llama_eagle import EagleLlamaForCausalLM
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -21,8 +24,12 @@ class EagleProposer:
         self.num_speculative_tokens = (
             vllm_config.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
-        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs,
-                                   device=device)
+        # We need +1 here because the arange is used to set query_start_loc,
+        # which has one more element than batch_size.
+        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
+                                   1,
+                                   device=device,
+                                   dtype=torch.int32)
 
     def propose(
         self,
@@ -54,7 +61,9 @@ class EagleProposer:
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         input_ids[last_token_indices] = next_token_ids
 
-        seq_lens = target_positions[last_token_indices] + 1
+        # FA requires seq_len to have dtype int32.
+        seq_lens = (target_positions[last_token_indices] + 1).int()
+
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         max_seq_len = seq_lens.max().item()
         max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
@@ -98,7 +107,7 @@ class EagleProposer:
         hidden_states = sample_hidden_states
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
-        attn_metadata.query_start_loc = self.arange[:batch_size]
+        attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         for _ in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             input_ids = draft_token_ids_list[-1]
@@ -176,26 +185,28 @@ class EagleProposer:
         return cu_num_tokens, token_indices
 
     def load_model(self, target_model: nn.Module) -> None:
-        self.model = DummyEagleModel()
-        self.model.get_input_embeddings = target_model.get_input_embeddings
-        self.model.compute_logits = target_model.compute_logits
+        loader = get_model_loader(self.vllm_config.load_config)
+        target_layer_num = self.vllm_config.model_config.get_num_layers(
+            self.vllm_config.parallel_config)
 
+        draft_model_config = \
+            self.vllm_config.speculative_config.draft_model_config
+        # FIXME(lily): This does not handle with distributed inference.
+        target_device = self.vllm_config.device_config.device
+        # We need to set the vllm_config here to register attention
+        # layers in the forward context.
+        with set_default_torch_dtype(
+                draft_model_config.dtype), set_current_vllm_config(
+                    self.vllm_config):
+            self.model = EagleLlamaForCausalLM(
+                model_config=draft_model_config,
+                start_layer_id=target_layer_num).to(target_device)
 
-# FIXME(woosuk): This is a dummy model for testing.
-# Remove this once we have a real model.
-class DummyEagleModel(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> torch.Tensor:
-        input_embeddings = self.get_input_embeddings(input_ids)
-        return hidden_states + input_embeddings  # Dummy return.
+        self.model.load_weights(
+            loader.get_all_weights(
+                self.vllm_config.speculative_config.draft_model_config,
+                self.model))
+        self.model.lm_head = target_model.lm_head
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
