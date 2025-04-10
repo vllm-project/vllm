@@ -98,12 +98,12 @@ class XPUWorker(Worker):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        flag = os.getenv("IPEX_LLM_FIND_MAX_LENGTH", None)
-        if flag:
+        flag = int(os.getenv("IPEX_LLM_FIND_MAX_LENGTH", -1))
+        if flag != -1:
+            assert flag > 0
             torch.xpu.empty_cache()
             before_memory = torch.xpu.memory_reserved()
-            # Start with 8000
-            max_num_batched_tokens = 8000
+            max_num_batched_tokens = flag
             max_num_seqs = 1
             support_input = []
             support_kv_cache = []
@@ -149,7 +149,18 @@ class XPUWorker(Worker):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        self.model_runner.profile_run()
+        self_max_num_batched_tokens = os.getenv("IPEX_LLM_SELF_MAX_NUM_BATCHED_TOKENS", None)
+        if self_max_num_batched_tokens is not None:
+            # If this get set, then profile using max input length
+            max_num_batched_tokens = int(self_max_num_batched_tokens)
+            self_max_num_seqs = os.getenv("IPEX_LLM_SELF_MAX_NUM_SEQS", None)
+            if self_max_num_seqs is not None:
+                max_num_seqs = int(self_max_num_seqs)
+            else:
+                max_num_seqs = 1
+            self.model_runner.profile_run(max_num_batched_tokens, max_num_seqs)
+        else:
+            self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.

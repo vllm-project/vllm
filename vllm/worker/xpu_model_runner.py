@@ -812,15 +812,6 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
                 max_num_seqs = 1
 
         batch_size = 0
-        import os
-        self_max_num_batched_tokens = os.getenv("IPEX_LLM_SELF_MAX_NUM_BATCHED_TOKENS", None)
-        if self_max_num_batched_tokens is not None:
-            max_num_batched_tokens = int(self_max_num_batched_tokens)
-            self_max_num_seqs = os.getenv("IPEX_LLM_SELF_MAX_NUM_SEQS", None)
-            if self_max_num_seqs is not None:
-                max_num_seqs = int(self_max_num_seqs)
-            else:
-                max_num_seqs = 1
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
