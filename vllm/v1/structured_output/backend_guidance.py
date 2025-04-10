@@ -49,6 +49,19 @@ class GuidanceBackend(StructuredOutputBackend):
         self.ll_tokenizer = llguidance_hf.from_tokenizer(
             tokenizer, self.vocab_size)
 
+    @classmethod
+    def validate_grammar(cls, sampling_params: SamplingParams) -> None:
+        # TODO: ideally we would have the LLTokenizer here as Lark syntax
+        # allows <|special_token|> and similar, see
+        # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
+        # Without tokenizer these are disallowed in grammars.
+        tokenizer: Optional[llguidance.LLTokenizer] = None
+        tp, grm = get_structured_output_key(sampling_params)
+        guidance_grm = serialize_guidance_grammar(tp, grm)
+        err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
+        if err:
+            raise ValueError(f"Grammar error: {err}")
+
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
         self.serialized_grammar = serialize_guidance_grammar(
@@ -157,13 +170,3 @@ def serialize_guidance_grammar(request_type: StructuredOutputOptions,
             raise ValueError("grammar is not of valid supported types. "
                              f"({request_type!s})")
         return llguidance.grammar_from(tp, grammar_spec)
-
-
-def validate_guidance_grammar(
-        sampling_params: SamplingParams,
-        tokenizer: Optional[llguidance.LLTokenizer] = None) -> None:
-    tp, grm = get_structured_output_key(sampling_params)
-    guidance_grm = serialize_guidance_grammar(tp, grm)
-    err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
-    if err:
-        raise ValueError(f"Grammar error: {err}")

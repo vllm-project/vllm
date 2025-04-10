@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 
 import torch
 
+from vllm.sampling_params import SamplingParams
+
 
 class StructuredOutputOptions(enum.Enum):
     JSON = enum.auto()
@@ -62,6 +64,17 @@ class StructuredOutputGrammar(ABC):
 
 class StructuredOutputBackend(ABC):
     """Engine-level backend for structured output requests."""
+
+    @classmethod
+    @abstractmethod
+    def validate_grammar(cls, sampling_params: SamplingParams) -> None:
+        """
+        Validates that the request is supported by structured output on this 
+        backend, raises ValueError if the request is not supported.
+
+        Args:
+            sampling_params (SamplingParams): The request sampling params.
+        """
 
     @abstractmethod
     def compile_grammar(self, request_type: StructuredOutputOptions,
