@@ -972,8 +972,7 @@ class TPUModelRunner:
 
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:
-            assert hasattr(self.model, "language_model")
-            compiled_model = self.model.language_model.model
+            compiled_model = self.model.get_language_model().model
         else:
             compiled_model = self.model.model
         if isinstance(compiled_model, TorchCompileWrapperWithCustomDispatcher):
