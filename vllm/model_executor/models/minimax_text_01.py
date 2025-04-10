@@ -489,6 +489,8 @@ class MiniMaxText01LinearAttention(nn.Module):
 
         hidden = self.norm(hidden)
         gate, _ = self.output_gate(hidden_states)
+        if gate.size(0) != hidden.size(0):
+            gate = gate[:hidden.size(0)]
         hidden = F.sigmoid(gate) * hidden
         hidden = hidden.to(hidden_states.dtype)
         hidden, _ = self.out_proj(hidden)
