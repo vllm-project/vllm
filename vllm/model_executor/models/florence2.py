@@ -764,16 +764,9 @@ class Florence2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_max_image_tokens(self) -> int:
+    def get_num_image_tokens(self) -> int:
         processor_config = self.ctx.get_hf_image_processor_config()
         return processor_config["image_seq_length"]
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
 
 
 class Florence2DummyInputsBuilder(
@@ -871,7 +864,7 @@ class Florence2MultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         pad_token_id = hf_config.pad_token_id
-        num_image_tokens = self.info.get_max_image_tokens()
+        num_image_tokens = self.info.get_num_image_tokens()
         image_tokens = [pad_token_id] * num_image_tokens
 
         return [

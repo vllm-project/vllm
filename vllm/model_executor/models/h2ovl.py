@@ -412,19 +412,6 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
             **kwargs,
         )
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        max_tokens_one_image = self.get_max_image_tokens(use_msac=None)
-        if mm_counts.get("image", 0) <= 1:
-            max_tokens_per_image = max_tokens_one_image
-        else:
-            max_tokens_per_image = self.get_max_image_tokens(use_msac=False)
-
-        return {"image": max_tokens_per_image}
-
     def get_num_image_tokens(
         self,
         *,
@@ -439,16 +426,6 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         return processor.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
-            use_msac=use_msac,
-        )
-
-    def get_max_image_tokens(self, use_msac: Optional[bool] = None) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
             use_msac=use_msac,
         )
 

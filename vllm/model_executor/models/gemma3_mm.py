@@ -68,13 +68,6 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
     def _resolve_image_kwargs(
         self,
         processor: Gemma3Processor,
@@ -227,15 +220,6 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
 
         # Result in the max possible feature size (h:w = max_num_crops:1)
         return ImageSize(height=50 * max_num_crops, width=50)
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
-        )
 
 
 class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):

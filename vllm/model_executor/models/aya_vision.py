@@ -117,31 +117,6 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self) -> GotOcr2ImageProcessor:
         return self.get_hf_processor().image_processor
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
-    def get_max_image_tokens(self) -> int:
-        hf_processor = self.get_hf_processor()
-        image_processor = hf_processor.image_processor
-
-        image_size = self.get_image_size_with_most_features()
-        num_patches = self.get_num_patches(
-            image_width=image_size.width,
-            image_height=image_size.height,
-            size=image_processor.size,
-            min_patches=image_processor.min_patches,
-            max_patches=image_processor.max_patches,
-        )
-
-        img_patches_per_tile = (hf_processor.img_size //
-                                hf_processor.patch_size)**2
-
-        return num_patches * img_patches_per_tile
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 

@@ -538,15 +538,8 @@ class WhisperProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
-    def get_max_audio_tokens(self) -> int:
+    def get_num_audio_tokens(self) -> int:
         return self.get_hf_config().max_source_positions
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"audio": self.get_max_audio_tokens()}
 
 
 class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
@@ -630,7 +623,7 @@ class WhisperMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        num_tokens = self.info.get_max_audio_tokens()
+        num_tokens = self.info.get_num_audio_tokens()
         return [
             PromptReplacement(
                 modality="audio",
