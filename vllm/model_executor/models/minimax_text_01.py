@@ -100,20 +100,6 @@ class MiniMaxText01RMSNormTP(CustomOp):
         param.data.copy_(loaded_weight[shard])
         return
 
-    def _forward(
-        self,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        # 确保输入张量和权重张量的维度匹配
-        if x.size(-1) != weight.size(0):
-            # 如果维度不匹配，调整权重张量的大小
-            weight = weight[:x.size(-1)]
-        
-        var = torch.mean(x * x, dim=-1, keepdim=True)
-        x_norm = x * torch.rsqrt(var + self.variance_epsilon)
-        return weight * x_norm
-
     def forward(
         self,
         x: torch.Tensor,
@@ -122,7 +108,18 @@ class MiniMaxText01RMSNormTP(CustomOp):
         assert residual is None, "RMSNorm does not support residual connection."
         orig_dtype = x.dtype
         x = x.to(torch.float32)
-        result = self._forward(x, self.weight)
+        
+        # 确保输入张量和权重张量的维度匹配
+        if x.size(-1) != self.weight.size(0):
+            # 如果维度不匹配，调整权重张量的大小
+            weight = self.weight[:x.size(-1)]
+        else:
+            weight = self.weight
+        
+        var = torch.mean(x * x, dim=-1, keepdim=True)
+        x_norm = x * torch.rsqrt(var + self.variance_epsilon)
+        result = weight * x_norm
+        
         return result.to(orig_dtype)
 
 
@@ -490,7 +487,7 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden = self._decode_infer(q, k, v, kv_cache,
                                         state_indices_tensor, attn_metadata)
 
-        hidden = self.norm._forward(hidden)
+        hidden = self.norm(hidden)
         gate, _ = self.output_gate(hidden_states)
         hidden = F.sigmoid(gate) * hidden
         hidden = hidden.to(hidden_states.dtype)
