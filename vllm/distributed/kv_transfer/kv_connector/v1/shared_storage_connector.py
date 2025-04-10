@@ -16,8 +16,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-    from vllm.v1.core.kv_cache_utils import KVCacheBlock
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -152,7 +150,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 kv_cache_layer = attn_layer.kv_cache[\
                         forward_context.virtual_engine]
 
-                filename = self.generate_filename_debug(
+                filename = self._generate_filename_debug(
                     layer_name, request.token_ids)
                 kv_cache = safetensors.torch.load_file(
                     filename)["kv_cache"].cuda()
@@ -201,7 +199,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         assert isinstance(connector_metadata, SharedStorageConnectorMetadata)
         for request in connector_metadata.requests:
             if request.is_store:
-                filename = self.generate_filename_debug(
+                filename = self._generate_filename_debug(
                     layer_name, request.token_ids)
                 kv_cache = extract_kv_from_layer(kv_layer,
                                                  request.slot_mapping)
@@ -211,29 +209,18 @@ class SharedStorageConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         return
 
-    def get_external_prefix_cache_blocks(
+    def get_num_matched_tokens(
         self,
         request: "Request",
-        computed_blocks: list["KVCacheBlock"],
         num_computed_tokens: int,
-        kv_cache_manager: "KVCacheManager",
-    ) -> list["KVCacheBlock"]:
-        """Get the external prefix cache blocks from the connector.
-
-        This function may change the state of the connector, which will be 
-        used by `build_connector_meta` later.
-
-        Args:
-            request (Request): the request object.
-            computed_blocks (list[KVCacheBlock]): the 'local' computed blocks.
-            num_computed_tokens (int): the number of 'local' computed tokens.
-            kv_cache_manager (KVCacheManager): the KV cache manager to 
-                allocate/free the blocks if needed.
-
-        Returns:
-            The updated list of the computed blocks (appended with the remote
-            cached blocks)
+    ) -> int:
         """
+        Check for external KV cache hit.
+        
+        Returns the number of tokens that can be loaded from the 
+        external KV cache beyond what is already computed.
+        """
+
         # NOTE: in this debug implementation, we assume that the prompt is
         # cached_prompt + newly_generated_single_token
         # Therefore, we use prompt_token_ids[:-1] to determine the folder name
@@ -241,48 +228,28 @@ class SharedStorageConnector(KVConnectorBase_V1):
         # NOTE: in current v1 scheduler, the num_computed_tokens is aligned
         # with the block granularity. And it expects the returned blocks and
         # num_computed_tokens to also be aligned with the block granularity.
-        if not self.found_match_for_request(request):
-            return computed_blocks
+        if not self._found_match_for_request(request):
+            return 0
+
+        logger.info("External Cache Hit!")
 
         # Now, first num_tokens_to_check tokens are hit, we need to prepare
         # the metadata for the worker connector to correctly load the KV
-
-        logger.info("Hit the cache! Allocate new blocks!")
         num_tokens_to_check = align_to_block_size(
             len(request.prompt_token_ids) - 1, self._block_size)
-        need_to_allocate = num_tokens_to_check - num_computed_tokens
-        if need_to_allocate > 0:
-            # HACK: We don't want the scheduler see the blocks are allocated
-            # and associated with the current request. Instead, we want the
-            # scheduler find that the blocks are already allocated and they
-            # are associated with some other requests (i.e., the case of
-            # prefix caching.
 
-            # HACK: KVCacheManager.allocate_slots will pre-allocate a few
-            # blocks, which will cause problems in the later allocations.
-            # We should make sure the pre allocation does not happen.
-            old_req_id = request.request_id
-            request.request_id = "temp-req-id-for-connector"
-            allocated_blocks = kv_cache_manager.allocate_slots(
-                request,
-                need_to_allocate,
-                computed_blocks,
-                skip_preallocate=True,
-                skip_inc_ref_count=True)
-            request.request_id = old_req_id
-            kv_cache_manager.req_to_blocks.pop("temp-req-id-for-connector")
-            kv_cache_manager.num_cached_block.pop("temp-req-id-for-connector")
+        return num_tokens_to_check - num_computed_tokens
 
-            num_expected_blocks = need_to_allocate // self._block_size
-            if len(allocated_blocks) > num_expected_blocks:
-                logger.error("Detected pre-allocated blocks in the connector!"
-                             "This should not happen!")
-                allocated_blocks = allocated_blocks[:num_expected_blocks]
+    def update_state_after_alloc(self, request: Request,
+                                 num_allocated_blocks: int):
+        """
+        Update KVConnector state after temporary buffer alloc.
 
+        For SharedStorageConnector, update _request_needs_load
+        if the CacheManager this allocated blocks for us.
+        """
+        if num_allocated_blocks > 0:
             self._requests_need_load.append(request.request_id)
-            return computed_blocks + allocated_blocks
-        else:
-            return computed_blocks
 
     def build_connector_meta(
             self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
@@ -302,7 +269,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # NOTE: here, we set the store and load being exclusive,
                 # but in LMCache use case, a single request can have both
                 # store and load status
-                if not self.found_match_for_request(request):
+                if not self._found_match_for_request(request):
                     meta.add_request(request, self._block_size, is_store=True)
 
         self._requests_need_load.clear()
@@ -312,7 +279,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
     # Helper functions
     # ==============================
 
-    def found_match_for_request(
+    def _found_match_for_request(
         self,
         request: "Request",
     ) -> bool:
@@ -320,12 +287,12 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """
         num_tokens_to_check = align_to_block_size(
             len(request.prompt_token_ids) - 1, self._block_size)
-        foldername = self.generate_foldername_debug(torch.tensor(
+        foldername = self._generate_foldername_debug(torch.tensor(
             request.prompt_token_ids)[:num_tokens_to_check],
-                                                    create_folder=False)
+                                                     create_folder=False)
         return os.path.exists(foldername)
 
-    def generate_foldername_debug(
+    def _generate_foldername_debug(
         self,
         input_ids: torch.Tensor,
         create_folder=False,
@@ -340,7 +307,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
             os.makedirs(foldername, exist_ok=True)
         return foldername
 
-    def generate_filename_debug(
+    def _generate_filename_debug(
         self,
         layer_name: str,
         input_ids: torch.Tensor,
@@ -348,8 +315,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """Generate a file name based on the layer name and the hash 
         of the bytes of the input ids.
         """
-        foldername = self.generate_foldername_debug(input_ids,
-                                                    create_folder=True)
+        foldername = self._generate_foldername_debug(input_ids,
+                                                     create_folder=True)
         return os.path.join(foldername, f"{layer_name}.safetensors")
 
 

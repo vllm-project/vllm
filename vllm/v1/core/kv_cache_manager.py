@@ -84,7 +84,11 @@ class KVCacheManager:
         # data for reempted ones.
         self.num_cached_block: dict[str, int] = {}
         self.prefix_cache_stats = PrefixCacheStats()
-        self.connector = connector
+
+        # KVConnector: buffer reqs for KVConnector. We write
+        # the external KVs to the "buffer" req and leverage
+        # prefix caching to share with the "real" req
+        self.kv_connector_buffer_reqs: list[Request] = []
 
     @property
     def usage(self) -> float:
@@ -159,13 +163,6 @@ class KVCacheManager:
             # we shouldn't modify it directly.
             block_hashes.append(last_block_hash)
 
-        # Check the remote cache for the external prefix cache blocks.
-        if self.connector is not None:
-            computed_blocks =\
-                    self.connector.get_external_prefix_cache_blocks(
-                            request, computed_blocks,
-                            len(computed_blocks) * self.block_size, self)
-
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
         # `block_size`.
@@ -178,7 +175,6 @@ class KVCacheManager:
         num_tokens: int,
         new_computed_blocks: Optional[list[KVCacheBlock]] = None,
         skip_preallocate: bool = False,
-        skip_inc_ref_count: bool = False,
     ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -188,11 +184,7 @@ class KVCacheManager:
                 not include the tokens that have already been computed.
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
-            skip_preallocate: Whether to skip preallocating blocks for 
-                the request.
-            skip_preallocate: Whether to skip incrementing the ref count. This
-                is useful for the KVConnector to allocate blocks which will be
-                filled by the remote KVs for a single model step().
+            skip_preallocate: Whether to skip preallocating blocks.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -246,12 +238,11 @@ class KVCacheManager:
             return None
 
         # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching and not skip_inc_ref_count:
+        if self.enable_caching:
             self.block_pool.touch(new_computed_blocks)
         else:
-            assert not new_computed_blocks, (
-                "Computed blocks should be empty when "
-                "prefix caching is disabled")
+            assert not new_computed_blocks, "Computed blocks should "\
+                "be empty when prefix caching is disabled"
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
@@ -396,3 +387,56 @@ class KVCacheManager:
         is finished, not when it is preempted.
         """
         self.req_to_block_hashes.pop(request.request_id, None)
+
+    def alloc_and_get_external_blocks(
+        self,
+        request: "Request",
+        computed_blocks: list["KVCacheBlock"],
+        num_computed_tokens: int,
+        kv_connector: KVConnectorBase_V1,
+    ) -> tuple[list["KVCacheBlock"], int]:
+
+        # Check for cache hit.
+        need_to_allocate = kv_connector.get_num_matched_tokens(
+            request, num_computed_tokens)
+        num_allocated_blocks = 0
+
+        # Cache hit: allocate buffer.
+        if need_to_allocate > 0:
+            # HACK: We don't want the scheduler see the blocks are allocated
+            # and associated with the current request. Instead, we want the
+            # scheduler find that the blocks are already allocated and they
+            # are associated with some other requests (i.e., the case of
+            # prefix caching.
+
+            old_req_id = request.request_id
+            request.request_id = f"{old_req_id}-buf-for-kv-connector"
+            allocated_blocks = self.allocate_slots(
+                request,
+                need_to_allocate,
+                computed_blocks,
+                skip_preallocate=True,
+            )
+            request.request_id = old_req_id
+
+            num_expected_blocks = need_to_allocate // self.block_size
+            num_allocated_blocks = len(
+                allocated_blocks) if allocated_blocks else 0
+            assert num_allocated_blocks <= num_expected_blocks, ""\
+                    "Detected pre-allocated blocks in the connector! "\
+                    "This should not happen!"
+
+        # Update internal state. In case of:
+        # * SharedStorageConnector: add req_id to _requests_need_load
+        #   so that we know to load this requests KVs later.
+        kv_connector.update_state_after_alloc(request, num_allocated_blocks)
+        num_computed_blocks = len(computed_blocks) * self.block_size
+        return computed_blocks, num_computed_blocks
+
+    def free_buffer_requests(self) -> None:
+        """Free buffer requests for the KV connector."""
+
+        for buffer_req in self.kv_connector_buffer_reqs:
+            self.free(buffer_req)
+            self.free_block_hashes(buffer_req)
+        self.kv_connector_buffer_reqs.clear()

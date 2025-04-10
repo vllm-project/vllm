@@ -19,8 +19,6 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-    from vllm.v1.core.kv_cache_utils import KVCacheBlock
     from vllm.v1.request import Request
 
 
@@ -148,32 +146,33 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
     @abstractmethod
-    def get_external_prefix_cache_blocks(
+    def get_num_matched_tokens(
         self,
         request: "Request",
-        computed_blocks: list["KVCacheBlock"],
         num_computed_tokens: int,
-        kv_cache_manager: "KVCacheManager",
-    ) -> list["KVCacheBlock"]:
+    ) -> int:
         """
-        Get the external prefix cache blocks from the connector.
-
-        This function may change the state of the connector, which will
-        be used by `build_connector_meta` later.
-
-        This function will also allocate/free the blocks dynamically when  
-        there is remote cache hit.
-
+        Check for external KV cache hit.
+        
         Args:
             request (Request): the request object.
-            computed_blocks (list[KVCacheBlock]): the 'local' computed blocks.
-            num_computed_tokens (int): the number of 'local' computed tokens.
-            kv_cache_manager (KVCacheManager): the KV cache manager to 
-                allocate/free the blocks if needed.
+            num_computed_tokens (int): the number of locally
+                computed tokens for this request
 
         Returns:
-            The updated list of the computed blocks (appended with the remote
-            cached blocks)
+            the number of tokens that can be loaded from the 
+            external KV cache beyond what is already computed.
+        """
+        pass
+
+    @abstractmethod
+    def update_state_after_alloc(self, request: Request,
+                                 num_allocated_blocks: int):
+        """
+        Update KVConnector state after temporary buffer alloc.
+
+        For SharedStorageConnector, update _request_needs_load
+        if the CacheManager this allocated blocks for us.
         """
         pass
 

@@ -308,6 +308,20 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(request)
+
+                # KVConnector: get blocks externally-cached tokens.
+                # Internally, this allocates a "buffer" req with a prompt
+                # corresponding to externally cached tokens. In alloc_slots
+                # below, we will compute a cache hit and thus skip the
+                # computation for externally cached tokens.
+                # NOTE: since this allocates temporary buffer requests,
+                # we must call kv_cache_manager.free_buffer_requests() below.
+                if self.connector is not None:
+                    computed_blocks, num_computed_tokens = \
+                        self.kv_cache_manager.alloc_and_get_external_blocks(
+                            request, computed_blocks,
+                            num_computed_tokens, self.connector)
+
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
@@ -466,6 +480,11 @@ class Scheduler(SchedulerInterface):
         #    computed tokens will be adjusted in update_from_output.
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             self.requests[req_id].num_computed_tokens += num_scheduled_token
+
+        # KVConnector: once we have allocated the buffer blocks to the
+        # "real" requests (via prefix caching), free the tmp buffer reqs.
+        if self.connector is not None:
+            self.kv_cache_manager.free_buffer_requests()
 
         self.finished_req_ids = set()
         return scheduler_output
