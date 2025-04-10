@@ -468,12 +468,19 @@ class HfRunner:
         prompts: list[str],
         beam_width: int,
         max_tokens: int,
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
     ) -> list[tuple[list[list[int]], list[str]]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
                                 max_new_tokens=max_tokens,
                                 num_beams=beam_width,
-                                num_return_sequences=beam_width)
+                                num_return_sequences=beam_width,
+                                images=images,
+                                videos=videos,
+                                audios=audios)
+
         for i in range(len(outputs)):
             output_ids, output_str = outputs[i]
             for j in range(len(output_ids)):
