@@ -21,21 +21,35 @@ from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargs,
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
 
+# TODO calibrate this size
+INLINE_BUF_SIZE_THRESHOLD = 256
+
 logger = init_logger(__name__)
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
 
 class MsgpackEncoder:
-    """Encoder with custom torch tensor and numpy array serialization."""
+    """Encoder with custom torch tensor and numpy array serialization.
+
+    Note that unlike vanilla `msgspec` Encoders, this interface is generally
+    not thread-safe when encoding tensors / numpy arrays.
+    """
 
     def __init__(self):
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
+        # This is used as a local stash of buffers that we can then access from
+        # our custom `msgspec` hook, `enc_hook`. We don't have a way to
+        # pass custom data to the hook otherwise.
         self.aux_buffers: Optional[list[bytestr]] = None
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
             self.aux_buffers = bufs = [b'']
             bufs[0] = self.encoder.encode(obj)
+            # This `bufs` list allows us to collect direct pointers to backing
+            # buffers of tensors and np arrays, and return them along with the
+            # top-level encoded buffer instead of copying their data into the
+            # new buffer.
             return bufs
         finally:
             self.aux_buffers = None
@@ -77,21 +91,37 @@ class MsgpackEncoder:
             return rd
 
         if isinstance(obj, FunctionType):
+            # `pickle` is generally faster than cloudpickle, but can have
+            # problems serializing methods.
             return msgpack.Ext(CUSTOM_TYPE_CLOUDPICKLE, cloudpickle.dumps(obj))
 
         return msgpack.Ext(CUSTOM_TYPE_PICKLE,
                            pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
 
-    def _encode_ndarray(self, obj: np.ndarray) -> Any:
+    def _encode_ndarray(
+        self, obj: np.ndarray
+    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
-        obj = np.ascontiguousarray(obj)
-        index = len(self.aux_buffers)
-        self.aux_buffers.append(obj.data)
-        return (obj.dtype.str, obj.shape, index)
+        if not obj.shape or obj.nbytes < INLINE_BUF_SIZE_THRESHOLD:
+            # Encode small arrays and scalars inline.
+            data = obj.data
+        else:
+            # Otherwise encode index of backing buffer.
+            obj = np.ascontiguousarray(obj)
+            data = len(self.aux_buffers)
+            self.aux_buffers.append(obj.data)
+        # We serialize the ndarray as a tuple of native types.
+        # The data is either inlined if small, or an index into a list of
+        # backing buffers that we've stashed in `aux_buffers`.
+        return (obj.dtype.str, obj.shape, data)
 
 
 class MsgpackDecoder:
-    """Decoder with custom torch tensor and numpy array serialization."""
+    """Decoder with custom torch tensor and numpy array serialization.
+
+    Note that unlike vanilla `msgspec` Decoders, this interface is generally
+    not thread-safe when encoding tensors / numpy arrays.
+    """
 
     def __init__(self, t: Optional[Any] = None):
         args = () if t is None else (t, )
@@ -102,6 +132,8 @@ class MsgpackDecoder:
 
     def decode(self, bufs: Union[bytestr, Sequence[bytestr]]) -> Any:
         if isinstance(bufs, (bytes, bytearray, memoryview, zmq.Frame)):
+            # TODO - This check can become `isinstance(bufs, bytestr)`
+            # as of Python 3.10.
             return self.decoder.decode(bufs)
 
         self.aux_buffers = bufs
@@ -111,6 +143,7 @@ class MsgpackDecoder:
             self.aux_buffers = ()
 
     def dec_hook(self, t: type, obj: Any) -> Any:
+        # Given native types in `obj`, convert to type `t`.
         if isclass(t):
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
@@ -125,10 +158,9 @@ class MsgpackDecoder:
         return obj
 
     def _decode_ndarray(self, obj: Any) -> np.ndarray:
-        (dtype, shape, index) = obj
-        return np.ndarray(buffer=self.aux_buffers[index],
-                          dtype=np.dtype(dtype),
-                          shape=shape)
+        (dtype, shape, data) = obj
+        buffer = self.aux_buffers[data] if isinstance(data, int) else data
+        return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
 
     def _decode_items(self, obj: list) -> list[MultiModalKwargsItem]:
         all = []

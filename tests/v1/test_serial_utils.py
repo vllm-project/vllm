@@ -33,13 +33,17 @@ def test_encode_decode():
     """Test encode/decode loop with zero-copy tensors."""
 
     obj = MyType(
-        tensor1=torch.randint(low=0, high=100, size=(10, ), dtype=torch.int32),
+        tensor1=torch.randint(low=0,
+                              high=100,
+                              size=(1024, ),
+                              dtype=torch.int32),
         a_string="hello",
         list_of_tensors=[
             torch.rand((1, 10), dtype=torch.float32),
-            torch.rand((3, 5, 4), dtype=torch.float64),
+            torch.rand((3, 5, 4000), dtype=torch.float64),
+            torch.tensor(1984),  # test scalar too,
         ],
-        numpy_array=np.arange(20),
+        numpy_array=np.arange(512),
         unrecognized=UnrecognizedType(33),
     )
 
@@ -48,8 +52,10 @@ def test_encode_decode():
 
     encoded = encoder.encode(obj)
 
-    # There should be the main buffer + 3 tensor buffers + one ndarray buffer
-    assert len(encoded) == 5
+    # There should be the main buffer + 2 large tensor buffers
+    # + 1 large numpy array. "large" is <= 256 bytes.
+    # The two small tensors are encoded inline.
+    assert len(encoded) == 4
 
     decoded: MyType = decoder.decode(encoded)
 
@@ -61,7 +67,7 @@ def test_encode_decode():
 
     encoded2 = encoder.encode_into(obj, preallocated)
 
-    assert len(encoded2) == 5
+    assert len(encoded2) == 4
     assert encoded2[0] is preallocated
 
     decoded2: MyType = decoder.decode(encoded2)
