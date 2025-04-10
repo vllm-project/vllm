@@ -5,12 +5,20 @@ import torch
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
+from vllm.model_executor.model_loader.utils import get_architecture_class_name
+from vllm.config import get_current_vllm_config
 
+SUPPORTTED_MODEL_ARCHS = ["MixtralForCausalLM",
+                          "DeepseekForCausalLM",
+                          "DeepseekV2ForCausalLM",
+                          "DeepseekV3ForCausalLM"]
 
 def is_rocm_aiter_moe_enabled() -> bool:
+    model_cls_name = get_architecture_class_name(get_current_vllm_config().model_config)
     return current_platform.is_rocm() \
         and envs.VLLM_ROCM_USE_AITER_MOE \
         and envs.VLLM_ROCM_USE_AITER \
+        and model_cls_name in SUPPORTTED_MODEL_ARCHS
 
 
 def is_rocm_aiter_block_scaled_moe_enabled() -> bool:
@@ -33,6 +41,7 @@ def rocm_aiter_fused_experts(
         **kwagrs  # Ignore additional keyword arguments
 ) -> torch.Tensor:
 
+    print("aiter moe used!")
     import aiter as rocm_aiter
     import aiter.fused_moe_bf16_asm as rocm_aiter_asm_fmoe
 
