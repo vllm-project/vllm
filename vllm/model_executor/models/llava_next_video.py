@@ -16,13 +16,14 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
                                    VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -130,22 +131,27 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 class LlavaNextVideoDummyInputsBuilder(
         BaseDummyInputsBuilder[LlavaNextVideoProcessingInfo]):
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_videos = mm_counts.get("video", 0)
 
         processor = self.info.get_hf_processor()
         video_token = processor.video_token
+
+        return video_token * num_videos
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        num_videos = mm_counts.get("video", 0)
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         target_num_frames = \
             self.info.get_num_frames_with_most_features(seq_len, mm_counts)
 
-        mm_data = {
+        return {
             "video":
             self._get_dummy_videos(
                 width=target_width,
@@ -154,11 +160,6 @@ class LlavaNextVideoDummyInputsBuilder(
                 num_videos=num_videos,
             )
         }
-
-        return ProcessorInputs(
-            prompt_text=video_token * num_videos,
-            mm_data=mm_data,
-        )
 
 
 class LlavaNextVideoMultiModalProcessor(

@@ -15,12 +15,13 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptIndexTargets,
                                         PromptInsertion, PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .blip import BlipVisionModel
@@ -413,28 +414,26 @@ class Blip2ProcessingInfo(BaseProcessingInfo):
 
 class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
 
         max_image_size = vision_config.image_size
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=max_image_size,
                                    height=max_image_size,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="",
-            mm_data=mm_data,
-        )
 
 
 class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
