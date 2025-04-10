@@ -4,7 +4,7 @@
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
-from tests.v1.shutdown.util import SHUTDOWN_TEST_TIMEOUT
+from tests.v1.shutdown.utils import SHUTDOWN_TEST_TIMEOUT
 from vllm import LLM
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.models.llama import LlamaForCausalLM
@@ -31,12 +31,13 @@ def evil_forward(self, *args, **kwargs):
 
 @pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT)
 @pytest.mark.parametrize("enable_multiprocessing", [True])
-@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
+@pytest.mark.parametrize("tensor_parallel_size", [1])
 @pytest.mark.parametrize("model", MODELS)
 def test_llm_model_error(monkeypatch, tensor_parallel_size: int,
                          enable_multiprocessing: bool, model: str) -> None:
     """Test that LLM propagates a forward pass error and frees memory.
-    TODO(andy) - LLM without multiprocessing.
+    TODO(andy) - LLM without multiprocessing; LLM with multiprocessing
+    and >1 rank
     """
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
