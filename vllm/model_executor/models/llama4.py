@@ -471,7 +471,7 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         gen_config = vllm_config.model_config.try_get_generation_config()
         gen_config.update(vllm_config.model_config.override_generation_config)
         vllm_config.model_config.hf_config.attn_temperature_tuning \
-            = gen_config.get("attn_temperature_tuning", False)
+            = gen_config.get("attn_temperature_tuning", True)
 
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
