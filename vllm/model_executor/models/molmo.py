@@ -1164,13 +1164,6 @@ class MolmoProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
     def get_num_image_tokens(
         self,
         *,
@@ -1194,15 +1187,6 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         joint = ((ncols + 1) // pooling_size) * ((nrows + 1) // pooling_size)
 
         return extra + joint
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
-        )
 
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()

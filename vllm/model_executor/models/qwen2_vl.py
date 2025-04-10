@@ -818,16 +818,6 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {
-            "image": self.get_max_image_tokens(),
-            "video": self.get_max_video_tokens(seq_len, mm_counts),
-        }
-
     def _get_vision_info(
         self,
         *,

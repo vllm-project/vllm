@@ -13,7 +13,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, MultiModalKwargs)
-from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
+                                   MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptIndexTargets,
                                         PromptInsertion, PromptUpdate,
@@ -72,16 +73,18 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_mm_max_tokens_per_item(
+    def get_num_image_tokens(
         self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
-
-    def get_num_image_tokens(self) -> int:
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
         vision_encoder_info = self.get_vision_encoder_info()
-        return vision_encoder_info.get_max_image_tokens()
+
+        return vision_encoder_info.get_num_image_tokens(
+            image_width=image_width,
+            image_height=image_height,
+        )
 
 
 class PaliGemmaDummyInputsBuilder(
@@ -148,11 +151,29 @@ class PaliGemmaMultiModalProcessor(
         image_token_id = hf_config.image_token_index
 
         tokenizer = self.info.get_tokenizer()
-        num_image_tokens = self.info.get_num_image_tokens()
-        image_tokens = [image_token_id] * num_image_tokens
 
         bos_token_id = tokenizer.bos_token_id
         assert isinstance(bos_token_id, int)
+
+        def get_insertion(item_idx: int):
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems))
+
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                image_size = images.get_image_size(item_idx)
+                num_image_tokens = self.info.get_num_image_tokens(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                )
+
+            image_tokens = [image_token_id] * num_image_tokens
+
+            return PromptUpdateDetails.select_token_id(
+                image_tokens + [bos_token_id],
+                embed_token_id=image_token_id,
+            )
 
         # Paligemma 1 and 2 have different tokenizer.add_bos_token
         # Insert <image>*n + <bos> after <bos> for Paligemma 1
@@ -162,10 +183,7 @@ class PaliGemmaMultiModalProcessor(
                 modality="image",
                 target=PromptIndexTargets.prefix(
                     [bos_token_id] if tokenizer.add_bos_token else []),
-                insertion=PromptUpdateDetails.select_token_id(
-                    image_tokens + [bos_token_id],
-                    embed_token_id=image_token_id,
-                ),
+                insertion=get_insertion,
             )
         ]
 

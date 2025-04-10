@@ -101,16 +101,6 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {
-            "image": self.get_max_image_tokens(),
-            "video": self.get_max_video_tokens(seq_len, mm_counts),
-        }
-
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
     # with additional logic afterwards taken from LlavaOnevisionProcessor
     def _get_num_unpadded_features(
