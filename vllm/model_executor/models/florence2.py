@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BartTokenizer, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -764,16 +764,9 @@ class Florence2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_max_image_tokens(self) -> int:
+    def get_num_image_tokens(self) -> int:
         processor_config = self.ctx.get_hf_image_processor_config()
         return processor_config["image_seq_length"]
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
 
 
 class Florence2DummyInputsBuilder(
@@ -826,6 +819,18 @@ class Florence2MultiModalProcessor(
     ) -> Union[str, list[int]]:
         return [self.info.get_hf_config().eos_token_id]
 
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        hf_processor = self.info.get_hf_processor()
+        tokenizer: BartTokenizer = hf_processor.tokenizer
+        prompt_text = tokenizer.decode(prompt_tokens)
+        # convert task tokens to prompt
+        prompt_text = hf_processor._construct_prompts([prompt_text])[0]
+        prompt_tokens = tokenizer.encode(prompt_text, add_special_tokens=False)
+        return prompt_tokens
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -859,7 +864,7 @@ class Florence2MultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         pad_token_id = hf_config.pad_token_id
-        num_image_tokens = self.info.get_max_image_tokens()
+        num_image_tokens = self.info.get_num_image_tokens()
         image_tokens = [pad_token_id] * num_image_tokens
 
         return [
@@ -1037,6 +1042,9 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
         assert image_input["type"] == "pixel_values"
         pixel_values = image_input["data"]
         return self._encode_image(pixel_values)
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

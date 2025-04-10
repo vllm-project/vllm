@@ -45,9 +45,6 @@ class PrithviGeoSpatialMAEProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {"image": 0}
-
 
 class PrithviGeoSpatialMAEInputBuilder(
         BaseDummyInputsBuilder[PrithviGeoSpatialMAEProcessingInfo]):

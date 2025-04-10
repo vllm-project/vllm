@@ -530,13 +530,6 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
-
     def get_num_image_tokens(self) -> int:
         hf_config = self.get_hf_config()
         vision_config = hf_config.visual
@@ -647,9 +640,9 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             PromptReplacement(
                 modality="image",
                 target=[img_start_id, img_end_id],
-                replacement=PromptUpdateDetails(
-                    full=[img_start_id] + image_tokens + [img_end_id],
-                    features=image_tokens,
+                replacement=PromptUpdateDetails.select_token_id(
+                    [img_start_id] + image_tokens + [img_end_id],
+                    embed_token_id=img_pad_id,
                 ),
             )
         ]
@@ -739,6 +732,9 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
             return image_input["data"]
 
         return self.transformer.visual(image_input["data"])
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.transformer
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

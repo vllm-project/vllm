@@ -39,7 +39,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import scatter_patch_features, select_patch_features
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -59,14 +58,6 @@ class InternVLImagePixelInputs(TypedDict):
 
     num_patches: torch.Tensor
     """Shape: `(batch_size * num_images)`"""
-
-    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    A boolean mask indicating which image embeddings correspond
-    to patch tokens.
-
-    Shape: `(batch_size * num_images, num_embeds)`
-    """
 
 
 class InternVLImageEmbeddingInputs(TypedDict):
@@ -419,24 +410,12 @@ class BaseInternVLProcessor(ABC):
                 torch.tensor([len(item) for item in pixel_values_lst]),
             }
 
-            tokenizer = self.tokenizer
-            image_token_id = self.image_token_id
-
-            embed_is_patch = list[torch.Tensor]()
-
             for pixel_values in pixel_values_lst:
                 num_patches = pixel_values.shape[0]
                 feature_size = num_patches * self.num_image_token
 
                 image_repl = self.get_image_repl(feature_size, num_patches)
-                feature_tokens = tokenizer.encode(image_repl.features,
-                                                  add_special_tokens=False)
-
                 text = [t.replace('<image>', image_repl.full, 1) for t in text]
-                embed_is_patch.append(
-                    torch.tensor(feature_tokens) == image_token_id)
-
-            image_inputs["embed_is_patch"] = embed_is_patch
 
         text_inputs = self.tokenizer(text)
 
@@ -460,7 +439,7 @@ class InternVLProcessor(BaseInternVLProcessor):
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
 
-        return PromptUpdateDetails(full=repl_full, features=repl_features)
+        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
 
 class BaseInternVLProcessingInfo(BaseProcessingInfo):
@@ -479,13 +458,6 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
     def get_num_image_tokens(
         self,
         *,
@@ -499,15 +471,6 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         return processor.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
-        )
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -599,7 +562,6 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             pixel_values_flat=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_patches),
             image_num_patches=MultiModalFieldConfig.batched("image"),
-            embed_is_patch=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
             image_token_id=MultiModalFieldConfig.shared("image", num_images),
         )
@@ -831,7 +793,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             self, **kwargs: object) -> Optional[InternVLImageInputs]:
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
         image_num_patches = kwargs.pop("image_num_patches", None)
-        embed_is_patch = kwargs.pop("embed_is_patch", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values_flat is None and image_embeds is None:
@@ -860,20 +821,14 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of image_num_patches. "
                                  f"Got type: {type(image_num_patches)}")
 
-            if not isinstance(embed_is_patch, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of embed_is_patch. "
-                                 f"Got type: {type(embed_is_patch)}")
-
             pixel_values_flat = flatten_bn(pixel_values_flat, concat=True)
             image_num_patches = flatten_bn(image_num_patches, concat=True)
-            embed_is_patch = flatten_bn(embed_is_patch)
 
             return InternVLImagePixelInputs(
                 type="pixel_values",
                 pixel_values_flat=self._validate_pixel_values(
                     pixel_values_flat),
                 num_patches=image_num_patches,
-                embed_is_patch=embed_is_patch,
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -913,21 +868,16 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         else:
             self.visual_token_mask = None
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
 
-        image_features = self._process_image_input(image_input)
-
-        if image_input["type"] != "pixel_values":
-            return image_features
-
-        return scatter_patch_features(
-            image_features,
-            image_input["embed_is_patch"],
-        )
+        return self._process_image_input(image_input)
 
     def get_input_embeddings(
         self,
@@ -941,7 +891,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                select_patch_features(multimodal_embeddings),
+                multimodal_embeddings,
                 self.img_context_token_id,
             )
         return inputs_embeds

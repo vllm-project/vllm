@@ -40,8 +40,7 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, BoundPromptUpdate,
                                         PlaceholderFeaturesInfo,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+                                        PromptReplacement, PromptUpdate)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -322,21 +321,6 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        max_image_tokens = self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
-        )
-
-        return {"image": max_image_tokens}
-
     def get_num_image_tokens(
         self,
         *,
@@ -443,12 +427,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                     processor=hf_processor,
                 )
 
-            image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
-
-            return PromptUpdateDetails(
-                full=image_tokens,
-                features=image_tokens,
-            )
+            return [_IMAGE_TOKEN_ID] * num_image_tokens
 
         num_images = mm_items.get_count("image", strict=False)
 
@@ -517,6 +496,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                         item_idx=p.item_idx,
                         start_idx=p.start_idx - 1,
                         tokens=p.tokens,
+                        is_embed=p.is_embed,
                     ) for p in ps
                 ]
                 for modality, ps in placeholders.items()
@@ -678,6 +658,9 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                                                 image_input["image_sizes"])
 
         return image_embeds
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

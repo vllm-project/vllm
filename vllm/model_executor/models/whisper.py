@@ -538,15 +538,8 @@ class WhisperProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
-    def get_max_audio_tokens(self) -> int:
+    def get_num_audio_tokens(self) -> int:
         return self.get_hf_config().max_source_positions
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"audio": self.get_max_audio_tokens()}
 
 
 class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
@@ -579,6 +572,10 @@ class WhisperMultiModalProcessor(
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+
+    @property
+    def pad_dummy_encoder_prompt(self) -> bool:
+        return True
 
     def create_encoder_prompt(
         self,
@@ -626,7 +623,7 @@ class WhisperMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        num_tokens = self.info.get_max_audio_tokens()
+        num_tokens = self.info.get_num_audio_tokens()
         return [
             PromptReplacement(
                 modality="audio",
@@ -687,6 +684,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             positions=positions,
         )
         return decoder_outputs
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model.decoder
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

@@ -88,7 +88,6 @@ def test_llama_lora(sql_lora_files):
         # also test odd max_num_seqs
         max_num_seqs=13,
         max_loras=4,
-        tensor_parallel_size=1,
         enable_chunked_prefill=True)
     generate_and_test(llm, sql_lora_files)
 
@@ -150,23 +149,6 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
         max_loras=4,
         tensor_parallel_size=4,
         fully_sharded_loras=True,
-        enable_chunked_prefill=True,
-    )
-    generate_and_test(llm, sql_lora_files)
-
-
-@multi_gpu_test(num_gpus=4)
-@create_new_process_for_each_test()
-def test_llama_lora_tp4_fully_sharded_enable_bias(sql_lora_files):
-
-    llm = vllm.LLM(
-        MODEL_PATH,
-        enable_lora=True,
-        max_num_seqs=16,
-        max_loras=4,
-        tensor_parallel_size=4,
-        fully_sharded_loras=True,
-        enable_lora_bias=True,
         enable_chunked_prefill=True,
     )
     generate_and_test(llm, sql_lora_files)

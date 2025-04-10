@@ -61,22 +61,6 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"video": 1}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        max_video_tokens = self.get_num_video_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(
-                seq_len, mm_counts),
-        )
-
-        return {"video": max_video_tokens}
-
     def get_image_size_with_most_features(self) -> ImageSize:
         vision_encoder_info = self.get_vision_encoder_info()
         width = height = vision_encoder_info.get_image_size()
@@ -420,6 +404,9 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                 f"Unsupported type of video input {type(video_pixels)}")
 
         return [e.flatten(0, 1) for e in embeds]
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

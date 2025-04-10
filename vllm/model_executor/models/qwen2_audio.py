@@ -109,17 +109,6 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        hf_config = self.get_hf_config()
-        max_source_positions = hf_config.audio_config.max_source_positions
-        max_output_lengths = (max_source_positions - 2) // 2 + 1
-
-        return {"audio": max_output_lengths}
-
 
 class Qwen2AudioDummyInputsBuilder(
         BaseDummyInputsBuilder[Qwen2AudioProcessingInfo]):
@@ -229,9 +218,9 @@ class Qwen2AudioMultiModalProcessor(
 
             audio_tokens = [audio_token_id] * num_features
 
-            return PromptUpdateDetails(
-                full=[audio_bos_id] + audio_tokens + [audio_eos_id],
-                features=audio_tokens,
+            return PromptUpdateDetails.select_token_id(
+                [audio_bos_id] + audio_tokens + [audio_eos_id],
+                embed_token_id=audio_token_id,
             )
 
         return [
@@ -354,6 +343,9 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Split to tuple of embeddings for individual audio input.
         return torch.split(masked_audio_features,
                            audio_output_lengths.flatten().tolist())
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

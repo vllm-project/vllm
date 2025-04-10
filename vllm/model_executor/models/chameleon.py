@@ -38,7 +38,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
+                         SupportsQuant)
 from .utils import (flatten_bn, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -62,13 +63,6 @@ class ChameleonProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
 
     def get_num_image_tokens(self) -> int:
         processor = self.get_hf_processor()
@@ -161,9 +155,9 @@ class ChameleonMultiModalProcessor(
             PromptReplacement(
                 modality="image",
                 target=[image_token_id],
-                replacement=PromptUpdateDetails(
-                    full=([image_start_id] + image_tokens + [image_end_id]),
-                    features=image_tokens,
+                replacement=PromptUpdateDetails.select_token_id(
+                    [image_start_id] + image_tokens + [image_end_id],
+                    embed_token_id=image_token_id,
                 ),
             )
         ]
@@ -927,7 +921,11 @@ class ChameleonModel(nn.Module):
     info=ChameleonProcessingInfo,
     dummy_inputs=ChameleonDummyInputsBuilder)
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
+                                        SupportsPP, SupportsQuant):
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -982,6 +980,9 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             type="pixel_values",
             data=self._validate_pixel_values(pixel_values),
         )
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
