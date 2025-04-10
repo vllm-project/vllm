@@ -183,7 +183,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                   w_s_param_name="weight_scale",
                                   w_zp_param_name="weight_zero_point",
                                   w_gidx_param_name="weight_g_idx")
-        print(self.kernel, type(self.kernel))
 
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from the format the kernel may want. Handle repacking here.
