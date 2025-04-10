@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections import UserDict
 from dataclasses import dataclass
+from typing import Optional
 
+import msgspec
 import numpy as np
 import torch
 
+from vllm.multimodal.inputs import (MultiModalBatchedField,
+                                    MultiModalFieldElem, MultiModalKwargs,
+                                    MultiModalKwargsItem, NestedTensors)
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
@@ -68,6 +73,99 @@ def test_encode_decode():
     decoded2: MyType = decoder.decode(encoded2)
 
     assert_equal(decoded2, obj)
+
+
+class MyRequest(msgspec.Struct):
+    mm: Optional[list[MultiModalKwargs]]
+
+
+def test_multimodal_kwargs():
+    d = {
+        "foo":
+        torch.zeros(1000, dtype=torch.float16),
+        "bar": [torch.zeros(i * 1000, dtype=torch.int8) for i in range(3)],
+        "baz": [
+            torch.rand((256), dtype=torch.float16),
+            [
+                torch.rand((1, 12), dtype=torch.float32),
+                torch.rand((3, 5, 7), dtype=torch.float64),
+            ], [torch.rand((4, 4), dtype=torch.float16)]
+        ],
+    }
+
+    # pack mm kwargs into a mock request so that it can be decoded properly
+    req = MyRequest(mm=[MultiModalKwargs(d)])
+
+    encoder = MsgpackEncoder()
+    decoder = MsgpackDecoder(MyRequest)
+
+    encoded = encoder.encode(req)
+
+    # 8 total tensors + top level buffer
+    assert len(encoded) == 6
+
+    total_len = sum([len(x) for x in encoded])
+
+    # expected total encoding length, should be 4440, +-20 for minor changes
+    assert total_len >= 4420 and total_len <= 4460
+    decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
+    assert all(nested_equal(d[k], decoded[k]) for k in d)
+
+
+def test_multimodal_items_by_modality():
+    e1 = MultiModalFieldElem("audio", "a0", torch.zeros(1000,
+                                                        dtype=torch.int16),
+                             MultiModalBatchedField())
+    e2 = MultiModalFieldElem(
+        "video",
+        "v0",
+        [torch.zeros(1000, dtype=torch.int8) for _ in range(4)],
+        MultiModalBatchedField(),
+    )
+    e3 = MultiModalFieldElem("image", "i0", torch.zeros(1000,
+                                                        dtype=torch.int32),
+                             MultiModalBatchedField())
+    e4 = MultiModalFieldElem("image", "i1", torch.zeros(1000,
+                                                        dtype=torch.int32),
+                             MultiModalBatchedField())
+    audio = MultiModalKwargsItem.from_elems([e1])
+    video = MultiModalKwargsItem.from_elems([e2])
+    image = MultiModalKwargsItem.from_elems([e3, e4])
+    mm = MultiModalKwargs.from_items([audio, video, image])
+
+    # pack mm kwargs into a mock request so that it can be decoded properly
+    req = MyRequest([mm])
+
+    encoder = MsgpackEncoder()
+    decoder = MsgpackDecoder(MyRequest)
+
+    encoded = encoder.encode(req)
+
+    # 5 total tensors + top level buffer
+    assert len(encoded) == 8
+
+    total_len = sum([len(x) for x in encoded])
+
+    # expected total encoding length, should be 7507, +-20 for minor changes
+    assert total_len >= 7487 and total_len <= 7527
+    decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
+
+    # check all modalities were recovered and do some basic sanity checks
+    assert len(decoded.modalities) == 3
+    images = decoded.get_items("image")
+    assert len(images) == 1
+    assert len(images[0].items()) == 2
+    assert list(images[0].keys()) == ["i0", "i1"]
+
+    # check the tensor contents and layout in the main dict
+    assert all(nested_equal(mm[k], decoded[k]) for k in mm)
+
+
+def nested_equal(a: NestedTensors, b: NestedTensors):
+    if isinstance(a, torch.Tensor):
+        return torch.equal(a, b)
+    else:
+        return all([nested_equal(x, y) for (x, y) in zip(a, b)])
 
 
 def assert_equal(obj1: MyType, obj2: MyType):

@@ -2,7 +2,9 @@
 
 import pickle
 from collections.abc import Sequence
+from dataclasses import asdict
 from inspect import isclass
+from itertools import chain
 from types import FunctionType
 from typing import Any, Optional, Union
 
@@ -11,6 +13,9 @@ import numpy as np
 import torch
 import zmq
 from msgspec import msgpack
+
+from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargs,
+                                    MultiModalKwargsItem, NestedTensors)
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
@@ -63,6 +68,26 @@ class MsgpackEncoder:
         # Fall back to pickle for object or void kind ndarrays.
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
+
+        if isinstance(obj, MultiModalKwargs):
+            mm: MultiModalKwargs = obj
+            if mm.modalities:
+                # ignore the main dict, it will be re-indexed.
+                # pass a list of MultiModalKwargsItem, then see below
+                # Any tensors *not* indexed by modality will be ignored.
+                return [mm.get_items(m) for m in mm.modalities]
+            # just return the main dict if there are no modalities
+            return {k: v for k, v in obj.items()}
+
+        if isinstance(obj, MultiModalKwargsItem):
+            # Encode as plain dictionary + special handling for '.field'
+            rd = {}
+            for k, v in obj.items():
+                vv = asdict(v)
+                vv['field'] = pickle.dumps(v.field,
+                                           protocol=pickle.HIGHEST_PROTOCOL)
+                rd[k] = vv
+            return rd
 
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
@@ -121,6 +146,12 @@ class MsgpackDecoder:
         if isclass(t):
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
+            if issubclass(t, MultiModalKwargs) and isinstance(obj, dict):
+                return MultiModalKwargs(
+                    {k: self._decode_nested(obj[k])
+                     for k in obj})
+            if issubclass(t, MultiModalKwargs) and isinstance(obj, list):
+                return MultiModalKwargs.from_items(self._decode_items(obj))
             if issubclass(t, torch.Tensor):
                 return torch.from_numpy(self._decode_ndarray(obj))
         return obj
@@ -129,6 +160,24 @@ class MsgpackDecoder:
         dtype, shape, data = arr
         buffer = self.aux_buffers[data] if isinstance(data, int) else data
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
+
+    def _decode_items(self, obj: list) -> list[MultiModalKwargsItem]:
+        all = []
+        for item in chain.from_iterable(obj):
+            elems = []
+            for v in item.values():
+                v['data'] = self._decode_nested(v['data'])
+                v['field'] = pickle.loads(v['field'])
+                elems.append(MultiModalFieldElem(**v))
+            all.append(MultiModalKwargsItem.from_elems(elems))
+        return all
+
+    def _decode_nested(self, obj: Any) -> NestedTensors:
+        if isinstance(obj, list) and isinstance(obj[0], str):
+            return torch.from_numpy(self._decode_ndarray(obj))
+        if isinstance(obj, list):
+            return [self._decode_nested(x) for x in obj]
+        raise TypeError(f"Unexpected NestedArray contents: {obj}")
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_PICKLE:
