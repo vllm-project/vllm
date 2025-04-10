@@ -78,6 +78,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         length: int,
         num_audios: int,
     ) -> list[npt.NDArray]:
+        if num_audios == 0:
+            return []
         audio = np.zeros((length, ))
         return [audio] * num_audios
 
@@ -88,6 +90,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         height: int,
         num_images: int,
     ) -> list[Image.Image]:
+        if num_images == 0:
+            return []
         image = Image.new("RGB", (width, height), color=255)
         return [image] * num_images
 
@@ -99,6 +103,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         num_frames: int,
         num_videos: int,
     ) -> list[npt.NDArray]:
+        if num_videos == 0:
+            return []
         video = np.full((num_frames, width, height, 3), 255)
         return [video] * num_videos
 
