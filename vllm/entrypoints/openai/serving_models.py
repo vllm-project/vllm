@@ -243,7 +243,8 @@ class OpenAIServingModels:
 
         return None
 
-    async def resolve_lora(self, lora_name: str) -> Union[LoRARequest, ErrorResponse]:
+    async def resolve_lora(
+            self, lora_name: str) -> Union[LoRARequest, ErrorResponse]:
         """Attempt to resolve a LoRA adapter using available resolvers.
 
         Args:
@@ -252,7 +253,7 @@ class OpenAIServingModels:
         Returns:
             LoRARequest if found and loaded successfully.
             ErrorResponse (404) if no resolver finds the adapter.
-            ErrorResponse (400) if adapter(s) are found but none load successfully.
+            ErrorResponse (400) if adapter(s) are found but none load.
         """
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded
@@ -266,7 +267,8 @@ class OpenAIServingModels:
 
             # Try to resolve using available resolvers
             for resolver in self.lora_resolvers:
-                lora_request = await resolver.resolve_lora(base_model_name, lora_name)
+                lora_request = await resolver.resolve_lora(
+                    base_model_name, lora_name)
 
                 if lora_request is not None:
                     found_adapter = True
@@ -287,9 +289,10 @@ class OpenAIServingModels:
                         continue
 
             if found_adapter:
-                # An adapter was found by at least one resolver, but all attempts to load it failed.
+                # An adapter was found, but all attempts to load it failed.
                 return create_error_response(
-                    message=f"LoRA adapter '{lora_name}' was found but could not be loaded.",
+                    message=(f"LoRA adapter '{lora_name}' was found "
+                             "but could not be loaded."),
                     err_type="BadRequestError",
                     status_code=HTTPStatus.BAD_REQUEST)
             else:

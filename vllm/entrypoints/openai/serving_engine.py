@@ -134,7 +134,8 @@ class OpenAIServing:
                 lora.lora_name for lora in self.models.lora_requests
         ]:
             return None
-        if request.model and (load_result := await self.models.resolve_lora(request.model)):
+        if request.model and (load_result := await self.models.resolve_lora(
+                request.model)):
             if isinstance(load_result, LoRARequest):
                 return None
             if isinstance(load_result, ErrorResponse) and \
