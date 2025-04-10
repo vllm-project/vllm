@@ -275,7 +275,7 @@ class OpenAIServingModels:
                     lora_request.lora_int_id = unique_id
 
                     try:
-                        await self.engine_client.add_lora(lora_request)
+                        # await self.engine_client.add_lora(lora_request)
                         self.lora_requests.append(lora_request)
                         logger.info(
                             "Resolved and loaded LoRA adapter '%s' using %s",
