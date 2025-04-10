@@ -4,6 +4,7 @@
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
+from tests.v1.shutdown.util import SHUTDOWN_TEST_TIMEOUT
 from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import cuda_device_count_stateless
@@ -14,6 +15,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 def test_async_llm_delete(model: str, tensor_parallel_size: int) -> None:
@@ -40,6 +42,7 @@ def test_async_llm_delete(model: str, tensor_parallel_size: int) -> None:
     )
 
 
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("enable_multiprocessing", [True])

@@ -4,6 +4,7 @@
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
+from tests.v1.shutdown.util import SHUTDOWN_TEST_TIMEOUT
 from vllm import LLM
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -26,6 +27,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("failing_method", ["forward", "load_weights"])
@@ -58,6 +60,7 @@ def test_async_llm_startup_error(monkeypatch, model: str,
     )
 
 
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("enable_multiprocessing", [True])
