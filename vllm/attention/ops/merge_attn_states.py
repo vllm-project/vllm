@@ -21,12 +21,12 @@ def merge_attn_states(
     def supported_dtypes(o: torch.Tensor) -> bool:
         return o.dtype in [torch.float32, torch.half, torch.bfloat16]
 
+    # NOTE(DefTruth): Currently, custom merge_attn_states CUDA
+    # kernel load/store 128b(16 bytes) per memory issue within
+    # thread. Namely, the headsize(headdim) must be multiple of
+    # pack_size (float32 -> 4, half/bfloat16 -> 8).
     def supported_headdim(o: torch.Tensor) -> bool:
-        # NOTE(DefTruth): Currently, custom merge_attn_states CUDA
-        # kernel load/store 128b(16 bytes) per memory issue within
-        # thread. Namely, the headsize(headdim) must be multiple of
-        # pack_size (float32 -> 4, half/bfloat16 -> 8).
-        headdim = output.shape[2]  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+        headdim = o.shape[2]  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
         if o.dtype == torch.float32:
             return headdim % 4 == 0
         return headdim % 8 == 0
