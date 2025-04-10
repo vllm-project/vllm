@@ -391,14 +391,6 @@ class SequenceData(msgspec.Struct,
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"get_num_computed_tokens={self.get_num_computed_tokens()})")
 
-    # Version of __repr__ with the prompt data obfuscated
-    def anon_repr(self) -> str:
-        return (f"SequenceData("
-                f"prompt_token_ids_len={len(self._prompt_token_ids)}, "
-                f"output_token_ids_len={len(self.output_token_ids)}, "
-                f"cumulative_logprob={self.cumulative_logprob}, "
-                f"get_num_computed_tokens={self.get_num_computed_tokens()})")
-
 
 class Sequence:
     """Stores the data, status, and block information of a sequence.

@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import enum
 import json
+from typing import Optional
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -49,8 +53,18 @@ def prepare_object_to_dump(obj) -> str:
             return repr(obj)
 
 
-def dump_engine_exception(err: BaseException, config: VllmConfig):
+def dump_engine_exception(config: VllmConfig,
+                          scheduler_output: SchedulerOutput,
+                          scheduler_stats: Optional[SchedulerStats]):
+    # NOTE: ensure we can log extra info without risking raises
+    # unexpected errors during logging
+    with contextlib.suppress(BaseException):
+        _dump_engine_exception(config, scheduler_output, scheduler_stats)
 
+
+def _dump_engine_exception(config: VllmConfig,
+                           scheduler_output: SchedulerOutput,
+                           scheduler_stats: Optional[SchedulerStats]):
     logger.error("Dumping input data")
 
     logger.error(
@@ -59,15 +73,12 @@ def dump_engine_exception(err: BaseException, config: VllmConfig):
         config,
     )
 
-    from vllm.v1.engine.core import ModelExecutionError
-    if isinstance(err, ModelExecutionError):
-        try:
-            if err.scheduler_output is not None:
-                dump_obj = prepare_object_to_dump(err.scheduler_output)
-                logger.error("Dumping scheduler output for model execution:")
-                logger.error(dump_obj)
-            if err.scheduler_stats is not None:
-                logger.error(err.scheduler_stats)
-        except BaseException as exception:
-            logger.error("Error preparing object to dump")
-            logger.error(repr(exception))
+    try:
+        dump_obj = prepare_object_to_dump(scheduler_output)
+        logger.error("Dumping scheduler output for model execution:")
+        logger.error(dump_obj)
+        if scheduler_stats:
+            logger.error(scheduler_stats)
+    except BaseException as exception:
+        logger.error("Error preparing object to dump")
+        logger.error(repr(exception))

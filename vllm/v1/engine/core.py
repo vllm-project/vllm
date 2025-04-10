@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import contextlib
 import os
 import queue
 import signal
@@ -36,7 +35,6 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -48,35 +46,6 @@ logger = init_logger(__name__)
 POLLING_TIMEOUT_S = 2.5
 
 _R = TypeVar('_R')  # Return type for collective_rpc
-
-
-class ModelExecutionError(RuntimeError):
-    """Custom RuntimeError with input data for model execution
-    
-    In a nutshell, this object is useful for custom handling of exception for
-    the case the engine raises an error. For instance, it is used to log the
-    input metadata that is useful for debugging on engine crashes.
-    
-    Args:
-        scheduler_output: SchedulerOutput object that contains the input
-            data for model execution
-        
-    """
-    scheduler_output: SchedulerOutput
-    scheduler_stats: SchedulerStats
-
-    def __init__(self, *args, scheduler_output=None, scheduler_stats=None):
-        super().__init__(*args)
-        self.scheduler_output = scheduler_output
-        self.scheduler_stats = scheduler_stats
-
-    def __reduce__(self):
-        # To avoid pickle errors.
-        # This happens when we exchange this object between processes
-        # since scheduler_output can have objects that only makes sense
-        # to their context/process we remove them from the serialization
-        # and only send the summary of the error as a regular RuntimeError.
-        return (self.__class__, (self.args[0], ))
 
 
 class EngineCore:
@@ -239,15 +208,9 @@ class EngineCore:
         try:
             output = self.model_executor.execute_model(scheduler_output)
         except BaseException as err:
-            # NOTE: ensure we can log extra info without risking raises
-            # unexpected errors during logging
-            with contextlib.suppress(BaseException):
-                model_err = ModelExecutionError(
-                    f"Model execution failure,"
-                    f"reason: {repr(err)}",
-                    scheduler_output=scheduler_output,
-                    scheduler_stats=self.scheduler.make_stats())
-                dump_engine_exception(model_err, self.vllm_config)
+            # NOTE: This method is exception-free
+            dump_engine_exception(self.vllm_config, scheduler_output,
+                                  self.scheduler.make_stats())
             # Re-raise exception
             raise err
 
