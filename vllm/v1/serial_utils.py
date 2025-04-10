@@ -32,6 +32,11 @@ class MsgpackEncoder:
         try:
             self.aux_buffers = bufs = [b'']
             bufs[0] = self.encoder.encode(obj)
+            # This `bufs` array gives our custom encoder the opportunity
+            # to stash additional buffers behind it. This allows us to structure
+            # the data in such a way that msgpack is encoding directly from our
+            # original backing buffers, instead of copying them into a new type
+            # that msgpack understands. This is a significant performance gain.
             return bufs
         finally:
             self.aux_buffers = None
