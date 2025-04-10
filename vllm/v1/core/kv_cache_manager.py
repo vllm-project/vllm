@@ -127,7 +127,8 @@ class KVCacheManager:
 
         self.prefix_cache_stats.requests += 1
         # When the request requires prompt logprobs, we skip prefix caching.
-        if request.sampling_params.prompt_logprobs is not None:
+        if request.sampling_params and \
+            request.sampling_params.prompt_logprobs is not None:
             return [], 0
 
         if len(block_hashes) * self.block_size == request.num_tokens:

@@ -27,7 +27,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
+from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .utils import WeightsMapper, maybe_prefix
 
 
@@ -372,12 +372,16 @@ class BertModel(nn.Module, SupportsQuant):
             hidden_states = inputs_embeds
         else:
             attn_metadata = get_forward_context().attn_metadata
-            assert hasattr(attn_metadata, "seq_lens_tensor")
-            hidden_states = self.embeddings(
-                input_ids=input_ids,
-                seq_lens=attn_metadata.seq_lens_tensor,
-                position_ids=position_ids,
-                token_type_ids=token_type_ids)
+            seq_lens = None
+            if attn_metadata is not None:  # Can be None during warmup
+                seq_lens = getattr(attn_metadata, "seq_lens_tensor",
+                                   attn_metadata.seq_lens)
+                assert seq_lens is not None
+            hidden_states = self.embeddings(input_ids=input_ids,
+                                            seq_lens=seq_lens,
+                                            position_ids=position_ids,
+                                            token_type_ids=token_type_ids)
+
         return self.encoder(position_ids, hidden_states)
 
     def load_weights(self, weights: Iterable[Tuple[str,
@@ -417,7 +421,7 @@ class BertModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
+class BertEmbeddingModel(nn.Module, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
