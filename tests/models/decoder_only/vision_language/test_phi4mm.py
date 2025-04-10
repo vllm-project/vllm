@@ -147,8 +147,6 @@ def run_test(
         )
 
 
-# Since we use _attn_implementation="eager" for hf_runner, there is more
-# significant numerical difference. The basic `logprobs=5` fails to pass.
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
