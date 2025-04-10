@@ -53,10 +53,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 
   
   // Register fast Hadamard transforms
-  rocm_ops.def("fast_hadamard_transform_1024(Tensor x, float scale) -> Tensor");
-  rocm_ops.impl("fast_hadamard_transform_1024", torch::kCUDA, &fast_hadamard_transform_1024);
-  rocm_ops.def("fast_hadamard_transform_512(Tensor x, float scale) -> Tensor");
-  rocm_ops.impl("fast_hadamard_transform_512", torch::kCUDA, &fast_hadamard_transform_512);
+  rocm_ops.def("fast_hadamard_transform(Tensor x, float scale) -> Tensor");
+  rocm_ops.impl("fast_hadamard_transform", torch::kCUDA, &fast_hadamard_transform);
 
 }
 
