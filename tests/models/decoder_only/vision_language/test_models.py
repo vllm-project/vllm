@@ -425,23 +425,20 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
     ),
-    # Tests for phi3v currently live in another file because of a bug in
-    # transformers. Once this issue is fixed, we can enable them here instead.
-    # https://github.com/huggingface/transformers/issues/34307
-    # "phi3v": VLMTestInfo(
-    #     models=["microsoft/Phi-3.5-vision-instruct"],
-    #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-    #     prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
-    #     img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
-    #     max_model_len=4096,
-    #     max_num_seqs=2,
-    #     task="generate",
-    #     # use eager mode for hf runner since phi3v didn't work with flash_attn
-    #     hf_model_kwargs={"_attn_implementation": "eager"},
-    #     use_tokenizer_eos=True,
-    #     vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
-    #     num_logprobs=10,
-    # ),
+    "phi3v": VLMTestInfo(
+        models=["microsoft/Phi-3.5-vision-instruct"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        task="generate",
+        # use eager mode for hf runner since phi3v didn't work with flash_attn
+        hf_model_kwargs={"_attn_implementation": "eager"},
+        use_tokenizer_eos=True,
+        vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
+        num_logprobs=10,
+    ),
     "pixtral_hf": VLMTestInfo(
         models=["nm-testing/pixtral-12b-FP8-dynamic"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
