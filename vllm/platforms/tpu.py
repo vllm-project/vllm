@@ -145,9 +145,10 @@ class TpuPlatform(Platform):
         params: Union[SamplingParams, PoolingParams],
     ) -> None:
         """Raises if this request is unsupported on this platform"""
-        if isinstance(params,
-                      SamplingParams) and params.guided_decoding is not None:
-            raise ValueError("Structured output is not supported on "
-                             f"{cls.device_name}.")
-        if params.sampling_type == SamplingType.RANDOM_SEED:
-            raise ValueError("Torch XLA does not support per-request seed.")
+        if isinstance(params, SamplingParams):
+            if params.guided_decoding is not None:
+                raise ValueError("Structured output is not supported on "
+                                 f"{cls.device_name}.")
+            if params.sampling_type == SamplingType.RANDOM_SEED:
+                raise ValueError(
+                    "Torch XLA does not support per-request seed.")
