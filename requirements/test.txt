@@ -267,7 +267,7 @@ nltk==3.9.1
     # via rouge-score
 num2words==0.5.14
     # via -r requirements/test.in
-numba==0.61.0
+numba==0.61.2
     # via
     #   -r requirements/test.in
     #   librosa
