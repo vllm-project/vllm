@@ -381,6 +381,13 @@ class LlamaModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+
+            #NOTE: Quarot
+            if "zero_point" in name:
+                continue
+            if "module" in name: #<- will be deprecated
+                name=name.replace(".module","")
+
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name

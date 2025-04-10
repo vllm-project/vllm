@@ -20,10 +20,11 @@ class QuarkW8A8Int8(QuarkScheme):
     _kernel_backends_being_used: Set[str] = set()
 
     def __init__(self, qscheme: str, is_static_input_scheme: Optional[bool],
-                 input_symmetric: Optional[bool]):
+            input_symmetric: Optional[bool], online_rotation_method: Optional[Callable]):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
         self.input_symmetric = input_symmetric
+        self.online_rotation_method = online_rotation_method
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -35,6 +36,7 @@ class QuarkW8A8Int8(QuarkScheme):
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
+        layer.logical_widths = output_partition_sizes
         self.logical_widths = output_partition_sizes
 
         scaled_mm_linear_kernel_config = ScaledMMLinearLayerConfig(
@@ -103,5 +105,10 @@ class QuarkW8A8Int8(QuarkScheme):
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
-                      bias: Optional[torch.Tensor]) -> torch.Tensor:
+                bias: Optional[torch.Tensor]) -> torch.Tensor:
+
+        if self.online_rotation_method:
+            #print("self.online_rotation_method")
+            x=self.online_rotation_method(x)
+        
         return self.kernel.apply_weights(layer, x, bias)
