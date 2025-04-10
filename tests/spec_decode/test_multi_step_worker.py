@@ -12,7 +12,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, Logprob,
                            get_all_seq_ids)
-from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+from vllm.spec_decode.draft_model_runner import TP1PP1DraftModelRunner
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
@@ -91,7 +91,7 @@ def test_same_output_for_single_step():
         block_size,
         num_gpu_blocks,
         seed,
-        model_runner_cls=TP1DraftModelRunner,
+        model_runner_cls=TP1PP1DraftModelRunner,
     )
     worker = create_worker(
         Worker,
@@ -304,7 +304,7 @@ def test_multi_step_with_batch_expansion_correct_output():
         block_size,
         num_gpu_blocks,
         seed,
-        model_runner_cls=TP1DraftModelRunner,
+        model_runner_cls=TP1PP1DraftModelRunner,
     )
     multi_step_worker.set_include_gpu_probs_tensor()
     worker = create_worker(
@@ -399,7 +399,7 @@ def test_multi_step_with_batch_expansion_incorrect_output():
         block_size,
         num_gpu_blocks,
         seed,
-        model_runner_cls=TP1DraftModelRunner,
+        model_runner_cls=TP1PP1DraftModelRunner,
     )
     multi_step_worker.set_include_gpu_probs_tensor()
     worker = create_worker(
@@ -502,13 +502,14 @@ def test_multi_step_correct_kvcache(num_steps, attn_backend):
 
     with global_force_attn_backend_context_manager(attn_backend):
         dtype = 'float16' if attn_backend == _Backend.FLASH_ATTN else 'float32'
-        multi_step_worker = create_worker(MultiStepWorker,
-                                          model_name,
-                                          block_size,
-                                          num_gpu_blocks,
-                                          seed,
-                                          model_runner_cls=TP1DraftModelRunner,
-                                          dtype=dtype)
+        multi_step_worker = create_worker(
+            MultiStepWorker,
+            model_name,
+            block_size,
+            num_gpu_blocks,
+            seed,
+            model_runner_cls=TP1PP1DraftModelRunner,
+            dtype=dtype)
         multi_step_worker.set_include_gpu_probs_tensor()
         worker = create_worker(Worker,
                                model_name,
@@ -771,7 +772,7 @@ def test_use_draft_model_runner_advance_step():
         block_size,
         num_gpu_blocks,
         seed,
-        model_runner_cls=TP1DraftModelRunner,
+        model_runner_cls=TP1PP1DraftModelRunner,
     )
 
     # Mock "_gpu_advance_step" to raise an exception when called.

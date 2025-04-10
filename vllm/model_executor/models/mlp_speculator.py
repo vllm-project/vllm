@@ -13,6 +13,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsPP
 
 SQRT2 = 2**0.5
 
@@ -56,7 +57,7 @@ class MLPSpeculatorLayerNorm(nn.Module):
         return x
 
 
-class MLPSpeculator(nn.Module):
+class MLPSpeculator(nn.Module, SupportsPP):
     """
     An implementation of the speculative models introduced in
     "Accelerating Production LLMs with Combined Token/Embedding

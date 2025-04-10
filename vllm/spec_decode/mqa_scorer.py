@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from vllm.distributed import get_pp_group
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import (ExecuteModelRequest, SequenceData,
                            SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
@@ -67,7 +69,40 @@ class MQAScorer(SpeculativeScorer):
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
 
-        target_sampler_output = target_sampler_output[0]
+        if get_pp_group().is_last_rank:
+            assert len(
+                target_sampler_output) == 1, "expected single-step output"
+            target_sampler_output = target_sampler_output[0]
+            # Store hidden states from target model execution, BxD.
+            sampled_token_probs = target_sampler_output.sampled_token_probs
+            logprobs = target_sampler_output.logprobs
+            sampled_token_ids = target_sampler_output.sampled_token_ids
+            hidden_states = target_sampler_output.hidden_states
+            prefill_hidden_states = target_sampler_output.prefill_hidden_states
+            tensors = {
+                "sampled_token_probs": sampled_token_probs,
+                "logprobs": logprobs,
+                "sampled_token_ids": sampled_token_ids,
+                "hidden_states": hidden_states,
+                "prefill_hidden_states": prefill_hidden_states
+            }
+            get_pp_group().broadcast_tensor_dict(
+                tensors, src=get_pp_group().world_size - 1)
+        else:
+            tensors = get_pp_group().broadcast_tensor_dict(
+                src=get_pp_group().world_size - 1)
+            sampled_token_probs = tensors["sampled_token_probs"]
+            logprobs = tensors["logprobs"]
+            sampled_token_ids = tensors["sampled_token_ids"]
+            hidden_states = tensors["hidden_states"]
+            prefill_hidden_states = tensors["prefill_hidden_states"]
+            target_sampler_output = SamplerOutput(
+                outputs=None,
+                sampled_token_probs=sampled_token_probs,
+                logprobs=logprobs,
+                sampled_token_ids=sampled_token_ids,
+                hidden_states=hidden_states,
+                prefill_hidden_states=prefill_hidden_states)
 
         k = execute_model_req.num_lookahead_slots
         bs = len(execute_model_req.seq_group_metadata_list)
