@@ -321,7 +321,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         }
 
         return ProcessorInputs(
-            prompt_text=image_token * num_images,
+            prompt_text="test_image" + image_token * num_images,
             mm_data=mm_data,
         )
 
