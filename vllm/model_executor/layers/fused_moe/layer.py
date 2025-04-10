@@ -65,8 +65,10 @@ class MoEConfig:
     ep_size: int
     ep_rank: int
 
-    in_dtype: torch.dtype = torch.bfloat16
-    out_dtype: torch.dtype = torch.bfloat16
+    in_dtype: torch.dtype
+    out_dtype: torch.dtype
+
+    # TODO: add more quantization params, blocked, per-token, etc.
     block_size: int = 128
 
 
@@ -110,10 +112,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
-class AllToAllCacheThreadSafe:
+class AllToAllCache:
 
     def __init__(self):
-        self._cache = {}
+        self._cache = weakref.WeakValueDictionary()
         self._lock = threading.RLock()  # Reentrant lock for thread safety
 
     def get_or_create(self, **kwargs):
@@ -121,60 +123,11 @@ class AllToAllCacheThreadSafe:
         key = tuple(sorted((k, v) for k, v in kwargs.items()))
 
         with self._lock:
-            if key in self._cache:
-                instance, refs = self._cache[key]
-                new_ref = weakref.ref(object(),
-                                      lambda _: self._decrement_ref_count(key))
-                refs.append(new_ref)
-                return instance
-            else:
-                # Create new instance
+            instance = self._cache.get(key)
+            if instance is None:
                 instance = pplx.AllToAll(**kwargs)
-                # Use a weakref.ref with a callback when reference is collected
-                refs = [
-                    weakref.ref(object(),
-                                lambda _: self._decrement_ref_count(key))
-                ]
-                self._cache[key] = (instance, refs)
-                return instance
-
-    def _decrement_ref_count(self, key):
-        with self._lock:
-            if key in self._cache:
-                instance, refs = self._cache[key]
-                # Remove dead references
-                refs = [ref for ref in refs if ref() is not None]
-                if not refs:
-                    # No more references, clean up the instance
-                    instance.destroy()
-                    del self._cache[key]
-                else:
-                    # Update refs
-                    self._cache[key] = (instance, refs)
-
-
-class AllToAllCache:
-
-    def __init__(self):
-        self._cache = {}
-
-    def get_or_create(self, **kwargs):
-        # Create a hashable key from the kwargs
-        key = tuple(sorted((k, v) for k, v in kwargs.items()))
-
-        if key in self._cache:
-            return self._cache[key]
-        else:
-            # Create new instance
-            print("CREATE AllToAll")
-            instance = pplx.AllToAll(**kwargs)
-            self._cache[key] = instance
+                self._cache[key] = instance
             return instance
-
-    def clear():
-        for k, v in self._cache.items():
-            v.destroy()
-        del self._cache
 
 
 # Global singleton
@@ -649,6 +602,8 @@ class FusedMoE(torch.nn.Module):
             from vllm_hpu_extension.ops import DynamicFusedMOE
             self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
+        print(f"params dtype= {params_dtype}")
+
         moe = MoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k, # ?  must be same as topk_ids.shape[1]
@@ -658,8 +613,8 @@ class FusedMoE(torch.nn.Module):
             dp_rank=self.dp_rank,
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
-            #in_dtype = 0,
-            #out_dtype = 0,
+            in_dtype = params_dtype, # this is probably not right, where to get?
+            out_dtype = params_dtype, # ditto.
         )
 
         # Note: get_quant_method will look at the layer's local_num_experts
@@ -669,10 +624,6 @@ class FusedMoE(torch.nn.Module):
         if quant_config is None:
             quant_method = UnquantizedFusedMoEMethod(moe)
         else:
-            # moe?
-            # TODO: setup dispatcher on FusedMoE.  callees of this
-            # function can grab dispatcher from there?  Or add
-            # supports_dispatcher/set_dispatcher method on FusedMoeMethodBase
             quant_method = quant_config.get_quant_method(self, prefix)
             assert isinstance(quant_method, FusedMoEMethodBase)
 
@@ -681,24 +632,47 @@ class FusedMoE(torch.nn.Module):
 
         # TODO: move to method?
         if self.dp_size > 1:
-            all_to_all = get_all_to_all(
-                max_num_tokens=MOE_DP_CHUNK_SIZE, # // moe.dp_size,
-                num_experts=moe.num_experts,
-                experts_per_token=moe.experts_per_token, # has to be same as topk_ids.shape[1]
-                rank=moe.ep_rank,
-                world_size=moe.ep_size,
-                dp_size=moe.ep_size // moe.dp_size, # dp_size actually means TP.
-                hidden_dim=moe.hidden_dim,
-                hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
-                hidden_dim_scale_bytes=0,
-            )
+            if True:
+                max_num_tokens = MOE_DP_CHUNK_SIZE # // moe.dp_size
+                world_size = moe.ep_size
+                dp_size = moe.ep_size // moe.dp_size # dp_size actually means TP.
+                rank = moe.ep_rank
 
-            if False:
+                print(f"max num = {max_num_tokens}")
+                print(f"world size = {world_size}")
+                print(f"moe ep size = {moe.ep_size}")
+                print(f"moe dp size = {moe.dp_size}")
+                print(f"dp size = {dp_size}")
+                print(f"rank= {rank}")
+
+                all_to_all = get_all_to_all(
+                    max_num_tokens=max_num_tokens,
+                    num_experts=moe.num_experts,
+                    experts_per_token=moe.experts_per_token, # topk
+                    rank=rank,
+                    world_size=world_size,
+                    dp_size=dp_size,
+                    hidden_dim=moe.hidden_dim,
+                    hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
+                    # For blocked per token: set to ceil_div(hidden_dim, block_size) * sizeof(float32)
+                    # For per-token: set to sizeof(float32)
+                    hidden_dim_scale_bytes=(
+                        0
+                        if moe.in_dtype.itemsize != 1
+                        else (
+                                (moe.hidden_dim + moe.block_size - 1)
+                                // moe.block_size
+                                * torch.float32.itemsize
+                        )
+                    )
+                )
+
                 dispatch_combine = PplxDispatchCombine(
                     all_to_all,
-                    MOE_DP_CHUNK_SIZE,
-                    moe.ep_size,
-                    moe.dp_size,
+                    max_num_tokens,
+                    world_size,
+                    dp_size,
+                    rank, # just for debugging
                     moe.in_dtype,
                 )
             else:
@@ -1061,7 +1035,7 @@ class FusedMoE(torch.nn.Module):
         num_tokens_across_dp = get_forward_context(
         ).dp_metadata.num_tokens_across_dp
 
-        #print(f"max/num/rank_num = {max_tokens_across_dp}/{num_tokens_across_dp}/{get_forward_context().dp_metadata.dp_rank_num_tokens}")
+        print(f"max/num/rank_num = {max_tokens_across_dp}/{num_tokens_across_dp}/{get_forward_context().dp_metadata.dp_rank_num_tokens}")
 
         #In this function we define two ranges:
         # 1. chunk_range - The current iteration of the loops's range over the DP world tokens
