@@ -711,6 +711,25 @@ class TPUModelRunner:
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
 
+    def _get_model_inputs(self, input_ids: torch.Tensor,
+                          mm_embeds: list[torch.Tensor]):
+        if self.is_multimodal_model:
+            # NOTE(woosuk): To unify token ids and soft tokens (vision
+            # embeddings), we always use embeddings (rather than token ids)
+            # as input to the multimodal model, even when the input is text.
+            if mm_embeds:
+                inputs_embeds = self.model.get_input_embeddings(
+                    input_ids, mm_embeds)
+            else:
+                inputs_embeds = self.model.get_input_embeddings(input_ids)
+            return None, inputs_embeds
+        else:
+            # For text-only models, we use token ids as input.
+            # While it is possible to use embeddings as input just like the
+            # multimodal models, it is not desirable for performance since
+            # then the embedding layer is not included in the CUDA graph.
+            return input_ids, None
+
     @torch.no_grad()
     def execute_model(
         self,
@@ -734,23 +753,8 @@ class TPUModelRunner:
         # Prepare inputs
         attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
             scheduler_output)
-        if self.is_multimodal_model:
-            # NOTE(woosuk): To unify token ids and soft tokens (vision
-            # embeddings), we always use embeddings (rather than token ids)
-            # as input to the multimodal model, even when the input is text.
-            if mm_embeds:
-                inputs_embeds = self.model.get_input_embeddings(
-                    self.input_ids, mm_embeds)
-            else:
-                inputs_embeds = self.model.get_input_embeddings(self.input_ids)
-            input_ids = None
-        else:
-            # For text-only models, we use token ids as input.
-            # While it is possible to use embeddings as input just like the
-            # multimodal models, it is not desirable for performance since
-            # then the embedding layer is not included in the CUDA graph.
-            input_ids = self.input_ids
-            inputs_embeds = None
+        input_ids, inputs_embeds = self._get_model_inputs(
+            self.input_ids, mm_embeds)
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
@@ -928,6 +932,7 @@ class TPUModelRunner:
 
     def _precompile_mm_encoder(self) -> None:
         # Pre-compile MM encoder for all supported data modalities.
+        hf_config = self.vllm_config.model_config.hf_config
         for mode, max_items_by_mode in \
             self.max_num_mm_items_by_modality.items():
             logger.info(
@@ -941,9 +946,29 @@ class TPUModelRunner:
                     mode, num_items)
                 # Run multimodal encoder.
                 xm.mark_step()
-                self.model.get_multimodal_embeddings(**batched_dummy_mm_inputs)
+                mm_embeds = self.model.\
+                    get_multimodal_embeddings(**batched_dummy_mm_inputs)
                 xm.mark_step()
-
+                num_patches = mm_embeds[0].shape[0]
+                items_size = num_patches * num_items
+                # NOTE (NickLucche) pre-compile `get_input_embeddings`. Ideally
+                # one would compile two sequential graphs to avoid duplicate
+                # subgraphs. But this would imply assuming the internals of
+                # `get_input_embeddings` hence for now we respect the function
+                # interface and compile for both values of `mm_embeds`.
+                for num_tokens in self.num_tokens_paddings:
+                    print("\n\nPATCHES", num_patches, num_tokens)
+                    placeholders_ids = torch.zeros((num_tokens, ),
+                                                   dtype=torch.int32)
+                    # Align placeholders and actual num mm embeddings.
+                    placeholders_ids[:items_size] = hf_config.image_token_index
+                    placeholders_ids = placeholders_ids.to(self.device)
+                    self._get_model_inputs(placeholders_ids, [])
+                    xm.mark_step()
+                    if num_tokens >= items_size:
+                        # We can fit `num_items` items in prompt.
+                        self._get_model_inputs(placeholders_ids, [mm_embeds])
+                        xm.mark_step()
             xm.wait_device_ops()
             end = time.perf_counter()
             logger.info(
