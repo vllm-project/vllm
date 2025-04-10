@@ -22,7 +22,8 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
+                                    PlaceholderRange)
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
@@ -654,13 +655,14 @@ class TPUModelRunner:
         # NOTE (NickLucche) here we diverge from logic in other runners, as we
         # assume to only have whole mm items to process. Hence we avoid the
         # intrinsic dynamism that `scatter_mm_placeholders` introduces.
-        for (req_id, input_id, _), output in zip(
+        for (req_id, input_id, pos_info), output in zip(
                 req_ids_pos,
                 encoder_outputs,
         ):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
-
+            assert pos_info.is_embed is None, "Expected all positions to be"\
+                " contiguous and embeddings."
             self.encoder_cache[req_id][input_id] = output
 
     def _gather_mm_embeddings(
@@ -696,6 +698,8 @@ class TPUModelRunner:
 
                 assert req_id in self.encoder_cache
                 assert i in self.encoder_cache[req_id]
+                assert pos_info.is_embed is None, "Expected all positions to"\
+                " be contiguous and embeddings."
                 encoder_output = self.encoder_cache[req_id][i]
                 mm_embeds.append(encoder_output)
         return mm_embeds
@@ -743,6 +747,7 @@ class TPUModelRunner:
             scheduler_output)
         input_ids, inputs_embeds = self._get_model_inputs(
             self.input_ids, mm_embeds)
+        xm.mark_step()
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
@@ -939,23 +944,39 @@ class TPUModelRunner:
                 xm.mark_step()
                 num_patches = mm_embeds[0].shape[0]
                 items_size = num_patches * num_items
-                # NOTE (NickLucche) pre-compile `get_input_embeddings`. Ideally
-                # one would compile two sequential graphs to avoid duplicate
-                # subgraphs. But this would imply assuming the internals of
-                # `get_input_embeddings` hence for now we respect the function
-                # interface and compile for both values of `mm_embeds`.
+
+                # NOTE (NickLucche) pre-compile `get_input_embeddings` when mm
+                # embeddings are present. We assume `--disable-mm-chunked`,
+                # hence only whole items can be scheduled. This implies we just
+                # need to compile when `num_items` fit the (padded) `input_ids`
                 for num_tokens in self.num_tokens_paddings:
-                    placeholders_ids = torch.zeros((num_tokens, ),
-                                                   dtype=torch.int32)
-                    # Align placeholders and actual num mm embeddings.
-                    placeholders_ids[:items_size] = hf_config.image_token_index
-                    placeholders_ids = placeholders_ids.to(self.device)
-                    self._get_model_inputs(placeholders_ids, [])
-                    xm.mark_step()
                     if num_tokens >= items_size:
-                        # We can fit `num_items` items in prompt.
-                        self._get_model_inputs(placeholders_ids, [mm_embeds])
+                        # XLA Workaround: if torch.zeros(..device) is used, XLA
+                        # compiles a scalar+expansion op, which won't match
+                        # the graph generated at runtime. CPU->TPU must be used
+                        placeholders_ids = torch.zeros(num_tokens,
+                                                       dtype=torch.int32,
+                                                       device="cpu")
+                        # Align placeholders and actual num mm_embeddings.
+                        placeholders_ids[:items_size] = \
+                            hf_config.image_token_index
+
+                        placeholders_ids = placeholders_ids.to(self.device)
+                        # Assign outputs or the graph will be cut short.
+                        a, b = self._get_model_inputs(placeholders_ids,
+                                                      [mm_embeds])
                         xm.mark_step()
+
+            # Pre-compile `get_input_embeddings` when mm_embeddings are not
+            # present. Chunk is only made of text, no mm_placeholders.
+            for num_tokens in self.num_tokens_paddings:
+                placeholders_ids = torch.zeros(num_tokens,
+                                               dtype=torch.int32,
+                                               device="cpu")
+                placeholders_ids = placeholders_ids.to(self.device)
+                a, b = self._get_model_inputs(placeholders_ids, [])
+                xm.mark_step()
+
             xm.wait_device_ops()
             end = time.perf_counter()
             logger.info(
@@ -1175,7 +1196,8 @@ class TPUModelRunner:
     def get_input_embeddings(self, *args, **kwargs):
         return self.model.get_input_embeddings(*args, **kwargs)
 
-    def _get_mm_dummy_batch(self, modality: str, batch_size: int):
+    def _get_mm_dummy_batch(self, modality: str,
+                            batch_size: int) -> BatchedTensorInputs:
         # Dummy data for pre-compiling multimodal models.
         dummy_request_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
@@ -1247,7 +1269,6 @@ def _get_token_paddings(min_token_size: int, max_token_size: int,
             if num >= max_token_size:
                 break
             num *= 2
-
     else:
         logger.info("Using incremental token paddings:")
         while num <= padding_gap:
