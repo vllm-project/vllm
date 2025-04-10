@@ -172,7 +172,7 @@ The `tool_chat_template_llama3_json.jinja` file contains the "official" Llama ch
 it works better with vLLM.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
-For Llama 4 use `examples/tool_chat_template_llama4_json.jinja`.
+For Llama 4 use `--tool-call-parser llama4_json examples/tool_chat_template_llama4_json.jinja`.
 
 #### IBM Granite
 
