@@ -101,20 +101,23 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     "scaling factors are available in the fp8 checkpoint.")
 
         if layer.q_scale > 0.0:
-            q_scale = layer.q_scale.tolist()
+            q_scale = layer.q_scale
             if current_platform.is_fp8_fnuz():
                 q_scale *= 2
             layer.calculate_kv_scales = False
         else:
             q_scale = 1.0
         if layer.prob_scale > 0.0:
-            prob_scale = layer.prob_scale.to("cpu").tolist()
+            prob_scale = layer.prob_scale
             if current_platform.is_fp8_fnuz():
                 prob_scale *= 2
         else:
             prob_scale = 1.0
 
-        if not isinstance(q_scale, float) or not isinstance(prob_scale, float):
+        is_singleton_float = lambda x: isinstance(x, float) or isinstance(
+            x, torch.Tensor) and x.numel() == 1
+        if not is_singleton_float(q_scale) or not is_singleton_float(
+                prob_scale):
             raise ValueError("Only support per-tensor scaling factor"
                              "for fp8-quantized Q/prob")
 
