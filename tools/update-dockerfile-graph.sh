@@ -69,6 +69,7 @@ if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   NEW_HASH=$(sha256sum "$TARGET_GRAPH_FILE")
   if [ "$NEW_HASH" != "$OLD_HASH" ]; then
     echo "Graph has changed. Please stage the updated file: $TARGET_GRAPH_FILE"
+    exit 1
   else
     echo "No changes in graph detected."
   fi
