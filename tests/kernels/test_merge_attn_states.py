@@ -49,7 +49,7 @@ NUM_QUERY_HEADS = [4, 8, 16, 32, 48, 64]
 HEAD_SIZES = [32, 48, 64, 96, 128, 256]
 DTYPES = [torch.float32, torch.half, torch.bfloat16]
 
-all_case_info = []
+all_case_info: list[tuple] = []
 
 
 def generate_markdown_table():
