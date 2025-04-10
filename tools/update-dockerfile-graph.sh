@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# Make this script more verbose for debugging
+set -x
+
 # Check if docker/Dockerfile is staged for commit
 if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   echo "docker/Dockerfile has changed, updating dependency graph..."
@@ -17,6 +20,7 @@ if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   fi
   
   # Generate Dockerfile graph
+  echo "Running dockerfilegraph tool..."
   docker run \
     --rm \
     --user "$(id -u):$(id -g)" \
@@ -29,8 +33,24 @@ if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
     --filename docker/Dockerfile \
     --legend
   
-  # Move the generated file to the correct location
-  mv docker/Dockerfile.png docs/source/assets/contributing/dockerfile-stages-dependency.png
+  echo "Finding generated PNG file..."
+  # Check for Dockerfile.png in the root directory (most likely location)
+  if [ -f "./Dockerfile.png" ]; then
+    echo "Found Dockerfile.png in root directory"
+    cp "./Dockerfile.png" docs/source/assets/contributing/dockerfile-stages-dependency.png
+  else
+    # Try to find it elsewhere
+    DOCKERFILE_PNG=$(find . -name "Dockerfile.png" -type f | head -1)
+    
+    if [ -n "$DOCKERFILE_PNG" ]; then
+      echo "Found generated file at: $DOCKERFILE_PNG"
+      cp "$DOCKERFILE_PNG" docs/source/assets/contributing/dockerfile-stages-dependency.png
+    else
+      echo "Error: Could not find the generated PNG file"
+      find . -name "*.png" -type f -mmin -5
+      exit 1
+    fi
+  fi
   
   # Check if the graph has changed
   if [ -f "/tmp/old_hash.txt" ]; then
