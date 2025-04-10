@@ -340,6 +340,7 @@ class ImageProcessor(BaseImageProcessor):
         )
         self.image_grid_pinpoints = image_grid_pinpoints
         self.patch_size = patch_size
+        self.image_token = "<image>"
 
     def preprocess(self,
                     images,
