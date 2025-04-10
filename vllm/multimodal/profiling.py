@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Generic, NamedTuple, Optional, TypeVar, cast
@@ -60,14 +60,24 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
 
         self.info = info
 
-    @abstractmethod
+    # TODO: @abstractmethod after transition
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         """
         Build the text input corresponding to :code:`mm_counts`.
         """
-        raise NotImplementedError
+        if (type(self).get_dummy_processor_inputs ==
+                BaseDummyInputsBuilder.get_dummy_processor_inputs):
+            raise NotImplementedError
 
-    @abstractmethod
+        logger.warning_once("`get_dummy_processor_inputs` has been split up "
+                            "into `get_dummy_text` and `get_dummy_mm_data`. "
+                            "These two methods will be marked as abstract "
+                            "in an upcoming release.")
+
+        seq_len = self.info.ctx.model_config.max_model_len
+        return self.get_dummy_processor_inputs(seq_len, mm_counts).prompt_text
+
+    # TODO: @abstractmethod after transition
     def get_dummy_mm_data(
         self,
         seq_len: int,

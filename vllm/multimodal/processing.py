@@ -1051,12 +1051,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                  *,
                  cache: Optional[ProcessingCache] = None,
                  enable_sanity_checks: bool = True) -> None:
-        if get_repls := getattr(self, "_get_prompt_replacements", None):
-            logger.warning_once("`_get_prompt_replacements` has been renamed "
-                                "to `_get_prompt_updates`. The old name will "
-                                "be removed in an upcoming release.")
-            self._get_prompt_updates = get_repls  # type: ignore[method-assign]
-
         super().__init__()
 
         self.info = info
