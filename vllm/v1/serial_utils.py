@@ -84,6 +84,8 @@ class MsgpackDecoder:
 
     def decode(self, bufs: Union[bytestr, Sequence[bytestr]]) -> Any:
         if isinstance(bufs, (bytes, bytearray, memoryview, zmq.Frame)):
+            # TODO - This check can become `isinstance(bufs, bytestr)`
+            # as of Python 3.10.
             return self.decoder.decode(bufs)
 
         self.aux_buffers = bufs
