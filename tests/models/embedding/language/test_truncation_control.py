@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 
-from vllm.entrypoints.llm import LLM
-
-llm = LLM(model="sentence-transformers/all-MiniLM-L12-v2", task="embed")
+MODEL_NAME = "sentence-transformers/all-MiniLM-L12-v2"
 max_model_len = 128
 
 input_str = """Immerse yourself in the enchanting chronicle of calculus, a 
@@ -47,41 +45,49 @@ input_str = """Immerse yourself in the enchanting chronicle of calculus, a
     the essence of change and motion has been critical in driving innovation."""
 
 
-def test_smaller_truncation_size(llm=llm,
-                                 input_str=input_str,
-                                 truncate_prompt_tokens=10):
+def test_smaller_truncation_size(vllm_runner,
+                                 model_name=MODEL_NAME,
+                                 input_str=input_str):
 
-    llm_output = llm.encode(input_str,
-                            truncate_prompt_tokens=truncate_prompt_tokens)
+    truncate_prompt_tokens = 10
 
-    prompt_tokens = llm_output[0].prompt_token_ids
+    with vllm_runner(model_name, task="embed",
+                     max_model_len=max_model_len) as vllm_model:
+        vllm_output = vllm_model.model.encode(
+            input_str, truncate_prompt_tokens=truncate_prompt_tokens)
+
+    prompt_tokens = vllm_output[0].prompt_token_ids
 
     assert len(prompt_tokens) == truncate_prompt_tokens
 
 
-def test_max_truncation_size(llm=llm,
-                             input_str=input_str,
-                             truncate_prompt_tokens=-1,
-                             max_model_len=max_model_len):
+def test_max_truncation_size(vllm_runner,
+                             model_name=MODEL_NAME,
+                             input_str=input_str):
+    truncate_prompt_tokens = -1
 
-    llm_output = llm.encode(input_str,
-                            truncate_prompt_tokens=truncate_prompt_tokens)
+    with vllm_runner(model_name, task="embed",
+                     max_model_len=max_model_len) as vllm_model:
+        vllm_output = vllm_model.model.encode(
+            input_str, truncate_prompt_tokens=truncate_prompt_tokens)
 
-    prompt_tokens = llm_output[0].prompt_token_ids
+    prompt_tokens = vllm_output[0].prompt_token_ids
 
     assert len(prompt_tokens) == max_model_len
 
 
-def test_bigger_truncation_size(llm=llm,
-                                input_str=input_str,
-                                max_model_len=max_model_len):
+def test_bigger_truncation_size(vllm_runner,
+                                model_name=MODEL_NAME,
+                                input_str=input_str):
 
     truncate_prompt_tokens = max_model_len + 1
 
-    with pytest.raises(ValueError):
-        assert str(
-            llm.encode(input_str,
-                       truncate_prompt_tokens=truncate_prompt_tokens).detail
-        ) == f"""truncate_prompt_tokens value ({truncate_prompt_tokens})
+    with pytest.raises(ValueError), vllm_runner(
+            model_name, task="embed",
+            max_model_len=max_model_len) as vllm_model:
+
+        assert str(llm_output=vllm_model.model.encode(
+            input_str, truncate_prompt_tokens=truncate_prompt_tokens
+        )) == f"""truncate_prompt_tokens value ({truncate_prompt_tokens})
                 is greater than max_model_len ({max_model_len}).
                 Please, select a smaller truncation size."""
