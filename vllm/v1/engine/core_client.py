@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
-import contextlib
 import queue
 import uuid
 import weakref
@@ -317,8 +316,7 @@ class BackgroundResources:
             core_engine.close()
 
         if self.output_queue_task is not None:
-            with contextlib.suppress(Exception):
-                self.output_queue_task.cancel()
+            self.output_queue_task.cancel()
 
         # ZMQ context termination can hang if the sockets
         # aren't explicitly closed first.

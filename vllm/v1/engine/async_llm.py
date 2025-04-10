@@ -110,8 +110,7 @@ class AsyncLLM(EngineClient):
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
-            self.output_handler = asyncio.create_task(
-                self._run_output_handler())
+            self._run_output_handler()
         except RuntimeError:
             pass
 
@@ -170,6 +169,9 @@ class AsyncLLM(EngineClient):
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
         )
+
+    def __del__(self):
+        self.shutdown()
 
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
@@ -270,9 +272,7 @@ class AsyncLLM(EngineClient):
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
-            if self.output_handler is None:
-                self.output_handler = asyncio.create_task(
-                    self._run_output_handler())
+            self._run_output_handler()
 
             q = await self.add_request(
                 request_id,
@@ -324,55 +324,69 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
 
-    async def _run_output_handler(self):
+    def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
-        try:
-            while True:
-                # 1) Pull EngineCoreOutputs from the EngineCore.
-                outputs = await self.engine_core.get_output_async()
-                num_outputs = len(outputs.outputs)
+        if self.output_handler is not None:
+            return
 
-                iteration_stats = IterationStats() if (
-                    self.log_stats and num_outputs) else None
+        # Ensure that the task doesn't have a circular ref back to the AsyncLLM
+        # object, or else it won't be garbage collected and cleaned up properly.
+        engine_core = self.engine_core
+        output_processor = self.output_processor
+        log_stats = self.log_stats
+        stat_loggers = self.stat_loggers if log_stats else None
 
-                # Split outputs into chunks of at most
-                # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
-                # event loop for too long.
-                if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
-                    slices = (outputs.outputs, )
-                else:
-                    slices = np.array_split(
-                        outputs.outputs,
-                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
+        async def output_handler():
+            try:
+                while True:
+                    # 1) Pull EngineCoreOutputs from the EngineCore.
+                    outputs = await engine_core.get_output_async()
+                    num_outputs = len(outputs.outputs)
 
-                for i, outputs_slice in enumerate(slices):
-                    # 2) Process EngineCoreOutputs.
-                    processed_outputs = self.output_processor.process_outputs(
-                        outputs_slice, outputs.timestamp, iteration_stats)
-                    # NOTE: RequestOutputs are pushed to their queues.
-                    assert not processed_outputs.request_outputs
+                    iteration_stats = IterationStats() if (
+                        log_stats and num_outputs) else None
 
-                    # Allow other asyncio tasks to run between chunks
-                    if i + 1 < len(slices):
-                        await asyncio.sleep(0)
+                    # Split outputs into chunks of at most
+                    # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
+                    # event loop for too long.
+                    if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
+                        slices = (outputs.outputs, )
+                    else:
+                        slices = np.array_split(
+                            outputs.outputs,
+                            cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
 
-                    # 3) Abort any reqs that finished due to stop strings.
-                    await self.engine_core.abort_requests_async(
-                        processed_outputs.reqs_to_abort)
+                    for i, outputs_slice in enumerate(slices):
+                        # 2) Process EngineCoreOutputs.
+                        processed_outputs = output_processor.process_outputs(
+                            outputs_slice, outputs.timestamp, iteration_stats)
+                        # NOTE: RequestOutputs are pushed to their queues.
+                        assert not processed_outputs.request_outputs
 
-                # 4) Logging.
-                # TODO(rob): make into a coroutine and launch it in
-                # background thread once Prometheus overhead is non-trivial.
-                self._record_stats(
-                    engine_index=outputs.engine_index,
-                    scheduler_stats=outputs.scheduler_stats,
-                    iteration_stats=iteration_stats,
-                )
+                        # Allow other asyncio tasks to run between chunks
+                        if i + 1 < len(slices):
+                            await asyncio.sleep(0)
 
-        except Exception as e:
-            logger.exception("AsyncLLM output_handler failed.")
-            self.output_processor.propagate_error(e)
+                        # 3) Abort any reqs that finished due to stop strings.
+                        await engine_core.abort_requests_async(
+                            processed_outputs.reqs_to_abort)
+
+                    # 4) Logging.
+                    # TODO(rob): make into a coroutine and launch it in
+                    # background thread once Prometheus overhead is non-trivial.
+                    if stat_loggers:
+                        assert outputs.scheduler_stats is not None
+                        AsyncLLM._record_stats(
+                            stat_loggers[outputs.engine_index],
+                            scheduler_stats=outputs.scheduler_stats,
+                            iteration_stats=iteration_stats,
+                        )
+            except Exception as e:
+                logger.exception("AsyncLLM output_handler failed.")
+                output_processor.propagate_error(e)
+
+        self.output_handler = asyncio.create_task(output_handler())
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
@@ -383,17 +397,15 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Aborted request %s.", request_id)
 
+    @staticmethod
     def _record_stats(
-        self,
-        scheduler_stats: Optional[SchedulerStats],
+        stat_loggers: list[StatLoggerBase],
+        scheduler_stats: SchedulerStats,
         iteration_stats: Optional[IterationStats],
-        engine_index: int = 0,
     ):
-        if not self.log_stats:
-            return
-
-        assert scheduler_stats is not None
-        for stat_logger in self.stat_loggers[engine_index]:
+        """static so that it can be used from the output_handler task
+        without a circular ref to AsyncLLM."""
+        for stat_logger in stat_loggers:
             stat_logger.record(scheduler_stats=scheduler_stats,
                                iteration_stats=iteration_stats)
 
