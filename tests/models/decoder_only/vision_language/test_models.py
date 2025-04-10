@@ -160,17 +160,32 @@ VLM_TEST_SETTINGS = {
     ),
     "aya_vision": VLMTestInfo(
         models=["CohereForAI/aya-vision-8b"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        test_type=(VLMTestType.IMAGE),
         prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>", # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts({
             "stop_sign": "<image>What's the content in the center of the image?",  # noqa: E501
             "cherry_blossom": "<image>What is the season?",  # noqa: E501
         }),
         multi_image_prompt="<image><image>Describe the two images in detail.",  # noqa: E501
-        max_model_len=8192,
+        max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}}
+        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
+    ),
+    "aya_vision-multi_image": VLMTestInfo(
+        models=["CohereForAI/aya-vision-8b"],
+        test_type=(VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>", # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<image>What's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "<image>What is the season?",  # noqa: E501
+        }),
+        multi_image_prompt="<image><image>Describe the two images in detail.",  # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "blip2": VLMTestInfo(
         # TODO: Change back to 2.7b once head_dim = 80 is supported
@@ -303,6 +318,21 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
     ),
+    "llama4": VLMTestInfo(
+        models=["meta-llama/Llama-4-Scout-17B-16E-Instruct"],
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{img_prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n", # noqa: E501
+        img_idx_to_prompt=lambda _: "<|image|>",
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        distributed_executor_backend="mp",
+        image_size_factors=[(.25, 0.5, 1.0)],
+        hf_model_kwargs={"device_map": "auto"},
+        max_model_len=8192,
+        max_num_seqs=4,
+        dtype="bfloat16",
+        auto_cls=AutoModelForImageTextToText,
+        tensor_parallel_size=4,
+        marks=multi_gpu_marks(num_gpus=4),
+    ),
     "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         test_type=(VLMTestType.IMAGE, VLMTestType.CUSTOM_INPUTS),
@@ -395,23 +425,20 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
     ),
-    # Tests for phi3v currently live in another file because of a bug in
-    # transformers. Once this issue is fixed, we can enable them here instead.
-    # https://github.com/huggingface/transformers/issues/34307
-    # "phi3v": VLMTestInfo(
-    #     models=["microsoft/Phi-3.5-vision-instruct"],
-    #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-    #     prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
-    #     img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
-    #     max_model_len=4096,
-    #     max_num_seqs=2,
-    #     task="generate",
-    #     # use eager mode for hf runner since phi3v didn't work with flash_attn
-    #     hf_model_kwargs={"_attn_implementation": "eager"},
-    #     use_tokenizer_eos=True,
-    #     vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
-    #     num_logprobs=10,
-    # ),
+    "phi3v": VLMTestInfo(
+        models=["microsoft/Phi-3.5-vision-instruct"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        task="generate",
+        # use eager mode for hf runner since phi3v didn't work with flash_attn
+        hf_model_kwargs={"_attn_implementation": "eager"},
+        use_tokenizer_eos=True,
+        vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
+        num_logprobs=10,
+    ),
     "pixtral_hf": VLMTestInfo(
         models=["nm-testing/pixtral-12b-FP8-dynamic"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -462,6 +489,16 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.skyworkr1v_patch_hf_runner,
         marks=[large_gpu_mark(min_gb=80)],
+    ),
+    "smolvlm": VLMTestInfo(
+        models=["HuggingFaceTB/SmolVLM2-2.2B-Instruct"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt:f"<|im_start|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        hf_output_post_proc=model_utils.smolvlm_trunc_hf_output,
     ),
     ### Tensor parallel / multi-gpu broadcast tests
     "chameleon-broadcast": VLMTestInfo(

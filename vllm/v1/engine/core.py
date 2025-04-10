@@ -31,7 +31,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
-from vllm.v1.engine.mm_input_cache import MMInputCacheServer
+from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
@@ -105,7 +105,7 @@ class EngineCore:
         )
 
         # Setup MM Input Mapper.
-        self.mm_input_cache_server = MMInputCacheServer(
+        self.mm_input_cache_server = MirroredProcessingCache(
             vllm_config.model_config)
 
         # Setup batch queue for pipeline parallelism.
@@ -173,7 +173,7 @@ class EngineCore:
             # anything that has a hash must have a HIT cache entry here
             # as well.
             assert request.mm_inputs is not None
-            request.mm_inputs = self.mm_input_cache_server.get_and_update(
+            request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
@@ -490,14 +490,14 @@ class EngineCoreProc(EngineCore):
 
             while True:
                 # (RequestType, RequestData)
-                type_frame, data_frame = socket.recv_multipart(copy=False)
+                type_frame, *data_frames = socket.recv_multipart(copy=False)
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                 # Deserialize the request data.
                 decoder = add_request_decoder if (
                     request_type
                     == EngineCoreRequestType.ADD) else generic_decoder
-                request = decoder.decode(data_frame.buffer)
+                request = decoder.decode(data_frames)
 
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait((request_type, request))
@@ -514,8 +514,8 @@ class EngineCoreProc(EngineCore):
             while True:
                 outputs = self.output_queue.get()
                 outputs.engine_index = engine_index
-                encoder.encode_into(outputs, buffer)
-                socket.send(buffer, copy=False)
+                buffers = encoder.encode_into(outputs, buffer)
+                socket.send_multipart(buffers, copy=False)
 
 
 ENGINE_PAUSED_OUTPUTS = EngineCoreOutputs(engine_paused=True)
