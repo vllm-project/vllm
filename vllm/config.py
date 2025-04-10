@@ -1431,44 +1431,49 @@ class LoadFormat(str, enum.Enum):
     FASTSAFETENSORS = "fastsafetensors"
 
 
+@config
 @dataclass
 class LoadConfig:
-    """
-        download_dir: Directory to download and load the weights, default to the
-            default cache directory of huggingface.
-        load_format: The format of the model weights to load:
-            "auto" will try to load the weights in the safetensors format and
-                fall back to the pytorch bin format if safetensors format is
-                not available.
-            "pt" will load the weights in the pytorch bin format.
-            "safetensors" will load the weights in the safetensors format.
-            "npcache" will load the weights in pytorch format and store
-                a numpy cache to speed up the loading.
-            "dummy" will initialize the weights with random values, which is
-                mainly for profiling.
-            "tensorizer" will use CoreWeave's tensorizer library for
-                fast weight loading.
-            "bitsandbytes" will load nf4 type weights.
-            "sharded_state" will load weights from pre-sharded checkpoint files,
-                supporting efficient loading of tensor-parallel models.
-            "gguf" will load weights from GGUF format files.
-            "mistral" will load weights from consolidated safetensors files used
-                by Mistral models.
-            "runai_streamer" will load weights from RunAI streamer format files.
-        model_loader_extra_config: The extra config for the model loader.
-        ignore_patterns: The list of patterns to ignore when loading the model.
-            Default to "original/**/*" to avoid repeated loading of llama's
-            checkpoints.
-        use_tqdm_on_load: Whether to enable tqdm for showing progress bar during
-            loading. Default to True
-    """
+    """Configuration for loading the model weights."""
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    """
+    The format of the model weights to load:
+
+    - "auto" will try to load the weights in the safetensors format and fall
+    back to the pytorch bin format if safetensors format is not available.
+    - "pt" will load the weights in the pytorch bin format.
+    - "safetensors" will load the weights in the safetensors format.
+    - "npcache" will load the weights in pytorch format and store a numpy cache
+    to speed up the loading.
+    - "dummy" will initialize the weights with random values, which is mainly
+    for profiling.
+    - "tensorizer" will use CoreWeave's tensorizer library for fast weight
+    loading. See the Tensorize vLLM Model script in the Examples section for
+    more information.
+    - "runai_streamer" will load the Safetensors weights using Run:ai Model
+    Streamer.
+    - "bitsandbytes" will load the weights using bitsandbytes quantization.
+    - "sharded_state" will load weights from pre-sharded checkpoint files,
+    supporting efficient loading of tensor-parallel models.
+    - "gguf" will load weights from GGUF format files (details specified in
+    https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
+    - "mistral" will load weights from consolidated safetensors files used by
+    Mistral models.
+    """
     download_dir: Optional[str] = None
-    model_loader_extra_config: Optional[Union[str, dict]] = field(
-        default_factory=dict)
+    """Directory to download and load the weights, default to the default
+    cache directory of Hugging Face."""
+    model_loader_extra_config: Optional[Union[str, dict]] = None
+    """Extra config for model loader. This will be passed to the model loader
+    corresponding to the chosen load_format. This should be a JSON string that
+    will be parsed into a dictionary."""
     ignore_patterns: Optional[Union[list[str], str]] = None
+    """The list of patterns to ignore when loading the model. Default to
+    "original/**/*" to avoid repeated loading of llama's checkpoints."""
     use_tqdm_on_load: bool = True
+    """Whether to enable tqdm for showing progress bar when loading model
+    weights."""
 
     def compute_hash(self) -> str:
         """
