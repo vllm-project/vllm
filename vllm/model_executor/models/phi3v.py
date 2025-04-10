@@ -32,7 +32,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 # yapf conflicts with isort for this block
@@ -42,7 +43,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PlaceholderFeaturesInfo,
                                         PromptReplacement, PromptUpdate)
 # yapf: enable
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -343,30 +344,30 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
 
 class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        hf_processor = self.info.get_hf_processor()
+        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
+
+        return "".join(image_tokens[:num_images])
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        hf_processor = self.info.get_hf_processor()
-        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
-
-        return ProcessorInputs(
-            prompt_text="".join(image_tokens[:num_images]),
-            mm_data=mm_data,
-        )
 
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):

@@ -21,13 +21,14 @@ from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
                                              BartScaledWordEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
-from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
+from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptIndexTargets, PromptInsertion,
                                         PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
@@ -772,26 +773,24 @@ class Florence2ProcessingInfo(BaseProcessingInfo):
 class Florence2DummyInputsBuilder(
         BaseDummyInputsBuilder[Florence2ProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width = target_height = self.info.get_hf_config().projection_dim
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="",
-            mm_data=mm_data,
-        )
 
 
 class Florence2MultiModalProcessor(

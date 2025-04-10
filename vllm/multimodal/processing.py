@@ -1051,12 +1051,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                  *,
                  cache: Optional[ProcessingCache] = None,
                  enable_sanity_checks: bool = True) -> None:
-        if get_repls := getattr(self, "_get_prompt_replacements", None):
-            logger.warning_once("`_get_prompt_replacements` has been renamed "
-                                "to `_get_prompt_updates`. The old name will "
-                                "be removed in an upcoming release.")
-            self._get_prompt_updates = get_repls  # type: ignore[method-assign]
-
         super().__init__()
 
         self.info = info
@@ -1274,13 +1268,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         mm_counts = mm_items.get_all_counts()
 
-        dummy_inputs = self.dummy_inputs.get_dummy_processor_inputs(
-            self.info.ctx.model_config.max_model_len,
-            mm_counts,
-        )
-
         _, mm_kwargs, _ = self._apply_hf_processor_text_mm(
-            prompt_text=dummy_inputs.prompt_text,
+            prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )
