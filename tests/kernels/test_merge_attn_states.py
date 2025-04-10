@@ -57,13 +57,21 @@ def generate_markdown_table():
     table_header = ("| tokens | heads | headsize | dtype "
                     "| device | torch | triton | cuda | speedup |")
     table_separator = "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+
+    def shortly_dtype(dtype: torch.dtype) -> str:
+        return str(dtype).removeprefix("torch.")
+
+    def shortly_device(device: str) -> str:
+        return device.removeprefix("NVIDIA").strip()
+
     print(table_header)
     print(table_separator)
     for info in all_case_info:
         (num_tokens, num_heads, head_size, dtype, device,
          avg_time_torch_kernel, avg_time_triton_kernel, avg_time_cuda_kernel,
          performance_improved) = info
-        dtype = str(dtype).replace("torch.", "")
+        dtype = shortly_dtype(dtype)
+        device = shortly_device(device)
         print(f"| {num_tokens} | {num_heads} | {head_size} "
               f"| {dtype} | {device} | {avg_time_torch_kernel:.5f}ms "
               f"| {avg_time_triton_kernel:.5f}ms "

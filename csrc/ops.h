@@ -58,8 +58,7 @@ void merge_attn_states(torch::Tensor& output,
                        const torch::Tensor& prefix_output,
                        const torch::Tensor& prefix_lse,
                        const torch::Tensor& suffix_output,
-                       const torch::Tensor& suffix_lse,
-                       const bool disable_loop_over_head);
+                       const torch::Tensor& suffix_lse);
 #endif
 
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
