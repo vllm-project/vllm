@@ -346,18 +346,6 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
         return mm_limits
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        mm_max_tokens = {"image": self.get_max_image_tokens()}
-        if self.get_model_version() == (2, 6):
-            mm_max_tokens["video"] = self.get_max_video_tokens(
-                seq_len, mm_counts)
-
-        return mm_max_tokens
-
     def get_slice_image_placeholder(
         self,
         image_size: ImageSize,

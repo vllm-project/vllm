@@ -408,13 +408,6 @@ class AriaProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
-
     def get_num_image_tokens(self) -> int:
         hf_config = self.get_hf_config()
         return max(hf_config.projector_patch_to_query_dict.values())

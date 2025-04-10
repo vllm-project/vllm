@@ -68,7 +68,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
     ) -> ProcessorInputs:
         """
         Build the input which, after processing, results in
-        :code:`self.info.get_mm_max_tokens_per_item()` placeholder tokens.
+        the maximum possible number of placeholder tokens.
         """
         raise NotImplementedError
 
@@ -152,8 +152,11 @@ class MultiModalProfiler(Generic[_I]):
     def _get_dummy_mm_inputs(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        mm_counts: Optional[Mapping[str, int]] = None,
     ) -> MultiModalInputs:
+        if mm_counts is None:
+            mm_counts = self.get_mm_limits()
+
         factory = self.dummy_inputs
         processor_inputs = factory.get_dummy_processor_inputs(
             seq_len, mm_counts)
@@ -164,53 +167,23 @@ class MultiModalProfiler(Generic[_I]):
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         )
 
-    def get_and_validate_mm_inputs(
+    def _get_mm_num_tokens(
         self,
-        seq_len: int,
-        mm_counts: Optional[Mapping[str, int]] = None,
-    ) -> tuple[MultiModalInputs, Mapping[str, int]]:
-        if mm_counts is None:
-            mm_counts = self.get_mm_limits()
-
-        info = self.processing_info
-        mm_max_tokens_per_item = info.get_mm_max_tokens_per_item(
-            seq_len, mm_counts)
-
-        if mm_counts.keys() - mm_max_tokens_per_item.keys():
-            raise AssertionError(
-                "The keys returned by `get_supported_mm_limits` "
-                f"({set(mm_counts.keys())}) should be a subset of those "
-                "returned by `get_mm_max_tokens_per_item` "
-                f"({set(mm_max_tokens_per_item.keys())})")
-
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        mm_inputs: MultiModalInputs,
+    ) -> Mapping[str, int]:
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
-        total_placeholders_by_modality = {
+        return {
             modality: sum(item.get_num_embeds() for item in placeholders)
             for modality, placeholders in placeholders_by_modality.items()
         }
-        expected_placeholders_by_modality = {
-            modality: mm_max_tokens_per_item[modality] * mm_counts[modality]
-            for modality in placeholders_by_modality
-        }
-        if total_placeholders_by_modality != expected_placeholders_by_modality:
-            raise AssertionError(
-                f"The processed dummy data has a total of "
-                f"{total_placeholders_by_modality} placeholder tokens, which "
-                f"is not the expected {expected_placeholders_by_modality} "
-                "tokens.")
-        return mm_inputs, total_placeholders_by_modality
 
     def get_encoder_dummy_data(
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
     ) -> DummyEncoderData:
-        (
-            mm_inputs,
-            total_placeholders_by_modality,
-        ) = self.get_and_validate_mm_inputs(seq_len, mm_counts)
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
 
         # For encoder-decoder models, use encoder prompt token ids instead of
@@ -232,7 +205,7 @@ class MultiModalProfiler(Generic[_I]):
                 " is too short "
                 "to hold the multi-modal embeddings in the worst case "
                 f"({total_len} tokens in total, out of which "
-                f"{total_placeholders_by_modality} are reserved for "
+                f"{self._get_mm_num_tokens(mm_inputs)} are reserved for "
                 "multi-modal embeddings). This may cause certain "
                 "multi-modal inputs to fail during inference, even when "
                 "the input text is short. To avoid this, you should "
@@ -246,10 +219,7 @@ class MultiModalProfiler(Generic[_I]):
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
     ) -> DummyDecoderData:
-        (
-            mm_inputs,
-            total_placeholders_by_modality,
-        ) = self.get_and_validate_mm_inputs(seq_len, mm_counts)
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
@@ -263,7 +233,7 @@ class MultiModalProfiler(Generic[_I]):
                 "is too short "
                 "to hold the multi-modal embeddings in the worst case "
                 f"({total_len} tokens in total, out of which "
-                f"{total_placeholders_by_modality} are reserved for "
+                f"{self._get_mm_num_tokens(mm_inputs)} are reserved for "
                 "multi-modal embeddings). This may cause certain "
                 "multi-modal inputs to fail during inference, even when "
                 "the input text is short. To avoid this, you should "
@@ -278,3 +248,12 @@ class MultiModalProfiler(Generic[_I]):
             multi_modal_data=mm_inputs["mm_kwargs"],
             multi_modal_placeholders=mm_inputs["mm_placeholders"],
         )
+
+    def get_mm_max_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
+    ) -> Mapping[str, int]:
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+
+        return self._get_mm_num_tokens(mm_inputs)

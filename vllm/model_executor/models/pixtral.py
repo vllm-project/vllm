@@ -167,13 +167,6 @@ class PixtralProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
     def get_vision_config(
         self,
         processor: Optional[PixtralProcessorAdapter] = None,
@@ -206,14 +199,6 @@ class PixtralProcessingInfo(BaseProcessingInfo):
         max_image_size = image_processor.mm_config.max_image_size
 
         return ImageSize(width=max_image_size, height=max_image_size)
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-        )
 
 
 class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
@@ -937,14 +922,6 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
             image_height=image_height,
         )
         return ncols * nrows
-
-    def get_max_image_tokens(self) -> int:
-        image_size = self.get_image_size()
-
-        return self.get_num_image_tokens(
-            image_width=image_size,
-            image_height=image_size,
-        )
 
     def get_image_size(self) -> int:
         return self.vision_config.image_size

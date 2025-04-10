@@ -34,10 +34,6 @@ class VisionEncoderInfo(ABC, Generic[_C]):
         raise NotImplementedError
 
     @abstractmethod
-    def get_max_image_tokens(self) -> int:
-        raise NotImplementedError
-
-    @abstractmethod
     def get_image_size(self) -> int:
         raise NotImplementedError
 
