@@ -240,7 +240,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         return num_tokens_to_check - num_computed_tokens
 
-    def update_state_after_alloc(self, request: Request,
+    def update_state_after_alloc(self, request: "Request",
                                  num_allocated_blocks: int):
         """
         Update KVConnector state after temporary buffer alloc.

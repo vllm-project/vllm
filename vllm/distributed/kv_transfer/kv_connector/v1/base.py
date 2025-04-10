@@ -166,7 +166,7 @@ class KVConnectorBase_V1(ABC):
         pass
 
     @abstractmethod
-    def update_state_after_alloc(self, request: Request,
+    def update_state_after_alloc(self, request: "Request",
                                  num_allocated_blocks: int):
         """
         Update KVConnector state after temporary buffer alloc.

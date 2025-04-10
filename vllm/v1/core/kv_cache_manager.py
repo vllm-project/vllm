@@ -393,7 +393,7 @@ class KVCacheManager:
         request: "Request",
         computed_blocks: list["KVCacheBlock"],
         num_computed_tokens: int,
-        kv_connector: KVConnectorBase_V1,
+        kv_connector: "KVConnectorBase_V1",
     ) -> tuple[list["KVCacheBlock"], int]:
 
         # Check for cache hit.
