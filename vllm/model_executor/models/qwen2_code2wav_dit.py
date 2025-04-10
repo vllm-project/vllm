@@ -526,7 +526,7 @@ class Qwen2Code2wav(torch.nn.Module):
         prev_generated: torch.Tensor,
         generated: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if start_index == 0:
+        if i == 0:
             generated = generated.to(torch.float32)[:, :self.chunk_size, :]
             mel = generated
         elif finished:
@@ -536,12 +536,13 @@ class Qwen2Code2wav(torch.nn.Module):
                 [prev_generated[:, -self.future_size * 2:, :], generated],
                 dim=1)
         else:
-            generated = generated.to(
-                torch.float32)[:,
-                               self.past_cache_size:-self.future_cache_size, :]
-            mel = torch.cat(
-                [prev_generated[:, -self.future_size * 2:, :], generated],
-                dim=1)
+            # Note that self.chunk_size == self.past_cache_size, so the following branch
+            # can be simplified. But for clearness, we keep it as it is in transformers.
+            if start_index == 0:
+                generated = generated.to(torch.float32)[:, i*self.chunk_size:-self.future_cache_size, :]
+            else:
+                generated = generated.to(torch.float32)[:, self.past_cache_size:-self.future_cache_size, :]
+            mel = torch.cat([prev_generated[:,-self.future_size*2:,:], generated], dim=1)
 
         audio = self.code2wav_bigvgan_model(mel)
         if i == 0:
