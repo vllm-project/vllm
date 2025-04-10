@@ -1675,12 +1675,20 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         intermediate_cache3 = _resize_cache(workspace13,
                                             (num_tokens, top_k_num, K))
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(
-                topk_ids,
-                config['BLOCK_SIZE_M'] if self.block_m is None else self.block_m,
-                global_num_experts, expert_map
-            ))
+        if hidden_states.dim() == 2: #block_m is None:
+            sorted_token_ids, expert_ids, num_tokens_post_padded = (
+                moe_align_block_size(
+                    topk_ids,
+                    config['BLOCK_SIZE_M'],
+                    global_num_experts, expert_map
+                ))
+        else:
+            stride = hidden_states.shape[1]
+            sorted_token_ids = torch.arange(0, hidden_states.shape[0], device=hidden_states.device, dtype=torch.int)
+            sorted_token_ids = sorted_token_ids * stride
+            expert_ids = torch.logical_not(torch.isnan(hidden_states)).sum(dim=(1,2)).nonzero()
+            num_tokens_post_padded = torch.zeros(1, device=hidden_states.device, dtype=torch.int)
+            hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
         invoke_fused_moe_kernel(hidden_states,
                                 w1,
@@ -1703,7 +1711,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 per_channel_quant=self.per_channel_quant,
                                 block_shape=self.block_shape)
 
-        self.activation(activation, intermediate_cache2,
+        self.activation(activation,
+                        intermediate_cache2,
                         intermediate_cache1.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None

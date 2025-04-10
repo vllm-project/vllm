@@ -257,7 +257,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     # Maybe extra args
     def set_dispatch_combine(self, dispatch_combine: FusedMoEQuantizeDispatchCombine) -> bool:
         block_m = MOE_DP_CHUNK_SIZE * (self.moe.ep_size // self.moe.dp_size)
-        print(f"block_m = {block_m}")
+        #print(f"block_m = {block_m}")
 
         experts = TritonExperts(
             use_fp8_w8a8 = False,
@@ -576,8 +576,8 @@ class FusedMoE(torch.nn.Module):
             self.ep_size = 1
             self.local_num_experts = self.global_num_experts
             self.expert_map = None
+        #self.global_num_experts = num_experts  redundant?
         self.top_k = top_k
-        self.global_num_experts = num_experts
 
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
@@ -598,11 +598,12 @@ class FusedMoE(torch.nn.Module):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
+
         if current_platform.is_hpu():
             from vllm_hpu_extension.ops import DynamicFusedMOE
             self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
-        print(f"params dtype= {params_dtype}")
+        #print(f"params dtype= {params_dtype}")
 
         moe = MoEConfig(
             num_experts=self.global_num_experts,
@@ -631,13 +632,13 @@ class FusedMoE(torch.nn.Module):
         self.quant_method = quant_method
 
         # TODO: move to method?
-        if self.dp_size > 1:
-            if True:
-                max_num_tokens = MOE_DP_CHUNK_SIZE # // moe.dp_size
-                world_size = moe.ep_size
-                dp_size = moe.ep_size // moe.dp_size # dp_size actually means TP.
-                rank = moe.ep_rank
+        if False and self.dp_size > 1:
+            max_num_tokens = MOE_DP_CHUNK_SIZE # // moe.dp_size
+            world_size = moe.ep_size
+            dp_size = moe.ep_size // moe.dp_size # dp_size actually means TP.
+            rank = moe.ep_rank
 
+            if False:
                 print(f"max num = {max_num_tokens}")
                 print(f"world size = {world_size}")
                 print(f"moe ep size = {moe.ep_size}")
@@ -645,45 +646,45 @@ class FusedMoE(torch.nn.Module):
                 print(f"dp size = {dp_size}")
                 print(f"rank= {rank}")
 
-                all_to_all = get_all_to_all(
-                    max_num_tokens=max_num_tokens,
-                    num_experts=moe.num_experts,
-                    experts_per_token=moe.experts_per_token, # topk
-                    rank=rank,
-                    world_size=world_size,
-                    dp_size=dp_size,
-                    hidden_dim=moe.hidden_dim,
-                    hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
-                    # For blocked per token: set to ceil_div(hidden_dim, block_size) * sizeof(float32)
-                    # For per-token: set to sizeof(float32)
-                    hidden_dim_scale_bytes=(
-                        0
-                        if moe.in_dtype.itemsize != 1
-                        else (
-                                (moe.hidden_dim + moe.block_size - 1)
-                                // moe.block_size
-                                * torch.float32.itemsize
-                        )
+            all_to_all = get_all_to_all(
+                max_num_tokens=max_num_tokens,
+                num_experts=moe.num_experts,
+                experts_per_token=moe.experts_per_token, # topk
+                rank=rank,
+                world_size=world_size,
+                dp_size=dp_size,
+                hidden_dim=moe.hidden_dim,
+                hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
+                # For blocked per token: set to ceil_div(hidden_dim, block_size) * sizeof(float32)
+                # For per-token: set to sizeof(float32)
+                hidden_dim_scale_bytes=(
+                    0
+                    if moe.in_dtype.itemsize != 1
+                    else (
+                            (moe.hidden_dim + moe.block_size - 1)
+                            // moe.block_size
+                            * torch.float32.itemsize
                     )
                 )
+            )
 
-                dispatch_combine = PplxDispatchCombine(
-                    all_to_all,
-                    max_num_tokens,
-                    world_size,
-                    dp_size,
-                    rank, # just for debugging
-                    moe.in_dtype,
-                )
-            else:
-                dispatch_combine = StandardDispatchCombine(
-                    moe.in_dtype,
-                    quant_config.weight_block_size if quant_config is not None else None,
-                )
+            dispatch_combine = PplxDispatchCombine(
+                all_to_all,
+                max_num_tokens,
+                world_size,
+                dp_size,
+                rank, # just for debugging
+                moe.in_dtype,
+            )
 
             success = self.quant_method.set_dispatch_combine(dispatch_combine)
             if not success:
                 logger.warning("DP+EP not supported for %s.", type(self.quant_method))
+        else:
+            dispatch_combine = StandardDispatchCombine(
+                moe.in_dtype,
+                quant_config.weight_block_size if quant_config is not None else None,
+            )
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
@@ -1035,7 +1036,7 @@ class FusedMoE(torch.nn.Module):
         num_tokens_across_dp = get_forward_context(
         ).dp_metadata.num_tokens_across_dp
 
-        print(f"max/num/rank_num = {max_tokens_across_dp}/{num_tokens_across_dp}/{get_forward_context().dp_metadata.dp_rank_num_tokens}")
+        #print(f"max/num/rank_num = {max_tokens_across_dp}/{num_tokens_across_dp}/{get_forward_context().dp_metadata.dp_rank_num_tokens}")
 
         #In this function we define two ranges:
         # 1. chunk_range - The current iteration of the loops's range over the DP world tokens
