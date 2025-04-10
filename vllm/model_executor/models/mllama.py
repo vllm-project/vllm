@@ -1325,6 +1325,9 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         cross_attention_states = cross_attention_states_flat
         return cross_attention_states
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_cross_attention_states(
         self,
         image_inputs: MllamaImagePixelInputs,

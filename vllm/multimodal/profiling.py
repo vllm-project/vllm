@@ -78,6 +78,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         length: int,
         num_audios: int,
     ) -> list[npt.NDArray]:
+        if num_audios == 0:
+            return []
         audio = np.zeros((length, ))
         return [audio] * num_audios
 
@@ -88,6 +90,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         height: int,
         num_images: int,
     ) -> list[Image.Image]:
+        if num_images == 0:
+            return []
         image = Image.new("RGB", (width, height), color=255)
         return [image] * num_images
 
@@ -99,6 +103,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         num_frames: int,
         num_videos: int,
     ) -> list[npt.NDArray]:
+        if num_videos == 0:
+            return []
         video = np.full((num_frames, width, height, 3), 255)
         return [video] * num_videos
 
@@ -213,8 +219,12 @@ class MultiModalProfiler(Generic[_I]):
 
         total_len = len(encoder_prompt_token_ids)
 
-        # Encoder-decoder multimodal models only support v0
-        if total_len > seq_len:
+        processor = cast(EncDecMultiModalProcessor, self.processor)
+        if processor.pad_dummy_encoder_prompt:
+            num_tokens_to_pad = max(total_len, seq_len) - total_len
+            encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
+        # NOTE: Whisper allows total_len > seq_len.
+        elif total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
             logger.warning_once(
                 "The encoder sequence length used for profiling ("
@@ -228,11 +238,6 @@ class MultiModalProfiler(Generic[_I]):
                 "the input text is short. To avoid this, you should "
                 "increase `max_model_len`, reduce `max_num_seqs`, "
                 "and/or reduce `mm_counts`.")
-
-        processor = cast(EncDecMultiModalProcessor, self.processor)
-        if processor.pad_dummy_encoder_prompt:
-            num_tokens_to_pad = max(total_len, seq_len) - total_len
-            encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
 
         return DummyEncoderData(encoder_prompt_token_ids)
 
