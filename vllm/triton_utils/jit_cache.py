@@ -31,10 +31,6 @@ Authors:
 
 """
 
-from __future__ import annotations
-
-import sys
-import os
 import time
 import inspect
 
@@ -43,9 +39,6 @@ from triton.runtime.driver import driver
 from triton.runtime.autotuner import OutOfResources
 from triton import __version__ as triton_version
 
-triton_major_version = int(triton_version.split(".")[0])
-triton_minor_version = int(triton_version.split(".")[1])
-triton_version_float = triton_major_version + float(triton_minor_version / 10)
 
 from vllm.logger import init_logger
 logger = init_logger(__name__)
@@ -182,7 +175,8 @@ class JitCache(KernelInterface):
         cache_lock: CacheLock,
         cache_launch_grid=False,
     ):
-        assert 3.0 <= triton_version_float <= 3.2
+        # we depend on the triton version, right now, 3.0 -- 3.2 are supported
+        assert int(triton_version.split(".")[0]) == 3 and int(triton_version.split(".")[1]) <= 2
         self.arg_names = arg_names
         self.fn = fn
         self.base_fn = fn
