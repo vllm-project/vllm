@@ -315,32 +315,34 @@ class Processor:
         *,
         prompt_type: Literal["encoder", "decoder"],
     ):
+        model_config = self.model_config
         tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
 
-        if prompt_type == "encoder":
-            model_config = self.model_config
-
-            if model_config.is_multimodal_model:
-                mm_registry = self.input_preprocessor.mm_registry
-                mm_processor = mm_registry.create_processor(
-                    model_config, tokenizer=tokenizer)
-                assert isinstance(mm_processor, EncDecMultiModalProcessor)
-
-                if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper
-
         prompt_ids = prompt_inputs["prompt_token_ids"]
-
         if not prompt_ids:
-            raise ValueError(f"The {prompt_type} prompt cannot be empty")
+            if prompt_type == "encoder" and model_config.is_multimodal_model:
+                pass  # Mllama may have empty encoder inputs for text-only data
+            else:
+                raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        max_input_id = max(prompt_ids)
+        max_input_id = max(prompt_ids, default=0)
         if max_input_id > tokenizer.max_token_id:
             raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
         if len(prompt_ids) >= max_prompt_len:
-            if self.model_config.is_multimodal_model:
+            if prompt_type == "encoder" and model_config.is_multimodal_model:
+                mm_registry = self.input_preprocessor.mm_registry
+                mm_processor = mm_registry.create_processor(
+                    model_config,
+                    tokenizer=tokenizer,
+                )
+                assert isinstance(mm_processor, EncDecMultiModalProcessor)
+
+                if mm_processor.pad_dummy_encoder_prompt:
+                    return  # Skip encoder length check for Whisper
+
+            if model_config.is_multimodal_model:
                 suggestion = (
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
