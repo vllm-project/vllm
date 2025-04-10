@@ -684,8 +684,8 @@ def attn_fwd(
     cu_seqlens_k,
     dropout_p,
     philox_seed,
-    PERSISTENT: tl.constexpr,
-    PERSISTENT_DYNAMIC: tl.constexpr,
+    IS_PERSISTENT: tl.constexpr,
+    IS_PERSISTENT_DYNAMIC: tl.constexpr,
     atomic_counter,
     NUM_CU: tl.constexpr,
     GRID_CU_MULTIP: tl.constexpr,
@@ -714,14 +714,14 @@ def attn_fwd(
     QUANT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
 ):
 
-    if PERSISTENT:  # if persistent, kernel loops over multiple tiles
+    if IS_PERSISTENT:  # if persistent, kernel loops over multiple tiles
         NUM_WG = NUM_CU * GRID_CU_MULTIP  # number of workgroups launched
         num_tiles_per_head = tl.cdiv(
             MAX_SEQLENS_Q,
             BLOCK_M)  # the number of work units (tiles) of a single head
         num_tiles_per_sample = num_tiles_per_head * HQ  # times number of heads
         num_tiles_total = num_tiles_per_sample * B  # times number of samples
-        if PERSISTENT_DYNAMIC:
+        if IS_PERSISTENT_DYNAMIC:
             tile_id = atomic_counter.atomic_add(
                 1)  # returns the value BEFORE the atomic operation
         else:
@@ -733,8 +733,8 @@ def attn_fwd(
     if o_descale_ptr is not None:
         o_descale = tl.load(o_descale_ptr)
 
-    while tile_id < num_tiles_total:  # loops more than once only if PERSISTENT
-        if PERSISTENT:
+    while tile_id < num_tiles_total:  # loops more than once if IS_PERSISTENT
+        if IS_PERSISTENT:
             # tile id basically tells us the Q block we are handling
             # at which batch sample are we
             off_z = tile_id // num_tiles_per_sample
@@ -1143,8 +1143,8 @@ def attn_fwd(
                          acc.to(Out.dtype.element_ty),
                          mask=o_ptrs_mask)
 
-        if PERSISTENT:
-            if PERSISTENT_DYNAMIC:
+        if IS_PERSISTENT:
+            if IS_PERSISTENT_DYNAMIC:
                 tile_id = atomic_counter.atomic_add(1)
             else:
                 tile_id += NUM_WG
@@ -1318,8 +1318,8 @@ class _attention(torch.autograd.Function):
             IS_EIGHT_BIT=metadata.eight_bit,
             USE_P_SCALE=metadata.eight_bit and metadata.use_p_scale,
             IS_EIGHT_BIT_KV=metadata.eight_bit and metadata.eight_bit_kv,
-            PERSISTENT=metadata.persistent is not None,
-            PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
+            IS_PERSISTENT=metadata.persistent is not None,
+            IS_PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
             NUM_CU=NUM_CU,
             atomic_counter=atomic_counter,
             B=batch,
