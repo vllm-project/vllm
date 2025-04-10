@@ -1319,14 +1319,14 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Because attn_metadata.encoder_seq_lens only counts the last
         # group of images for each sample, which is used to cheat the
         # block manager to allocate blocks for those images only.
-        # See input_processor_for_mllama() for more details.
+        # See MllamaMultiModalProcessor for more details.
         actual_encoder_seq_lens = [
             sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles
         ]
 
         # remove 0 encoder len entries for text-only requests for these
         # assertions
-        attn_metadata_lens = [len for len in encoder_seq_lens if len > 0]
+        attn_metadata_lens = [x for x in encoder_seq_lens if x > 0]
         assert len(actual_encoder_seq_lens) == len(attn_metadata_lens)
         for actual_len, last_group_len in zip(actual_encoder_seq_lens,
                                               attn_metadata_lens):
