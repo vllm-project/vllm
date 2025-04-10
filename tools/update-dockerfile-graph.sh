@@ -20,13 +20,16 @@ if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
     exit 0
   fi
 
+  # Define the target file path
+  TARGET_GRAPH_FILE="docs/source/assets/contributing/dockerfile-stages-dependency.png"
+
   # Ensure target directory exists
-  mkdir -p docs/source/assets/contributing
-  
+  mkdir -p "$(dirname "$TARGET_GRAPH_FILE")"
+
   # Store old image hash in a variable if the file exists
   OLD_HASH=""
-  if [ -f "docs/source/assets/contributing/dockerfile-stages-dependency.png" ]; then
-    OLD_HASH=$(sha256sum docs/source/assets/contributing/dockerfile-stages-dependency.png)
+  if [ -f "$TARGET_GRAPH_FILE" ]; then
+    OLD_HASH=$(sha256sum "$TARGET_GRAPH_FILE")
   fi
   
   # Generate Dockerfile graph
@@ -47,14 +50,14 @@ if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   # Check for Dockerfile.png in the root directory (most likely location)
   if [ -f "./Dockerfile.png" ]; then
     echo "Found generated file at: ./Dockerfile.png"
-    mv "./Dockerfile.png" docs/source/assets/contributing/dockerfile-stages-dependency.png
+    mv "./Dockerfile.png" "$TARGET_GRAPH_FILE"
   else
     # Try to find it elsewhere
     DOCKERFILE_PNG=$(find . -name "Dockerfile.png" -type f | head -1)
     
     if [ -n "$DOCKERFILE_PNG" ]; then
       echo "Found generated file at: $DOCKERFILE_PNG"
-      mv "$DOCKERFILE_PNG" docs/source/assets/contributing/dockerfile-stages-dependency.png
+      mv "$DOCKERFILE_PNG" "$TARGET_GRAPH_FILE"
     else
       echo "Error: Could not find the generated PNG file"
       find . -name "*.png" -type f -mmin -5
@@ -63,10 +66,9 @@ if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   fi
   
   # Check if the graph has changed
-  NEW_HASH=$(sha256sum docs/source/assets/contributing/dockerfile-stages-dependency.png)
+  NEW_HASH=$(sha256sum "$TARGET_GRAPH_FILE")
   if [ "$NEW_HASH" != "$OLD_HASH" ]; then
-    echo "Graph has changed, adding to commit."
-    git add docs/source/assets/contributing/dockerfile-stages-dependency.png
+    echo "Graph has changed. Please stage the updated file: $TARGET_GRAPH_FILE"
   else
     echo "No changes in graph detected."
   fi
