@@ -626,6 +626,16 @@ class AsyncMPClient(MPClient):
         self.outputs_handler: Optional[Callable[
             [AsyncMPClient, EngineCoreOutputs], Awaitable[None]]] = None
 
+        try:
+            # If we are running in an asyncio event loop, start the queue task.
+            # Otherwise, it will be started lazily. If it is not started here,
+            # we could miss EXECUTOR_FAILED messages from engine core if they
+            # occur prior to any requests being sent.
+            asyncio.get_running_loop()
+            self._ensure_output_queue_task()
+        except RuntimeError:
+            pass
+
     def _ensure_output_queue_task(self):
         if self.queue_task is not None:
             return
@@ -648,7 +658,7 @@ class AsyncMPClient(MPClient):
                 while True:
                     frame = await output_socket.recv(copy=False)
                     resources.validate_alive(frame.buffer)
-                    outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
+                    outputs: EngineCoreOutputs = decoder.decode(frame)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
@@ -783,9 +793,6 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
                  log_stats: bool):
-        super().__init__(vllm_config, executor_class, log_stats)
-
-        assert len(self.core_engines) > 1
 
         # Control message used for triggering dp idle mode loop.
         self.start_dp_msg = (EngineCoreRequestType.START_DP.value,
@@ -795,6 +802,10 @@ class DPAsyncMPClient(AsyncMPClient):
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
         self.outputs_handler = DPAsyncMPClient.process_engine_outputs  # type: ignore[assignment]
+
+        super().__init__(vllm_config, executor_class, log_stats)
+
+        assert len(self.core_engines) > 1
 
     def _init_core_engines(
         self,
