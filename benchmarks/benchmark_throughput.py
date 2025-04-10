@@ -594,18 +594,22 @@ if __name__ == "__main__":
         default=None,
         help="Path to the lora adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.")
-    parser.add_argument("--prefix-len",
-                        type=int,
-                        default=None,
-                        help="Number of prefix tokens per request."
-                        "This is for the RandomDataset and SonnetDataset")
+    parser.add_argument(
+        "--prefix-len",
+        type=int,
+        default=0,
+        help="Number of fixed prefix tokens before the random "
+        "context in a request (default: 0).",
+    )
     # random dataset
     parser.add_argument(
         "--random-range-ratio",
         type=float,
-        default=None,
-        help="Range of sampled ratio of input/output length, "
-        "used only for RandomDataSet.",
+        default=0.0,
+        help="Range ratio for sampling input/output length, "
+        "used only for RandomDataset. Must be in the range [0, 1) to define "
+        "a symmetric sampling range "
+        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
 
     # hf dtaset

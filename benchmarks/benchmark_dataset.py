@@ -288,7 +288,7 @@ def process_image(image: Any) -> Mapping[str, Any]:
 class RandomDataset(BenchmarkDataset):
     # Default values copied from benchmark_serving.py for the random dataset.
     DEFAULT_PREFIX_LEN = 0
-    DEFAULT_RANGE_RATIO = 1.0
+    DEFAULT_RANGE_RATIO = 0.0
     DEFAULT_INPUT_LEN = 1024
     DEFAULT_OUTPUT_LEN = 128
 
@@ -308,19 +308,32 @@ class RandomDataset(BenchmarkDataset):
         output_len: int = DEFAULT_OUTPUT_LEN,
         **kwargs,
     ) -> list[SampleRequest]:
+        # Enforce range_ratio < 1
+        assert range_ratio < 1.0, (
+            "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        )
+
         vocab_size = tokenizer.vocab_size
 
         prefix_token_ids = (np.random.randint(
             0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
 
-        input_low = int(input_len * range_ratio)
-        output_low = int(output_len * range_ratio)
+        # New sampling logic: [X * (1 - b), X * (1 + b)]
+        input_low = int(input_len * (1 - range_ratio))
+        input_high = int(input_len * (1 + range_ratio))
+        output_low = int(output_len * (1 - range_ratio))
+        output_high = int(output_len * (1 + range_ratio))
+
+        # Add logging for debugging
+        logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
+        logger.info("Sampling output_len from [%s, %s]", output_low,
+                    output_high)
 
         input_lens = np.random.randint(input_low,
-                                       input_len + 1,
+                                       input_high + 1,
                                        size=num_requests)
         output_lens = np.random.randint(output_low,
-                                        output_len + 1,
+                                        output_high + 1,
                                         size=num_requests)
         offsets = np.random.randint(0, vocab_size, size=num_requests)
 
