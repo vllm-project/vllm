@@ -60,8 +60,10 @@ def test_bigger_truncation_size(vllm_runner,
             model_name, task="embed",
             max_model_len=max_model_len) as vllm_model:
 
-        assert str(llm_output=vllm_model.model.encode(
-            input_str, truncate_prompt_tokens=truncate_prompt_tokens
-        )) == f"""truncate_prompt_tokens value ({truncate_prompt_tokens})
-                is greater than max_model_len ({max_model_len}).
-                Please, select a smaller truncation size."""
+        llm_output = vllm_model.model.encode(
+            input_str, truncate_prompt_tokens=truncate_prompt_tokens)
+
+        assert llm_output == f"""truncate_prompt_tokens value 
+                ({truncate_prompt_tokens}) is greater than 
+                max_model_len ({max_model_len}). Please, select 
+                a smaller truncation size."""
