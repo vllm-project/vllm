@@ -34,14 +34,14 @@ if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   # Check for Dockerfile.png in the root directory (most likely location)
   if [ -f "./Dockerfile.png" ]; then
     echo "Found Dockerfile.png in root directory"
-    cp "./Dockerfile.png" docs/source/assets/contributing/dockerfile-stages-dependency.png
+    mv "./Dockerfile.png" docs/source/assets/contributing/dockerfile-stages-dependency.png
   else
     # Try to find it elsewhere
     DOCKERFILE_PNG=$(find . -name "Dockerfile.png" -type f | head -1)
     
     if [ -n "$DOCKERFILE_PNG" ]; then
       echo "Found generated file at: $DOCKERFILE_PNG"
-      cp "$DOCKERFILE_PNG" docs/source/assets/contributing/dockerfile-stages-dependency.png
+      mv "$DOCKERFILE_PNG" docs/source/assets/contributing/dockerfile-stages-dependency.png
     else
       echo "Error: Could not find the generated PNG file"
       find . -name "*.png" -type f -mmin -5
