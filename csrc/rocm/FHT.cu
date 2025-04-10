@@ -146,7 +146,7 @@ void fast_hadamard_transform_launch(HadamardParamsBase &params, cudaStream_t str
 }
 
 at::Tensor
-FHT(at::Tensor &x, double scale) {
+fast_hadamard_transform(at::Tensor &x, double scale) {
 
     //NOTE: reshape and get batch_size
     const auto shapes_og = x.sizes();
