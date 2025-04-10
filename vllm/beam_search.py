@@ -38,12 +38,16 @@ class BeamSearchOutput:
 
 class BeamSearchInstance:
 
-    def __init__(self, prompt_tokens: list[int], **kwargs):
-        logprobs = kwargs.pop("logprobs", [])
+    def __init__(
+        self,
+        prompt_tokens: list[int],
+        logprobs: Optional[list[dict[int, Logprob]]] = None,
+        **kwargs,
+    ):
         self.beams: list[BeamSearchSequence] = [
             BeamSearchSequence(
                 tokens=prompt_tokens,
-                logprobs=logprobs,
+                logprobs=[] if logprobs is None list(logprobs),
                 **kwargs,
             )
         ]
