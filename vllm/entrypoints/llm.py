@@ -546,23 +546,19 @@ class LLM:
         instances: list[BeamSearchInstance] = []
 
         for prompt in prompts:
-
-            # TODO Probably need to handle different prompt types
-            multi_modal_kwargs = {}
+            # Add multimodal processor kwargs & data
+            mm_kwargs = {}
             if "multi_modal_data" in prompt:
-                multi_modal_kwargs["multi_modal_data"] = prompt[
-                    "multi_modal_data"]
+                mm_kwargs["multi_modal_data"] = prompt["multi_modal_data"]
             if "mm_processor_kwargs" in prompt:
-                multi_modal_kwargs["mm_processor_kwargs"] = prompt[
+                mm_kwargs["mm_processor_kwargs"] = prompt[
                     "mm_processor_kwargs"]
 
             if is_token_prompt(prompt):
                 prompt_tokens = prompt["prompt_token_ids"]
             else:
                 prompt_tokens = tokenizer.encode(prompt["prompt"])
-
-            instances.append(
-                BeamSearchInstance(prompt_tokens, **multi_modal_kwargs))
+            instances.append(BeamSearchInstance(prompt_tokens, **mm_kwargs))
 
         for _ in range(max_tokens):
             all_beams: list[BeamSearchSequence] = list(
