@@ -74,6 +74,9 @@ class MsgpackEncoder:
             obj = np.ascontiguousarray(obj)
             data = len(self.aux_buffers)
             self.aux_buffers.append(obj.data)
+        # We serialize the ndarray as a tuple of native types.
+        # The data is either inlined if small, or an index into a backing buffer
+        # that we've stashed in `aux_buffers`.
         return obj.dtype.str, obj.shape, data
 
 
