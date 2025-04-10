@@ -99,7 +99,8 @@ class ModelConfig:
         override_neuron_config: Initialize non default neuron config or 
             override default neuron config that are specific to Neuron devices, 
             this argument will be used to configure the neuron config that 
-            can not be gathered from the vllm arguments. 
+            can not be gathered from the vllm arguments.
+        override_tt_config: Override default TT config, specific to TT devices.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
@@ -132,6 +133,7 @@ class ModelConfig:
                  limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
                  use_async_output_proc: bool = True,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
+                 override_tt_config: Optional[Dict[str, Any]] = None,
                  config_format: ConfigFormat = ConfigFormat.AUTO,
                  mm_processor_kwargs: Optional[Dict[str, Any]] = None) -> None:
         self.model = model
@@ -207,6 +209,7 @@ class ModelConfig:
 
         self.override_neuron_config = override_neuron_config if is_neuron(
         ) else None
+        self.override_tt_config = override_tt_config if is_tt() else None
         self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()

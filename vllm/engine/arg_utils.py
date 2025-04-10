@@ -178,6 +178,7 @@ class EngineArgs:
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
     override_neuron_config: Optional[Dict[str, Any]] = None
+    override_tt_config: Optional[Dict[str, Any]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
 
@@ -818,6 +819,12 @@ class EngineArgs:
             default=None,
             help="Override or set neuron device configuration. "
             "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
+        parser.add_argument(
+            '--override-tt-config',
+            type=json.loads,
+            default=None,
+            help="Override or set TT device configuration. "
+            "e.g. '{\"sample_on_device_decode\": true}'")
 
         parser.add_argument(
             '--scheduling-policy',
@@ -866,6 +873,7 @@ class EngineArgs:
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             use_async_output_proc=not self.disable_async_output_proc,
             override_neuron_config=self.override_neuron_config,
+            override_tt_config=self.override_tt_config,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
         )
