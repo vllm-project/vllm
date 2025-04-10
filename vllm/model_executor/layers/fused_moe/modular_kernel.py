@@ -60,9 +60,6 @@ def _moe_problem_size(
     E, N, _ = w1.shape
     K = w2.shape[1]
 
-    assert topk_ids.dim() == 2
-    topk = topk_ids.shape[1]
-
     if a1.dim() == 2:
         # Make sure we are using the correct a1 (pre-permute).
         assert topk_ids.shape[0] == a1.shape[0], \
@@ -72,6 +69,9 @@ def _moe_problem_size(
         assert a1.dim() == 3
         assert E == a1.shape[0]
         M = a1.shape[1] # This is max_num_tokens
+
+    assert topk_ids.dim() == 2
+    topk = topk_ids.shape[1]
 
     return E, M, N, K, topk
 

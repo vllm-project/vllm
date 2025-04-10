@@ -32,10 +32,6 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         self.dp_size = dp_size
         self.rank = rank
         self.quant_dtype = quant_dtype
-        print(f"max_num_tokens = {max_num_tokens}")
-        print(f"dp_num_tokens = {self.dp_num_tokens}")
-        print(f"world_size = {world_size}")
-        print(f"dp_size = {dp_size}")
 
     def dispatch(
         self,
@@ -77,7 +73,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             dtype=torch.int32,
             device=a1.device,
         )
-        expert_num_tokens.fill_(-1)
+        expert_num_tokens.fill_(-1)  # debugging remove
 
         num_dp = self.world_size // self.dp_size
         expert_x = torch.empty(
@@ -85,7 +81,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             dtype=a1q.dtype,
             device=a1.device,
         )
-        expert_x.fill_(torch.nan)
+        expert_x.fill_(torch.nan)   # debugging remove
 
         expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
@@ -146,3 +142,6 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
+
+        #print("END COMBINE")
+
