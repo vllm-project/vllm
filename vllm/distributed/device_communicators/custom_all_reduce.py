@@ -53,7 +53,7 @@ class CustomAllreduce:
     def __init__(self,
                  group: ProcessGroup,
                  device: Union[int, str, torch.device],
-                 max_size=8192 * 1024) -> None:
+                 max_size=2 * 8192 * 1024) -> None:
         """
         Args:
             group: the process group to work on. If None, it will use the
