@@ -752,11 +752,17 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
         return rope_scaling.get("type", None) == "mrope" or rope_scaling.get("mrope_section", None) is not None
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self, num_batched_tokens=-1, num_seqs=-1) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        assert (num_batched_tokens == -1 or num_batched_tokens > 0)
+        assert (num_seqs == -1 or num_seqs > 0)
         max_num_seqs = self.scheduler_config.max_num_seqs
+        if num_batched_tokens != -1:
+            max_num_batched_tokens = num_batched_tokens
+        if num_seqs != -1:
+            max_num_seqs = num_seqs
 
         # This represents the maximum number of different requests
         # that will have unique loras, an therefore the max amount of memory
@@ -806,15 +812,15 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
                 max_num_seqs = 1
 
         batch_size = 0
-        import os
-        self_max_num_batched_tokens = os.getenv("IPEX_LLM_SELF_MAX_NUM_BATCHED_TOKENS", None)
-        if self_max_num_batched_tokens is not None:
-            max_num_batched_tokens = int(self_max_num_batched_tokens)
-            self_max_num_seqs = os.getenv("IPEX_LLM_SELF_MAX_NUM_SEQS", None)
-            if self_max_num_seqs is not None:
-                max_num_seqs = int(self_max_num_seqs)
-            else:
-                max_num_seqs = 1
+        # import os
+        # self_max_num_batched_tokens = os.getenv("IPEX_LLM_SELF_MAX_NUM_BATCHED_TOKENS", None)
+        # if self_max_num_batched_tokens is not None:
+        #     max_num_batched_tokens = int(self_max_num_batched_tokens)
+        #     self_max_num_seqs = os.getenv("IPEX_LLM_SELF_MAX_NUM_SEQS", None)
+        #     if self_max_num_seqs is not None:
+        #         max_num_seqs = int(self_max_num_seqs)
+        #     else:
+        #         max_num_seqs = 1
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))

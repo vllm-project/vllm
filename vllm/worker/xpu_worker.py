@@ -98,6 +98,52 @@ class XPUWorker(Worker):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
+        flag = os.getenv("IPEX_LLM_FIND_MAX_LENGTH", None)
+        if flag:
+            torch.xpu.empty_cache()
+            before_memory = torch.xpu.memory_reserved()
+            # Start with 8000
+            max_num_batched_tokens = 8000
+            max_num_seqs = 1
+            support_input = []
+            support_kv_cache = []
+            while True:
+                print(f"Profiling with max_num_batched_tokens {max_num_batched_tokens}...")
+                self.model_runner.profile_run(max_num_batched_tokens, max_num_seqs)
+                torch.xpu.synchronize()
+                used_memory = torch.xpu.memory_reserved()
+                total_gpu_memory = torch.xpu.get_device_properties(
+                    self.local_rank).total_memory
+                free_gpu_memory = total_gpu_memory - used_memory
+                peak_memory = self.init_gpu_memory - free_gpu_memory
+                assert peak_memory > 0
+                cache_block_size = self.get_cache_block_size_bytes()
+                num_gpu_blocks = int(
+                    (total_gpu_memory * self.cache_config.gpu_memory_utilization -
+                    peak_memory) // cache_block_size)
+                num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                                    cache_block_size)
+                num_gpu_blocks = max(num_gpu_blocks, 0)
+                num_cpu_blocks = max(num_cpu_blocks, 0)
+                gc.collect()
+                torch.xpu.empty_cache()
+                # Begin to handle data...
+                if num_gpu_blocks == 0:
+                    break
+                kv_cache_support_length = num_gpu_blocks * self.cache_config.block_size
+                # Too long input...
+                if max_num_batched_tokens > kv_cache_support_length:
+                    break
+                support_input.append(max_num_batched_tokens)
+                support_kv_cache.append(kv_cache_support_length)
+                max_num_batched_tokens += 250
+
+            print(f"Recommended max input length: {support_input[len(support_input) - 1]}")
+            print(f"{'input length':<15} {'kv cache length':<15}")
+            print("-" * 30)
+
+            for inp, kv in zip(support_input, support_kv_cache):
+                print(f"{inp:<15} {kv:<15}")
         torch.xpu.empty_cache()
         before_memory = torch.xpu.memory_reserved()
 
