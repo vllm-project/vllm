@@ -335,6 +335,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
     "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
                                         trust_remote_code=True,
+                                        max_transformers_version="4.48",
+                                        transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
                                         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"}),  # noqa: E501
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
