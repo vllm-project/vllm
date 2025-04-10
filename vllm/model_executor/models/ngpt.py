@@ -38,43 +38,30 @@ from transformers import NGPTConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather,
-    tensor_model_parallel_gather,
-)
+from vllm.distributed import (get_pp_group,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather,
+                              tensor_model_parallel_gather)
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (
-    PPMissingLayer,
-    is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
-    make_layers,
-    maybe_prefix,
-)
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 def normalize_vector(x, eps=0.0):
@@ -129,10 +116,8 @@ class NGPTMLP(nn.Module):
 
         # nGPT: mlp scaling
         suv, _ = self.suv(torch.ones((1, 1), device=up.device, dtype=up.dtype))
-        suv = suv * (
-            (self.suv_init_value / self.suv_init_scaling)
-            * (self.hidden_size**0.5)
-        )
+        suv = suv * ((self.suv_init_value / self.suv_init_scaling) *
+                     (self.hidden_size**0.5))
 
         x = self.act_fn(suv * up)
         x, _ = self.down_proj(x)
@@ -172,9 +157,8 @@ class NGPTAttention(nn.Module):
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         # MistralConfig has an optional head_dim introduced by Mistral-Nemo
-        self.head_dim = getattr(
-            config, "head_dim", self.hidden_size // self.total_num_heads
-        )
+        self.head_dim = getattr(config, "head_dim",
+                                self.hidden_size // self.total_num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**0.5  # nGPT
@@ -229,9 +213,8 @@ class NGPTAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-    def forward(
-        self, positions: torch.Tensor, hidden_states: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, positions: torch.Tensor,
+                hidden_states: torch.Tensor) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
@@ -241,11 +224,9 @@ class NGPTAttention(nn.Module):
         sqk = sqk * (self.sqk_init_value / self.sqk_init_scaling)
 
         q = normalize_vector(q.view(-1, self.num_heads, self.head_dim)).view(
-            -1, self.q_size
-        ) * (sqk**2)
-        k = normalize_vector(k.view(-1, self.num_kv_heads, self.head_dim)).view(
-            -1, self.kv_size
-        )
+            -1, self.q_size) * (sqk**2)
+        k = normalize_vector(k.view(-1, self.num_kv_heads,
+                                    self.head_dim)).view(-1, self.kv_size)
 
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -266,27 +247,22 @@ class NGPTDecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None
-        ):
+                config, "original_max_position_embeddings", None):
             rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings
-            )
-        max_position_embeddings = getattr(
-            config, "max_position_embeddings", 8192
-        )
+                config.original_max_position_embeddings)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
 
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
-            config, "bias", False
-        )
+            config, "bias", False)
         self.self_attn = NGPTAttention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=getattr(
-                config, "num_key_value_heads", config.num_attention_heads
-            ),
+            num_kv_heads=getattr(config, "num_key_value_heads",
+                                 config.num_attention_heads),
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
@@ -296,14 +272,12 @@ class NGPTDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
         # nGPT: attention interpolation parameters
-        self.attn_alpha_init_value = getattr(
-            config, "attn_alpha_init_value", 0.05
-        )
+        self.attn_alpha_init_value = getattr(config, "attn_alpha_init_value",
+                                             0.05)
         self.attn_alpha_init_scaling = config.initializer_range
         self.attn_alpha = torch.nn.Parameter(
-            self.attn_alpha_init_scaling
-            * torch.ones(config.hidden_size, dtype=torch.float32)
-        )
+            self.attn_alpha_init_scaling *
+            torch.ones(config.hidden_size, dtype=torch.float32))
 
         self.mlp = NGPTMLP(
             config=config,
@@ -315,14 +289,12 @@ class NGPTDecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         # nGPT: mlp interpolation parameters
-        self.mlp_alpha_init_value = getattr(
-            config, "mlp_alpha_init_value", 0.05
-        )
+        self.mlp_alpha_init_value = getattr(config, "mlp_alpha_init_value",
+                                            0.05)
         self.mlp_alpha_init_scaling = config.initializer_range
         self.mlp_alpha = torch.nn.Parameter(
-            self.mlp_alpha_init_scaling
-            * torch.ones(config.hidden_size, dtype=torch.float32)
-        )
+            self.mlp_alpha_init_scaling *
+            torch.ones(config.hidden_size, dtype=torch.float32))
 
     def residual_update(
         self,
@@ -333,8 +305,7 @@ class NGPTDecoderLayer(nn.Module):
         alpha_init_scaling,
     ):
         lr = torch.abs(alpha * (alpha_init_value / alpha_init_scaling)).to(
-            hidden_states.dtype
-        )
+            hidden_states.dtype)
         A_norm = normalize_vector(residual)
         B_norm = normalize_vector(hidden_states)
         return normalize_vector(A_norm + lr * (B_norm - A_norm))
@@ -347,9 +318,8 @@ class NGPTDecoderLayer(nn.Module):
         residual = hidden_states
 
         # Self Attention
-        hidden_states = self.self_attn(
-            positions=positions, hidden_states=hidden_states
-        )
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states)
         # nGPT: attention interpolation
         hidden_states = self.residual_update(
             hidden_states,
@@ -386,16 +356,12 @@ class NGPTModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
+        lora_vocab = ((lora_config.lora_extra_vocab_size *
+                       (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
-        if get_pp_group().is_first_rank or (
-            config.tie_word_embeddings and get_pp_group().is_last_rank
-        ):
+        if get_pp_group().is_first_rank or (config.tie_word_embeddings
+                                            and get_pp_group().is_last_rank):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
@@ -418,9 +384,7 @@ class NGPTModel(nn.Module):
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size
-            )
-        )
+                ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -441,7 +405,7 @@ class NGPTModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for layer in self.layers[self.start_layer : self.end_layer]:
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states = layer(positions, hidden_states)
 
         if not get_pp_group().is_last_rank:
@@ -476,9 +440,8 @@ class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
         self.quant_config = quant_config
 
-        self.model = NGPTModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+        self.model = NGPTModel(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
@@ -488,28 +451,27 @@ class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
-                padding_size=(  # We need bigger padding if using lora for kernel compatibility
-                    DEFAULT_VOCAB_PADDING_SIZE
-                    if not lora_config
-                    else lora_config.lora_vocab_padding_size
-                ),
+                padding_size=
+                (  # We need bigger padding if using lora for kernel compatibility
+                    DEFAULT_VOCAB_PADDING_SIZE if not lora_config else
+                    lora_config.lora_vocab_padding_size),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+                self.lm_head = self.lm_head.tie_weights(
+                    self.model.embed_tokens)
 
             logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, config.vocab_size, logit_scale
-            )
+            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                    config.vocab_size,
+                                                    logit_scale)
         else:
             self.lm_head = PPMissingLayer()
 
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
+            self.model.make_empty_intermediate_tensors)
 
         # nGPT: output scaling parameters
         self.sz_init_value = getattr(config, "sz_init_value", 1.0)
@@ -535,9 +497,8 @@ class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
         return hidden_states
 
     def _gather_sz(self, sz: torch.Tensor) -> torch.Tensor:
@@ -559,9 +520,8 @@ class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(
-            self.lm_head, hidden_states, sampling_metadata
-        )
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
 
         # When PP>1, this function is called only on the last rank.
         # logits_processor, gathers the logits from all TP ranks.
@@ -570,8 +530,7 @@ class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         if logits is not None:
             # nGPT: output scaling
             sz, _ = self.sz(
-                torch.ones((1, 1), device=logits.device, dtype=logits.dtype)
-            )
+                torch.ones((1, 1), device=logits.device, dtype=logits.dtype))
             sz = sz * (self.sz_init_value / self.sz_init_scaling)
             sz = self._gather_sz(sz)
             logits = logits * sz
@@ -586,9 +545,8 @@ class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(
-        self, weights: Iterable[Tuple[str, torch.Tensor]]
-    ) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -600,26 +558,19 @@ class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if (
-                "rotary_emb.cos_cached" in name
-                or "rotary_emb.sin_cached" in name
-            ):
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
             if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
+                    scale_name := self.quant_config.get_cache_scale(name)):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
-                loaded_weight = (
-                    loaded_weight
-                    if loaded_weight.dim() == 0
-                    else loaded_weight[0]
-                )
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -652,9 +603,8 @@ class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

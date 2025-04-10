@@ -12,27 +12,20 @@ import huggingface_hub
 from huggingface_hub import hf_hub_download
 from huggingface_hub import list_repo_files as hf_list_repo_files
 from huggingface_hub import try_to_load_from_cache
-from huggingface_hub.utils import (
-    EntryNotFoundError,
-    HfHubHTTPError,
-    HFValidationError,
-    LocalEntryNotFoundError,
-    RepositoryNotFoundError,
-    RevisionNotFoundError,
-)
+from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
+                                   HFValidationError, LocalEntryNotFoundError,
+                                   RepositoryNotFoundError,
+                                   RevisionNotFoundError)
 from torch import nn
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
-    get_image_processor_config,
-)
+    get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
-    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
-)
+    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
@@ -135,22 +128,21 @@ def list_repo_files(
         if (local_path := Path(repo_id)).exists():
             return [
                 str(file.relative_to(local_path))
-                for file in local_path.rglob("*")
-                if file.is_file()
+                for file in local_path.rglob("*") if file.is_file()
             ]
         # if model is remote, use hf_hub api to list files
         try:
             if VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import (
-                    modelscope_list_repo_files,
-                )
+                    modelscope_list_repo_files)
 
-                return modelscope_list_repo_files(
-                    repo_id, revision=revision, token=token
-                )
-            return hf_list_repo_files(
-                repo_id, revision=revision, repo_type=repo_type, token=token
-            )
+                return modelscope_list_repo_files(repo_id,
+                                                  revision=revision,
+                                                  token=token)
+            return hf_list_repo_files(repo_id,
+                                      revision=revision,
+                                      repo_type=repo_type,
+                                      token=token)
         except huggingface_hub.errors.OfflineModeIsEnabled:
             # Don't raise in offline mode,
             # all we know is that we don't have this
@@ -168,23 +160,23 @@ def file_exists(
     revision: Optional[str] = None,
     token: Union[str, bool, None] = None,
 ) -> bool:
-    file_list = list_repo_files(
-        repo_id, repo_type=repo_type, revision=revision, token=token
-    )
+    file_list = list_repo_files(repo_id,
+                                repo_type=repo_type,
+                                revision=revision,
+                                token=token)
     return file_name in file_list
 
 
 # In offline mode the result can be a false negative
-def file_or_path_exists(
-    model: Union[str, Path], config_name: str, revision: Optional[str]
-) -> bool:
+def file_or_path_exists(model: Union[str, Path], config_name: str,
+                        revision: Optional[str]) -> bool:
     if (local_path := Path(model)).exists():
         return (local_path / config_name).is_file()
 
     # Offline mode support: Check if config file is cached already
-    cached_filepath = try_to_load_from_cache(
-        repo_id=model, filename=config_name, revision=revision
-    )
+    cached_filepath = try_to_load_from_cache(repo_id=model,
+                                             filename=config_name,
+                                             revision=revision)
     if isinstance(cached_filepath, str):
         # The config file exists in cache- we can continue trying to load
         return True
@@ -193,9 +185,10 @@ def file_or_path_exists(
     # hf_hub. This will fail in offline mode.
 
     # Call HF to check if the file exists
-    return file_exists(
-        str(model), config_name, revision=revision, token=HF_TOKEN
-    )
+    return file_exists(str(model),
+                       config_name,
+                       revision=revision,
+                       token=HF_TOKEN)
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
@@ -217,8 +210,7 @@ def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
             raise ValueError(
                 f"Found conflicts between 'rope_type={rope_type}' (modern "
                 f"field) and 'type={rope_type_legacy}' (legacy field). "
-                "You should only specify one of them."
-            )
+                "You should only specify one of them.")
 
     if "rope_type" not in rope_scaling and "type" in rope_scaling:
         rope_scaling["rope_type"] = rope_scaling["type"]
@@ -272,19 +264,17 @@ def get_config(
     if config_format == ConfigFormat.AUTO:
         try:
             if is_gguf or file_or_path_exists(
-                model, HF_CONFIG_NAME, revision=revision
-            ):
+                    model, HF_CONFIG_NAME, revision=revision):
                 config_format = ConfigFormat.HF
-            elif file_or_path_exists(
-                model, MISTRAL_CONFIG_NAME, revision=revision
-            ):
+            elif file_or_path_exists(model,
+                                     MISTRAL_CONFIG_NAME,
+                                     revision=revision):
                 config_format = ConfigFormat.MISTRAL
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "
                     "Ensure your model has either config.json (HF format) "
-                    "or params.json (Mistral format)."
-                )
+                    "or params.json (Mistral format).")
 
         except Exception as e:
             error_message = (
@@ -296,8 +286,7 @@ def get_config(
                 "   - For Hugging Face models: ensure the presence of a "
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
-                "'params.json'.\n"
-            ).format(model=model)
+                "'params.json'.\n").format(model=model)
 
             raise ValueError(error_message) from e
 
@@ -332,18 +321,15 @@ def get_config(
                     **kwargs,
                 )
             except ValueError as e:
-                if (
-                    not trust_remote_code
-                    and "requires you to execute the configuration file"
-                    in str(e)
-                ):
+                if (not trust_remote_code
+                        and "requires you to execute the configuration file"
+                        in str(e)):
                     err_msg = (
                         "Failed to load the model config. If the model "
                         "is a custom model not yet available in the "
                         "HuggingFace transformers library, consider setting "
                         "`trust_remote_code=True` in LLM or using the "
-                        "`--trust-remote-code` flag in the CLI."
-                    )
+                        "`--trust-remote-code` flag in the CLI.")
                     raise RuntimeError(err_msg) from e
                 else:
                     raise e
@@ -358,15 +344,13 @@ def get_config(
             f"Unsupported config format: {config_format}. "
             f"Supported formats are: {', '.join(supported_formats)}. "
             f"Ensure your model uses one of these configuration formats "
-            f"or specify the correct format explicitly."
-        )
+            f"or specify the correct format explicitly.")
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(
-                f"Can't get gguf config for {config.model_type}."
-            )
+                f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
 
@@ -378,17 +362,17 @@ def get_config(
     return config
 
 
-def try_get_local_file(
-    model: Union[str, Path], file_name: str, revision: Optional[str] = "main"
-) -> Optional[Path]:
+def try_get_local_file(model: Union[str, Path],
+                       file_name: str,
+                       revision: Optional[str] = "main") -> Optional[Path]:
     file_path = Path(model) / file_name
     if file_path.is_file():
         return file_path
     else:
         try:
-            cached_filepath = try_to_load_from_cache(
-                repo_id=model, filename=file_name, revision=revision
-            )
+            cached_filepath = try_to_load_from_cache(repo_id=model,
+                                                     filename=file_name,
+                                                     revision=revision)
             if isinstance(cached_filepath, str):
                 return Path(cached_filepath)
         except HFValidationError:
@@ -396,9 +380,9 @@ def try_get_local_file(
     return None
 
 
-def get_hf_file_to_dict(
-    file_name: str, model: Union[str, Path], revision: Optional[str] = "main"
-):
+def get_hf_file_to_dict(file_name: str,
+                        model: Union[str, Path],
+                        revision: Optional[str] = "main"):
     """
     Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
@@ -413,9 +397,9 @@ def get_hf_file_to_dict(
     the contents of the downloaded file.
     """
 
-    file_path = try_get_local_file(
-        model=model, file_name=file_name, revision=revision
-    )
+    file_path = try_get_local_file(model=model,
+                                   file_name=file_name,
+                                   revision=revision)
 
     if file_path is None:
         try:
@@ -423,10 +407,10 @@ def get_hf_file_to_dict(
         except huggingface_hub.errors.OfflineModeIsEnabled:
             return None
         except (
-            RepositoryNotFoundError,
-            RevisionNotFoundError,
-            EntryNotFoundError,
-            LocalEntryNotFoundError,
+                RepositoryNotFoundError,
+                RevisionNotFoundError,
+                EntryNotFoundError,
+                LocalEntryNotFoundError,
         ) as e:
             logger.debug("File or repository not found in hf_hub_download", e)
             return None
@@ -467,9 +451,9 @@ def get_pooling_config(model: str, revision: Optional[str] = "main"):
     modules_file_name = "modules.json"
 
     modules_dict = None
-    if file_or_path_exists(
-        model=model, config_name=modules_file_name, revision=revision
-    ):
+    if file_or_path_exists(model=model,
+                           config_name=modules_file_name,
+                           revision=revision):
         modules_dict = get_hf_file_to_dict(modules_file_name, model, revision)
 
     if modules_dict is None:
@@ -478,31 +462,23 @@ def get_pooling_config(model: str, revision: Optional[str] = "main"):
     logger.info("Found sentence-transformers modules configuration.")
 
     pooling = next(
-        (
-            item
-            for item in modules_dict
-            if item["type"] == "sentence_transformers.models.Pooling"
-        ),
+        (item for item in modules_dict
+         if item["type"] == "sentence_transformers.models.Pooling"),
         None,
     )
     normalize = bool(
         next(
-            (
-                item
-                for item in modules_dict
-                if item["type"] == "sentence_transformers.models.Normalize"
-            ),
+            (item for item in modules_dict
+             if item["type"] == "sentence_transformers.models.Normalize"),
             False,
-        )
-    )
+        ))
 
     if pooling:
 
         pooling_file_name = "{}/config.json".format(pooling["path"])
         pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision)
         pooling_type_name = next(
-            (item for item, val in pooling_dict.items() if val is True), None
-        )
+            (item for item, val in pooling_dict.items() if val is True), None)
 
         if pooling_type_name is not None:
             pooling_type_name = get_pooling_config_name(pooling_type_name)
@@ -536,9 +512,9 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
 
 
 @cache
-def get_sentence_transformer_tokenizer_config(
-    model: str, revision: Optional[str] = "main"
-):
+def get_sentence_transformer_tokenizer_config(model: str,
+                                              revision: Optional[str] = "main"
+                                              ):
     """
     Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
@@ -565,12 +541,9 @@ def get_sentence_transformer_tokenizer_config(
     encoder_dict = None
 
     for config_file in sentence_transformer_config_files:
-        if (
-            try_get_local_file(
-                model=model, file_name=config_file, revision=revision
-            )
-            is not None
-        ):
+        if (try_get_local_file(model=model,
+                               file_name=config_file,
+                               revision=revision) is not None):
             encoder_dict = get_hf_file_to_dict(config_file, model, revision)
             if encoder_dict:
                 break
@@ -578,15 +551,16 @@ def get_sentence_transformer_tokenizer_config(
     if not encoder_dict and not model.startswith("/"):
         try:
             # If model is on HuggingfaceHub, get the repo files
-            repo_files = list_repo_files(
-                model, revision=revision, token=HF_TOKEN
-            )
+            repo_files = list_repo_files(model,
+                                         revision=revision,
+                                         token=HF_TOKEN)
         except Exception:
             repo_files = []
 
         for config_name in sentence_transformer_config_files:
             if config_name in repo_files:
-                encoder_dict = get_hf_file_to_dict(config_name, model, revision)
+                encoder_dict = get_hf_file_to_dict(config_name, model,
+                                                   revision)
                 if encoder_dict:
                     break
 
@@ -657,7 +631,7 @@ def maybe_register_config_serialize_by_value() -> None:
         from vllm.config import VllmConfig
 
         def _reduce_config(config: VllmConfig):
-            return (pickle.loads, (cloudpickle.dumps(config),))
+            return (pickle.loads, (cloudpickle.dumps(config), ))
 
         multiprocessing.reducer.register(VllmConfig, _reduce_config)
 
@@ -671,9 +645,8 @@ def maybe_register_config_serialize_by_value() -> None:
         )
 
 
-def load_params_config(
-    model: Union[str, Path], revision: Optional[str], **kwargs
-) -> PretrainedConfig:
+def load_params_config(model: Union[str, Path], revision: Optional[str],
+                       **kwargs) -> PretrainedConfig:
     # This function loads a params.json config which
     # should be used when loading models in mistral format
 
@@ -705,12 +678,10 @@ def load_params_config(
     config_dict["model_type"] = config_dict.get("model_type", "transformer")
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
     config_dict["tie_word_embeddings"] = config_dict.get(
-        "tie_embeddings", False
-    )
+        "tie_embeddings", False)
     config_dict["max_seq_len"] = config_dict.get("max_seq_len", 128_000)
     config_dict["max_position_embeddings"] = config_dict.get(
-        "max_position_embeddings", 128_000
-    )
+        "max_position_embeddings", 128_000)
 
     if config_dict.get("quantization") is not None:
         quantization = config_dict.get("quantization", {})
@@ -722,16 +693,14 @@ def load_params_config(
             }
         else:
             raise ValueError(
-                f"Found unknown quantization='{quantization}' in config"
-            )
+                f"Found unknown quantization='{quantization}' in config")
 
         config_dict["quantization_config"] = quantization_config
 
-    config_type: Literal["text", "multimodal"] = (
-        "multimodal"
-        if config_dict.get("vision_encoder") is not None
-        else "text"
-    )
+    config_type: Literal["text",
+                         "multimodal"] = ("multimodal"
+                                          if config_dict.get("vision_encoder")
+                                          is not None else "text")
 
     if config_dict.get("moe") is not None:
         config_dict["architectures"] = ["MixtralForCausalLM"]
@@ -755,11 +724,9 @@ def load_params_config(
     # transform to HF config format
     if config_type == "multimodal":
         config_dict["text_config"] = PretrainedConfig(
-            **config_dict["text_config"]
-        )
+            **config_dict["text_config"])
         config_dict["vision_config"] = PretrainedConfig(
-            **config_dict["vision_config"]
-        )
+            **config_dict["vision_config"])
 
     return PretrainedConfig(**config_dict)
 
@@ -776,9 +743,10 @@ def get_hf_image_processor_config(
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
         model = Path(model).parent
-    return get_image_processor_config(
-        model, token=hf_token, revision=revision, **kwargs
-    )
+    return get_image_processor_config(model,
+                                      token=hf_token,
+                                      revision=revision,
+                                      **kwargs)
 
 
 def get_hf_text_config(config: PretrainedConfig):
@@ -818,16 +786,13 @@ def try_get_generation_config(
 
 
 def get_cross_encoder_activation_function(config: PretrainedConfig):
-    if (
-        hasattr(config, "sbert_ce_default_activation_function")
-        and config.sbert_ce_default_activation_function is not None
-    ):
+    if (hasattr(config, "sbert_ce_default_activation_function")
+            and config.sbert_ce_default_activation_function is not None):
 
         function_name = config.sbert_ce_default_activation_function
         assert function_name.startswith("torch.nn.modules."), (
             "Loading of activation functions is restricted to "
-            "torch.nn.modules for security reasons"
-        )
+            "torch.nn.modules for security reasons")
         return resolve_obj_by_qualname(function_name)()
     else:
         return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()

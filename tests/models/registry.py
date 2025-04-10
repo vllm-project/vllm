@@ -67,10 +67,8 @@ class _HfExamplesInfo:
         If the installed transformers version does not meet the requirements,
         perform the given action.
         """
-        if (
-            self.min_transformers_version is None
-            and self.max_transformers_version is None
-        ):
+        if (self.min_transformers_version is None
+                and self.max_transformers_version is None):
             return
 
         current_version = TRANSFORMERS_VERSION
