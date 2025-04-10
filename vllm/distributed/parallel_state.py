@@ -119,11 +119,13 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
 
 
 if supports_custom_op():
+    from vllm.platforms import current_platform
     direct_register_custom_op(
         op_name="all_reduce",
         op_func=all_reduce,
         mutates_args=[],
         fake_impl=all_reduce_fake,
+        dispatch_key=current_platform.dispatch_key,
     )
 
 
@@ -219,7 +221,8 @@ class GroupCoordinator:
                 self.cpu_group, 1 << 22, 6)
 
         from vllm.platforms import current_platform
-        self.use_custom_op_call = current_platform.is_cuda_alike()
+        self.use_custom_op_call = (current_platform.is_cuda_alike()
+                                   or current_platform.is_tpu())
 
     @property
     def first_rank(self):
@@ -902,11 +905,17 @@ def initialize_model_parallel(
     if config is not None:
         data_parallel_size = config.parallel_config.data_parallel_size
 
-    # the layout order is: DP x PP x TP
+    # the layout order is: ExternalDP x DP x PP x TP
+    # ExternalDP is the data parallel group that is not part of the model,
+    # every dp rank can generate independently (in verl integration).
+    # DP is the data parallel group that is part of the model,
+    # all the ranks in the same DP group should generate simultaneously,
+    # i.e. the `generate` call in the same DP group should be called together,
+    # otherwise it will cause deadlock.
     # to get group_ranks for each dimension, transpose that dimension to the
     # last dimension, then reshape to 2D, then unbind the last dimension
     all_ranks = torch.arange(world_size).reshape(
-        data_parallel_size, pipeline_model_parallel_size,
+        -1, data_parallel_size, pipeline_model_parallel_size,
         tensor_model_parallel_size)  # noqa
 
     # Build the tensor model-parallel groups.
@@ -926,7 +935,7 @@ def initialize_model_parallel(
     global _PP
     assert _PP is None, (
         "pipeline model parallel group is already initialized")
-    group_ranks = all_ranks.transpose(1, 2).reshape(
+    group_ranks = all_ranks.transpose(2, 3).reshape(
         -1, pipeline_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(group_ranks,
@@ -936,8 +945,8 @@ def initialize_model_parallel(
 
     global _DP
     assert _DP is None, ("data parallel group is already initialized")
-    group_ranks = all_ranks.transpose(0,
-                                      2).reshape(-1,
+    group_ranks = all_ranks.transpose(1,
+                                      3).reshape(-1,
                                                  data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _DP = init_model_parallel_group(group_ranks,

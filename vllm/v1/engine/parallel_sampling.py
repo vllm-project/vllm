@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from copy import copy
-from typing import Callable, Optional, Union
+from typing import Optional
 
-from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
+from vllm.outputs import CompletionOutput
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.metrics.stats import IterationStats
 
 
@@ -23,7 +22,7 @@ class ParentRequest:
     child_requests: set[str]
 
     # To aggregate child completions when not streaming
-    output_aggregator: Optional[RequestOutput]
+    output_aggregator: list[CompletionOutput]
 
     # To find the max number of generated tokens across all children
     max_num_generation_tokens: int
@@ -37,19 +36,11 @@ class ParentRequest:
         self.sampling_params = sampling_params
 
         self.child_requests = set()
-        self.output_aggregator = None
+        self.output_aggregator = [None] * sampling_params.n if (
+            sampling_params.output_kind
+            == RequestOutputKind.FINAL_ONLY) else []
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
-
-    @classmethod
-    def from_params(
-        cls,
-        request_id: str,
-        params: Union[SamplingParams, PoolingParams],
-    ) -> Optional['ParentRequest']:
-        if not isinstance(params, SamplingParams) or params.n == 1:
-            return None
-        return cls(request_id, params)
 
     def _get_child_sampling_params(
         self,
@@ -93,43 +84,30 @@ class ParentRequest:
         """
         child_req_id = f"{index}_{self.request_id}"
         self.child_requests.add(child_req_id)
-        return (child_req_id, self._get_child_sampling_params(index))
-
-    def finish_child_request(self, req_id: str):
-        self.child_requests.remove(req_id)
+        return child_req_id, self._get_child_sampling_params(index)
 
     @property
     def n(self) -> int:
         return self.sampling_params.n
 
-    def make_request_output(
+    def get_outputs(
         self,
-        final_only: bool,
+        child_request_id: str,
         completion_output: CompletionOutput,
-        new_request_output: Callable[[str], RequestOutput],
-    ) -> Optional[RequestOutput]:
-        # Use an existing RequestOutput if we're aggregating
-        request_output = self.output_aggregator
+    ) -> tuple[str, list[CompletionOutput], bool]:
+        if completion_output.finished():
+            self.child_requests.remove(child_request_id)
 
-        # Make new RequestOutput otherwise
-        if request_output is None:
-            request_output = new_request_output(self.request_id)
+        if self.sampling_params.output_kind != RequestOutputKind.FINAL_ONLY:
+            # If streaming, just return the current output.
+            outputs = [completion_output]
+        else:
+            # If not streaming, aggregate the n final outputs.
+            self.output_aggregator[completion_output.index] = completion_output
+            outputs = [] if self.child_requests else self.output_aggregator
 
-        # Add a new completion
-        request_output.outputs.append(completion_output)
-
-        # If not streaming, aggregate until all child requests complete
-        if final_only and len(request_output.outputs) != self.n:
-            self.output_aggregator = request_output
-            return None
-
-        # We're done aggregating
-        self.output_aggregator = None
-
-        # Parent completion output list must be sorted by index
-        request_output.outputs = sorted(request_output.outputs,
-                                        key=lambda x: x.index)
-        return request_output
+        finished = not self.child_requests
+        return self.request_id, outputs, finished
 
     def observe_num_generation_tokens(self, num_generation_tokens: int):
         self.max_num_generation_tokens = max(num_generation_tokens,

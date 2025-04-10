@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pickle
+from types import FunctionType
 from typing import Any, Optional
 
+import cloudpickle
 import torch
 from msgspec import msgpack
 
 CUSTOM_TYPE_TENSOR = 1
 CUSTOM_TYPE_PICKLE = 2
+CUSTOM_TYPE_CLOUDPICKLE = 3
 
 
 class MsgpackEncoder:
@@ -41,6 +44,9 @@ def custom_enc_hook(obj: Any) -> Any:
         # https://gist.github.com/tlrmchlsmth/8067f1b24a82b6e2f90450e7764fa103 # noqa: E501
         return msgpack.Ext(CUSTOM_TYPE_TENSOR, pickle.dumps(obj.numpy()))
 
+    if isinstance(obj, FunctionType):
+        return msgpack.Ext(CUSTOM_TYPE_CLOUDPICKLE, cloudpickle.dumps(obj))
+
     return msgpack.Ext(CUSTOM_TYPE_PICKLE, pickle.dumps(obj))
 
 
@@ -49,5 +55,7 @@ def custom_ext_hook(code: int, data: memoryview) -> Any:
         return torch.from_numpy(pickle.loads(data))
     if code == CUSTOM_TYPE_PICKLE:
         return pickle.loads(data)
+    if code == CUSTOM_TYPE_CLOUDPICKLE:
+        return cloudpickle.loads(data)
 
     raise NotImplementedError(f"Extension type code {code} is not supported")

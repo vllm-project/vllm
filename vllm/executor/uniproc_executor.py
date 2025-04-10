@@ -103,6 +103,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         # so we can use the env:// method.
         # required env vars:
         # - RANK
+        # - LOCAL_RANK
         # - MASTER_ADDR
         # - MASTER_PORT
         distributed_init_method = "env://"

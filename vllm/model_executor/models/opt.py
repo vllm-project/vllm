@@ -200,7 +200,6 @@ class OPTDecoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_position_embeddings
         self.vocab_size = config.vocab_size
 

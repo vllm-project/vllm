@@ -456,8 +456,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_allocator.get_prefix_cache_hit_rate(device)
 
-    def reset_prefix_cache(self) -> bool:
-        return self.block_allocator.reset_prefix_cache()
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+        return self.block_allocator.reset_prefix_cache(device)
 
     def _can_swap(self,
                   seq_group: SequenceGroup,

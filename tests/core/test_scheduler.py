@@ -617,7 +617,6 @@ def test_schedule_decode_blocks_to_copy_update():
                                      num_gpu_blocks=16)
     _, seq_group = create_dummy_prompt("1",
                                        prompt_length=60,
-                                       best_of=2,
                                        block_size=block_size)
     curr_loras = None
     scheduler._allocate_and_set_running(seq_group)
@@ -686,7 +685,6 @@ def test_schedule_swapped_cannot_swap_in():
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
-                                           best_of=2,
                                            block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
@@ -717,7 +715,6 @@ def test_infeasible_swap():
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
-                                           best_of=2,
                                            block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
@@ -747,7 +744,6 @@ def test_schedule_swapped_blocks_to_copy():
     curr_loras = None
     _, seq_group = create_dummy_prompt("1",
                                        prompt_length=60,
-                                       best_of=2,
                                        block_size=block_size)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)

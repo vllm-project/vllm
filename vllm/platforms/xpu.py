@@ -37,10 +37,11 @@ class XPUPlatform(Platform):
         return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
     @staticmethod
-    def get_device_capability(device_id: int = 0) -> DeviceCapability:
-        major, minor, *_ = torch.xpu.get_device_capability(
-            device_id)['version'].split('.')
-        return DeviceCapability(major=int(major), minor=int(minor))
+    def get_device_capability(
+            device_id: int = 0) -> Optional[DeviceCapability]:
+        # capacity format differs from cuda's and will cause unexpected
+        # failure, so use None directly
+        return None
 
     @staticmethod
     def get_device_name(device_id: int = 0) -> str:

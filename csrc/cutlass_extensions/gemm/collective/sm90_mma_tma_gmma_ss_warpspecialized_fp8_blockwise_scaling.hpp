@@ -402,7 +402,7 @@ struct CollectiveMma<
 
     // TODO: test `scale_copy_a` with `ScaleMsPerTile` < 128
     TiledCopy scale_copy_a = make_tiled_copy(SmemBlockScalingCopyAtomA{}, 
-      Layout<Shape<_32, _1>>{}, Layout<Shape<_4, _1>>{}); // (1,1,1)
+      Layout<Shape<_32>>{}, Layout<Shape<_1>>{}); // (1,1,1)
     TiledCopy scale_copy_b = make_tiled_copy(SmemBlockScalingCopyAtomB{}, 
       Layout<Shape<_1>>{}, Layout<Shape<_1>>{}); // (1,1,1)
     ThrCopy thr_scale_copy_a = scale_copy_a.get_slice(threadIdx.x);

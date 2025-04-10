@@ -426,7 +426,7 @@ main() {
 
   pip install -U transformers
 
-  pip install -r requirements-dev.txt
+  pip install -r requirements/dev.txt
   which genai-perf
 
   # check storage

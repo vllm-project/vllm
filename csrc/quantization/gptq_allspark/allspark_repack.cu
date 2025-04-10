@@ -13,8 +13,8 @@ __global__ void __launch_bounds__(128)
         const uint8_t* B, const FType* B_scale, const FType* B_zero,
         uint8_t* B_result, FType* B_scale_result, FType* B_zero_result,
         const int K, const int N, const int N_32align) {
-  const int lane_id = threadIdx.x % 32;
-  const int warp_id = threadIdx.x / 32;
+  const auto lane_id = threadIdx.x % 32;
+  const auto warp_id = threadIdx.x / 32;
 
   if (blockIdx.x != gridDim.x - 1) {
     // Load B
@@ -50,7 +50,7 @@ __global__ void __launch_bounds__(128)
     }
 
     // Store B
-    const int dst_row_base_idx = blockIdx.y * (128 / 4) + (lane_id / 8) * 8;
+    const auto dst_row_base_idx = blockIdx.y * (128 / 4) + (lane_id / 8) * 8;
     const int dst_col_idx =
         blockIdx.x * (64 * 4) + warp_id * 64 + (lane_id % 8) * 8;
     for (int i = 0; i < 8; ++i) {
@@ -65,7 +65,7 @@ __global__ void __launch_bounds__(128)
   } else {
     // Load B_scale and B_zero
     FType b_scale_reg, b_zero_reg;
-    int src_offset = blockIdx.y * 128 + threadIdx.x;
+    auto src_offset = blockIdx.y * 128 + threadIdx.x;
     ldg16_cg_0(b_scale_reg, B_scale + src_offset, src_offset < N);
     if (B_zero != nullptr)
       ldg16_cg_0(b_zero_reg, B_zero + src_offset, src_offset < N);

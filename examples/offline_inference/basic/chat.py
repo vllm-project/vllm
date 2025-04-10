@@ -27,12 +27,13 @@ def main(args: dict):
         sampling_params.top_k = top_k
 
     def print_outputs(outputs):
+        print("\nGenerated Outputs:\n" + "-" * 80)
         for output in outputs:
             prompt = output.prompt
             generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}")
+            print(f"Prompt: {prompt!r}\n")
             print(f"Generated text: {generated_text!r}")
-        print("-" * 80)
+            print("-" * 80)
 
     print("=" * 80)
 

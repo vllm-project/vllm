@@ -90,7 +90,6 @@ class MambaModel(nn.Module):
         is_lora_enabled = bool(lora_config)
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
                        (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab

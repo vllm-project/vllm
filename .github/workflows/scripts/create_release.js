@@ -1,4 +1,4 @@
-// Uses Github's API to create the release and wait for result.
+// Uses GitHub's API to create the release and wait for result.
 // We use a JS script since github CLI doesn't provide a way to wait for the release's creation and returns immediately.
 
 module.exports = async (github, context, core) => {

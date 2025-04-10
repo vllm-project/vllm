@@ -5,7 +5,7 @@
 # Copyright (c) Alibaba Cloud.
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
 """Inference-only QWen model compatible with HuggingFace weights."""
-
+import json
 from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -354,7 +354,7 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
                 "The configuration of this model indicates that it supports "
                 "vision inputs, but you instantiated the text-only version "
                 "of this model. Please use the vision model by setting "
-                f"`--hf-overrides {hf_overrides!r}`")
+                f"`--hf-overrides '{json.dumps(hf_overrides)}'`")
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 

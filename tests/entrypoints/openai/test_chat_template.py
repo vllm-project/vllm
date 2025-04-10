@@ -107,8 +107,10 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
     # Call the function and get the result
     result = apply_hf_chat_template(
         tokenizer,
+        trust_remote_code=True,
         conversation=mock_request.messages,
         chat_template=mock_request.chat_template or template_content,
+        tools=None,
         add_generation_prompt=mock_request.add_generation_prompt,
         continue_final_message=mock_request.continue_final_message,
     )
