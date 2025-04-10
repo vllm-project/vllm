@@ -13,7 +13,8 @@ import warnings
 from collections import Counter
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
+                         replace)
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
@@ -106,6 +107,77 @@ class ModelImpl(str, enum.Enum):
     AUTO = "auto"
     VLLM = "vllm"
     TRANSFORMERS = "transformers"
+
+
+def get_attr_docs(cls: type[Any]) -> dict[str, str]:
+    """
+    Get any docstrings placed after attribute assignments in a class body.
+
+    https://davidism.com/mit-license/
+    """
+
+    def pairwise(iterable):
+        """
+        Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
+        
+        Can be removed when Python 3.9 support is dropped.
+        """
+        iterator = iter(iterable)
+        a = next(iterator, None)
+
+        for b in iterator:
+            yield a, b
+            a = b
+
+    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+
+    if not isinstance(cls_node, ast.ClassDef):
+        raise TypeError("Given object was not a class.")
+
+    out = {}
+
+    # Consider each pair of nodes.
+    for a, b in pairwise(cls_node.body):
+        # Must be an assignment then a constant string.
+        if (not isinstance(a, (ast.Assign, ast.AnnAssign))
+                or not isinstance(b, ast.Expr)
+                or not isinstance(b.value, ast.Constant)
+                or not isinstance(b.value.value, str)):
+            continue
+
+        doc = inspect.cleandoc(b.value.value)
+
+        # An assignment can have multiple targets (a = b = v), but an
+        # annotated assignment only has one target.
+        targets = a.targets if isinstance(a, ast.Assign) else [a.target]
+
+        for target in targets:
+            # Must be assigning to a plain name.
+            if not isinstance(target, ast.Name):
+                continue
+
+            out[target.id] = doc
+
+    return out
+
+
+def config(cls: type[Any]) -> type[Any]:
+    """
+    A decorator that ensures all fields in a dataclass have default values
+    and that each field has a docstring.
+    """
+    if not is_dataclass(cls):
+        raise TypeError("The decorated class must be a dataclass.")
+    attr_docs = get_attr_docs(cls)
+    for f in fields(cls):
+        if f.init and f.default is MISSING and f.default_factory is MISSING:
+            raise ValueError(
+                f"Field '{f.name}' in {cls.__name__} must have a default value."
+            )
+        if f.name not in attr_docs:
+            raise ValueError(
+                f"Field '{f.name}' in {cls.__name__} has no docstring.")
+    return cls
 
 
 class ModelConfig:
@@ -1436,6 +1508,7 @@ class LoadConfig:
             self.ignore_patterns = ["original/**/*"]
 
 
+@config
 @dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
@@ -1490,7 +1563,13 @@ class ParallelConfig:
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
     sd_worker_cls: str = "auto"
+    """The full name of the worker class to use for speculative decofing. 
+    If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
+    """The full name of the worker extension class to use. The worker extension
+    class is dynamically inherited by the worker class. This is used to inject
+    new attributes and methods to the worker class for use in collective_rpc
+    calls."""
 
     world_size: int = field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
@@ -1499,6 +1578,7 @@ class ParallelConfig:
     including data parallelism."""
 
     rank: int = 0
+    """Global rank in distributed setup."""
 
     def get_next_dp_init_port(self) -> int:
         """
@@ -3826,55 +3906,3 @@ def get_current_vllm_config() -> VllmConfig:
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config
-
-
-def _pairwise(iterable):
-    """
-    Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
-    
-    Can be removed when Python 3.9 support is dropped.
-    """
-    iterator = iter(iterable)
-    a = next(iterator, None)
-
-    for b in iterator:
-        yield a, b
-        a = b
-
-
-def get_attr_docs(cls: type[Any]) -> dict[str, str]:
-    """
-    Get any docstrings placed after attribute assignments in a class body.
-
-    https://davidism.com/mit-license/
-    """
-    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
-
-    if not isinstance(cls_node, ast.ClassDef):
-        raise TypeError("Given object was not a class.")
-
-    out = {}
-
-    # Consider each pair of nodes.
-    for a, b in _pairwise(cls_node.body):
-        # Must be an assignment then a constant string.
-        if (not isinstance(a, (ast.Assign, ast.AnnAssign))
-                or not isinstance(b, ast.Expr)
-                or not isinstance(b.value, ast.Constant)
-                or not isinstance(b.value.value, str)):
-            continue
-
-        doc = inspect.cleandoc(b.value.value)
-
-        # An assignment can have multiple targets (a = b = v), but an
-        # annotated assignment only has one target.
-        targets = a.targets if isinstance(a, ast.Assign) else [a.target]
-
-        for target in targets:
-            # Must be assigning to a plain name.
-            if not isinstance(target, ast.Name):
-                continue
-
-            out[target.id] = doc
-
-    return out
