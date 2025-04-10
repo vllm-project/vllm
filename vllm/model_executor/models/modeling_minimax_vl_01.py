@@ -23,6 +23,7 @@ from transformers.utils import logging, TensorType
 from transformers.image_transforms import to_channel_dimension_format
 from transformers.image_utils import ChannelDimension
 from torchvision.transforms import Compose, ToTensor, Normalize
+from PIL import Image
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -323,6 +324,16 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             prompt_text=image_token * num_images,
             mm_data=mm_data,
         )
+
+    def _get_dummy_images(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_images: int,
+    ) -> list[npt.NDArray]:
+        image = Image.new('RGB', (width, height), color=(255, 255, 255))
+        return [image] * num_images
     
     
 @MULTIMODAL_REGISTRY.register_processor(
