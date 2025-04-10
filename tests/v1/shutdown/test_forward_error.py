@@ -34,7 +34,7 @@ def evil_forward(self, *args, **kwargs):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tensor_parallel_size", [1])
+@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("model", MODELS)
 async def test_async_llm_model_error(monkeypatch, tensor_parallel_size: int,
                                      model: str) -> None:
