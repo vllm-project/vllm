@@ -31,8 +31,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
-from .image_processer import ImageProcessor, resize_multiple_of, _convert_image_to_rgb
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
@@ -47,8 +45,6 @@ import numpy as np
 import numpy.typing as npt
 
 # Register the processors
-AutoImageProcessor.register("minimax_vl_01", ImageProcessor)
-AutoProcessor.register("minimax_vl_01", ImageProcessor)
 class LlavaNextImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     pixel_values: Union[torch.Tensor, list[torch.Tensor]]
