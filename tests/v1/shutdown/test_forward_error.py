@@ -4,7 +4,8 @@
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
-from tests.v1.shutdown.utils import SHUTDOWN_TEST_TIMEOUT
+from tests.v1.shutdown.utils import (SHUTDOWN_TEST_THRESHOLD_BYTES,
+                                     SHUTDOWN_TEST_TIMEOUT_SEC)
 from vllm import LLM
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.models.llama import LlamaForCausalLM
@@ -29,7 +30,7 @@ def evil_forward(self, *args, **kwargs):
     return self.model(*args, **kwargs)
 
 
-@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT)
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
 @pytest.mark.parametrize("enable_multiprocessing", [True])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 @pytest.mark.parametrize("model", MODELS)
@@ -61,6 +62,5 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size: int,
         # Confirm all the processes are cleaned up.
         wait_for_gpu_memory_to_clear(
             devices=list(range(tensor_parallel_size)),
-            threshold_bytes=2 * 2**30,
-            timeout_s=60,
+            threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
         )

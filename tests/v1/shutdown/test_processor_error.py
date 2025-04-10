@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from tests.v1.shutdown.utils import SHUTDOWN_TEST_TIMEOUT
+from tests.v1.shutdown.utils import SHUTDOWN_TEST_TIMEOUT_SEC
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
@@ -17,7 +17,7 @@ MODELS = ["meta-llama/Llama-3.2-1B"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT)
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
 @pytest.mark.parametrize("model", MODELS)
 async def test_async_llm_processor_error(model: str) -> None:
     """Test that AsyncLLM propagates a processor error.
