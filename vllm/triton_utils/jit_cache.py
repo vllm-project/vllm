@@ -31,25 +31,24 @@ Authors:
 
 """
 
-import time
 import inspect
+import time
 
 from triton import KernelInterface
-from triton.runtime.driver import driver
-from triton.runtime.autotuner import OutOfResources
 from triton import __version__ as triton_version
-
+from triton.runtime.autotuner import OutOfResources
+from triton.runtime.driver import driver
 
 from vllm.logger import init_logger
-logger = init_logger(__name__)
 
+logger = init_logger(__name__)
 
 __print_name__ = "vllm.triton_utils.jit_cache"
 
 
 class CacheLock:
 
-    def __init__(self, id="unkown"):
+    def __init__(self, id="unknown"):
         self.is_locked = False
         self.id = id
 
@@ -61,11 +60,13 @@ class CacheLock:
         self.is_locked = False
         logger.debug(f"JitCache lock '{self.id}' is UNLOCKED.")
 
+
 # to provide a global lock
 global_cache_lock = CacheLock("global")
 
 
 class PreparedKernel:
+
     def __init__(
         self,
         grid_obj,
@@ -176,7 +177,10 @@ class JitCache(KernelInterface):
         cache_launch_grid=False,
     ):
         # we depend on the triton version, right now, 3.0 -- 3.2 are supported
-        assert int(triton_version.split(".")[0]) == 3 and int(triton_version.split(".")[1]) <= 2
+        assert (
+            int(triton_version.split(".")[0]) == 3
+            and int(triton_version.split(".")[1]) <= 2
+        )
         self.arg_names = arg_names
         self.fn = fn
         self.base_fn = fn
@@ -262,7 +266,9 @@ class JitCache(KernelInterface):
         bind_time = bind_end - compile_end
         wrapper_time = wrapper_end - bind_end
 
-        logger.debug(f"JIT compilation took {compile_time}s, binding {bind_time}, wrapper {wrapper_time}s.")
+        logger.debug(
+            f"JIT compilation took {compile_time}s, binding {bind_time}, wrapper {wrapper_time}s."
+        )
 
         return prepared_kernel
 
@@ -281,10 +287,10 @@ class JitCache(KernelInterface):
             for key in self.check_keys:
                 assert type(kwargs[key]) in [int, bool, float]
             prepared_kernel = self._get_prepared_kernel(*args, **kwargs)
-            if prepared_kernel.get_key() in self.kernel_cache: 
+            if prepared_kernel.get_key() in self.kernel_cache:
                 logger.debug(
-                    f"WARNING: Kernel variant already cached, will override (cache lock is not locked). "
-                    f"This could mean that the given check_keys are ambigous (or the same call was already executed)."
+                    "WARNING: Kernel variant already cached, will override (cache lock is not locked). "
+                    "This could mean that the given check_keys are ambiguous (or the same call was already executed)."
                 )
             self.kernel_cache[prepared_kernel.get_key()] = prepared_kernel
 
@@ -311,7 +317,7 @@ class JitCache(KernelInterface):
 
         try:
             kernel_variant = self.kernel_cache[self.cache_index_func(kwargs)]
-        except KeyError as e:
+        except KeyError:
             logger.debug(
                 f"Key {self.cache_index_func(kwargs)}  not in cache, compiling...\n"
                 f"Current cache: {list(self.kernel_cache.keys())}"
