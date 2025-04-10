@@ -473,7 +473,7 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
-        return self.engine_core.is_engine_dead or not self.is_running
+        return self.engine_core.resources.engine_dead or not self.is_running
 
     @property
     def dead_error(self) -> BaseException:
