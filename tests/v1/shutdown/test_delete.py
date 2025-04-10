@@ -19,9 +19,16 @@ MODELS = ["meta-llama/Llama-3.2-1B"]
 @pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-async def test_async_llm_delete(model: str, tensor_parallel_size: int) -> None:
+@pytest.mark.parametrize("send_one_request", [False])
+async def test_async_llm_delete(model: str, tensor_parallel_size: int,
+                                send_one_request: bool) -> None:
     """Test that AsyncLLM frees GPU memory upon deletion.
     AsyncLLM always uses an MP client.
+
+    Args:
+      model: model under test
+      tensor_parallel_size: degree of tensor parallelism
+      send_one_request: send one request to engine before deleting
     """
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
@@ -33,12 +40,13 @@ async def test_async_llm_delete(model: str, tensor_parallel_size: int) -> None:
     # Instantiate AsyncLLM; make request to complete any deferred
     # initialization; then delete instance
     async_llm = AsyncLLM.from_engine_args(engine_args)
-    async for _ in async_llm.generate(
-            "Hello my name is",
-            request_id="abc",
-            sampling_params=SamplingParams(
-                max_tokens=1, output_kind=RequestOutputKind.DELTA)):
-        pass
+    if send_one_request:
+        async for _ in async_llm.generate(
+                "Hello my name is",
+                request_id="abc",
+                sampling_params=SamplingParams(
+                    max_tokens=1, output_kind=RequestOutputKind.DELTA)):
+            pass
     del async_llm
 
     # Confirm all the processes are cleaned up.
@@ -52,10 +60,18 @@ async def test_async_llm_delete(model: str, tensor_parallel_size: int) -> None:
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("enable_multiprocessing", [True])
+@pytest.mark.parametrize("send_one_request", [False])
 def test_llm_delete(monkeypatch, model: str, tensor_parallel_size: int,
-                    enable_multiprocessing: bool) -> None:
+                    enable_multiprocessing: bool,
+                    send_one_request: bool) -> None:
     """Test that LLM frees GPU memory upon deletion.
     TODO(andy) - LLM without multiprocessing.
+
+    Args:
+      model: model under test
+      tensor_parallel_size: degree of tensor parallelism
+      enable_multiprocessing: enable workers in separate process(es)
+      send_one_request: send one request to engine before deleting
     """
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
@@ -69,8 +85,9 @@ def test_llm_delete(monkeypatch, model: str, tensor_parallel_size: int,
         llm = LLM(model=model,
                   enforce_eager=True,
                   tensor_parallel_size=tensor_parallel_size)
-        llm.generate("Hello my name is",
-                     sampling_params=SamplingParams(max_tokens=1))
+        if send_one_request:
+            llm.generate("Hello my name is",
+                         sampling_params=SamplingParams(max_tokens=1))
         del llm
 
         # Confirm all the processes are cleaned up.
