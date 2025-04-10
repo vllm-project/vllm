@@ -95,9 +95,6 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
 
         return hf_processor
 
-    # def get_image_processor(self, **kwargs: object) -> ImageProcessor:
-    #     return ImageProcessor(**kwargs)
-
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
     def get_num_image_tokens(
         self,
@@ -316,9 +313,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
-        self.config = config
-        self.multimodal_config = multimodal_config
-
         vision_feature_layer = config.vision_feature_layer
         # Determine the layer up to which we will initialize the vision tower
         if isinstance(vision_feature_layer, int):
@@ -334,6 +328,10 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 f"vision_layer_feature type: {type(vision_feature_layer)}"
                 " is not supported")
 
+        self.config = config
+        self.multimodal_config = multimodal_config
+
+        # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = init_vision_tower_for_llava(
             config,
             quant_config,
@@ -345,7 +343,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             vision_hidden_size=vision_hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act,
-            multimodal_projector_bias=True)
+            multimodal_projector_bias=config.multimodal_projector_bias)
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -356,7 +354,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @property
+    @cached_property
     def sampler(self):
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
@@ -383,28 +381,23 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _validate_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
+
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
 
         def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape)
-            if len(actual_dims) == 2:
-                d = d.unsqueeze(0)
-            elif len(actual_dims) == 3 and actual_dims[0] != 3:
-                d = d.permute(2, 0, 1)
-            elif len(actual_dims) == 4 and actual_dims[0] == 1:
-                d = d.squeeze(0)
-            
-            if d.shape != expected_dims:
-                raise ValueError(
-                    f"The expected shape of pixel values is {expected_dims}. "
-                    f"You supplied {d.shape}.")
-            return d
+            actual_dims = tuple(d.shape[1:])
 
-        if isinstance(data, torch.Tensor):
-            return _validate_shape(data)
-        else:
-            return [_validate_shape(d) for d in data]
+            if actual_dims != expected_dims:
+                expected_expr = ("num_patches", *map(str, expected_dims))
+                raise ValueError(
+                    "The expected shape of pixel values per image per batch "
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
+
+        return data
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaNextImageInputs]:
@@ -420,29 +413,16 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            # 确保pixel_values具有正确的维度
-            def _ensure_3d(img):
-                if len(img.shape) == 2:
-                    # 如果是2维的,添加通道维度
-                    return img.unsqueeze(0)
-                elif len(img.shape) == 3:
-                    # 如果已经是3维的,检查通道维度
-                    if img.shape[0] != 3:
-                        return img.permute(2, 0, 1)
-                return img
-
-            if isinstance(pixel_values, torch.Tensor):
-                if len(pixel_values.shape) == 4:  # (batch, channels, height, width)
-                    pixel_values = [_ensure_3d(img) for img in pixel_values]
-                else:
-                    pixel_values = _ensure_3d(pixel_values)
-            elif isinstance(pixel_values, list):
-                pixel_values = [_ensure_3d(img) for img in pixel_values]
+            if not isinstance(image_sizes, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of image sizes. "
+                                 f"Got type: {type(image_sizes)}")
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(flatten_bn(pixel_values)),
-                image_sizes=self._validate_image_sizes(flatten_bn(image_sizes, concat=True)) if image_sizes is not None else None,
+                pixel_values=self._validate_pixel_values(
+                    flatten_bn(pixel_values)),
+                image_sizes=self._validate_image_sizes(
+                    flatten_bn(image_sizes, concat=True)),
             )
 
         if image_embeds is not None:
@@ -562,15 +542,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         pixel_values = inputs["pixel_values"]
 
         if isinstance(pixel_values, torch.Tensor):
-            # 检查张量维度
-            if len(pixel_values.shape) == 3:  # 如果是3维的 (c, h, w)
-                # 添加批次和补丁维度
-                pixel_values = pixel_values.unsqueeze(0).unsqueeze(0)  # 变成 (1, 1, c, h, w)
-            
-            # # 确保有5个维度
-            # if len(pixel_values.shape) != 5:
-            #     raise ValueError(f"Expected pixel_values to have 5 dimensions (b, num_patches, c, h, w), but got shape {pixel_values.shape}")
-                
             b, num_patches, c, h, w = pixel_values.shape
             stacked_pixel_values = pixel_values.view(b * num_patches, c, h, w)
             stacked_image_features = self._image_pixels_to_features(
@@ -600,7 +571,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         image_sizes = image_input.get("image_sizes")
         if image_sizes is None:
-            batch_size = len(patch_embeddings)
+            batch_size = len(image_input["data"])
             vision_config = self.config.vision_config
             default_height = default_width = vision_config.image_size
             image_sizes = torch.as_tensor([[default_height, default_width]
