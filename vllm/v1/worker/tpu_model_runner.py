@@ -20,6 +20,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.ops.xla_ops import LORA_RANK_BLOCK_SIZE
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -1036,6 +1037,43 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             torch.argmax(logits, dim=-1, keepdim=True),
             sample(logits, sampling_metadata).sampled_token_ids)
         return out_tokens
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        success = super().add_lora(lora_request)
+        if not success:
+            return False
+
+        # Only compile when we see a new LoRA adapter
+        logger.info("Compiling LoRA adapter %s", lora_request.path)
+        start = time.perf_counter()
+        xm.mark_step()
+
+        for n in range(self.lora_config.max_loras):
+            logger.info("  --lora_index %d", n)
+            # Create n dummy LoRAs as padding
+            lora_requests: set[LoRARequest] = {
+                LoRARequest(lora_name=f"warmup_{lora_id}",
+                            lora_int_id=lora_id,
+                            lora_path="/not/a/real/path")
+                for lora_id in range(1, n + 1)
+            }
+            with self.lora_manager.dummy_lora_cache():
+                # Add the dummy LoRAs here so _set_active_loras doesn't try to
+                # load from disk.
+                for lr in lora_requests:
+                    self.lora_manager.add_dummy_lora(
+                        lr, rank=self.LORA_WARMUP_RANK)
+
+            lora_requests.add(lora_request)
+
+            self.lora_manager._apply_adapters(lora_requests)
+            self.lora_manager.remove_all_adapters()
+
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in in %.2f [secs].", end - start)
+
+        return True
 
 
 def _get_padded_number(n: int, multiple: int) -> int:
