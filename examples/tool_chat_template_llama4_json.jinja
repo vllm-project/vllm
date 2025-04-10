@@ -88,7 +88,6 @@
         {{- "<|eot|>" }}
     {%- elif 'tool_calls' in message and message.tool_calls|length > 0 %}
        {{- '<|header_start|>assistant<|header_end|>\n\n' -}}
-       {{- '<|python_start|>' }}
         {%- if message['content'] is string %}
             {{- message['content'] }}
         {%- else %}
@@ -100,7 +99,6 @@
                 {%- endif %}
             {%- endfor %}
         {%- endif %}
-       {{- '<|python_end|>' }}
         {%- for tool_call in message.tool_calls %}
            {{- '{"name": "' + tool_call.function.name + '", ' }}
            {{- '"parameters": ' }}
@@ -115,7 +113,7 @@
         {%- else %}
             {{- message.content }}
         {%- endif %}
-        {{- "<|eot|>" }}
+        {{- "<|eom|>" }}
     {%- endif %}
 {%- endfor %}
 {%- if add_generation_prompt %}
