@@ -146,9 +146,7 @@ class Llama4Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        # TODO: attn_temperature_tuning should be a bool in huggingface
-        self.attn_temperature_tuning = self.nope and \
-            config.attn_temperature_tuning > 0
+        self.attn_temperature_tuning = self.nope
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
@@ -234,7 +232,7 @@ class Llama4Attention(nn.Module):
         #
         # We should apply temperature tuning between (after) rotary / QK norm
         # and (before) attention.
-        if self.attn_temperature_tuning and self.nope:
+        if self.attn_temperature_tuning:
             attn_scale = self._get_attn_scale(positions)
             q = (q * attn_scale).to(q.dtype)
         attn_output = self.attn(q, k, v)
@@ -467,12 +465,6 @@ class Llama4ForCausalLM(LlamaForCausalLM):
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # Update temperature tuning config from generation config
-        gen_config = vllm_config.model_config.try_get_generation_config()
-        gen_config.update(vllm_config.model_config.override_generation_config)
-        vllm_config.model_config.hf_config.attn_temperature_tuning \
-            = gen_config.get("attn_temperature_tuning", False)
-
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
                          layer_type=Llama4DecoderLayer)
