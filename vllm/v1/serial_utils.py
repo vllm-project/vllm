@@ -95,6 +95,7 @@ class MsgpackDecoder:
             self.aux_buffers = ()
 
     def dec_hook(self, t: type, obj: Any) -> Any:
+        # Given native types in `obj`, convert to type `t`.
         if isclass(t):
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
