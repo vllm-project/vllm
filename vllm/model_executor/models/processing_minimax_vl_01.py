@@ -167,8 +167,14 @@ class MiniMaxVL01Processor(ProcessorMixin):
         # 确保 tokenizer 是 PreTrainedTokenizerBase 类型
         if hasattr(tokenizer, 'get_hf_tokenizer'):
             tokenizer = tokenizer.get_hf_tokenizer()
+        elif hasattr(tokenizer, 'tokenizer'):
+            tokenizer = tokenizer.tokenizer
             
-        super().__init__(image_processor.get_hf_processor(), tokenizer, chat_template=chat_template)
+        # 确保 image_processor 是 ImageProcessor 类型
+        if hasattr(image_processor, 'get_hf_processor'):
+            image_processor = image_processor.get_hf_processor()
+            
+        super().__init__(image_processor, tokenizer, chat_template=chat_template)
         self.patch_size = image_processor.patch_size
         self.grid_pinpoints = image_processor.image_grid_pinpoints
         self.max_size = image_processor.size
