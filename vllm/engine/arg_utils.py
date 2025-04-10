@@ -7,7 +7,7 @@ import re
 import threading
 from dataclasses import MISSING, dataclass, fields
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
-                    Tuple, Type, Union, cast, get_args)
+                    Tuple, Type, Union, cast, get_args, get_origin)
 
 import torch
 
@@ -234,6 +234,10 @@ class EngineArgs:
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
+        def is_optional(cls: type[Any]) -> bool:
+            """Check if the class is an optional type."""
+            return get_origin(cls) is Union and type(None) in get_args(cls)
+
         def get_kwargs(cls: type[Any]) -> Dict[str, Any]:
             cls_docs = get_attr_docs(cls)
             kwargs = {}
@@ -245,8 +249,13 @@ class EngineArgs:
                 kwargs[name] = {"default": default, "help": cls_docs[name]}
                 # When using action="store_true"
                 # add_argument doesn't accept type
-                if field.type is not bool:
-                    kwargs[name]["type"] = field.type
+                if field.type is bool:
+                    continue
+                # Handle optional fields
+                if is_optional(field.type):
+                    kwargs[name]["type"] = nullable_str
+                    continue
+                kwargs[name]["type"] = field.type
             return kwargs
 
         # Model arguments
