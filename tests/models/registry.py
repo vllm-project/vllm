@@ -374,6 +374,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DeepSeekMTPModel": _HfExamplesInfo("luccafong/deepseek_mtp_main_random",
                                         speculative_model="luccafong/deepseek_mtp_draft_random",  # noqa: E501
                                         trust_remote_code=True),
+    "EagleLlamaForCausalLM": _HfExamplesInfo("yuhuili/EAGLE-LLaMA3-Instruct-8B",
+                                             trust_remote_code=True,
+                                             speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
+                                             tokenizer="meta-llama/Meta-Llama-3-8B-Instruct"),  # noqa: E501
 }
 
 _TRANSFORMERS_MODELS = {
