@@ -98,6 +98,13 @@ def truncate_tool_call_ids(request: "ChatCompletionRequest"):
                 request.messages[i]["tool_call_id"] = tool_call_id
 
 
+def validate_request_params(request: "ChatCompletionRequest"):
+    if (request.skip_special_tokens is not None
+            and not request.skip_special_tokens):
+        raise ValueError("skip_special_tokens=False is not supported "
+                         "for Mistral tokenizers.")
+
+
 def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
     repo_cache = os.path.join(
         huggingface_hub.constants.HF_HUB_CACHE,
