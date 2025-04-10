@@ -209,14 +209,15 @@ def _run_test(
     # will hurt multiprocessing backend with fork method (the default method).
 
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     dtype=dtype,
-                     max_model_len=8192,
-                     max_num_seqs=3,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
-                                          }) as vllm_model:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            max_model_len=19212,  # 3 max size images
+            max_num_seqs=3,
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+            limit_mm_per_prompt={"image":
+                                 _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
