@@ -147,7 +147,7 @@ else:
 
 ### Low Level Explanation - Matrix Multiply Implementation
 - My implementation of the Matrix Multiplication in step 2.1\*\*:
-	- Consider the expression for $AX$ in (A). I rewrite this as the transpose of the following expression: $\begin{bmatrix} X_0^\top & X_1^\top & \cdots & X_p^\top \end{bmatrix} \begin{bmatrix} A_0 & A_1 & \cdots & A_p \end{bmatrix}$
+	- Consider the expression for $AX$ in (A). I rewrite this as the transpose of the following expression: $\begin{bmatrix} X_0^\top & X_1^\top & \cdots & X_p^\top \end{bmatrix} \begin{bmatrix} A_0 \\ A_1 \\ \cdots \\ A_p \end{bmatrix}$ 
 		- Note that:
 			- The `RowParallelLinear` uses `nn.Linear`, where $y=XA$, and $A$ is the fixed weight, and $X$ is the activation. Therefore, we need to rewrite it to match this form:
 				- $AX$ = $(X^\top A^\top)^\top$
