@@ -9,7 +9,7 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 
-from .utils import AutoWeightsLoader, embed_multimodal
+from .utils import AutoWeightsLoader, embed_multimodal, init_vllm_registered_model, maybe_prefix
 from vllm.config import VllmConfig
 from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
@@ -357,6 +357,11 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
         self.vocab_size = config.text_config.vocab_size
         text_config = MiniMaxText01Config.from_dict(config.text_config.to_dict())
         self.language_model = MiniMaxText01ForCausalLM(text_config)
+        self.language_model = init_vllm_registered_model(
+            vllm_config=vllm_config,
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
         self._padding_side = "left"  # set it to left by default, user can use setter to change padding_sides
         self.post_init()
@@ -701,7 +706,7 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
         image_features = torch.cat(new_image_features, dim=0)
         feature_lens = torch.tensor(feature_lens, dtype=torch.long, device=image_features.device)
         return image_features, feature_lens
-
+        
     @add_start_docstrings_to_model_forward(MINIMAX_VL_01_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=MiniMaxVL01CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
