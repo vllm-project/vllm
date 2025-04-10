@@ -34,7 +34,4 @@ struct HadamardParamsBase {
 };
 
 at::Tensor
-fast_hadamard_transform_1024(at::Tensor &x, double scale);
-
-at::Tensor
-fast_hadamard_transform_512(at::Tensor &x, double scale);
+fast_hadamard_transform(at::Tensor &x, double scale);
