@@ -220,6 +220,7 @@ class Fp8LinearOp:
 
             per_tensor_weights = (weight_scale.numel() == 1)
             per_tensor_activations = (x_scale.numel() == 1)
+
             if per_tensor_weights and per_tensor_activations:
                 # Fused GEMM_DQ
                 output = torch._scaled_mm(qinput,
