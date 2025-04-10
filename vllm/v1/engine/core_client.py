@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import contextlib
 import queue
 import uuid
 import weakref
@@ -302,6 +303,7 @@ class BackgroundResources:
     core_engines: list[CoreEngine] = field(default_factory=list)
     output_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     input_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
+    output_queue_task: Optional[asyncio.Task] = None
     shutdown_path: Optional[str] = None
 
     # Set if any of the engines are dead. Here so that the output
@@ -313,6 +315,10 @@ class BackgroundResources:
 
         for core_engine in self.core_engines:
             core_engine.close()
+
+        if self.output_queue_task is not None:
+            with contextlib.suppress(Exception):
+                self.output_queue_task.cancel()
 
         # ZMQ context termination can hang if the sockets
         # aren't explicitly closed first.
@@ -622,8 +628,6 @@ class AsyncMPClient(MPClient):
 
         self.outputs_queue: asyncio.Queue[Union[EngineCoreOutputs,
                                                 Exception]] = asyncio.Queue()
-        self.queue_task: Optional[asyncio.Task] = None
-
         self.outputs_handler: Optional[Callable[
             [AsyncMPClient, EngineCoreOutputs], Awaitable[None]]] = None
 
@@ -638,7 +642,8 @@ class AsyncMPClient(MPClient):
             pass
 
     def _ensure_output_queue_task(self):
-        if self.queue_task is not None:
+        resources = self.resources
+        if resources.output_queue_task is not None:
             return
 
         # Perform IO in separate task to parallelize as much as possible.
@@ -651,7 +656,6 @@ class AsyncMPClient(MPClient):
         output_path = self.output_path
         output_socket = make_zmq_socket(self.ctx, output_path,
                                         zmq.constants.PULL)
-        resources = self.resources
         resources.output_socket = output_socket
 
         async def process_outputs_socket():
@@ -678,13 +682,8 @@ class AsyncMPClient(MPClient):
             except Exception as e:
                 outputs_queue.put_nowait(e)
 
-        self.queue_task = asyncio.create_task(process_outputs_socket(),
-                                              name="EngineCoreOutputQueueTask")
-
-    def shutdown(self):
-        super().shutdown()
-        if queue_task := getattr(self, "queue_task", None):
-            queue_task.cancel()
+        resources.output_queue_task = asyncio.create_task(
+            process_outputs_socket(), name="EngineCoreOutputQueueTask")
 
     async def get_output_async(self) -> EngineCoreOutputs:
         self._ensure_output_queue_task()
