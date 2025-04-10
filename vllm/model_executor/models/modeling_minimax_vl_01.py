@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union, Iterable
+from typing import List, Set, Optional, Tuple, Union, Iterable
 
 import numpy as np
 import torch
