@@ -15,16 +15,23 @@ from msgspec import msgpack
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
 
+# TODO calibrate this size
+INLINE_BUF_SIZE_THRESHOLD = 256
+
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
 
 class MsgpackEncoder:
-    """Encoder with custom torch tensor and numpy array serialization."""
+    """Encoder with custom torch tensor and numpy array serialization.
+
+    Note that unlike vanilla `msgspec` Encoders, this interface is generally
+    not thread-safe when encoding tensors / numpy arrays.
+    """
 
     def __init__(self):
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
         # This is used as a local stash of buffers that we can then access from
-        # our custom `msgpack` hook, `enc_hook`. We don't have a way to
+        # our custom `msgspec` hook, `enc_hook`. We don't have a way to
         # pass custom data to the hook otherwise.
         self.aux_buffers: Optional[list[bytestr]] = None
 
@@ -32,11 +39,10 @@ class MsgpackEncoder:
         try:
             self.aux_buffers = bufs = [b'']
             bufs[0] = self.encoder.encode(obj)
-            # This `bufs` array gives our custom encoder the opportunity
-            # to stash additional buffers behind it. This allows us to structure
-            # the data in such a way that msgpack is encoding directly from our
-            # original backing buffers, instead of copying them into a new type
-            # that msgpack understands. This is a significant performance gain.
+            # This `bufs` list allows us to collect direct pointers to backing
+            # buffers of tensors and np arrays, and return them along with the
+            # top-level encoded buffer instead of copying their data into the
+            # new buffer.
             return bufs
         finally:
             self.aux_buffers = None
@@ -59,14 +65,18 @@ class MsgpackEncoder:
             return self._encode_ndarray(obj)
 
         if isinstance(obj, FunctionType):
+            # `pickle` is generally faster than cloudpickle, but can have
+            # problems serializing methods.
             return msgpack.Ext(CUSTOM_TYPE_CLOUDPICKLE, cloudpickle.dumps(obj))
 
         return msgpack.Ext(CUSTOM_TYPE_PICKLE,
                            pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
 
-    def _encode_ndarray(self, obj: np.ndarray) -> Any:
+    def _encode_ndarray(
+        self, obj: np.ndarray
+    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
-        if not obj.shape or obj.nbytes <= 256:
+        if not obj.shape or obj.nbytes < INLINE_BUF_SIZE_THRESHOLD:
             # Encode small arrays and scalars inline.
             data = obj.data
         else:
@@ -75,13 +85,17 @@ class MsgpackEncoder:
             data = len(self.aux_buffers)
             self.aux_buffers.append(obj.data)
         # We serialize the ndarray as a tuple of native types.
-        # The data is either inlined if small, or an index into a backing buffer
-        # that we've stashed in `aux_buffers`.
+        # The data is either inlined if small, or an index into a list of
+        # backing buffers that we've stashed in `aux_buffers`.
         return obj.dtype.str, obj.shape, data
 
 
 class MsgpackDecoder:
-    """Decoder with custom torch tensor and numpy array serialization."""
+    """Decoder with custom torch tensor and numpy array serialization.
+
+    Note that unlike vanilla `msgspec` Decoders, this interface is generally
+    not thread-safe when encoding tensors / numpy arrays.
+    """
 
     def __init__(self, t: Optional[Any] = None):
         args = () if t is None else (t, )
