@@ -109,7 +109,7 @@ class BambaMixerDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
-        mamba2_metadata: Optional[Mamba2Metadata] = None,
+        mamba2_metadata: Mamba2Metadata,
         **kwargs,
     ):
         if residual is None:
