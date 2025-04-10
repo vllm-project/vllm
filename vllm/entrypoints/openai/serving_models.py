@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.utils import AtomicCounter
 
 logger = init_logger(__name__)
 
@@ -69,6 +70,7 @@ class OpenAIServingModels:
 
         self.static_lora_modules = lora_modules
         self.lora_requests: list[LoRARequest] = []
+        self.lora_id_counter = AtomicCounter(0)
 
         self.lora_resolvers: list[LoRAResolver] = []
         for lora_resolver_name in LoRAResolverRegistry.get_supported_resolvers(
@@ -157,7 +159,7 @@ class OpenAIServingModels:
             return error_check_ret
 
         lora_name, lora_path = request.lora_name, request.lora_path
-        unique_id = abs(hash(lora_name))
+        unique_id = self.lora_id_counter.inc(1)
         lora_request = LoRARequest(lora_name=lora_name,
                                    lora_int_id=unique_id,
                                    lora_path=lora_path)
@@ -262,7 +264,7 @@ class OpenAIServingModels:
                     return existing
 
             base_model_name = self.model_config.model
-            unique_id = abs(hash(lora_name))
+            unique_id = self.lora_id_counter.inc(1)
             found_adapter = False
 
             # Try to resolve using available resolvers
