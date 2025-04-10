@@ -12,6 +12,7 @@ import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
+from vllm.triton_utils.jit_cache import jitcache
 
 from .prefix_prefill import context_attention_fwd
 
@@ -21,6 +22,8 @@ def cdiv_fn(x, y):
     return (x + y - 1) // y
 
 
+@jitcache(
+    check_keys=["USE_ALIBI_SLOPES", "SLIDING_WINDOW", "filter_by_query_len"], )
 @triton.jit
 def kernel_paged_attention_2d(
         output_ptr,  # [num_tokens, num_query_heads, head_size]
@@ -30,9 +33,9 @@ def kernel_paged_attention_2d(
         block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
         seq_lens_ptr,  # [num_seqs]
         alibi_slopes_ptr,  # [num_query_heads]
-        scale,  # float32
-        k_scale,  # float32
-        v_scale,  # float32
+        scale: float,  # float32
+        k_scale: float,  # float32
+        v_scale: float,  # float32
         num_query_heads: tl.constexpr,  # int
         num_queries_per_kv: tl.constexpr,  # int
         num_queries_per_kv_padded: tl.constexpr,  # int
