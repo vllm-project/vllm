@@ -61,6 +61,24 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self.info = info
 
     @abstractmethod
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        """
+        Build the text input corresponding to :code:`mm_counts`.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        """
+        Build the multimodal input which, after processing, results in
+        the maximum possible number of placeholder tokens.
+        """
+        raise NotImplementedError
+
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
@@ -70,7 +88,10 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         Build the input which, after processing, results in
         the maximum possible number of placeholder tokens.
         """
-        raise NotImplementedError
+        dummy_text = self.get_dummy_text(mm_counts)
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+
+        return ProcessorInputs(prompt_text=dummy_text, mm_data=dummy_mm_data)
 
     def _get_dummy_audios(
         self,
