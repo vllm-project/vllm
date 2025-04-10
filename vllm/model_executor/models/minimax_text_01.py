@@ -457,11 +457,14 @@ class MiniMaxText01LinearAttention(nn.Module):
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor,
                       attn_metadata):
-        q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0
-                                               ):]
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        if num_prefill_tokens >= q.size(0):
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+            
+        q = q[num_prefill_tokens:].unsqueeze(2).contiguous()
+        k = k[num_prefill_tokens:].unsqueeze(2).contiguous()
+        v = v[num_prefill_tokens:].unsqueeze(2).contiguous()
+        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0):]
         hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
                                               slot_id, 32)
         return hidden
