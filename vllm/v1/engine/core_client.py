@@ -335,7 +335,8 @@ class BackgroundResources:
                 shutdown_sender.send(b'')
 
     def validate_alive(self, frames: Sequence[zmq.Frame]):
-        if len(frames) == 1 and frames[0] == EngineCoreProc.ENGINE_CORE_DEAD:
+        if len(frames) == 1 and (frames[0].buffer
+                                 == EngineCoreProc.ENGINE_CORE_DEAD):
             self.engine_dead = True
             raise EngineDeadError()
 
