@@ -311,6 +311,12 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed.", request_id)
             raise
 
+        # Bad request discovered in generate()
+        except ValueError:
+            if self.log_requests:
+                logger.info("Request %s failed.", request_id)
+            raise
+
         # Error in the generate() task (possibly recoverable).
         except Exception as e:
             await self.abort(request_id)
