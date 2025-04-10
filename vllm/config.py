@@ -2976,7 +2976,7 @@ class DecodingConfig:
 
     # Which guided decoding algo to use.
     # 'outlines' / 'lm-format-enforcer' / 'xgrammar'
-    guided_decoding_backend: str = 'xgrammar'
+    guided_decoding_backend: str = "auto" if envs.VLLM_USE_V1 else "xgrammar"
 
     reasoning_backend: Optional[str] = None
 
@@ -3001,7 +3001,7 @@ class DecodingConfig:
 
     def __post_init__(self):
         v0_valid_guided_backends = [
-            'outlines', 'lm-format-enforcer', 'xgrammar'
+            'outlines', 'lm-format-enforcer', 'xgrammar', 'auto'
         ]
         v1_valid_guided_backends = ['xgrammar', 'guidance', 'auto']
 
