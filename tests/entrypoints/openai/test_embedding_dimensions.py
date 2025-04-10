@@ -3,7 +3,7 @@
 Run `pytest tests/entrypoints/openai/test_embedding_dimensions.py`.
 """
 
-from collections import namedtuple
+from typing import NamedTuple
 
 import openai
 import pytest
@@ -12,7 +12,11 @@ from vllm.entrypoints.openai.protocol import EmbeddingResponse
 
 from ...utils import RemoteOpenAIServer
 
-ModelInfo = namedtuple('ModelInfo', ['name', 'is_matryoshka'])
+
+class ModelInfo(NamedTuple):
+    name: str
+    is_matryoshka: bool
+
 
 MODELS = [
     ModelInfo(name="BAAI/bge-m3", is_matryoshka=False),

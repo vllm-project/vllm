@@ -921,6 +921,11 @@ class LLM:
         if pooling_params is None:
             # Use default pooling params.
             pooling_params = PoolingParams()
+        elif isinstance(pooling_params, PoolingParams):
+            pooling_params.verify(self.llm_engine.model_config)
+        else:
+            for pooling_param in pooling_params:
+                pooling_param.verify(self.llm_engine.model_config)
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,

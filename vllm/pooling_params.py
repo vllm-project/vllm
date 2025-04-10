@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 
 class PoolingParams(
@@ -24,6 +27,17 @@ class PoolingParams(
         """Returns a deep copy of the PoolingParams instance."""
         return PoolingParams(dimensions=self.dimensions,
                              additional_data=self.additional_data)
+
+    def verify(self, model_config: "ModelConfig") -> None:
+        if not model_config.is_matryoshka:
+            if self.dimensions is not None:
+                raise ValueError(
+                    f'Model "{model_config.served_model_name}" does not '
+                    f'support matryoshka representation, '
+                    f'changing output dimensions will lead to poor results.')
+        else:
+            if isinstance(self.dimensions, int) and self.dimensions < 1:
+                raise ValueError("Dimensions must be greater than 0")
 
     def __repr__(self) -> str:
         return (f"PoolingParams("

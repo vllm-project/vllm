@@ -81,18 +81,6 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         encoding_format = request.encoding_format
 
-        # validating request.dimensions
-        if not self.model_config.is_matryoshka:
-            if request.dimensions is not None:
-                return self.create_error_response(
-                    f'Model "{self.model_config.served_model_name}" does not '
-                    f'support matryoshka representation, '
-                    f'changing output dimensions will lead to poor results.')
-        else:
-            if isinstance(request.dimensions, int) and request.dimensions < 1:
-                return self.create_error_response(
-                    "Dimensions must be greater than 0")
-
         model_name = self._get_model_name(request.model)
         request_id = f"embd-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
@@ -107,6 +95,13 @@ class OpenAIServingEmbedding(OpenAIServing):
                     "truncate_prompt_tokens value is "
                     "greater than max_model_len."
                     " Please, select a smaller truncation size.")
+
+        pooling_params = request.to_pooling_params()
+
+        try:
+            pooling_params.verify(self.model_config)
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         try:
             (
@@ -155,8 +150,6 @@ class OpenAIServingEmbedding(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
-            pooling_params = request.to_pooling_params()
-
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 
@@ -168,8 +161,6 @@ class OpenAIServingEmbedding(OpenAIServing):
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
-
-                print("create_embedding", pooling_params)
 
                 generator = self.engine_client.encode(
                     engine_prompt,
