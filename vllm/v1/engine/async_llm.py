@@ -308,16 +308,16 @@ class AsyncLLM(EngineClient):
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:
             if self.log_requests:
-                logger.info("Request %s failed.", request_id)
+                logger.info("Request %s failed (engine dead).", request_id)
             raise
 
-        # Bad request discovered in generate()
+        # Request validation error.
         except ValueError:
             if self.log_requests:
-                logger.info("Request %s failed.", request_id)
+                logger.info("Request %s failed (bad request).", request_id)
             raise
 
-        # Error in the generate() task (possibly recoverable).
+        # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
             await self.abort(request_id)
             if self.log_requests:
