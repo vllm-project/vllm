@@ -752,9 +752,8 @@ class Zamba2Model(nn.Module):
 
         mamba2_metadata = prepare_mamba2_metadata(
             chunk_size=self.config.chunk_size,
-            has_prefills=attn_metadata.num_prefills > 0,
             input_ids=input_ids,
-            query_start_loc=attn_metadata.query_start_loc,
+            attn_metadata=attn_metadata,
         )
 
         # Process through layers

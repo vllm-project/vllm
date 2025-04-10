@@ -6,10 +6,6 @@ import torch
 from torch import nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.attention.backends.placeholder_attn import (
-    PlaceholderAttentionMetadata)
-from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
@@ -389,28 +385,14 @@ class MambaMixer2(CustomOp):
         mamba_cache_params: MambaCacheParams,
         mamba2_metadata: Mamba2Metadata,
     ):
-        # For the mamba2 triton kernels to operate in continuous batching,
-        # the sequence_idx is needed to be passed in. Also, for the kernels
-        # to operate in chunked prefill, the mamba2_metadata containing
-        # chunk_indices and chunk_offsets must be passed in; it is
-        # more efficient to pre-compute once since they are common to all
-        # layers.
+        # mamba2_metadata contains metadata necessary for the mamba2 triton
+        # kernels to operate in continuous batching and in chunked prefill
+        # modes; they are computed at top-level model forward since they
+        # are the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
         seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
-
-        # detect if there are prefills
-        has_prefill = attn_metadata.num_prefills > 0
-
-        # - also need flags to indicate if there are initial states
-        # - currently we really only support the FlashAttention backend
-        has_initial_states = None
-        if (isinstance(attn_metadata,
-                       (FlashAttentionMetadata, XFormersMetadata,
-                        PlaceholderAttentionMetadata))
-                and attn_metadata.context_lens_tensor is not None):
-            has_initial_states = attn_metadata.context_lens_tensor > 0
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -428,7 +410,7 @@ class MambaMixer2(CustomOp):
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
-        if has_prefill:
+        if mamba2_metadata.has_prefill:
             # |---------- N-1 iteration --------|
             # |---------------- N iteration ---------------------|
             # |- tokenA -|......................|-- newTokens ---|
@@ -444,7 +426,7 @@ class MambaMixer2(CustomOp):
                 self.conv1d.bias,
                 activation=self.activation,
                 conv_states=mamba_cache_params.conv_state,
-                has_initial_state=has_initial_states,
+                has_initial_state=mamba2_metadata.has_initial_states,
                 cache_indices=mamba_cache_params.state_indices_tensor,
                 query_start_loc=attn_metadata.query_start_loc).transpose(
                     0, 1)[:seq_len]
@@ -472,13 +454,13 @@ class MambaMixer2(CustomOp):
         )
 
         # 3. State Space Model sequence transformation
-        if has_prefill:
+        if mamba2_metadata.has_prefill:
             initial_states = None
-            if has_initial_states is not None and torch.any(
-                    has_initial_states):
+            if (mamba2_metadata.has_initial_states is not None
+                    and mamba2_metadata.prep_initial_states):
                 # making a copy of the states
                 initial_states = torch.where(
-                    has_initial_states[:, None, None, None],
+                    mamba2_metadata.has_initial_states[:, None, None, None],
                     mamba_cache_params.ssm_state[
                         mamba_cache_params.state_indices_tensor], 0)
 

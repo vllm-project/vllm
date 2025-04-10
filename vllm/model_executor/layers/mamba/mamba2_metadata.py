@@ -4,9 +4,20 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.attention.backends.placeholder_attn import (
+    PlaceholderAttentionMetadata)
+from vllm.attention.backends.xformers import XFormersMetadata
+
 
 @dataclass
 class Mamba2Metadata:
+    has_prefill: bool
+
+    has_initial_states: torch.Tensor
+    prep_initial_states: bool
+
     chunk_size: int
     seq_idx: torch.Tensor
     chunk_indices: torch.Tensor
@@ -49,19 +60,31 @@ def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
 
 def prepare_mamba2_metadata(
     chunk_size: int,
-    has_prefills: bool,
     input_ids: torch.Tensor,
-    query_start_loc: torch.Tensor,
+    attn_metadata: AttentionMetadata,
 ) -> Mamba2Metadata:
+
+    # Need flags to indicate if there are initial states
+    # currently we really only support the FlashAttention backend
+    has_initial_states = None
+    prep_initial_states = False
+    if (isinstance(attn_metadata, (FlashAttentionMetadata, XFormersMetadata,
+                                   PlaceholderAttentionMetadata))
+            and attn_metadata.context_lens_tensor is not None):
+        has_initial_states = attn_metadata.context_lens_tensor > 0
+        # precompute flag to avoid device syncs later in mamba2 forwards
+        prep_initial_states = torch.any(has_initial_states).item()
+
+    has_prefill = attn_metadata.num_prefills > 0
 
     seq_idx = None
     chunk_indices, chunk_offsets = None, None
-    if has_prefills:
+    if has_prefill:
         seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
-        for i, (srt,
-                end) in enumerate(zip(
-                    query_start_loc,
-                    query_start_loc[1:],
+        for i, (srt, end) in enumerate(
+                zip(
+                    attn_metadata.query_start_loc,
+                    attn_metadata.query_start_loc[1:],
                 )):
             seq_idx[srt:end] = i
         seq_idx.unsqueeze_(0)
@@ -77,7 +100,10 @@ def prepare_mamba2_metadata(
         chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
             seq_idx, chunk_size)
 
-    return Mamba2Metadata(chunk_size=chunk_size,
+    return Mamba2Metadata(has_prefill=has_prefill,
+                          has_initial_states=has_initial_states,
+                          prep_initial_states=prep_initial_states,
+                          chunk_size=chunk_size,
                           seq_idx=seq_idx,
                           chunk_indices=chunk_indices,
                           chunk_offsets=chunk_offsets)
