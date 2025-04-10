@@ -168,20 +168,6 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
                                 image_width=x[1], image_height=x[0]))
         return ImageSize(width=width, height=height)
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        num_images = mm_counts.get("image", 0)
-        max_image_size = self.get_image_size_with_most_features()
-        max_image_tokens = self.get_num_image_tokens(
-            image_height=max_image_size.height,
-            image_width=max_image_size.width,
-            cropping=num_images <= 2)
-
-        return {"image": max_image_tokens}
-
 
 class DeepseekVL2DummyInputsBuilder(
         BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo]):

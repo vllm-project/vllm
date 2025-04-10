@@ -80,13 +80,6 @@ class FuyuProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
     def get_image_feature_grid_size(
         self,
         *,
@@ -128,14 +121,6 @@ class FuyuProcessingInfo(BaseProcessingInfo):
         image_processor = self.get_image_processor()
         return ImageSize(width=image_processor.size["width"],
                          height=image_processor.size["height"])
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-        )
 
 
 class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
