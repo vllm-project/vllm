@@ -340,10 +340,10 @@ MINIMAX_VL_01_INPUTS_DOCSTRING = r"""
                                         dummy_inputs=LlavaDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        super().__init__(config)
         self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
