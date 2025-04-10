@@ -388,8 +388,8 @@ def _merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
-    num_expected_tokens = is_multimodal.sum()  #.item()
-    # assert isinstance(num_expected_tokens, int)
+    num_expected_tokens = is_multimodal.sum().item()
+    assert isinstance(num_expected_tokens, int)
 
     flattened = _flatten_embeddings(multimodal_embeddings)
     if flattened.shape[0] != num_expected_tokens:

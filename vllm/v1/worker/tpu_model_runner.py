@@ -957,7 +957,6 @@ class TPUModelRunner:
                 # `get_input_embeddings` hence for now we respect the function
                 # interface and compile for both values of `mm_embeds`.
                 for num_tokens in self.num_tokens_paddings:
-                    print("\n\nPATCHES", num_patches, num_tokens)
                     placeholders_ids = torch.zeros((num_tokens, ),
                                                    dtype=torch.int32)
                     # Align placeholders and actual num mm embeddings.

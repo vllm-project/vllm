@@ -57,9 +57,17 @@ async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
         }]
 
     server_args = [
-        "--max-model-len", "4096", "--max-num-seqs", "16",
-        "--trust-remote-code", "--max-num-batched-tokens", "512",
-        "--chat-template", "examples/template_llava.jinja"
+        "--max-model-len",
+        "4096",
+        "--max-num-seqs",
+        "16",
+        "--trust-remote-code",
+        "--max-num-batched-tokens",
+        "1024",
+        # NOTE: max-num-batched-tokens>mm_item_size
+        "--disable_chunked_mm_input",
+        "--chat-template",
+        "examples/template_llava.jinja"
     ]
 
     # Server will pre-compile on first startup (takes a long time).
