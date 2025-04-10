@@ -185,10 +185,6 @@ class Platform:
         return current_capability.to_int() >= capability
 
     @classmethod
-    def has_rdna_target(cls):
-        return False
-
-    @classmethod
     def has_cdna_target(cls):
         return False
 
