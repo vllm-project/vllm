@@ -8,9 +8,6 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.triton_utils import HAS_TRITON
 
-if HAS_TRITON:
-    from vllm.attention.ops.prefix_prefill import context_attention_fwd
-
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
 
@@ -210,25 +207,28 @@ class PagedAttention:
     ) -> torch.Tensor:
         output = torch.empty_like(query)
         max_seq_len = None
-        context_attention_fwd(
-            query,
-            key,
-            value,
-            output,
-            kv_cache_dtype,
-            key_cache,
-            value_cache,
-            block_tables,
-            # query_start_loc is (batch_size + 1,)
-            query_start_loc,
-            seq_lens_tensor,
-            max_seq_len,
-            max_query_len,
-            k_scale,
-            v_scale,
-            alibi_slopes,
-            sliding_window,
-        )
+
+        if HAS_TRITON:
+            from vllm.attention.ops.prefix_prefill import context_attention_fwd
+            context_attention_fwd(
+                query,
+                key,
+                value,
+                output,
+                kv_cache_dtype,
+                key_cache,
+                value_cache,
+                block_tables,
+                # query_start_loc is (batch_size + 1,)
+                query_start_loc,
+                seq_lens_tensor,
+                max_seq_len,
+                max_query_len,
+                k_scale,
+                v_scale,
+                alibi_slopes,
+                sliding_window,
+            )
         return output
 
     @staticmethod
