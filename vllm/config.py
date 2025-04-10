@@ -176,7 +176,7 @@ def config(cls: type[Any]) -> type[Any]:
             )
         if f.name not in attr_docs:
             raise ValueError(
-                f"Field '{f.name}' in {cls.__name__} has no docstring.")
+                f"Field '{f.name}' in {cls.__name__} must have a docstring.")
     return cls
 
 
