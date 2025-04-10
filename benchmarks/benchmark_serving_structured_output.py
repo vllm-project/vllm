@@ -130,14 +130,14 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                         "description":
                         "An unique optional field to avoid cached schemas"
                     }
+        else:
+            json_schemas = [schema] * args.num_prompts
 
         def gen_prompt(index: int):
             return f"Generate an example of a user profile given the following schema: {json.dumps(get_schema(index))}"  # noqa: E501
 
         def get_schema(index: int):
-            return json_schemas[
-                index %
-                len(json_schemas)] if args.dataset == 'json-unique' else schema
+            return json_schemas[index % len(json_schemas)]
 
         requests = [
             SampleRequest(prompt=gen_prompt(i),
