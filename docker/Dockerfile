@@ -315,5 +315,3 @@ FROM vllm-openai-base AS vllm-openai
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
-# Test comment for pre-commit hook
-# Another test comment
