@@ -96,10 +96,12 @@ class LoRAModelRunnerMixin:
             num_reqs = len(num_scheduled_tokens)
             num_loras = lora_config.max_loras
 
+            base_lora_id = lora_config.max_loras + lora_config.max_cpu_loras + 1
+
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
             prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
-                                   num_loras) + 1
+                                   num_loras) + base_lora_id
 
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping,
@@ -108,9 +110,9 @@ class LoRAModelRunnerMixin:
             # Make dummy lora requests
             lora_requests: set[LoRARequest] = {
                 LoRARequest(lora_name=f"warmup_{lora_id}",
-                            lora_int_id=lora_id,
+                            lora_int_id=lora_id + base_lora_id,
                             lora_path="/not/a/real/path")
-                for lora_id in range(1, num_loras + 1)
+                for lora_id in range(num_loras)
             }
 
             with self.lora_manager.dummy_lora_cache():
