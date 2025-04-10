@@ -78,7 +78,7 @@ v        = (kv_c @ W_UV.view(Lkv, N * V)).view(Skv, N, V)
 spda_o = scaled_dot_product_attention(
     torch.cat([q_nope, q_pe], dim=-1),
     torch.cat([k_nope, k_pe.unsqueeze(1).expand(-1, N, -1)], dim=-1),
-    v
+    v 
 ) 
 return spda_o @ W_O
 
@@ -1063,7 +1063,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             self.vllm_flash_attn_version == 3
             and current_platform.get_device_capability()[0] == 9)
 
-    def _flash_attn_varlen_diff_headdims(self, q, k, v, **kwargs):
+    def _flash_attn_varlen_diff_headdims(self, q, k, v, softmax_scale,
+                                         return_softmax_lse, **kwargs):
         maybe_padded_v = v
         if self._pad_v:
             maybe_padded_v = torch.nn.functional.pad(

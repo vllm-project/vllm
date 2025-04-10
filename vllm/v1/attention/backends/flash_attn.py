@@ -86,7 +86,6 @@ class FlashAttentionMetadata:
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
-    scheduler_metadata: Optional[torch.Tensor]
 
     # For cascade attention.
     use_cascade: bool
@@ -94,7 +93,10 @@ class FlashAttentionMetadata:
     cu_prefix_query_lens: Optional[torch.Tensor]
     prefix_kv_lens: Optional[torch.Tensor]
     suffix_kv_lens: Optional[torch.Tensor]
-    prefix_scheduler_metadata: Optional[torch.Tensor]
+
+    # Optional aot scheduling
+    scheduler_metadata: Optional[torch.Tensor] = None
+    prefix_scheduler_metadata: Optional[torch.Tensor] = None
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
