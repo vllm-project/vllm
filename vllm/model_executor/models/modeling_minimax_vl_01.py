@@ -320,17 +320,21 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                                    num_images=num_images)
         }
 
-        # 构造提示文本
         prompt_text = "test_image" + image_token * num_images
-        
+
         # 对文本进行 tokenization
         tokenizer = self.info.get_tokenizer()
         input_ids = tokenizer(prompt_text, return_tensors="pt").input_ids
 
+        # 将 input_ids 添加到 hf_processor_mm_kwargs 中
+        hf_processor_mm_kwargs = {
+            "input_ids": input_ids
+        }
+
         return ProcessorInputs(
             prompt_text=prompt_text,
             mm_data=mm_data,
-            input_ids=input_ids
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs
         )
 
     def _get_dummy_images(
