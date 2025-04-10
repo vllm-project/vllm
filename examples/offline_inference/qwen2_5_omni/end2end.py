@@ -12,7 +12,6 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from io import BytesIO
 from typing import Dict, List, Optional, Union
 from urllib.request import urlopen
 
@@ -90,7 +89,6 @@ parser.add_argument('--prompt',
                         "badcase-audio-tower-1", "badcase-audio-only"
                     ],
                     default='text')
-parser.add_argument("--vl-fastv", action="store_true")
 
 parser.add_argument('--thinker-devices', type=json.loads, default="[0]")
 parser.add_argument('--talker-devices', type=json.loads, default="[0]")
@@ -98,6 +96,16 @@ parser.add_argument('--code2wav-devices', type=json.loads, default="[0]")
 parser.add_argument('--code2wav-dynamic-batch',
                     action='store_true',
                     help='Enable code2wav dynamic batch')
+parser.add_argument('--thinker-gpu-memory-utilization',
+                    type=float,
+                    default=0.4)
+parser.add_argument('--talker-gpu-memory-utilization', type=float, default=0.4)
+
+parser.add_argument('-o',
+                    '--output-dir',
+                    type=str,
+                    default='.',
+                    help="Audio output directory")
 
 args = parser.parse_args()
 
@@ -224,28 +232,32 @@ def make_inputs_qwen2_omni(
             if ele['type'] == 'audio' or ele['type'] == 'audio_url':
                 if 'audio_url' in ele:
                     audio_key = 'audio_url'
-                    with tempfile.NamedTemporaryFile(delete=True) as temp_audio_file:
+                    with tempfile.NamedTemporaryFile(
+                            delete=True) as temp_audio_file:
                         temp_audio_file.write(urlopen(ele[audio_key]).read())
                         temp_audio_file_path = temp_audio_file.name
-                        audios.append(resample_wav_to_16khz(temp_audio_file_path))
+                        audios.append(
+                            resample_wav_to_16khz(temp_audio_file_path))
                         ele['audio'] = temp_audio_file_path
                 elif 'audio' in ele:
                     audio_key = 'audio'
                     audios.append(resample_wav_to_16khz(ele[audio_key]))
                 else:
                     raise ValueError(f'Unknown ele {ele}')
-            elif use_audio_in_video and (ele['type'] == 'video' or ele['type'] == 'video_url'):
+            elif use_audio_in_video and (ele['type'] == 'video'
+                                         or ele['type'] == 'video_url'):
                 # use video as audio as well
                 if 'video_url' in ele:
                     audio_key = 'video_url'
-                    with tempfile.NamedTemporaryFile(delete=True) as temp_video_file:
+                    with tempfile.NamedTemporaryFile(
+                            delete=True) as temp_video_file:
                         temp_video_file.write(urlopen(ele[audio_key]).read())
                         temp_video_file_path = temp_video_file.name
                         ele[audio_key] = temp_video_file_path
                         audios.append(
-                            librosa.load(temp_video_file_path,
-                                        sr=16000)[0])
-                        videos.append(fetch_and_read_video(temp_video_file_path))
+                            librosa.load(temp_video_file_path, sr=16000)[0])
+                        videos.append(
+                            fetch_and_read_video(temp_video_file_path))
                         ele['video'] = temp_video_file_path
                 elif 'video' in ele:
                     audio_key = 'video'
@@ -263,7 +275,8 @@ def make_inputs_qwen2_omni(
             elif ele['type'] == 'video' or ele['type'] == 'video_url':
                 if 'video_url' in ele:
                     video_key = 'video_url'
-                    with tempfile.NamedTemporaryFile(delete=True) as temp_video_file:
+                    with tempfile.NamedTemporaryFile(
+                            delete=True) as temp_video_file:
                         temp_video_file.write(urlopen(ele['video_url']).read())
                         temp_video_file_path = temp_video_file.name
                         videos.append(fetch_and_read_video(temp_video_file))
@@ -395,7 +408,7 @@ def init_omni_engine():
     thinker_engine_args = AsyncEngineArgs(
         model=args.thinker_model,
         trust_remote_code=True,
-        gpu_memory_utilization=0.4,
+        gpu_memory_utilization=args.thinker_gpu_memory_utilization,
         tensor_parallel_size=len(args.thinker_devices),
         enforce_eager=args.enforce_eager or args.thinker_enforce_eager,
         distributed_executor_backend="mp",
@@ -413,7 +426,7 @@ def init_omni_engine():
     talker_engine_args = AsyncEngineArgs(
         model=args.talker_model,
         trust_remote_code=True,
-        gpu_memory_utilization=0.4,
+        gpu_memory_utilization=args.talker_gpu_memory_utilization,
         tensor_parallel_size=1,
         enforce_eager=args.enforce_eager or args.talker_enforce_eager,
         distributed_executor_backend="mp",
@@ -528,8 +541,10 @@ def parse_response(
     ]
     print(f'[R-{i}] Waveform times: {waveform_times} seconds')
 
+    os.makedirs(args.output_dir, exist_ok=True)
     for j, waveform in enumerate(waveforms):
-        tmp_wav_path = f"waveform-{i}-chunk{j}.wav"
+        tmp_wav_path = os.path.join(args.output_dir,
+                                    f"waveform-{i}-chunk{j}.wav")
         sf.write(tmp_wav_path, waveform, samplerate=args.sample_rate)
         print(f"[R-{i}] Generated: {tmp_wav_path}")
 
@@ -538,7 +553,7 @@ def parse_response(
         f'[R-{i}] Writting waveforms to waveform.wav: {len(waveforms)} waveforms'
     )
     if len(waveforms) > 0:
-        tmp_wav_path = f"waveform-{i}.wav"
+        tmp_wav_path = os.path.join(args.output_dir, f"waveform-{i}.wav")
         sf.write(tmp_wav_path,
                  np.concatenate(waveforms),
                  samplerate=args.sample_rate)
@@ -647,8 +662,8 @@ def main():
 
     try:
         run_omni_engine(prompt, omni, args.num_prompts, is_warmup=False)
-    except:
-        logger.exception('Error in run_omni_engine')
+    except Exception as e:
+        logger.exception('Error {e} in run_omni_engine')
 
     omni.shutdown()
 
