@@ -926,16 +926,16 @@ class TPUModelRunner:
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
 
-    def _precompile_mm_encoder(self)->None:
-        # Pre-compile MM encoder for all supported data modalities. 
+    def _precompile_mm_encoder(self) -> None:
+        # Pre-compile MM encoder for all supported data modalities.
         for mode, max_items_by_mode in \
             self.max_num_mm_items_by_modality.items():
             logger.info(
                 "Compiling Multimodal %s Encoder with different input"
                 " shapes.", mode)
-            num_items = 1
             start = time.perf_counter()
-            while True:
+            # No padding for MM encoder just yet.
+            for num_items in range(1, max_items_by_mode + 1):
                 logger.info("  -- mode: %s items: %d", mode, num_items)
                 batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                     mode, num_items)
@@ -943,10 +943,6 @@ class TPUModelRunner:
                 xm.mark_step()
                 self.model.get_multimodal_embeddings(**batched_dummy_mm_inputs)
                 xm.mark_step()
-                if num_items >= max_items_by_mode:
-                    break
-                # No padding for MM encoder just yet.
-                num_items += 1
 
             xm.wait_device_ops()
             end = time.perf_counter()
@@ -1025,11 +1021,11 @@ class TPUModelRunner:
         """
         Precompile all the subgraphs with possible input shapes.
         """
-        # TODO: precompile encoder
+        self._precompile_mm_encoder()
         self._precompile_backbone()
         self._precompile_select_hidden_states()
         self._precompile_sample_from_hidden()
-        
+
     def profile_run(
         self,
         num_tokens: int,
