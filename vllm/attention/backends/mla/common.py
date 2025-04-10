@@ -78,7 +78,7 @@ v        = (kv_c @ W_UV.view(Lkv, N * V)).view(Skv, N, V)
 spda_o = scaled_dot_product_attention(
     torch.cat([q_nope, q_pe], dim=-1),
     torch.cat([k_nope, k_pe.unsqueeze(1).expand(-1, N, -1)], dim=-1),
-    v 
+    v
 ) 
 return spda_o @ W_O
 
