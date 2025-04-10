@@ -42,6 +42,7 @@
 # SOFTWARE.
 
 import copy
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import (Any, Iterable, List, Literal, Optional, Sequence, Tuple,
@@ -80,8 +81,6 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
-from vllm.transformers_utils.processors.processing_kimi_vl import (
-    KimiVLProcessor)
 
 from .utils import is_pp_missing_parameter, maybe_prefix
 
@@ -135,7 +134,7 @@ class KimiVLImagePixelInputs(TypedDict):
 
 
 # TODO: support embeds too
-# We only support pixel input for kimiv now
+# We only support pixel input for kimi-vl now
 KimiVLImageInputs = KimiVLImagePixelInputs
 
 
@@ -144,9 +143,6 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(KimiVLConfig)
 
-    def get_hf_processor(self, **kwargs) -> KimiVLProcessor:
-        return self.ctx.get_hf_processor(KimiVLProcessor, **kwargs)
-
     def get_num_image_tokens(
         self,
         *,
@@ -154,8 +150,35 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
         image_height: int,
     ) -> int:
         hf_processor = self.get_hf_processor()
-        return hf_processor.get_image_tokens(width=image_width,
-                                             height=image_height)
+        patch_size = hf_processor.image_processor.patch_size
+        kernel_size = hf_processor.image_processor.merge_kernel_size
+        in_token_limit = hf_processor.image_processor.in_token_limit
+        height = image_height
+        width = image_width
+        assert isinstance(height,
+                          int), f"height must be int, current height {height}"
+        assert isinstance(width,
+                          int), f"width must be int, current width {width}"
+        assert kernel_size is not None, "kernel_size must be specified"
+
+        if (width // patch_size) * (height // patch_size) > in_token_limit:
+            scale = math.sqrt(in_token_limit / ((width // patch_size) *
+                                                (height // patch_size)))
+            new_w, new_h = int(width * scale), int(height * scale)
+            width, height = new_w, new_h
+
+        kernel_height, kernel_width = kernel_size
+
+        pad_height = (kernel_height * patch_size - height %
+                      (kernel_height * patch_size)) % (kernel_height *
+                                                       patch_size)
+        pad_width = (kernel_width * patch_size - width %
+                     (kernel_width * patch_size)) % (kernel_width * patch_size)
+
+        # Calculate new dimensions after padding and patching
+        token_height = (height + pad_height) // (kernel_size[0] * patch_size)
+        token_width = (width + pad_width) // (kernel_size[1] * patch_size)
+        return int(token_height * token_width)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         # None means unlimited
