@@ -98,6 +98,7 @@ class EngineCore:
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
             kv_cache_config=kv_cache_config,
+            speculative_config=vllm_config.speculative_config,
             structured_output_manager=self.structured_output_manager,
             include_finished_set=vllm_config.parallel_config.data_parallel_size
             > 1,
