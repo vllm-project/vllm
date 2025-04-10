@@ -93,12 +93,14 @@ class MarlinLinearKernel(MPLinearKernel):
 
         if c.zero_points:
             # TODO figure out a more efficient way to do it
+            grouped_k = (c.partition_weight_shape[0] //
+                         c.group_size if c.group_size != -1 else 1)
             self._transform_param(layer, self.w_zp_name, lambda x: \
                 marlin_zero_points(
                     unpack_cols(x.t(), c.weight_type.size_bits,
-                                c.partition_weight_shape[0] // c.group_size,
+                                grouped_k,
                                 c.partition_weight_shape[1]),
-                    size_k=c.partition_weight_shape[0] // c.group_size,
+                    size_k=grouped_k,
                     size_n=c.partition_weight_shape[1],
                     num_bits=c.weight_type.size_bits))
         else:
