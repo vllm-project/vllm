@@ -477,7 +477,9 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
                                          **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": 10}
+        # Although vLLM can support more images from an infra capability
+        # perspective, we do not recommend using >10 images in practice.
+        return {"image": None}
 
     @staticmethod
     def get_patch_per_chunk(vision_config: Llama4VisionConfig) -> int:
@@ -741,6 +743,9 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             img.flatten(0, 1)
             for img in vision_embeddings_flat.split(patches_per_image, dim=0)
         ]
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(self,
                                   **kwargs) -> Optional[MultiModalEmbeddings]:
