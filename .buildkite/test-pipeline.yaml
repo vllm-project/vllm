@@ -163,11 +163,6 @@ steps:
   - tests/tracing
   commands:
   - pytest -v -s metrics
-  - "pip install \
-      'opentelemetry-sdk>=1.26.0,<1.27.0' \
-      'opentelemetry-api>=1.26.0,<1.27.0' \
-      'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' \
-      'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0'"
   - pytest -v -s tracing
 
 ##### fast check tests  #####
@@ -292,6 +287,14 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py
   parallelism: 4
 
+- label: PyTorch Compilation Unit Tests
+  source_file_dependencies:
+    - vllm/
+    - tests/compile
+  commands:
+    - pytest -v -s compile/test_pass_manager.py
+    - pytest -v -s compile/test_fusion.py
+
 - label: PyTorch Fullgraph Smoke Test # 9min
   source_file_dependencies:
   - vllm/
@@ -301,7 +304,6 @@ steps:
   # these tests need to be separated, cannot combine
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
-  - pytest -v -s compile/test_pass_manager.py
 
 - label: PyTorch Fullgraph Test # 18min
   source_file_dependencies:
@@ -427,7 +429,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal
     - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'core_model or quant_model'
+    - pytest -v -s models/decoder_only/vision_language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/vision_language -m core_model
     - pytest -v -s models/encoder_decoder/audio_language -m core_model
     - pytest -v -s models/encoder_decoder/language -m core_model
@@ -446,10 +448,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
     - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=0) and not core_model and not quant_model'
-    # HACK - run phi3v tests separately to sidestep this transformers bug
-    # https://github.com/huggingface/transformers/issues/34307
-    - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_models.py --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_models.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/vision_language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/vision_language -m 'not core_model'
