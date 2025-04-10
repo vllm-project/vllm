@@ -23,6 +23,9 @@ class MsgpackEncoder:
 
     def __init__(self):
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
+        # This is used as a local stash of buffers that we can then access from
+        # our custom `msgpack` hook, `enc_hook`. We don't have a way to
+        # pass custom data to the hook otherwise.
         self.aux_buffers: Optional[list[bytestr]] = None
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
