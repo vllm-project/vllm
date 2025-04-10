@@ -425,6 +425,7 @@ class KVCacheManager:
             assert num_allocated_blocks <= num_expected_blocks, ""\
                     "Detected pre-allocated blocks in the connector! "\
                     "This should not happen!"
+            computed_blocks = computed_blocks + (allocated_blocks or [])
 
         # Update internal state. In case of:
         # * SharedStorageConnector: add req_id to _requests_need_load
