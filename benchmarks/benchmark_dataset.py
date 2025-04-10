@@ -288,7 +288,7 @@ def process_image(image: Any) -> Mapping[str, Any]:
 class RandomDataset(BenchmarkDataset):
     # Default values copied from benchmark_serving.py for the random dataset.
     DEFAULT_PREFIX_LEN = 0
-    DEFAULT_RANGE_RATIO = 1.0
+    DEFAULT_RANGE_RATIO = 0.0
     DEFAULT_INPUT_LEN = 1024
     DEFAULT_OUTPUT_LEN = 128
 
