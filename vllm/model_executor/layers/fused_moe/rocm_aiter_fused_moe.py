@@ -73,13 +73,27 @@ def moe_sorting_ck_fake(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
            torch.Tensor]:
     # Create fake tensors with appropriate shapes
-    sorted_token_ids = torch.zeros_like(topk_ids)
-    sorted_weight_buf = torch.zeros_like(topk_weights)
-    sorted_expert_ids = torch.zeros_like(topk_ids)
-    num_valid_ids = torch.zeros(1, dtype=torch.int32, device=topk_ids.device)
-    out_asm = torch.zeros((topk_ids.size(0), model_dim),
-                          dtype=dtype,
-                          device=topk_ids.device)
+    # This is hardcoded for now for this function based on
+    # aiter repository
+    BLOCK_SIZE_M = 32
+    device = topk_ids.device
+    M, topk = topk_ids.shape
+    topk = topk_ids.shape[1]
+    max_num_tokens_padded = topk_ids.numel() + E * BLOCK_SIZE_M - topk
+    max_num_m_blocks = int(
+        (max_num_tokens_padded + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M)
+    sorted_token_ids = torch.empty((max_num_tokens_padded, ),
+                                   dtype=torch.int32,
+                                   device=device)
+    sorted_weight_buf = torch.empty((max_num_tokens_padded, ),
+                                    dtype=torch.float,
+                                    device=device)
+    sorted_expert_ids = torch.empty((max_num_m_blocks, ),
+                                    dtype=torch.int32,
+                                    device=device)
+    num_valid_ids = torch.empty((1), dtype=torch.int32, device=device)
+    out_asm = torch.empty((M, model_dim), dtype=dtype, device=device)
+
     return sorted_token_ids, sorted_weight_buf, \
         sorted_expert_ids, num_valid_ids, out_asm
 
@@ -107,7 +121,6 @@ def fmoe_fp8_blockscale_g1u1_impl(
                                         num_valid_ids, topk, w1_scale,
                                         w2_scale, a1_scale, block_m, block_n,
                                         smooth_scale)
-    return out_asm
 
 
 def fmoe_fp8_blockscale_g1u1_fake(
@@ -126,15 +139,14 @@ def fmoe_fp8_blockscale_g1u1_fake(
         block_m: int,
         block_n: int,
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
-    return out_asm
+    pass
 
 
-def asm_moe_tkw1_impl(
-                      sorted_ids:torch.Tensor,
-                      sorted_weights:torch.Tensor,
-                      sorted_expert_ids:torch.Tensor,
-                      num_valid_ids:torch.Tensor,
-                      moe_buf:torch.Tensor,
+def asm_moe_tkw1_impl(sorted_ids: torch.Tensor,
+                      sorted_weights: torch.Tensor,
+                      sorted_expert_ids: torch.Tensor,
+                      num_valid_ids: torch.Tensor,
+                      moe_buf: torch.Tensor,
                       hidden_states: torch.Tensor,
                       w1: torch.Tensor,
                       w2: torch.Tensor,
@@ -147,7 +159,6 @@ def asm_moe_tkw1_impl(
                       a16: bool = False,
                       activation_str: str = "silu") -> torch.Tensor:
     import aiter as rocm_aiter
-    # import aiter.fused_moe_bf16_asm as rocm_aiter_asm_fmoe
 
     if activation_str == "silu":
         activation = rocm_aiter.ActivationType.Silu
@@ -156,32 +167,26 @@ def asm_moe_tkw1_impl(
     else:
         activation = rocm_aiter.ActivationType.Silu
 
-
     E, model_dim, _ = w2.shape
     M, topk = topk_ids.shape
     device = topk_ids.device
 
-    a8_type = w1.dtype if w1.dtype != torch.int32 and w1.dtype != torch.uint32 else torch.float8_e4m3fnuz
+    a8_type = (w1.dtype if w1.dtype != torch.int32 and w1.dtype != torch.uint32
+               else torch.float8_e4m3fnuz)
     a8 = torch.empty((M, model_dim), dtype=a8_type, device=device)
     a8_scale = torch.empty(M, dtype=torch.float, device=device)
     rocm_aiter.dynamic_per_token_scaled_fp8_quant(a8, hidden_states, a8_scale)
     fmoe_func = rocm_aiter.fmoe_g1u1_tkw1
-    fmoe_func(moe_buf, a8, w1, w2, sorted_ids,
-                sorted_weights, sorted_expert_ids, num_valid_ids,
-                topk,
-                a8_scale,
-                fc1_scale,
-                fc2_scale,
-                fc2_smooth_scale, activation)
-    return moe_buf
+    fmoe_func(moe_buf, a8, w1, w2, sorted_ids, sorted_weights,
+              sorted_expert_ids, num_valid_ids, topk, a8_scale, fc1_scale,
+              fc2_scale, fc2_smooth_scale, activation)
 
 
-def asm_moe_tkw1_fake(
-                      sorted_ids:torch.Tensor,
-                      sorted_weights:torch.Tensor,
-                      sorted_expert_ids:torch.Tensor,
-                      num_valid_ids:torch.Tensor,
-                      moe_buf:torch.Tensor,
+def asm_moe_tkw1_fake(sorted_ids: torch.Tensor,
+                      sorted_weights: torch.Tensor,
+                      sorted_expert_ids: torch.Tensor,
+                      num_valid_ids: torch.Tensor,
+                      moe_buf: torch.Tensor,
                       hidden_states: torch.Tensor,
                       w1: torch.Tensor,
                       w2: torch.Tensor,
@@ -193,7 +198,7 @@ def asm_moe_tkw1_fake(
                       fc2_smooth_scale: Optional[torch.Tensor] = None,
                       a16: bool = False,
                       activation_str: str = "silu") -> torch.Tensor:
-    return torch.empty_like(moe_buf)
+    pass
 
 
 # 4. Register rocm_aiter_asm_fmoe.asm_moe
@@ -271,17 +276,15 @@ def shuffle_weight_impl(tensor: torch.Tensor) -> torch.Tensor:
 
 def shuffle_weight_fake(tensor: torch.Tensor) -> torch.Tensor:
     IN, IK = (16, 16)
-    BK = IK*2
-    K = 16//tensor.element_size()
+    BK = IK * 2
+    K = 16 // tensor.element_size()
     BN = IN
-    x_ = tensor
-    x_ = x_.view(-1,
-                tensor.shape[-2]//BN, BN,
-                tensor.shape[-1]//BK, BK//K, K)
+    x_ = torch.empty_like(tensor)
+    x_ = x_.view(-1, tensor.shape[-2] // BN, BN, tensor.shape[-1] // BK,
+                 BK // K, K)
     x_ = x_.permute(0, 1, 3, 4, 2, 5)
     x_ = x_.contiguous()
     return x_  # Just return a copy of the tensor
-
 
 
 # def fused_topk_impl(
@@ -316,13 +319,8 @@ def shuffle_weight_fake(tensor: torch.Tensor) -> torch.Tensor:
 #                         device=hidden_states.device)
 #     return topk_weights, topk_ids
 
-
-
-
-
 # Register all custom ops if on ROCm platform
 if current_platform.is_rocm():
-
 
     direct_register_custom_op(
         op_name="rocm_aiter_ck_moe",
@@ -372,14 +370,12 @@ if current_platform.is_rocm():
         dispatch_key=current_platform.dispatch_key,
     )
 
-    direct_register_custom_op(
-        op_name="rocm_aiter_shuffle_weight",
-        op_func=shuffle_weight_impl,
-        mutates_args=[],
-        fake_impl=shuffle_weight_fake,
-        dispatch_key=current_platform.dispatch_key,
-        tags=(torch.Tag.inplace_view, )
-    )
+    direct_register_custom_op(op_name="rocm_aiter_shuffle_weight",
+                              op_func=shuffle_weight_impl,
+                              mutates_args=[],
+                              fake_impl=shuffle_weight_fake,
+                              dispatch_key=current_platform.dispatch_key,
+                              tags=(torch.Tag.inplace_view, ))
 
 
 def rocm_aiter_fused_experts(
@@ -458,7 +454,7 @@ def rocm_aiter_fused_experts(
         ) = torch.ops.vllm.rocm_aiter_moe_sorting_ck(topk_ids, topk_weights, E,
                                                      model_dim, dtype,
                                                      expert_mask)
-        return torch.ops.vllm.rocm_aiter_asm_moe_tkw1(
+        torch.ops.vllm.rocm_aiter_asm_moe_tkw1(
             sorted_ids=sorted_token_ids,
             sorted_weights=sorted_weight_buf,
             sorted_expert_ids=sorted_expert_ids,
@@ -475,6 +471,8 @@ def rocm_aiter_fused_experts(
             fc2_smooth_scale=None,
             a16=False,
             activation_str=activation)
+
+        return out_asm
 
     elif use_fp8_w8a8:
         return torch.ops.vllm.rocm_aiter_asm_moe(hidden_states=hidden_states,
@@ -496,14 +494,13 @@ def rocm_aiter_fused_experts(
                                             topk_ids=topk_ids)
 
 
-def rocm_aiter_topk_softmax_wrapper(topk_weights: torch.Tensor,
-                            topk_indices: torch.Tensor,
-                            token_expert_indices: torch.Tensor,
-                            gating_output: torch.Tensor,
-                            renormalize: bool) -> Tuple[torch.Tensor, ...]:
+def rocm_aiter_topk_softmax_wrapper(
+        topk_weights: torch.Tensor, topk_indices: torch.Tensor,
+        token_expert_indices: torch.Tensor, gating_output: torch.Tensor,
+        renormalize: bool) -> Tuple[torch.Tensor, ...]:
     torch.ops.vllm.rocm_aiter_topk_softmax(topk_weights, topk_indices,
-                                token_expert_indices, gating_output,
-                                renormalize)
+                                           token_expert_indices, gating_output,
+                                           renormalize)
     return topk_weights, topk_indices
 
 

@@ -1418,7 +1418,6 @@ def fused_moe(
         topk_weights, topk_ids = custom_routing_function(
             hidden_states, gating_output, topk, renormalize)
 
-
     return fused_experts(hidden_states,
                          w1,
                          w2,
