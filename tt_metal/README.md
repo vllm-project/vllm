@@ -102,12 +102,14 @@ To start up the server:
 VLLM_RPC_TIMEOUT=100000 MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/server_example_tt.py
 ```
 
+**Note**: By default, the server will run with Llama-3.1-70B-Instruct. To run with other models, set `MESH_DEVICE` and `--model` as described in [Running the offline inference example](#running-the-offline-inference-example).
+
+**Note**: Custom TT options can be set using `--override_tt_config`, e.g. `--override_tt_config '{"sample_on_device_decode": true}'`, however these shouldn't be used unless the model supports them (most currently do not).
+
 To send a request to the server:
 ```sh
 curl http://localhost:8000/v1/completions -H "Content-Type: application/json" -d '{ "model": "meta-llama/Llama-3.1-70B-Instruct", "prompt": "San Francisco is a", "max_tokens": 32, "temperature": 1, "top_p": 0.9, "top_k": 10 }'
 ```
-
-**Note**: By default, the server will run with Llama-3.1-70B-Instruct. To run with other models, set `MESH_DEVICE` and `--model` as described in [Running the offline inference example](#running-the-offline-inference-example).
 
 ### Llama-3.2 (11B and 90B) Vision models
 

@@ -121,8 +121,13 @@ def run_inference(
     disable_async_output_proc=False,
     multi_modal=False,
     test_increasing_seq_lens=False,
+    sample_on_device_decode=False,
 ):
     check_tt_model_supported(model)
+    
+    override_tt_config = {}
+    if sample_on_device_decode:
+        override_tt_config["sample_on_device_decode"] = True
     
     # LLM args
     engine_kw_args = {
@@ -135,6 +140,7 @@ def run_inference(
         "log_global_stats": True if measure_perf else False,
         "num_scheduler_steps": num_scheduler_steps,
         "disable_async_output_proc": disable_async_output_proc,
+        "override_tt_config": override_tt_config,
     }
     
     # Generation args
@@ -291,6 +297,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_scheduler_steps", type=int, default=10, help="Number of scheduler steps")
     parser.add_argument("--multi_modal", action="store_true", help="Run multi-modal inference with Llama3.2-11b")
     parser.add_argument("--test_increasing_seq_lens", action="store_true", help="Test generations of small to large sequences")
+    parser.add_argument("--sample_on_device_decode", action="store_true", help="Enable sampling on device during decode")
     args = parser.parse_args()
 
     run_inference(
@@ -307,4 +314,5 @@ if __name__ == "__main__":
         disable_async_output_proc=args.disable_async_output_proc,
         multi_modal=args.multi_modal,
         test_increasing_seq_lens=args.test_increasing_seq_lens,
+        sample_on_device_decode=args.sample_on_device_decode,
     )

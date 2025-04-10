@@ -231,6 +231,7 @@ class EngineArgs:
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
 
     override_neuron_config: Optional[Dict[str, Any]] = None
+    override_tt_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = ParallelConfig.worker_cls
@@ -919,6 +920,12 @@ class EngineArgs:
             help="Override or set neuron device configuration. "
             "e.g. ``{\"cast_logits_dtype\": \"bloat16\"}``.")
         parser.add_argument(
+            '--override-tt-config',
+            type=json.loads,
+            default=None,
+            help="Override or set TT device configuration. "
+            "e.g. '{\"sample_on_device_decode\": true}'")
+        parser.add_argument(
             '--override-pooler-config',
             type=PoolerConfig.from_json,
             default=None,
@@ -1090,6 +1097,7 @@ class EngineArgs:
             mm_processor_kwargs=self.mm_processor_kwargs,
             disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
             override_neuron_config=self.override_neuron_config,
+            override_tt_config=self.override_tt_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,

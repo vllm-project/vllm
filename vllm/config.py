@@ -263,6 +263,7 @@ class ModelConfig:
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
             can not be gathered from the vllm arguments.
+        override_tt_config: Override default TT config, specific to TT devices.
         override_pooler_config: Initialize non default pooling config or
             override default pooling config for the pooling model.
         logits_processor_pattern: Optional regex pattern specifying valid
@@ -346,6 +347,7 @@ class ModelConfig:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         disable_mm_preprocessor_cache: bool = False,
         override_neuron_config: Optional[dict[str, Any]] = None,
+        override_tt_config: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional["PoolerConfig"] = None,
         logits_processor_pattern: Optional[str] = None,
         generation_config: str = "auto",
@@ -508,6 +510,11 @@ class ModelConfig:
             self.override_neuron_config = override_neuron_config
         else:
             self.override_neuron_config = None
+        
+        if current_platform.is_tt():
+            self.override_tt_config = override_tt_config
+        else:
+            self.override_tt_config = None
 
         supported_tasks, task = self._resolve_task(task)
         self.supported_tasks = supported_tasks
