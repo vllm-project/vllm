@@ -17,12 +17,6 @@ if not envs.VLLM_USE_V1:
     )
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    # MM is not yet recompilation-free at runtime.
-    monkeypatch.setenv('VLLM_XLA_CHECK_RECOMPILATION', '0')
-
-
 @pytest.fixture(scope="session")
 def base64_encoded_image() -> dict[str, str]:
     return {
@@ -64,7 +58,7 @@ async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
         "--trust-remote-code",
         "--max-num-batched-tokens",
         "1024",
-        # NOTE: max-num-batched-tokens>mm_item_size
+        # NOTE: max-num-batched-tokens>=mm_item_size
         "--disable_chunked_mm_input",
         "--chat-template",
         "examples/template_llava.jinja"
