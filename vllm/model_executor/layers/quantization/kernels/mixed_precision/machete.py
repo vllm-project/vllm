@@ -33,12 +33,6 @@ class MacheteLinearKernel(MPLinearKernel):
                           "when the input features are partitioned across "\
                           "devices"
         if c.zero_points:
-            return False, "Zero points currently not supported by "\
-                          " Compressed Tensors + Machete. (Kernel supports it"\
-                          " but CompressedTensorsWNA16 does not so support has"\
-                          " not been added to MacheteWNA16Kernel yet"
-
-        if c.zero_points:
             return False, "Zero points currently not supported by Machete"
 
         if c.weight_type not in query_machete_supported_quant_types(
