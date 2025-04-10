@@ -16,6 +16,7 @@ from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.image_processing_utils import select_best_resolution
 from transformers.modeling_outputs import ModelOutput
+from vllm.sequence import IntermediateTensors
 from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
