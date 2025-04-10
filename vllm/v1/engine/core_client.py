@@ -26,7 +26,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
@@ -505,8 +505,8 @@ class SyncMPClient(MPClient):
                         # shutdown signal, exit thread.
                         break
 
-                    frame = out_socket.recv(copy=False)
-                    outputs = decoder.decode(frame.buffer)
+                    frames = out_socket.recv_multipart(copy=False)
+                    outputs = decoder.decode(frames)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
@@ -529,7 +529,7 @@ class SyncMPClient(MPClient):
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         # (Identity, RequestType, SerializedRequest)
         msg = (self.core_engine.identity, request_type.value,
-               self.encoder.encode(request))
+               *self.encoder.encode(request))
         self.input_socket.send_multipart(msg, copy=False)
 
     def call_utility(self, method: str, *args) -> Any:
@@ -633,8 +633,8 @@ class AsyncMPClient(MPClient):
 
         async def process_outputs_socket():
             while True:
-                (frame, ) = await output_socket.recv_multipart(copy=False)
-                outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
+                frames = await output_socket.recv_multipart(copy=False)
+                outputs: EngineCoreOutputs = decoder.decode(frames)
                 if outputs.utility_output:
                     _process_utility_output(outputs.utility_output,
                                             utility_results)
@@ -666,12 +666,12 @@ class AsyncMPClient(MPClient):
         if engine is None:
             engine = self.core_engine
 
-        message = (request_type.value, self.encoder.encode(request))
+        message = (request_type.value, *self.encoder.encode(request))
         return self._send_input_message(message, engine)
 
-    def _send_input_message(self, message: tuple[bytes, bytes],
+    def _send_input_message(self, message: tuple[bytestr, ...],
                             engine: CoreEngine) -> Awaitable[None]:
-        message = (engine.identity, ) + message  # type: ignore[assignment]
+        message = (engine.identity, ) + message
         return self.input_socket.send_multipart(message, copy=False)
 
     async def call_utility_async(self, method: str, *args) -> Any:
@@ -684,8 +684,8 @@ class AsyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
-        message = (EngineCoreRequestType.UTILITY.value,
-                   self.encoder.encode((call_id, method, args)))
+        message = (EngineCoreRequestType.UTILITY.value, *self.encoder.encode(
+            (call_id, method, args)))
         await self._send_input_message(message, engine)
         self._ensure_output_queue_task()
         return await future
@@ -760,7 +760,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         # Control message used for triggering dp idle mode loop.
         self.start_dp_msg = (EngineCoreRequestType.START_DP.value,
-                             self.encoder.encode(None))
+                             *self.encoder.encode(None))
 
         self.num_engines_running = 0
         self.reqs_in_flight: dict[str, CoreEngine] = {}
@@ -794,7 +794,7 @@ class DPAsyncMPClient(AsyncMPClient):
         # tokenized.
         request.prompt = None
 
-        msg = (EngineCoreRequestType.ADD.value, self.encoder.encode(request))
+        msg = (EngineCoreRequestType.ADD.value, *self.encoder.encode(request))
 
         chosen_engine = self.get_core_engine_for_request()
         self.reqs_in_flight[request.request_id] = chosen_engine
