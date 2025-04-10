@@ -1,28 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-This file is a (slightly adapted) copy of https://github.com/IBM/triton-dejavu/blob/main/triton_dejavu/jit_cache.py (copied here to reduce external dependencies).
+This file is a (slightly adapted) copy of 
+https://github.com/IBM/triton-dejavu/blob/main/triton_dejavu/jit_cache.py 
+(copied here to reduce external dependencies).
 
-The launch overhead of triton kernels is a well known problem (see e.g. [1](https://github.com/triton-lang/triton/pull/3503), [2](https://github.com/triton-lang/triton/issues/2637), [3](https://github.com/triton-lang/triton/issues/6064)). Parts of the launch overhead comes from the fact that the triton JIT checks very carefully if an existing binary is safe to use. 
-
-In many scenarios, these checks can be relaxed. 
-This PR adds such a cache with relaxed checks is implemented by `triton_dejavu.jitcache`. It is implemented as a decorator that could be used in front of the `triton.jit` decorator: 
-
-```
-@triton_dejavu.jitcache(
-    check_keys=["USE_ALIBI_SLOPES", "SLIDING_WINDOW", "filter_by_query_len"],
-)
-@triton.jit
-def kernel_paged_attention_.... 
-```
-
-The required `check_keys` argument must provide a list of the kernel parameters marked as `tl.constexpr` that **must be checked** to select the correct kernel binary. Ideally, this is just a subset of all constant kernel parameters.
-For example, if we have two constant parameters A and B, but we know that A never will change in a particular application, but B will, then the list should look like `check_keys=["A"]`.
-
-Consequently, *the usage of `triton_dejavu.jitcache` is application specific* (and also *experimental*).
-
-Additionally, a user could provide a lock with e.g. `cache_lock=triton_dejavu.global_cache_lock` to ensure that no re-compilation happens after the cache lock is locked.
-
-The `triton_dejavu.jitcache` reduces the launch overhead of triton kernels to 30-40 micro-seconds.
+The `jitcache` reduces the launch overhead of triton kernels to 30-40us.
 
 Details see: https://github.com/IBM/triton-dejavu
 
@@ -54,11 +36,11 @@ class CacheLock:
 
     def lock(self):
         self.is_locked = True
-        logger.debug(f"JitCache lock '{self.id}' is LOCKED.")
+        logger.debug("JitCache lock '%s' is LOCKED.", self.id)
 
     def unlock(self):
         self.is_locked = False
-        logger.debug(f"JitCache lock '{self.id}' is UNLOCKED.")
+        logger.debug("JitCache lock '%s' is UNLOCKED.", self.id)
 
 
 # to provide a global lock
@@ -110,24 +92,21 @@ class PreparedKernel:
         more or less redo what CompiledKernel._init_hanles is doing
         (c.f. triton/python/triton/runtime/compiler.py:379)
         """
-        self.run = driver.active.launcher_cls(self.kernel.src, self.kernel.metadata)
+        self.run = driver.active.launcher_cls(self.kernel.src,
+                                              self.kernel.metadata)
         # check once and not again
-        self.dev_max_shared = driver.active.utils.get_device_properties(self.device)[
-            "max_shared_mem"
-        ]
+        self.dev_max_shared = driver.active.utils.get_device_properties(
+            self.device)["max_shared_mem"]
         if self.kernel.metadata.shared > self.dev_max_shared:
-            raise OutOfResources(
-                self.metadata.shared, self.dev_max_shared, "shared memory"
-            )
-        # TODO: n_regs, n_spills should be metadata generated when calling `ptxas`
+            raise OutOfResources(self.metadata.shared, self.dev_max_shared,
+                                 "shared memory")
         self.module, self.function, self.n_regs, self.n_spills = (
             driver.active.utils.load_binary(
                 self.kernel.name,
                 self.kernel.kernel,
                 self.kernel.metadata.shared,
                 self.device,
-            )
-        )
+            ))
 
     def __call__(self, *args, **kwargs):
         assert len(args) == 0
@@ -177,10 +156,8 @@ class JitCache(KernelInterface):
         cache_launch_grid=False,
     ):
         # we depend on the triton version, right now, 3.0 -- 3.2 are supported
-        assert (
-            int(triton_version.split(".")[0]) == 3
-            and int(triton_version.split(".")[1]) <= 2
-        )
+        assert (int(triton_version.split(".")[0]) == 3
+                and int(triton_version.split(".")[1]) <= 2)
         self.arg_names = arg_names
         self.fn = fn
         self.base_fn = fn
@@ -226,8 +203,9 @@ class JitCache(KernelInterface):
                 non_const_arg_names.append(p.name)
         if any(x in self.check_keys for x in non_const_arg_names):
             raise RuntimeError(
-                f"[{__print_name__}] ERROR: check_keys must only contain parameters marked as tl.constexpr (non-constants will be updated in all cases)."
-            )
+                f"[{__print_name__}] ERROR: check_keys must only contain"
+                "parameters marked as tl.constexpr (non-constants will be "
+                "updated in all cases).")
 
         (
             bound_args,
@@ -245,7 +223,8 @@ class JitCache(KernelInterface):
 
         device = driver.active.get_current_device()
         stream = driver.active.get_current_stream(device)
-        launch_metadata = kernel.launch_metadata(grid, stream, *non_constexpr_vals)
+        launch_metadata = kernel.launch_metadata(grid, stream,
+                                                 *non_constexpr_vals)
 
         prepared_kernel = PreparedKernel(
             kwargs["grid"],
@@ -267,7 +246,10 @@ class JitCache(KernelInterface):
         wrapper_time = wrapper_end - bind_end
 
         logger.debug(
-            f"JIT compilation took {compile_time}s, binding {bind_time}, wrapper {wrapper_time}s."
+            "JIT compilation took %.2fs, binding %.2fs, wrapper %.2fs.",
+            compile_time,
+            bind_time,
+            wrapper_time,
         )
 
         return prepared_kernel
@@ -276,8 +258,8 @@ class JitCache(KernelInterface):
         # we only support kwargs
         if len(args) != 0:
             raise RuntimeError(
-                f"[{__print_name__}] ERROR: The JITCache only supports kwargs, len(args) must be 0."
-            )
+                f"[{__print_name__}] ERROR: The JITCache only supports kwargs,"
+                "len(args) must be 0.")
         # assert no config pre-hook
         assert "pre_hook" not in kwargs or kwargs["pre_hook"] is None
 
@@ -289,19 +271,20 @@ class JitCache(KernelInterface):
             prepared_kernel = self._get_prepared_kernel(*args, **kwargs)
             if prepared_kernel.get_key() in self.kernel_cache:
                 logger.debug(
-                    "WARNING: Kernel variant already cached, will override (cache lock is not locked). "
-                    "This could mean that the given check_keys are ambiguous (or the same call was already executed)."
-                )
+                    "WARNING: Kernel variant already cached, will override "
+                    "(cache lock is not locked). "
+                    "This could mean that the given check_keys are ambiguous "
+                    "(or the same call was already executed).")
             self.kernel_cache[prepared_kernel.get_key()] = prepared_kernel
 
         try:
             kernel_variant = self.kernel_cache[self.cache_index_func(kwargs)]
         except KeyError as e:
-            print(
-                f"[{__print_name__}] ERROR: Key {self.cache_index_func(kwargs)}  not in cache.\n"
-                f"Current cache: {list(self.kernel_cache.keys())}"
+            logger.debug(
+                "Key %s not in cache. Current cache %s",
+                str(self.cache_index_func(kwargs)),
+                str(list(self.kernel_cache.keys())),
             )
-            print(e)
             raise e
 
         return kernel_variant(*args, **kwargs)
@@ -310,8 +293,8 @@ class JitCache(KernelInterface):
         # we only support kwargs
         if len(args) != 0:
             raise RuntimeError(
-                f"[{__print_name__}] ERROR: The JITCache only supports kwargs, len(args) must be 0."
-            )
+                f"[{__print_name__}] ERROR: The JITCache only supports kwargs, "
+                "len(args) must be 0.")
         # assert no config pre-hook
         assert "pre_hook" not in kwargs or kwargs["pre_hook"] is None
 
@@ -319,8 +302,10 @@ class JitCache(KernelInterface):
             kernel_variant = self.kernel_cache[self.cache_index_func(kwargs)]
         except KeyError:
             logger.debug(
-                f"Key {self.cache_index_func(kwargs)}  not in cache, compiling...\n"
-                f"Current cache: {list(self.kernel_cache.keys())}"
+                "Key %s  not in cache, compiling...\n"
+                "Current cache: %s",
+                str(self.cache_index_func(kwargs)),
+                str(list(self.kernel_cache.keys())),
             )
             # we only support int, bool, float as cache index
             for key in self.check_keys:
@@ -339,11 +324,13 @@ def jitcache(
     """
     Decorator for caching a :code:`triton.jit`'d function.
 
-    :param check_keys: The list of tl.constexpr that are used to index the cache. Only types int, bool, float are supported.
+    :param check_keys: The list of tl.constexpr that are used to index
+                       the cache. Only types int, bool, float are supported.
     :type check_keys: list[str]
     :param cache_lock: The CacheLock used for this JitCache.
     :type cache_lock: CacheLock
-    :param chache_launch_grid: Indicate if the launch grid size is static and should be cached (False by default).
+    :param chache_launch_grid: Indicate if the launch grid size is static and
+                               should be cached (False by default).
     :type cache_launch_grid: bool
     """
 
