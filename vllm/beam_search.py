@@ -47,7 +47,7 @@ class BeamSearchInstance:
         self.beams: list[BeamSearchSequence] = [
             BeamSearchSequence(
                 tokens=prompt_tokens,
-                logprobs=[] if logprobs is None list(logprobs),
+                logprobs=[] if logprobs is None else list(logprobs),
                 **kwargs,
             )
         ]
