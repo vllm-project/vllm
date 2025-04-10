@@ -493,6 +493,16 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.skyworkr1v_patch_hf_runner,
         marks=[large_gpu_mark(min_gb=80)],
     ),
+    "smolvlm": VLMTestInfo(
+        models=["HuggingFaceTB/SmolVLM2-2.2B-Instruct"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt:f"<|im_start|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        hf_output_post_proc=model_utils.smolvlm_trunc_hf_output,
+    ),
     ### Tensor parallel / multi-gpu broadcast tests
     "chameleon-broadcast": VLMTestInfo(
         models=["facebook/chameleon-7b"],
