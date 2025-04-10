@@ -33,10 +33,6 @@ class TPUSupportedSamplingMetadata:
     # Greedy sampling flag for compiling single xla graph.
     all_greedy: bool = True
 
-    # Generator not supported by xla
-    generators: dict[int,
-                     torch.Generator] = field(default_factory=lambda: dict())
-
     # unsupported, you need to return an extra tensor of static size BxV
     max_num_logprobs = None
 
@@ -56,6 +52,15 @@ class TPUSupportedSamplingMetadata:
 
     allowed_token_ids_mask = None
     bad_words_token_ids = None
+
+    # Generator not supported by xla
+    _generators: dict[int,
+                      torch.Generator] = field(default_factory=lambda: dict())
+
+    @property
+    def generators(self) -> dict[int, torch.Generator]:
+        # Generator not supported by torch/xla. This field must be immutable.
+        return self._generators
 
     @classmethod
     def from_input_batch(
@@ -109,5 +114,4 @@ class TPUSupportedSamplingMetadata:
             top_p=None,  # input_batch.top_p[:padded_num_reqs],
             top_k=None,  # input_batch.top_k[:padded_num_reqs],
             min_p=input_batch.min_p_cpu_tensor[:padded_num_reqs].to(
-                xla_device),
-            generators=input_batch.generators)
+                xla_device))
