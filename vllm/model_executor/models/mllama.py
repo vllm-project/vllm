@@ -65,7 +65,7 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 from .clip import CLIPMLP
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsV0Only
+from .interfaces import SupportsMultiModal, SupportsV0Only
 from .llama import LlamaDecoderLayer, LlamaMLP
 from .utils import maybe_prefix
 
@@ -1182,7 +1182,7 @@ class MllamaForCausalLM(nn.Module):
                                         info=MllamaProcessingInfo,
                                         dummy_inputs=MllamaDummyInputsBuilder)
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                     SupportsV0Only, SupportsLoRA):
+                                     SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
