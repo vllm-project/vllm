@@ -32,7 +32,7 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             ModelRunnerOutput, SamplerOutput)
+                             ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
@@ -177,10 +177,12 @@ class TPUModelRunner:
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
-        self.num_tokens_paddings = _get_paddings(
+        self.num_tokens_paddings = _get_token_paddings(
             min_token_size=16,
             max_token_size=self.max_num_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        self.num_reqs_paddings = _get_req_paddings(
+            min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
 
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
@@ -508,7 +510,7 @@ class TPUModelRunner:
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
-        return attn_metadata, logits_indices
+        return attn_metadata, logits_indices, padded_num_reqs
 
     def _scatter_placeholders(
         self,
@@ -663,7 +665,8 @@ class TPUModelRunner:
             mm_embeds = []
 
         # Prepare inputs
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+        attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
+            scheduler_output)
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -682,11 +685,6 @@ class TPUModelRunner:
             input_ids = self.input_ids
             inputs_embeds = None
         num_reqs = self.input_batch.num_reqs
-        # NOTE (NickLucche) here we sync with TPU: sampling params tensors
-        # are copied to device in chunks of pre-compiled padded shape to
-        # avoid recompilations.
-        tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_input_batch(self.input_batch, logits_indices)
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
@@ -694,6 +692,10 @@ class TPUModelRunner:
                 positions=self.position_ids,
                 inputs_embeds=inputs_embeds,
             )
+        hidden_states = self.select_hidden_states(hidden_states,
+                                                  logits_indices)
+        tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
+            from_input_batch(self.input_batch, padded_num_reqs, self.device)
         selected_token_ids = self.sample_from_hidden(hidden_states,
                                                      tpu_sampling_metadata)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
@@ -857,59 +859,77 @@ class TPUModelRunner:
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
 
-    def capture_model(self) -> None:
-        """Compile the model."""
-
+    def _precompile_backbone(self) -> None:
         logger.info("Compiling the model with different input shapes.")
 
         start = time.perf_counter()
         for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(num_tokens)
-            xm.mark_step()
         xm.wait_device_ops()
         end = time.perf_counter()
-
         logger.info("Compilation finished in in %.2f [secs].", end - start)
-        self._update_num_xla_graphs("model")
+        self._update_num_xla_graphs("model backbone")
 
+    def _precompile_select_hidden_states(self) -> None:
+        # Compile hidden state selection function for bucketed
+        # n_tokens x max_num_reqs. Graph is really small so this is fine.
+        logger.info(
+            "Compiling select_hidden_states with different input shapes.")
+        start = time.perf_counter()
+        hsize = self.model_config.get_hidden_size()
+        for num_tokens in self.num_tokens_paddings:
+            dummy_hidden = torch.zeros((num_tokens, hsize),
+                                       device=self.device,
+                                       dtype=self._hidden_states_dtype)
+            torch._dynamo.mark_dynamic(dummy_hidden, 0)
+            for num_reqs in self.num_reqs_paddings:
+                indices = torch.zeros(num_reqs,
+                                      dtype=torch.int32,
+                                      device=self.device)
+                torch._dynamo.mark_dynamic(indices, 0)
+                self.select_hidden_states(dummy_hidden, indices)
+            logger.info("  -- num_tokens: %d", num_tokens)
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in in %.2f [secs].", end - start)
+        self._update_num_xla_graphs("select_hidden_states")
+
+    def _precompile_sample_from_hidden(self) -> None:
         logger.info("Compiling sampling with different input shapes.")
         start = time.perf_counter()
         hsize = self.model_config.get_hidden_size()
-        device = self.device
-        # Compile sampling step for different model+sampler outputs in bucketed
-        # n_tokens x max_num_reqs. Graph is really small so this is fine.
-        for num_tokens in self.num_tokens_paddings:
-            num_reqs_to_sample = MIN_NUM_SEQS
-            dummy_hidden = torch.randn((num_tokens, hsize),
-                                       device=device,
+        for num_reqs in self.num_reqs_paddings:
+            dummy_hidden = torch.zeros((num_reqs, hsize),
+                                       device=self.device,
                                        dtype=self._hidden_states_dtype)
-            # Compile for [8, 16, .., 128,.., `self.max_num_reqs`]
-            while True:
-                indices = torch.zeros(
-                    num_reqs_to_sample,
-                    dtype=torch.int32,
-                    device=device,
-                )
-                xm.mark_step()
-                sampling_meta = TPUSupportedSamplingMetadata.\
-                    from_input_batch(self.input_batch, indices)
-                logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
-                            num_reqs_to_sample)
-                out = self.sample_from_hidden(dummy_hidden, sampling_meta)
-                out = out.cpu()
-                # Requests can't be more than tokens. But do compile for the
-                # next bigger value in case num_tokens uses bucketed padding.
-                if num_reqs_to_sample >= min(num_tokens, self.max_num_reqs):
-                    break
-                # Make sure to compile the `max_num_reqs` upper-limit case
-                num_reqs_to_sample = _get_padded_num_reqs_with_upper_limit(
-                    num_reqs_to_sample + 1, self.max_num_reqs)
+            # The first dimension of dummy_hidden cannot be mark_dynamic because
+            # some operations in the sampler require it to be static.
+            for all_greedy in [False, True]:
+                generate_params_if_all_greedy = not all_greedy
+                sampling_metadata = (
+                    TPUSupportedSamplingMetadata.from_input_batch(
+                        self.input_batch,
+                        num_reqs,
+                        self.device,
+                        generate_params_if_all_greedy,
+                    ))
+                sampling_metadata.all_greedy = all_greedy
+                self.sample_from_hidden(dummy_hidden, sampling_metadata)
+            logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
-
         logger.info("Compilation finished in in %.2f [secs].", end - start)
         self._update_num_xla_graphs("sampling")
+
+    def capture_model(self) -> None:
+        """
+        Precompile all the subgraphs with possible input shapes.
+        """
+        # TODO: precompile encoder
+        self._precompile_backbone()
+        self._precompile_select_hidden_states()
+        self._precompile_sample_from_hidden()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -962,48 +982,55 @@ class TPUModelRunner:
                 compiled_model.original_code_object)
             compiled_model.compiled_codes.clear()
 
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def select_hidden_states(self, hidden_states, indices_do_sample):
+        return hidden_states[indices_do_sample]
+
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_hidden(
         self,
-        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
         sampling_metadata: TPUSupportedSamplingMetadata,
     ) -> torch.Tensor:
         """
-            Sample with xla-friendly function. This function is to be traced 
-            separately for lighter compilation overhead.
-            """
-        # Tensor `sample_hidden_states` is of fixed pre-compiled size.
-        sample_hidden_states = \
-            hidden_states[sampling_metadata.indices_do_sample]
-        # SamplingMetadata here for pruning output in LogitsProcessor, disabled.
+        Sample with xla-friendly function. This function is to be traced 
+        separately from `forward` for lighter compilation overhead.
+        """
         logits = self.model.compute_logits(sample_hidden_states, None)
-
-        def sample(
-                logits: torch.Tensor,
-                sampling_metadata: TPUSupportedSamplingMetadata
-        ) -> SamplerOutput:
-            sampler_out = self.sampler(logits, sampling_metadata)
-            return sampler_out
-
-        # Optimized greedy sampling branch, tracing both paths in a single pass
-        # NOTE all_greedy is a scalar, this is just an optimized if/else.
-        out_tokens = torch.where(
-            sampling_metadata.all_greedy,
-            torch.argmax(logits, dim=-1, keepdim=True),
-            sample(logits, sampling_metadata).sampled_token_ids)
+        if sampling_metadata.all_greedy:
+            out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
+        else:
+            out_tokens = self.sampler(logits,
+                                      sampling_metadata).sampled_token_ids
         return out_tokens
 
+    def get_multimodal_embeddings(self, *args, **kwargs):
+        return self.model.get_multimodal_embeddings(*args, **kwargs)
 
-def _get_padded_number(n: int, multiple: int) -> int:
-    return ((n + multiple - 1) // multiple) * multiple
+    def get_input_embeddings(self, *args, **kwargs):
+        return self.model.get_input_embeddings(*args, **kwargs)
 
 
-def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
+def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
+    logger.info("Preparing request paddings:")
+    # assert min_req_size is power of 2
+    assert (min_req_size & (min_req_size - 1) == 0) and min_req_size > 0
+    paddings: list = []
+    num = max(MIN_NUM_SEQS, min_req_size)
+    while num <= max_req_size and (len(paddings) == 0 or paddings[-1] != num):
+        paddings.append(num)
+        logger.info("    %d", num)
+        num = _get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
+    return paddings
+
+
+def _get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
     res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
     return min(res, upper_limit)
 
 
-def _get_paddings(min_token_size: int, max_token_size: int,
-                  padding_gap: int) -> list[int]:
+def _get_token_paddings(min_token_size: int, max_token_size: int,
+                        padding_gap: int) -> list[int]:
     """Generate a list of padding size, starting from min_token_size, 
     ending with a number that can cover max_token_size
     
@@ -1013,18 +1040,20 @@ def _get_paddings(min_token_size: int, max_token_size: int,
         first increase the size to twice, 
         then increase the padding size by padding_gap.
     """
+    # assert min_token_size is power of 2
+    assert (min_token_size & (min_token_size - 1) == 0) and min_token_size > 0
     paddings = []
     num = min_token_size
 
     if padding_gap == 0:
-        logger.info("Using exponential paddings:")
+        logger.info("Using exponential token paddings:")
         while num <= max_token_size:
             logger.info("    %d", num)
             paddings.append(num)
             num *= 2
 
     else:
-        logger.info("Using incremental paddings:")
+        logger.info("Using incremental token paddings:")
         while num <= padding_gap:
             logger.info("    %d", num)
             paddings.append(num)
