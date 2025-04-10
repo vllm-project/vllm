@@ -230,15 +230,30 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         )
 
     def _get_dummy_images(self, width: int, height: int, num_images: int) -> list[Image.Image]:
-        """Get dummy images for profiling.
+        """获取用于性能分析的虚拟图像。
         
+        Args:
+            width: 目标图像宽度
+            height: 目标图像高度 
+            num_images: 需要生成的图像数量
+            
         Returns:
-            A list of PIL Image objects with size (width, height).
+            包含指定数量 PIL Image 对象的列表,每个图像大小为 (width, height)
         """
-        # 创建一个基础的 RGB 图像
-        base_image = np.full((height, width, 3), 255, dtype=np.uint8)
+        # 创建一个 RGB 格式的基础图像
+        base_image = np.zeros((height, width, 3), dtype=np.uint8)
+        # 填充一些随机值以模拟真实图像
+        base_image[..., 0] = 255  # R 通道
+        base_image[..., 1] = 128  # G 通道
+        base_image[..., 2] = 64   # B 通道
+        
+        # 转换为 PIL Image
         base_image = Image.fromarray(base_image, mode='RGB')
         
+        # 调整图像大小到目标尺寸
+        if base_image.size != (width, height):
+            base_image = base_image.resize((width, height))
+            
         # 复制到所需的图像数量
         return [base_image.copy() for _ in range(num_images)]
 
