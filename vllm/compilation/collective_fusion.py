@@ -277,10 +277,6 @@ class CollectiveFusionPass(VllmInductorPass):
             return False
 
     def __call__(self, graph: fx.Graph):
-        import torch.distributed as dist
-
-        rank = dist.get_rank()
-
         self.dump_graph(graph, "before_collective_fusion")
         embedding_match_cnt = self.embedding_ag_rmsnorm_pattern.apply(graph)
         gemm_ar_rmsnorm_match_cnt = self.gemm_rs_ag_gemm_pattern.apply(graph)
@@ -305,7 +301,5 @@ class CollectiveFusionPass(VllmInductorPass):
                 gemm_ar_rmsnorm_match_cnt,
             )
 
-        if rank == 0:
-            print(f"after graph {graph}")
         self.dump_graph(graph, "after_collective_fusion")
         self.matches.clear()

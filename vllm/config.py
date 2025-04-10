@@ -3172,6 +3172,7 @@ class CompilationConfig(BaseModel):
         dump_graph_dir: Path = Field(default=Path("."))
         enable_fusion: bool = True
         enable_noop: bool = True
+        enable_collective_fusion: bool = True
 
         def uuid(self):
             """

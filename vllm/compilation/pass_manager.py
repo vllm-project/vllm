@@ -49,7 +49,8 @@ class PostGradPassManager(CustomGraphPass):
         if pass_config.enable_fusion:
             self.passes += [FusionPass.instance(pass_config)]
 
-        self.passes += [CollectiveFusionPass.instance(pass_config)]
+        if pass_config.enable_collective_fusion:
+            self.passes += [CollectiveFusionPass.instance(pass_config)]
 
         self.fix_functionalization = FixFunctionalizationPass(pass_config)
 
