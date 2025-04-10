@@ -489,8 +489,22 @@ class MiniMaxText01LinearAttention(nn.Module):
 
         hidden = self.norm(hidden)
         gate, _ = self.output_gate(hidden_states)
+        
+        # 确保 gate 和 hidden 的维度匹配
         if gate.size(0) != hidden.size(0):
+            # 如果 batch size 不匹配，截断 gate
             gate = gate[:hidden.size(0)]
+        
+        # 确保 gate 和 hidden 的其他维度也匹配
+        if gate.size(-1) != hidden.size(-1):
+            # 如果特征维度不匹配，调整 gate 的大小
+            if gate.size(-1) > hidden.size(-1):
+                gate = gate[..., :hidden.size(-1)]
+            else:
+                # 如果 gate 的特征维度小于 hidden，需要扩展
+                pad_size = hidden.size(-1) - gate.size(-1)
+                gate = torch.nn.functional.pad(gate, (0, pad_size))
+        
         hidden = F.sigmoid(gate) * hidden
         hidden = hidden.to(hidden_states.dtype)
         hidden, _ = self.out_proj(hidden)
