@@ -12,7 +12,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 
-# from .inductor_pass import get_pass_context
+from .inductor_pass import get_pass_context
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -44,9 +44,8 @@ def search_embedding_all_reduce_rmsnorm(
         result=permute,
         input=all_reduce,
         weight=arg3_1,
-        epsilon=1e-5)
-    
-    print(f"embedding pattern search, rmsnorm input = {all_reduce.shape}, output1 = {rmsnorm[1].shape}, residual = {all_reduce.shape}")
+        epsilon=1e-5,
+    )
 
     return rmsnorm[1], all_reduce
 
@@ -73,15 +72,13 @@ def replace_with_embedding_reduce_scatter_rmsnorm(
         result=rmsnorm_result,
         input=reduce_scatter,
         weight=arg3_1,
-        epsilon=1e-5)
+        epsilon=1e-5,
+    )
 
     all_gather = torch.ops.vllm.all_gather.default(rmsnorm[1],
                                                    dim=0,
                                                    world_size=tp_size,
                                                    group_name=tp.unique_name)
-    
-    print(f"embedding pattern replace, rmsnorm input = {reduce_scatter.shape}, output1 = {rmsnorm[1]}, output1 after all gather = {all_gather.shape}, residual = {reduce_scatter}")
-
 
     return all_gather, reduce_scatter
 
@@ -91,7 +88,6 @@ def search_gemm_allreduce_rmsnorm(
     gemm_1_weights: torch.Tensor,
     gemm_1_activations: torch.Tensor,
     rms_norm_weights: torch.Tensor,
-    # gemm_2_weights: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
@@ -102,7 +98,8 @@ def search_gemm_allreduce_rmsnorm(
         input=all_reduce,
         residual=residual,
         weight=rms_norm_weights,
-        epsilon=1e-5)
+        epsilon=1e-5,
+    )
 
     return rmsnorm[1], rmsnorm[2]
 
@@ -112,16 +109,9 @@ def replace_with_gemm_rs_ag_rmsnorm(
     gemm_1_weights: torch.Tensor,
     gemm_1_activations: torch.Tensor,
     rms_norm_weights: torch.Tensor,
-    # gemm_2_weights: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     tp = get_tp_group()
     tp_size = get_tensor_model_parallel_world_size()
-    
-    # slice_shape = residual_slice_shape(residual)
-    # start_idx = tp.rank * slice_shape
-    # end_idx = (tp.rank + 1) * slice_shape
-    # residual = residual[start_idx:end_idx, :]
-
     gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
     reduce_scatter = torch.ops.vllm.reduce_scatter.default(
@@ -133,81 +123,82 @@ def replace_with_gemm_rs_ag_rmsnorm(
         input=reduce_scatter,
         residual=residual,
         weight=rms_norm_weights,
-        epsilon=1e-5)
+        epsilon=1e-5,
+    )
 
-    print("residual.shape: ", residual.shape)
-    print("reduce_scatter.shape: ", reduce_scatter.shape)
-    print("rmsnorm[1].shape: ", rmsnorm[1].shape)
-    print("rmsnorm[2].shape: ", rmsnorm[2].shape)
+    all_gather = torch.ops.vllm.all_gather.default(rmsnorm[1],
+                                                   dim=0,
+                                                   world_size=tp_size,
+                                                   group_name=tp.unique_name)
+    return all_gather, rmsnorm[2]
 
-    # rank 0 and rank 1
-    # residual.shape:  torch.Size([(s0//2), 2048])
-    # reduce_scatter.shape:  torch.Size([(s0//2), 2048])
-    # rmsnorm[1].shape:  torch.Size([(s0//2), 2048])
-    # rmsnorm[2].shape:  torch.Size([(s0//2), 2048])
+
+def search_last_gemm_allreduce_rmsnorm(
+    residual: torch.Tensor,
+    gemm_1_weights: torch.Tensor,
+    gemm_1_activations: torch.Tensor,
+    rms_norm_weights: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
+    mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
+    all_reduce = tensor_model_parallel_all_reduce(mm_1)
+
+    rmsnorm = torch.ops.higher_order.auto_functionalized(
+        torch.ops._C.fused_add_rms_norm.default,
+        input=all_reduce,
+        residual=residual,
+        weight=rms_norm_weights,
+        epsilon=1e-5,
+    )
+
+    return rmsnorm[1]
+
+
+def replace_with_last_gemm_rs_ag_rmsnorm(
+    residual: torch.Tensor,
+    gemm_1_weights: torch.Tensor,
+    gemm_1_activations: torch.Tensor,
+    rms_norm_weights: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    tp = get_tp_group()
+    tp_size = get_tensor_model_parallel_world_size()
+    gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
+    mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
+    reduce_scatter = torch.ops.vllm.reduce_scatter.default(
+        mm_1, dim=0, world_size=tp_size, group_name=tp.unique_name)
+
+    # TODO is it possible to extract epsilon from somewhere
+    rmsnorm = torch.ops.higher_order.auto_functionalized(
+        torch.ops._C.fused_add_rms_norm.default,
+        input=reduce_scatter,
+        residual=residual,
+        weight=rms_norm_weights,
+        epsilon=1e-5,
+    )
 
     normalized = torch.ops.vllm.all_gather.default(rmsnorm[1],
                                                    dim=0,
                                                    world_size=tp_size,
                                                    group_name=tp.unique_name)
 
-    new_residual = rmsnorm[2]
-    # new_residual = new_residual.repeat(tp_size, 1)
-
-    return normalized, new_residual
+    return normalized
 
 
-def prepare_inputs_for_embedding_rmsnorm():
-    # Parameters as specified
-    vocab_size = 16
-    hidden_size = 4
-    seq_len = 8
-    batch_size = 1
-
-    # arg2_1: embedding table (vocab_size x hidden_size)
-    arg2_1 = torch.empty([vocab_size, hidden_size],
-                         device='cuda',
-                         dtype=torch.float16)
-    arg2_1.normal_(0, 0.02)
-
+def generate_inputs_for_embedding_ar_rmsnorm():
+    arg2_1 = torch.rand([16, 4], device="cuda", dtype=torch.float16)
     # mul_6: token indices (batch_size x seq_len)
     mul_6 = torch.tensor([[3, 7, 1, 4, 9, 2, 5, 0]],
-                         device='cuda',
+                         device="cuda",
                          dtype=torch.long)
-
-    unsqueeze = torch.ones([batch_size, seq_len, 1],
-                           device='cuda',
-                           dtype=torch.bool)
-
-    # full_default: zeros tensor with embedding output shape
-    # (batch_size x seq_len x hidden_size)
-    full_default = torch.zeros([batch_size, seq_len, hidden_size],
-                               device='cuda',
-                               dtype=torch.float16)
-
-    # permute: residual connection tensor
-    # (batch_size x seq_len x hidden_size)
-    permute = torch.empty([batch_size, seq_len, hidden_size],
-                          device='cuda',
-                          dtype=torch.float16)
-    permute.normal_(0, 0.1)
-
-    # arg3_1: RMSNorm weights (hidden_size)
-    arg3_1 = torch.ones([hidden_size], device='cuda', dtype=torch.float16)
-
-    # arg2_1: torch.Tensor,
-    # mul_6: torch.Tensor,
-    # unsqueeze: torch.Tensor,
-    # full_default: torch.Tensor,
-    # permute: torch.Tensor,
-    # arg3_1: torch.Tensor,
-
+    unsqueeze = torch.rand([1, 8, 1], device="cuda", dtype=torch.float16) > 0.5
+    full_default = torch.zeros([1, 8, 4], device="cuda", dtype=torch.float16)
+    permute = torch.rand([1, 8, 4], device="cuda", dtype=torch.float16)
+    arg3_1 = torch.rand([4], device="cuda", dtype=torch.float16)
     return [arg2_1, mul_6, unsqueeze, full_default, permute, arg3_1]
 
 
 class CollectiveFusionPass(VllmInductorPass):
-
-    _instance: 'Optional[CollectiveFusionPass]' = None
+    _instance: "Optional[CollectiveFusionPass]" = None
 
     @classmethod
     def instance(cls, config: CompilationConfig) -> "CollectiveFusionPass":
@@ -223,8 +214,8 @@ class CollectiveFusionPass(VllmInductorPass):
         return cls._instance
 
     def __init__(self, config: CompilationConfig):
-        assert self.__class__._instance is None, \
-            "CollectiveFusionPass singleton instance already exists"
+        assert self.__class__._instance is None, (
+            "CollectiveFusionPass singleton instance already exists")
         super().__init__(config)
 
         self.embedding_ag_rmsnorm_pattern = PatternMatcherPass()
@@ -232,41 +223,87 @@ class CollectiveFusionPass(VllmInductorPass):
         self.final_ar_rmsnorm_pattern = PatternMatcherPass()
         self.matches: List[Match] = []
 
-        inputs_for_embedding_rmsnorm = prepare_inputs_for_embedding_rmsnorm()
-        register_replacement(search_embedding_all_reduce_rmsnorm,
-                             replace_with_embedding_reduce_scatter_rmsnorm,
-                             inputs_for_embedding_rmsnorm,
-                             fwd_only, [self.embedding_ag_rmsnorm_pattern],
-                             extra_check=lambda m: self.record_match(m))
+        embedding_rmsnorm_inputs = generate_inputs_for_embedding_ar_rmsnorm()
+        register_replacement(
+            search_embedding_all_reduce_rmsnorm,
+            replace_with_embedding_reduce_scatter_rmsnorm,
+            embedding_rmsnorm_inputs,
+            fwd_only,
+            [self.embedding_ag_rmsnorm_pattern],
+            extra_check=lambda m: self.record_match(m),
+        )
 
-        x = torch.empty([4, 4], device='cuda', dtype=torch.float16)
-        w = torch.empty([4, 4], device='cuda', dtype=torch.float16)
-        resid = torch.empty([4, 4], device='cuda', dtype=torch.float16)
-        resid_w = torch.empty([4, 4], device='cuda', dtype=torch.float16)
+        gemm_1_weights = torch.empty([4, 4],
+                                     device="cuda",
+                                     dtype=torch.float16)
+        gemm_1_activations = torch.empty([4, 4],
+                                         device="cuda",
+                                         dtype=torch.float16)
+        residual = torch.empty([4, 4], device="cuda", dtype=torch.float16)
+        rms_norm_weights = torch.empty([4, 4],
+                                       device="cuda",
+                                       dtype=torch.float16)
 
-        inputs = [resid, x, w, resid_w]
-        register_replacement(search_gemm_allreduce_rmsnorm,
-                             replace_with_gemm_rs_ag_rmsnorm,
-                             inputs,
-                             fwd_only, [self.gemm_rs_ag_gemm_pattern],
-                             extra_check=lambda m: self.record_match(m))
+        inputs = [
+            residual,
+            gemm_1_weights,
+            gemm_1_activations,
+            rms_norm_weights,
+        ]
+        register_replacement(
+            search_gemm_allreduce_rmsnorm,
+            replace_with_gemm_rs_ag_rmsnorm,
+            inputs,
+            fwd_only,
+            [self.gemm_rs_ag_gemm_pattern],
+            extra_check=lambda m: self.record_match(m),
+        )
+
+        register_replacement(
+            search_last_gemm_allreduce_rmsnorm,
+            replace_with_last_gemm_rs_ag_rmsnorm,
+            inputs,
+            fwd_only,
+            [self.final_ar_rmsnorm_pattern],
+            extra_check=lambda m: self.record_match(m),
+        )
 
     def record_match(self, match: Match) -> bool:
-        # record the match for possible later use
         self.matches.append(match)
-        return bool(match)
+        # only do replace for specific shapes
+        if get_pass_context().runtime_shape is not None:
+            return bool(match)
+        else:
+            return False
 
     def __call__(self, graph: fx.Graph):
         import torch.distributed as dist
+
         rank = dist.get_rank()
-        if rank == 0:
-            print(f"before graph {graph}")
 
         self.dump_graph(graph, "before_collective_fusion")
         embedding_match_cnt = self.embedding_ag_rmsnorm_pattern.apply(graph)
-        match_cnt = self.gemm_rs_ag_gemm_pattern.apply(graph)
-        logger.info("all match count = %d, embedding_match_cnt = %d, fused gemm match cnt = %d",
-                    len(self.matches), embedding_match_cnt, match_cnt)
+        gemm_ar_rmsnorm_match_cnt = self.gemm_rs_ag_gemm_pattern.apply(graph)
+
+        if embedding_match_cnt > 0 or gemm_ar_rmsnorm_match_cnt > 0:
+            final_match_cnt = self.final_ar_rmsnorm_pattern.apply(graph)
+            logger.debug(
+                "all matches = %d, embedding matches = %d, \
+                gemm_ar_rmsnorm matches = %d, \
+                final ar rmsnorm matches = %d",
+                len(self.matches),
+                embedding_match_cnt,
+                gemm_ar_rmsnorm_match_cnt,
+                final_match_cnt,
+            )
+        else:
+            logger.debug(
+                "all matches = %d, embedding matches = %d, \
+                gemm_ar_rmsnorm matches = %d",
+                len(self.matches),
+                embedding_match_cnt,
+                gemm_ar_rmsnorm_match_cnt,
+            )
 
         if rank == 0:
             print(f"after graph {graph}")

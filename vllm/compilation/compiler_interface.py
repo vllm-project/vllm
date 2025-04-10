@@ -15,6 +15,8 @@ from packaging.version import Version
 
 from vllm.config import VllmConfig
 
+from .inductor_pass import pass_context
+
 
 class CompilerInterface:
     """
@@ -291,11 +293,12 @@ class InductorAdaptor(CompilerInterface):
             # Dynamo metrics context, see method for more details.
             stack.enter_context(self.metrics_context())
 
-            compiled_graph = compile_fx(
-                graph,
-                example_inputs,
-                inner_compile=hijacked_compile_fx_inner,
-                config_patches=current_config)
+            with pass_context(runtime_shape):
+                compiled_graph = compile_fx(
+                    graph,
+                    example_inputs,
+                    inner_compile=hijacked_compile_fx_inner,
+                    config_patches=current_config)
 
         assert hash_str is not None, (
             "failed to get the hash of the compiled graph")
