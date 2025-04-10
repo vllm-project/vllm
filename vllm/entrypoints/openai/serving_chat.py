@@ -39,7 +39,8 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
-                                                truncate_tool_call_ids)
+                                                truncate_tool_call_ids,
+                                                validate_request_params)
 
 logger = init_logger(__name__)
 
@@ -159,6 +160,7 @@ class OpenAIServingChat(OpenAIServing):
                 # for more info: see comment in `maybe_serialize_tool_calls`
                 maybe_serialize_tool_calls(request)
                 truncate_tool_call_ids(request)
+                validate_request_params(request)
 
             if (request.tool_choice == "auto" and
                     not (self.enable_auto_tools and tool_parser is not None)
