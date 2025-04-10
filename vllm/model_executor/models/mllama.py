@@ -106,16 +106,6 @@ class MllamaProcessingInfo(BaseProcessingInfo):
         image_size = self.get_hf_config().vision_config.image_size
         return calc_token_per_chunk(image_size)
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        vision_config = self.get_hf_config().vision_config
-        token_per_chunk = self.get_token_per_chunk_from_config()
-        mm_max_tokens = vision_config.max_num_tiles * token_per_chunk
-        return {"image": mm_max_tokens}
-
     def get_num_tiles_per_image(self, image_height: int,
                                 image_width: int) -> int:
         vision_config = self.get_hf_config().vision_config
@@ -211,6 +201,9 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         # }
 
         if mm_data:
+            hf_processor = self.info.get_hf_processor()
+            image_token: str = hf_processor.image_token
+
             # Since only the last group of consecutive images
             # are attended by the decoded tokens, we only need to
             # get the number of tokens for those images.
@@ -227,7 +220,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
             num_tokens = decode_tiles * token_per_chunk
             mm_inputs["encoder_prompt_token_ids"] = [image_token_id
                                                      ] * num_tokens
-            mm_inputs["encoder_prompt"] = "<|image|>" * num_tokens
+            mm_inputs["encoder_prompt"] = image_token * num_tokens
 
         return mm_inputs
 
@@ -1324,6 +1317,9 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
             start_pos = end_pos
         cross_attention_states = cross_attention_states_flat
         return cross_attention_states
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_cross_attention_states(
         self,

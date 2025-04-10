@@ -321,21 +321,6 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        max_image_tokens = self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
-        )
-
-        return {"image": max_image_tokens}
-
     def get_num_image_tokens(
         self,
         *,
@@ -673,6 +658,9 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                                                 image_input["image_sizes"])
 
         return image_embeds
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

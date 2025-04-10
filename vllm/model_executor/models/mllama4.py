@@ -477,7 +477,9 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
                                          **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": 10}
+        # Although vLLM can support more images from an infra capability
+        # perspective, we do not recommend using >10 images in practice.
+        return {"image": None}
 
     @staticmethod
     def get_patch_per_chunk(vision_config: Llama4VisionConfig) -> int:
@@ -496,31 +498,12 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         image_processor = self.get_hf_processor().image_processor
         return image_processor.max_patches
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        vision_config = self.get_hf_config().vision_config
-        patch_per_chunk = self.get_patch_per_chunk(vision_config)
-        num_patches = self.get_max_num_tiles() + 1
-
-        return {"image": patch_per_chunk * num_patches}
-
     def get_image_size_with_most_features(self) -> ImageSize:
         vision_config = self.get_hf_config().vision_config
         image_size = vision_config.image_size
         # Result in the max possible feature size (h:w = 16:1)
         return ImageSize(height=self.get_max_num_tiles() * image_size,
                          width=image_size)
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-        )
 
 
 class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
@@ -741,6 +724,9 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             img.flatten(0, 1)
             for img in vision_embeddings_flat.split(patches_per_image, dim=0)
         ]
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(self,
                                   **kwargs) -> Optional[MultiModalEmbeddings]:

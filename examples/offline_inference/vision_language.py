@@ -298,6 +298,34 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# SmolVLM2-2.2B-Instruct
+def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        enforce_eager=True,
+        mm_processor_kwargs={
+            "max_image_size": {
+                "longest_edge": 384
+            },
+        },
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
+    prompts = [
+        (f"<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:")
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -556,7 +584,7 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     # The configuration below has been confirmed to launch on a single L40 GPU.
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
@@ -955,6 +983,7 @@ model_example_map = {
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
     "skywork_chat": run_skyworkr1v,
+    "smolvlm": run_smolvlm,
 }
 
 

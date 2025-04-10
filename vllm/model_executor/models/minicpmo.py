@@ -142,17 +142,6 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {**super().get_supported_mm_limits(), "audio": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {
-            **super().get_mm_max_tokens_per_item(seq_len, mm_counts),
-            "audio":
-            self.get_max_audio_tokens(),
-        }
-
     def get_audio_placeholder(
         self,
         audio_lens: int,
