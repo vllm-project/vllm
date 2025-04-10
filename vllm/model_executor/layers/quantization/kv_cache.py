@@ -109,7 +109,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             q_scale = 1.0
         if layer.prob_scale > 0.0:
             prob_scale = layer.prob_scale.to("cpu").tolist()
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 prob_scale *= 2
         else:
             prob_scale = 1.0
