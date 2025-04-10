@@ -6,14 +6,27 @@ set -euo pipefail
 
 # Check if docker/Dockerfile is staged for commit
 if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
-  echo "docker/Dockerfile has changed, updating dependency graph..."
-  
+  echo "docker/Dockerfile has changed, attempting to update dependency graph..."
+
+  # Check if Docker is installed and running
+  if ! command -v docker &> /dev/null; then
+    echo "Warning: Docker command not found. Skipping Dockerfile graph update."
+    echo "Please install Docker to automatically update the graph: https://docs.docker.com/get-docker/"
+    exit 0
+  fi
+  if ! docker info &> /dev/null; then
+    echo "Warning: Docker daemon is not running. Skipping Dockerfile graph update."
+    echo "Please start Docker to automatically update the graph."
+    exit 0
+  fi
+
   # Ensure target directory exists
   mkdir -p docs/source/assets/contributing
   
-  # Store old image hash if exists
+  # Store old image hash in a variable if the file exists
+  OLD_HASH=""
   if [ -f "docs/source/assets/contributing/dockerfile-stages-dependency.png" ]; then
-    sha256sum docs/source/assets/contributing/dockerfile-stages-dependency.png > /tmp/old_hash.txt
+    OLD_HASH=$(sha256sum docs/source/assets/contributing/dockerfile-stages-dependency.png)
   fi
   
   # Generate Dockerfile graph
@@ -33,7 +46,7 @@ if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   echo "Finding generated PNG file..."
   # Check for Dockerfile.png in the root directory (most likely location)
   if [ -f "./Dockerfile.png" ]; then
-    echo "Found Dockerfile.png in root directory"
+    echo "Found generated file at: ./Dockerfile.png"
     mv "./Dockerfile.png" docs/source/assets/contributing/dockerfile-stages-dependency.png
   else
     # Try to find it elsewhere
@@ -50,22 +63,13 @@ if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   fi
   
   # Check if the graph has changed
-  if [ -f "/tmp/old_hash.txt" ]; then
-    NEW_HASH="$(sha256sum "docs/source/assets/contributing/dockerfile-stages-dependency.png")"
-    OLD_HASH="$(cat "/tmp/old_hash.txt")"
-    if [ "$NEW_HASH" != "$OLD_HASH" ]; then
-      echo "Graph has changed, adding to commit."
-      git add docs/source/assets/contributing/dockerfile-stages-dependency.png
-    else
-      echo "No changes in graph detected."
-    fi
-  else
-    echo "First time generating graph, adding to commit."
+  NEW_HASH=$(sha256sum docs/source/assets/contributing/dockerfile-stages-dependency.png)
+  if [ "$NEW_HASH" != "$OLD_HASH" ]; then
+    echo "Graph has changed, adding to commit."
     git add docs/source/assets/contributing/dockerfile-stages-dependency.png
+  else
+    echo "No changes in graph detected."
   fi
-  
-  # Clean up temp file
-  rm -f /tmp/old_hash.txt
 fi
 
 exit 0 
