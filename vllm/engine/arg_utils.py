@@ -245,7 +245,7 @@ class EngineArgs:
                 kwargs[name] = {"default": default, "help": cls_docs[name]}
                 # When using action="store_true"
                 # add_argument doesn't accept type
-                if not isinstance(field.type, bool):
+                if field.type is not bool:
                     kwargs[name]["type"] = field.type
             return kwargs
 
