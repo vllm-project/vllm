@@ -121,8 +121,7 @@ def run_test(
             for prompts, images, audios in inputs
         ]
 
-    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
-    hf_model_kwargs = {"_attn_implementation": "eager"}
+    hf_model_kwargs = {"_attn_implementation": "sdpa"}
     with hf_runner(model, dtype=dtype,
                    model_kwargs=hf_model_kwargs) as hf_model:
         hf_processor = hf_model.processor
