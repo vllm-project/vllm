@@ -533,6 +533,8 @@ steps:
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/decoder_only/vision_language/test_models.py -v -s -m 'distributed(num_gpus=2)'
+  # test sequence parallel
+  - pytest -v -s distributed/test_sequence_parallel.py
   # this test fails consistently.
   # TODO: investigate and fix
   # - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py

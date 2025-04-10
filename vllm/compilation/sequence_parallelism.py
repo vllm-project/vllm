@@ -197,18 +197,18 @@ def generate_inputs_for_embedding_ar_rmsnorm():
     return [arg2_1, mul_6, unsqueeze, full_default, permute, arg3_1]
 
 
-class CollectiveFusionPass(VllmInductorPass):
-    _instance: "Optional[CollectiveFusionPass]" = None
+class SequenceParallelismPass(VllmInductorPass):
+    _instance: "Optional[SequenceParallelismPass]" = None
 
     @classmethod
-    def instance(cls, config: CompilationConfig) -> "CollectiveFusionPass":
+    def instance(cls, config: CompilationConfig) -> "SequenceParallelismPass":
         """
         Get the singleton instance of the CollectiveFusionPass.
         If the instance exists, the config is updated but
         initialization is not repeated.
         """
         if cls._instance is None:
-            cls._instance = CollectiveFusionPass(config)
+            cls._instance = SequenceParallelismPass(config)
         else:
             cls._instance.config = config
         return cls._instance
@@ -271,13 +271,15 @@ class CollectiveFusionPass(VllmInductorPass):
     def record_match(self, match: Match) -> bool:
         self.matches.append(match)
         # only do replace for specific shapes
-        if get_pass_context().runtime_shape is not None:
+        tp_size = get_tensor_model_parallel_world_size()
+        if get_pass_context().runtime_shape is not None and \
+                get_pass_context().runtime_shape % tp_size == 0:
             return bool(match)
         else:
             return False
 
     def __call__(self, graph: fx.Graph):
-        self.dump_graph(graph, "before_collective_fusion")
+        self.dump_graph(graph, "before_sequence_parallelism_pass")
         embedding_match_cnt = self.embedding_ag_rmsnorm_pattern.apply(graph)
         gemm_ar_rmsnorm_match_cnt = self.gemm_rs_ag_gemm_pattern.apply(graph)
 
@@ -301,5 +303,5 @@ class CollectiveFusionPass(VllmInductorPass):
                 gemm_ar_rmsnorm_match_cnt,
             )
 
-        self.dump_graph(graph, "after_collective_fusion")
+        self.dump_graph(graph, "after_sequence_parallelism_pass")
         self.matches.clear()

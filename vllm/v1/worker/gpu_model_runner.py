@@ -1004,7 +1004,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # enabled collective fusion for SP
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
             if self.vllm_config.compilation_config.pass_config. \
-                enable_collective_fusion and tp_size > 1:
+                enable_sequence_parallelism and tp_size > 1:
                 import math
                 num_input_tokens = math.ceil(
                     num_scheduled_tokens / tp_size) * tp_size
