@@ -472,7 +472,7 @@ class SonnetDataset(BenchmarkDataset):
 
         # Determine how many poem lines to use.
         num_input_lines = round((input_len - base_offset) / avg_len)
-        num_prefix_lines = round((prefix_len - base_offset) / avg_len)
+        num_prefix_lines = max(round((prefix_len - base_offset) / avg_len), 0)
         prefix_lines = self.data[:num_prefix_lines]
 
         samples = []
