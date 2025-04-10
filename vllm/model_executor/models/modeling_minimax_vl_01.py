@@ -31,6 +31,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
@@ -176,8 +177,6 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         return largest_feature_pinpoint
 
 _I = TypeVar("_I", bound=LlavaNextProcessingInfo)
-
-
 class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
 
     # Copied from BaseMultiModalProcessor
