@@ -107,6 +107,13 @@ class AsyncLLM(EngineClient):
         )
 
         self.output_handler: Optional[asyncio.Task] = None
+        try:
+            # Start output handler eagerly if we are in the asyncio eventloop.
+            asyncio.get_running_loop()
+            self.output_handler = asyncio.create_task(
+                self._run_output_handler())
+        except RuntimeError:
+            pass
 
     @classmethod
     def from_vllm_config(
@@ -357,9 +364,9 @@ class AsyncLLM(EngineClient):
                     iteration_stats=iteration_stats,
                 )
 
-        except Exception:
+        except Exception as e:
             logger.exception("AsyncLLM output_handler failed.")
-            self.output_processor.propagate_error(EngineDeadError())
+            self.output_processor.propagate_error(e)
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""

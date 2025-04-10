@@ -12,6 +12,7 @@ from enum import Enum, auto
 from functools import partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
+from threading import Thread
 from typing import Any, Callable, Optional, Union
 
 import cloudpickle
@@ -41,6 +42,8 @@ class MultiprocExecutor(Executor):
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
+        self.is_failed = False
+        self.failure_callback: Optional[Callable] = None
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -86,12 +89,49 @@ class MultiprocExecutor(Executor):
             self.rpc_broadcast_mq.wait_until_ready()
             for w in self.workers:
                 w.worker_response_mq.wait_until_ready()
+
+            self.start_worker_monitor()
             success = True
         finally:
             if not success:
                 # Clean up the worker procs if there was a failure.
                 self._ensure_worker_termination(
                     [w.proc for w in unready_workers])
+
+    def start_worker_monitor(self):
+        workers = self.workers
+        self_ref = weakref.ref(self)
+
+        # Monitors worker process liveness. If any die unexpectedly,
+        # logs an error, shuts down the executor and invokes the failure
+        # callback to inform the engine.
+        def monitor_workers():
+            sentinels = [h.proc.sentinel for h in workers]
+            died = multiprocessing.connection.wait(sentinels)
+            _self = self_ref()
+            if not _self or getattr(_self, 'shutting_down', False):
+                return
+            _self.is_failed = True
+            proc_name = next(h.proc.name for h in workers
+                             if h.proc.sentinel == died[0])
+            logger.error(
+                "Worker proc %s died unexpectedly, "
+                "shutting down executor.", proc_name)
+            _self.shutdown()
+            callback = _self.failure_callback
+            if callback is not None:
+                _self.failure_callback = None
+                callback()
+
+        Thread(target=monitor_workers,
+               daemon=True,
+               name="MultiprocWorkerMonitor").start()
+
+    def register_failure_callback(self, callback: Callable):
+        if self.is_failed:
+            callback()
+        else:
+            self.failure_callback = callback
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -100,6 +140,9 @@ class MultiprocExecutor(Executor):
                        kwargs: Optional[dict] = None) -> list[Any]:
         start_time = time.monotonic()
         kwargs = kwargs or {}
+
+        if self.is_failed:
+            raise RuntimeError("Executor failed.")
 
         # NOTE: If the args are heterogeneous, then we pack them into a list,
         # and unpack them in the method of every worker, because every worker
@@ -129,9 +172,6 @@ class MultiprocExecutor(Executor):
             return responses
         except TimeoutError as e:
             raise TimeoutError(f"RPC call to {method} timed out.") from e
-        except Exception as e:
-            # Re-raise any other exceptions
-            raise e
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):

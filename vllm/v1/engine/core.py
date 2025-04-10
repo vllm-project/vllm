@@ -48,12 +48,11 @@ _R = TypeVar('_R')  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        executor_class: type[Executor],
-        log_stats: bool,
-    ):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 executor_class: type[Executor],
+                 log_stats: bool,
+                 executor_fail_callback: Optional[Callable] = None):
         assert vllm_config.model_config.runner_type != "pooling"
 
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
@@ -63,6 +62,9 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        if executor_fail_callback is not None:
+            self.model_executor.register_failure_callback(
+                executor_fail_callback)
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
@@ -317,9 +319,15 @@ class EngineCoreProc(EngineCore):
         log_stats: bool,
         engine_index: int = 0,
     ):
-        super().__init__(vllm_config, executor_class, log_stats)
+        input_queue: queue.Queue[tuple[EngineCoreRequestType,
+                                       Any]] = queue.Queue()
 
-        self.errored_sent_event = threading.Event()
+        executor_fail_callback = lambda: input_queue.put_nowait(
+            (EngineCoreRequestType.EXECUTOR_FAILED, b''))
+
+        super().__init__(vllm_config, executor_class, log_stats,
+                         executor_fail_callback)
+
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
         self.global_unfinished_reqs = False
@@ -329,16 +337,17 @@ class EngineCoreProc(EngineCore):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue: queue.Queue[tuple[EngineCoreRequestType,
-                                            Any]] = queue.Queue()
+        self.input_queue = input_queue
         self.output_queue: queue.Queue[Union[EngineCoreOutputs,
                                              bytes]] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, engine_index),
                          daemon=True).start()
-        threading.Thread(target=self.process_output_socket,
-                         args=(output_path, engine_index),
-                         daemon=True).start()
+        self.output_thread = threading.Thread(
+            target=self.process_output_socket,
+            args=(output_path, engine_index),
+            daemon=True)
+        self.output_thread.start()
 
     @staticmethod
     def run_engine_core(*args,
@@ -460,6 +469,11 @@ class EngineCoreProc(EngineCore):
                                           f" failed: {str(e)}")
             self.output_queue.put_nowait(
                 EngineCoreOutputs(utility_output=output))
+        elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
+            raise RuntimeError("Executor failed.")
+        else:
+            logger.error("Unrecognized input request type encountered: %s",
+                         request_type)
 
     @staticmethod
     def _convert_msgspec_args(method, args):
@@ -482,7 +496,8 @@ class EngineCoreProc(EngineCore):
         self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
 
         # Wait until msg sent by the daemon before shutdown.
-        if not self.errored_sent_event.wait(timeout=5.):
+        self.output_thread.join(timeout=5.0)
+        if self.output_thread.is_alive():
             logger.fatal("vLLM shutdown signal from EngineCore failed "
                          "to send. Please report this issue.")
 
@@ -524,7 +539,10 @@ class EngineCoreProc(EngineCore):
         # Reuse send buffer.
         buffer = bytearray()
 
-        with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
+        # We must set linger to ensure the ENGINE_CORE_DEAD
+        # message is sent prior to closing the socket.
+        with zmq_socket_ctx(output_path, zmq.constants.PUSH,
+                            linger=4000) as socket:
             while True:
                 outputs = self.output_queue.get()
                 if outputs == EngineCoreProc.ENGINE_CORE_DEAD:
@@ -534,9 +552,6 @@ class EngineCoreProc(EngineCore):
                 outputs.engine_index = engine_index
                 encoder.encode_into(outputs, buffer)
                 socket.send(buffer, copy=False)
-
-        # Signal to main thread that ENGINE_CORE_DEAD was sent.
-        self.errored_sent_event.set()
 
 
 ENGINE_PAUSED_OUTPUTS = EngineCoreOutputs(engine_paused=True)

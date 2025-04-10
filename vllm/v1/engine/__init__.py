@@ -156,3 +156,5 @@ class EngineCoreRequestType(enum.Enum):
     ABORT = b'\x01'
     START_DP = b'\x02'
     UTILITY = b'\x03'
+    # Sentinel used within EngineCoreProc.
+    EXECUTOR_FAILED = b'\x04'
