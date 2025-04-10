@@ -160,6 +160,8 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+#### Using a proxy
+
 Here are some tips for loading/downloading models from `Hugging Face` using a proxy:
 
 - Set the proxy globally for your session (or set it in the profile file):
