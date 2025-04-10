@@ -477,7 +477,9 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
                                          **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": 10}
+        # Although vLLM can support more images from an infra capability
+        # perspective, we do not recommend using >10 images in practice.
+        return {"image": None}
 
     @staticmethod
     def get_patch_per_chunk(vision_config: Llama4VisionConfig) -> int:
