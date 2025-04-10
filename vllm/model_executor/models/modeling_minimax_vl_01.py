@@ -363,6 +363,10 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
         self._padding_side = "left"  # set it to left by default, user can use setter to change padding_sides
         self.post_init()
+        
+        # 添加 make_empty_intermediate_tensors 属性
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
 
     @property
     def padding_side(self):
@@ -705,85 +709,60 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
         feature_lens = torch.tensor(feature_lens, dtype=torch.long, device=image_features.device)
         return image_features, feature_lens
         
-    @add_start_docstrings_to_model_forward(MINIMAX_VL_01_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=MiniMaxVL01CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
-        pixel_values: torch.FloatTensor = None,
-        image_sizes: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        vision_feature_layer: Optional[int] = None,
-        vision_feature_select_strategy: Optional[str] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, MiniMaxVL01CausalLMOutputWithPast]:
-        r"""
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        """Run forward pass for MiniMaxVL01.
+
         Args:
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+            input_ids: Flattened (concatenated) input_ids corresponding to a
+                batch.
+            positions: Position indices for each token in the input sequence.
+            intermediate_tensors: Optional intermediate tensors for caching.
+            inputs_embeds: Optional pre-computed embeddings.
+            **kwargs: Additional arguments including:
+                - pixel_values: The pixels in each grid patch for each input image.
+                - image_sizes: The original `(height, width)` for each input image.
+        """
+        if intermediate_tensors is not None:
+            inputs_embeds = None
 
-        Returns:
-
-        Example:
-
-        ```python
-        >>> from PIL import Image
-        >>> import requests
-        >>> from transformers import AutoProcessor, MiniMaxVL01ForConditionalGeneration
-
-        >>> model = MiniMaxVL01ForConditionalGeneration.from_pretrained(PATH_TO_MINIMAX_VL_01_MODEL)
-        >>> processor = AutoProcessor.from_pretrained(PATH_TO_MINIMAX_VL_01_MODEL)
-
-        >>> prompt = "[INST] <image>\nWhat is shown in this image? [/INST]"
-        >>> url = "https://www.ilankelman.org/stopsigns/australia.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
-
-        >>> inputs = processor(text=prompt, images=image, return_tensors="pt")
-
-        >>> # Generate
-        >>> generate_ids = model.generate(**inputs, max_length=30)
-        >>> processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        "[INST]  \nWhat is shown in this image? [/INST] The image appears to be a radar chart, which is a type of multi-dimensional plot (...)"
-        ```"""
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        vision_feature_layer = (
-            vision_feature_layer if vision_feature_layer is not None else self.config.vision_feature_layer
-        )
-        vision_feature_select_strategy = (
-            vision_feature_select_strategy
-            if vision_feature_select_strategy is not None
-            else self.config.vision_feature_select_strategy
-        )
-        legacy_processing = False
-        legacy_processing = (
-            (input_ids == self.config.image_token_index).sum(1).max() < self.config.image_seq_length
-        ) or (input_ids.shape[-1] == 1 and pixel_values is not None)
-
-        if inputs_embeds is None:
-            # 1. Extract the input embeddings
-            # In case image_token_index is not in the embeddings (extra token but embedding don't have it)
-            for_inputs_embeds_ids = input_ids.clone()
-            for_inputs_embeds_ids[(input_ids == self.config.image_token_index)] = 0
-            inputs_embeds = self.get_input_embeddings()(for_inputs_embeds_ids)
-
-            # 2. Merge text and images
-            if pixel_values is not None and input_ids.shape[1] != 1:# and pixel_values.size(0) > 0:
-                # ! infer image_num_patches from image_sizes
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            # 处理图像输入
+            pixel_values = kwargs.pop("pixel_values", None)
+            image_sizes = kwargs.pop("image_sizes", None)
+            
+            if pixel_values is not None and input_ids.shape[1] != 1:
+                # 处理图像特征
+                vision_feature_layer = kwargs.pop("vision_feature_layer", self.config.vision_feature_layer)
+                vision_feature_select_strategy = kwargs.pop("vision_feature_select_strategy", self.config.vision_feature_select_strategy)
+                
+                # 提取图像特征
+                image_features = self.vision_tower(pixel_values, output_hidden_states=True)
+                selected_image_feature = image_features.hidden_states[vision_feature_layer]
+                
+                # 处理图像特征
+                selected_image_feature = torch.chunk(selected_image_feature, len(pixel_values), dim=1)
+                selected_image_feature = torch.cat(selected_image_feature, dim=0)
+                
+                if vision_feature_select_strategy == "default":
+                    selected_image_feature = selected_image_feature[:, 1:]
+                elif vision_feature_select_strategy == "full":
+                    selected_image_feature = selected_image_feature
+                
+                # 投影图像特征
+                image_features = self.multi_modal_projector(selected_image_feature)
+                
+                # 处理不同大小的图像
                 if image_sizes is not None:
+                    # 计算每个图像的patch数量
                     image_num_patches = [
                         image_size_to_num_patches(
                             image_size=imsize,
@@ -792,53 +771,22 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                         )
                         for imsize in image_sizes
                     ]
-                # # figure out if pixel_values is concatenated or stacked
-                # if pixel_values.dim() == 5:
-                #     # stacking when input is (batch_size, num_patches, num_channels, height, width)
-                #     _pixel_values_list = [
-                #         pix_val[:num_patch] for pix_val, num_patch in zip(pixel_values, image_num_patches)
-                #     ]
-                #     pixel_values = torch.cat(_pixel_values_list, dim=0)
-                # elif pixel_values.dim() != 4:
-                #     # otherwise has to be stacked from list of (num_patches, num_channels, height, width)
-                #     raise ValueError(f"pixel_values of shape {pixel_values.shape}, expect to be of 4 or 5 dimensions")
-
-                image_features = self.vision_tower(pixel_values, output_hidden_states=True)
-                selected_image_feature = image_features.hidden_states[vision_feature_layer]
-
-
-                selected_image_feature = torch.chunk(selected_image_feature, len(pixel_values), dim=1)
-                selected_image_feature = torch.cat(selected_image_feature, dim=0)
-
-                if vision_feature_select_strategy == "default":
-                    selected_image_feature = selected_image_feature[:, 1:]
-                elif vision_feature_select_strategy == "full":
-                    selected_image_feature = selected_image_feature
-
-                image_features = self.multi_modal_projector(selected_image_feature)
-                if image_sizes is not None:
+                    
+                    # 分割图像特征
                     image_features = torch.split(image_features, image_num_patches, dim=0)
-
-                    # NOTE we only support multimodal_patch_merge_type == "spatial_unpad"
-
+                    
+                    # 打包图像特征
                     image_features, feature_lens = self.pack_image_features(
                         image_features,
                         image_sizes,
                         image_newline=self.image_newline,
                     )
-
-                inputs_embeds = inputs_embeds.to(image_features.dtype)
-                if legacy_processing:
-                    inputs_embeds, attention_mask, position_ids, labels, _ = self._merge_input_ids_with_image_features(
-                        image_features,
-                        feature_lens,
-                        inputs_embeds,
-                        input_ids,
-                        attention_mask,
-                        position_ids,
-                        labels=labels,
-                    )
-                else:
+                    
+                    # 合并文本和图像嵌入
+                    inputs_embeds = self.get_input_embeddings()(input_ids)
+                    inputs_embeds = inputs_embeds.to(image_features.dtype)
+                    
+                    # 使用掩码替换图像标记
                     special_image_mask = (
                         (input_ids == self.config.image_token_index)
                         .unsqueeze(-1)
@@ -847,84 +795,32 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                     )
                     image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
                     inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
-
-            # pixel_values is not None but is empty ---> text only cases
-            elif pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) == 0:
-                # there are no images
-                pass
-
-            # In case input_ids.shape[1] == 1 & pixel_values==None & past_key_values != None, we are in the case of
-            # generation with cache
-            elif past_key_values is not None and pixel_values is not None and input_ids.shape[1] == 1:
-                # Retrieve the first layer to inspect the logits and mask out the hidden states
-                # that are set to 0
-                first_layer_past_key_value = past_key_values[0][0][:, :, :, 0]
-
-                # Sum all dimensions of head_dim (-2) to avoid random errors such as: https://github.com/huggingface/transformers/pull/28032#issuecomment-1863691941
-                batch_index, non_attended_tokens = torch.where(first_layer_past_key_value.float().sum(-2) == 0)
-
-                # Get the target length
-                target_length = input_ids.shape[1]
-                past_length = first_layer_past_key_value.shape[-1]
-
-                extended_attention_mask = torch.ones(
-                    (attention_mask.shape[0], past_length),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-
-
-                valid_indices = non_attended_tokens < extended_attention_mask.size(-1)
-                new_batch_index = batch_index[valid_indices]
-                new_non_attended_tokens = non_attended_tokens[valid_indices]
-
-                # Zero-out the places where we don't need to attend
-                extended_attention_mask[new_batch_index, new_non_attended_tokens] = 0
-
-                attention_mask = torch.cat((extended_attention_mask, attention_mask[:, -target_length:]), dim=1)
-
-                position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
-
-        outputs = self.language_model(
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-        logits = outputs[0]
-
-        loss = None
-        if labels is not None:
-            # Shift so that tokens < n predict n
-            if attention_mask is not None:
-                shift_attention_mask = attention_mask[..., 1:]
-                shift_logits = logits[..., :-1, :][shift_attention_mask.to(logits.device) != 0].contiguous()
-                shift_labels = labels[..., 1:][shift_attention_mask.to(labels.device) != 0].contiguous()
+                else:
+                    # 如果没有图像大小信息，直接使用图像特征
+                    inputs_embeds = self.get_input_embeddings()(input_ids)
+                    inputs_embeds = inputs_embeds.to(image_features.dtype)
+                    
+                    # 使用掩码替换图像标记
+                    special_image_mask = (
+                        (input_ids == self.config.image_token_index)
+                        .unsqueeze(-1)
+                        .expand_as(inputs_embeds)
+                        .to(inputs_embeds.device)
+                    )
+                    image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
+                    inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
             else:
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1).to(shift_logits.device)
-            )
+                # 如果没有图像输入，直接使用文本嵌入
+                inputs_embeds = self.get_input_embeddings()(input_ids)
+            
+            input_ids = None
 
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return MiniMaxVL01CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+        # 调用语言模型进行前向传播
+        hidden_states = self.language_model.model(input_ids,
+                                                  positions,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
+        return hidden_states
 
     def prepare_inputs_for_generation(
         self,
@@ -953,67 +849,6 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                     "image_sizes": image_sizes,
                 }
             )
-        # if past_key_values is not None:
-        #     #print(isinstance(past_key_values, Cache))
-        #     if isinstance(past_key_values, Cache):
-        #         cache_length = past_key_values.get_seq_length()
-        #         past_length = past_key_values.seen_tokens
-        #         # print('attention_mask.shape[1]', attention_mask.shape[1])
-        #         # print('cache_length, past_length', cache_length, past_length)
-        #     else:
-        #         cache_length = past_length = past_key_values[0][0].shape[2]
-        #         # print('attention_mask.shape[1]', attention_mask.shape[1])
-        #         # print('cache_length, past_length', cache_length, past_length)
-        #     # Keep only the unprocessed tokens:
-        #     # 1 - If the length of the attention_mask exceeds the length of input_ids, then we are in a setting where
-        #     # some of the inputs are exclusively passed as part of the cache (e.g. when passing input_embeds as
-        #     # input)
-        #     if attention_mask is not None and attention_mask.shape[1] > input_ids.shape[1]:
-        #         input_ids = input_ids[:, -(attention_mask.shape[1] - past_length) :]
-        #     # 2 - If the past_length is smaller than input_ids', then input_ids holds all input tokens. We can discard
-        #     # input_ids based on the past_length.
-        #     elif past_length < input_ids.shape[1]:
-        #         input_ids = input_ids[:, past_length:]
-        #     # 3 - Otherwise (past_length >= input_ids.shape[1]), let's assume input_ids only has unprocessed tokens.
-        #     elif self.config.image_token_index in input_ids:
-        #         input_ids = input_ids[:, input_ids.shape[1] - 1 :]
-        #     # If the cache has seen more tokens than it can hold, then the cache has a size limit. Let's discard the
-        #     # older attention values, as their corresponding values are not part of the input.
-        #     if cache_length < past_length and attention_mask is not None:
-        #         attention_mask = attention_mask[:, -(cache_length + input_ids.shape[1]) :]
-
-        # position_ids = kwargs.get("position_ids", None)
-        # if attention_mask is not None and position_ids is None:
-        #     # create position_ids on the fly for batch generation
-        #     position_ids = attention_mask.long().cumsum(-1) - 1
-        #     position_ids.masked_fill_(attention_mask == 0, 1)
-        #     if past_key_values:
-        #         position_ids = position_ids[:, -input_ids.shape[1] :]
-
-        # # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        # if inputs_embeds is not None and past_key_values is None:
-        #     model_inputs = {"inputs_embeds": inputs_embeds}
-        # else:
-        #     model_inputs = {"input_ids": input_ids}
-
-        # model_inputs.update(
-        #     {
-        #         "position_ids": position_ids,
-        #         "past_key_values": past_key_values,
-        #         "use_cache": kwargs.get("use_cache"),
-        #         "attention_mask": attention_mask,
-        #         #"pixel_values": pixel_values,
-        #         #"image_sizes": image_sizes,
-        #     }
-        # )
-        # if past_length == 0:
-        #     model_inputs.update(
-        #         {
-        #             "pixel_values": pixel_values,
-        #             "image_sizes": image_sizes,
-        #         }
-        #     )
-        #print('model_inputs', model_inputs)
         return model_inputs
 
     # Copied from transformers.models.llava.modeling_llava.LlavaForConditionalGeneration._reorder_cache
