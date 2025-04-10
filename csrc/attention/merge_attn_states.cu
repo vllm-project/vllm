@@ -17,6 +17,7 @@ __global__ void merge_attn_states_kernel(
     const float* prefix_lse, const scalar_t* suffix_output,
     const float* suffix_lse, const uint num_tokens, const uint num_heads,
     const uint head_size) {
+  using pack_128b_t = uint4;
   const uint pack_size = 16 / sizeof(scalar_t);
   const uint threads_per_head = head_size / pack_size;
 
