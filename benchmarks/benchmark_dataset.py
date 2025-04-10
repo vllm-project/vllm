@@ -309,7 +309,9 @@ class RandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> list[SampleRequest]:
         # Enforce range_ratio < 1
-        assert range_ratio < 1.0, "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        assert range_ratio < 1.0, (
+            "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        )
 
         vocab_size = tokenizer.vocab_size
 
@@ -324,7 +326,8 @@ class RandomDataset(BenchmarkDataset):
 
         # Add logging for debugging
         logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
-        logger.info("Sampling output_len from [%s, %s]", output_low, output_high)
+        logger.info("Sampling output_len from [%s, %s]", output_low,
+                    output_high)
 
         input_lens = np.random.randint(input_low,
                                        input_high + 1,
