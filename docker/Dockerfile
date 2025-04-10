@@ -311,7 +311,7 @@ COPY examples/online_serving/sagemaker-entrypoint.sh .
 RUN chmod +x sagemaker-entrypoint.sh
 ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 
-# FROM vllm-openai-base AS vllm-openai
+FROM vllm-openai-base AS vllm-openai
 
-# ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
