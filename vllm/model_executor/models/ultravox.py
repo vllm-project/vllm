@@ -2,7 +2,6 @@
 
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
-import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import Any, Literal, Optional, Set, Tuple, TypedDict, Union
@@ -106,17 +105,6 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        feature_extractor = self.get_feature_extractor()
-        max_audio_tokens = math.ceil(feature_extractor.chunk_length *
-                                     _AUDIO_TOKENS_PER_SECOND)
-
-        return {"audio": max_audio_tokens * _MAX_ENCODER_BATCH_SIZE}
 
 
 class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo]

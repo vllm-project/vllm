@@ -106,16 +106,6 @@ class MllamaProcessingInfo(BaseProcessingInfo):
         image_size = self.get_hf_config().vision_config.image_size
         return calc_token_per_chunk(image_size)
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        vision_config = self.get_hf_config().vision_config
-        token_per_chunk = self.get_token_per_chunk_from_config()
-        mm_max_tokens = vision_config.max_num_tiles * token_per_chunk
-        return {"image": mm_max_tokens}
-
     def get_num_tiles_per_image(self, image_height: int,
                                 image_width: int) -> int:
         vision_config = self.get_hf_config().vision_config

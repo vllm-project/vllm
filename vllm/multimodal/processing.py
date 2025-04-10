@@ -1034,21 +1034,6 @@ class BaseProcessingInfo:
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        """
-        Get the maximum possible number of tokens per data item
-        for each modality.
-
-        The dictionary returned by this method should have the same
-        keys as that returned by :meth:`get_supported_mm_limits`.
-        """
-        raise NotImplementedError
-
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
 
