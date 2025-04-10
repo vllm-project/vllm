@@ -273,25 +273,23 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
+
+        # This represents the maximum number of different requests
+        # that will have unique loras, and therefore the max amount of
+        # memory consumption. Create dummy lora request copies from the
+        # lora request passed in, which contains a lora from the lora
+        # warmup path.
         dummy_lora_requests: List[LoRARequest] = []
         dummy_lora_requests_per_seq: List[LoRARequest] = []
         if self.lora_config:
-            assert self.lora_manager is not None
-            with self.lora_manager.dummy_lora_cache():
-                for idx in range(self.lora_config.max_loras):
-                    lora_id = idx + 1
-                    dummy_lora_request = LoRARequest(
-                        lora_name=f"warmup_{lora_id}",
-                        lora_int_id=lora_id,
-                        lora_path="/not/a/real/path",
-                    )
-                    self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                     rank=LORA_WARMUP_RANK)
-                    dummy_lora_requests.append(dummy_lora_request)
-                dummy_lora_requests_per_seq = [
-                    dummy_lora_requests[idx % len(dummy_lora_requests)]
-                    for idx in range(max_num_seqs)
-                ]
+            dummy_lora_requests = self._add_dummy_loras(
+                self.lora_config.max_loras)
+            assert len(dummy_lora_requests) == self.lora_config.max_loras
+            dummy_lora_requests_per_seq = [
+                dummy_lora_requests[idx % len(dummy_lora_requests)]
+                for idx in range(max_num_seqs)
+            ]
+
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
         seqs: List[SequenceGroupMetadata] = []

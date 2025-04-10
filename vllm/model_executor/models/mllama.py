@@ -1192,6 +1192,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         super().__init__()
         config: MllamaConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.text_config.vocab_size
         self.hidden_size = config.text_config.hidden_size
