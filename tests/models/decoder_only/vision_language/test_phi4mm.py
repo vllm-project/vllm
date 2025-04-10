@@ -124,8 +124,27 @@ def run_test(
     hf_model_kwargs = {"_attn_implementation": "sdpa"}
     with hf_runner(model, dtype=dtype,
                    model_kwargs=hf_model_kwargs) as hf_model:
+
         hf_processor = hf_model.processor
         eos_token_id = hf_processor.tokenizer.eos_token_id
+
+        def patch_hf_processor(*args,
+                               text="",
+                               images=None,
+                               audio=None,
+                               sampling_rate=None,
+                               **kwargs):
+            audios = None
+            if audio is not None and sampling_rate is not None:
+                audios = [(audio, sampling_rate)]
+            return hf_processor(*args,
+                                text=text,
+                                images=images,
+                                audios=audios,
+                                **kwargs)
+
+        hf_model.processor = patch_hf_processor
+
         hf_outputs_per_case = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
