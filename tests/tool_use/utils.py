@@ -82,6 +82,20 @@ CONFIGS: dict[str, ServerConfig] = {
         "supports_parallel":
         False,
     },
+    # TODO: this is a configuration that works in 4 A100s
+    # but enabling it would probably break CI
+    # "llama4": {
+    #     "model":
+    #     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    #     "arguments": [
+    #         "--enforce-eager", "--no-enable-prefix-caching",
+    #         "-tp", "4", "--distributed-executor-backend", "mp",
+    #         "--tool-call-parser", "llama3_json", "--chat-template",
+    #         str(VLLM_PATH / "examples/tool_chat_template_llama4_json.jinja")
+    #     ],
+    #     "supports_parallel":
+    #     False, # <--- one of the parallel tests actually passes
+    # },
     "mistral": {
         "model":
         "mistralai/Mistral-7B-Instruct-v0.3",

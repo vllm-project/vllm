@@ -156,6 +156,8 @@ Supported models:
 * `meta-llama/Meta-Llama-3.1-70B-Instruct`
 * `meta-llama/Meta-Llama-3.1-405B-Instruct`
 * `meta-llama/Meta-Llama-3.1-405B-Instruct-FP8`
+* `meta-llama/Llama-3.2-3B-Instruct`
+* `meta-llama/Llama-4-Scout-17B-16E-Instruct`
 
 The tool calling that is supported is the [JSON based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling). For [pythonic tool calling](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#zero-shot-function-calling) in Llama-3.2 models, see the `pythonic` tool parser below.
 Other tool calling formats like the built in python tool calling or custom tool calling are not supported.
@@ -170,6 +172,7 @@ The `tool_chat_template_llama3_json.jinja` file contains the "official" Llama ch
 it works better with vLLM.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
+For Llama 4 use `examples/tool_chat_template_llama4_json.jinja`.
 
 #### IBM Granite
 
