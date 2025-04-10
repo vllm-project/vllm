@@ -536,6 +536,19 @@ class LLM:
                                          tokenizer.eos_token_id,
                                          length_penalty)
 
+        def create_tokens_prompt_from_beam(
+                beam: BeamSearchSequence) -> TokensPrompt:
+            token_prompt_kwargs: TokensPrompt = {
+                "prompt_token_ids": beam.tokens
+            }
+            if beam.multi_modal_data is not None:
+                token_prompt_kwargs["multi_modal_data"] = beam.multi_modal_data
+
+            if beam.mm_processor_kwargs is not None:
+                token_prompt_kwargs[
+                    "mm_processor_kwargs"] = beam.mm_processor_kwargs
+            return TokensPrompt(**token_prompt_kwargs)
+
         tokenizer = self.get_tokenizer()
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
@@ -558,7 +571,8 @@ class LLM:
                 prompt_tokens = prompt["prompt_token_ids"]
             else:
                 prompt_tokens = tokenizer.encode(prompt["prompt"])
-            instances.append(BeamSearchInstance(prompt_tokens, **mm_kwargs))
+            instances.append(
+                BeamSearchInstance(prompt_tokens, logprobs=None, **mm_kwargs))
 
         for _ in range(max_tokens):
             all_beams: list[BeamSearchSequence] = list(
@@ -573,11 +587,7 @@ class LLM:
                 break
 
             prompts_batch = [
-                TokensPrompt(
-                    prompt_token_ids=beam.tokens,
-                    multi_modal_data=beam.multi_modal_data,
-                    mm_processor_kwargs=beam.mm_processor_kwargs,
-                ) for beam in all_beams
+                create_tokens_prompt_from_beam(beam) for beam in all_beams
             ]
 
             # only runs for one step
