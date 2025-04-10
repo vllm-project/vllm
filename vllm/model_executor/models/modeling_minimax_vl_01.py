@@ -2,13 +2,15 @@
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Iterable
 
 import numpy as np
 import torch
 import torch.utils.checkpoint
 from torch import nn
 
+from .utils import AutoWeightsLoader, embed_multimodal
+from vllm.config import VllmConfig
 from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
@@ -20,8 +22,11 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
+from vllm.model_executor.layers.sampler import SamplerOutput
 from transformers import AutoModel, AutoModelForCausalLM
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .modeling_clip import CLIPVisionModel, CLIPVisionConfig
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from .minimax_text_01 import MiniMaxText01ForCausalLM
@@ -333,10 +338,15 @@ MINIMAX_VL_01_INPUTS_DOCSTRING = r"""
 @MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor, 
                                         info=LlavaNextProcessingInfo, 
                                         dummy_inputs=LlavaDummyInputsBuilder)
-class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel):
-    def __init__(self, config: MiniMaxVL01Config):
-        super().__init__(config)
-        #self.vision_tower = AutoModel.from_config(config.vision_config)
+class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMultiModal, SupportsPP):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
+        self.config = config
+        self.multimodal_config = multimodal_config
+        self.quant_config = quant_config
         vision_config = CLIPVisionConfig.from_dict(config.vision_config.to_dict())
         self.vision_tower = CLIPVisionModel(vision_config)
 
@@ -360,6 +370,23 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel):
         if padding_side not in ["left", "right"]:
             raise ValueError(f"{padding_side} is not `left` or `right`.")
         self._padding_side = padding_side
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+
+        if multimodal_embeddings is None:
+            return self.language_model.get_input_embeddings(input_ids)
+
+        inputs_embeds = embed_multimodal(
+            input_ids,
+            self.config.image_token_index,
+            self.language_model.model.get_input_embeddings,
+            multimodal_embeddings,
+        )
+        return inputs_embeds
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
@@ -989,3 +1016,23 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel):
     # Copied from transformers.models.llava.modeling_llava.LlavaForConditionalGeneration._reorder_cache
     def _reorder_cache(self, *args, **kwargs):
         return self.language_model._reorder_cache(*args, **kwargs)
+    
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        return self.language_model.compute_logits(hidden_states,
+                                                  sampling_metadata)
+    
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        return self.language_model.sample(logits, sampling_metadata)
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
