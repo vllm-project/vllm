@@ -14,10 +14,9 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
-from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
@@ -78,9 +77,6 @@ class Processor:
         params: SamplingParams,
     ) -> None:
         self._validate_structured_output(params)
-        if (current_platform.is_tpu()
-                and params.sampling_type == SamplingType.RANDOM_SEED):
-            raise ValueError("Torch XLA does not support per-request seed.")
 
         if params.allowed_token_ids is None:
             return
