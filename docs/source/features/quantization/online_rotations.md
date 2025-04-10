@@ -44,7 +44,6 @@ Use this command to export to huggingface
 ```bash
 python quantize_quark.py --output_dir {name} --model_export hf_format --model_dir meta-llama/Meta-Llama-3-8B --quant_scheme w_int8_a_int8_per_tensor_sym --pre_quantization_optimization quarot
 ```
-### vLLM
 
 # Usage Example
 - Inside `config.json` include a field `online_rotations`
@@ -97,25 +96,25 @@ if self.online_rotation_method:
 	self.online_rotation_method_callable=func_name(layer,*func_args)
 ```
 - `get_quant_method` method, inside `QuarkConfig` class, takes in the layer, associates it with a `QuarkW8A8Int8` scheme, and returns a `QuarkLinearMethod` object, that will later use the `QuarkW8A8Int8` associated with the layer to apply the forward pass with the layer input.
-	- The helper method `_get_scheme_from_config` of the class `QuarkConfig` takes in a layer config and retrieves the appropriate `QuarkW8A8Int8` scheme. *I modify the `_get_scheme_from_config` method to check if the online rotation function is specified. If it is, ensure it is found in the registry, then pass the class name and constructor arguments of the online rotation function in while initializing the `QuarkW8A8Int8` quant schema.*
-	```python
-	online_rotation_config = cast(Dict[str, Any], config.get("online_rotations"))
-	if online_rotation_config:
-	func_name,func_args=online_rotation_config['func_name'],online_rotation_config['func_args']
-	if func_name in hadamard_transform_registry:
-		func_name=hadamard_transform_registry[func_name]
-		online_rotation_method=func_name,func_args
-	else:
-		raise ValueError("hadamard rotation func_name is not found in registry")
+- The helper method `_get_scheme_from_config` of the class `QuarkConfig` takes in a layer config and retrieves the appropriate `QuarkW8A8Int8` scheme. *I modify the `_get_scheme_from_config` method to check if the online rotation function is specified. If it is, ensure it is found in the registry, then pass the class name and constructor arguments of the online rotation function in while initializing the `QuarkW8A8Int8` quant schema.*
+```python
+online_rotation_config = cast(Dict[str, Any], config.get("online_rotations"))
+if online_rotation_config:
+func_name,func_args=online_rotation_config['func_name'],online_rotation_config['func_args']
+if func_name in hadamard_transform_registry:
+	func_name=hadamard_transform_registry[func_name]
+	online_rotation_method=func_name,func_args
 else:
-	online_rotation_method = None
-	```
-	- The helper method `_find_matched_config` of the class `QuarkConfig`, takes in the layer name, and retrieves the matching layer config. *I modify `_find_matched_config` to, based on whether the layer name is listed in the configuration, add the online rotation method specification to the layer config.*
-	```python
-	if "online_rotations" in self.quant_config:
-		rot_info = next((value for key, value in self.quant_config['online_rotations'].items() if layer_name.endswith(key)), None)
-		rv['online_rotations']=rot_info
-	```
+	raise ValueError("hadamard rotation func_name is not found in registry")
+else:
+online_rotation_method = None
+```
+- The helper method `_find_matched_config` of the class `QuarkConfig`, takes in the layer name, and retrieves the matching layer config. *I modify `_find_matched_config` to, based on whether the layer name is listed in the configuration, add the online rotation method specification to the layer config.*
+```python
+if "online_rotations" in self.quant_config:
+	rot_info = next((value for key, value in self.quant_config['online_rotations'].items() if layer_name.endswith(key)), None)
+	rv['online_rotations']=rot_info
+```
 
 ## Rotation Function design
 ### High Level Explanation
