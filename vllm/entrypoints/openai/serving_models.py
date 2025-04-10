@@ -19,7 +19,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.utils import AtomicCounter
 
 logger = init_logger(__name__)
 
@@ -66,10 +65,10 @@ class OpenAIServingModels:
         self.base_model_paths = base_model_paths
         self.max_model_len = model_config.max_model_len
         self.engine_client = engine_client
+        self.model_config = model_config
 
         self.static_lora_modules = lora_modules
         self.lora_requests: list[LoRARequest] = []
-        self.lora_id_counter = AtomicCounter(0)
 
         self.lora_resolvers: list[LoRAResolver] = []
         for lora_resolver_name in LoRAResolverRegistry.get_supported_resolvers(
@@ -158,7 +157,7 @@ class OpenAIServingModels:
             return error_check_ret
 
         lora_name, lora_path = request.lora_name, request.lora_path
-        unique_id = self.lora_id_counter.inc(1)
+        unique_id = abs(hash(lora_name))
         lora_request = LoRARequest(lora_name=lora_name,
                                    lora_int_id=unique_id,
                                    lora_path=lora_path)
@@ -244,14 +243,16 @@ class OpenAIServingModels:
 
         return None
 
-    async def resolve_lora(self, lora_name: str) -> Optional[LoRARequest]:
+    async def resolve_lora(self, lora_name: str) -> Union[LoRARequest, ErrorResponse]:
         """Attempt to resolve a LoRA adapter using available resolvers.
 
         Args:
             lora_name: Name/identifier of the LoRA adapter
 
         Returns:
-            Optional[LoRARequest]: LoRA request if found, None otherwise
+            LoRARequest if found and loaded successfully.
+            ErrorResponse (404) if no resolver finds the adapter.
+            ErrorResponse (400) if adapter(s) are found but none load successfully.
         """
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded
@@ -259,35 +260,44 @@ class OpenAIServingModels:
                 if existing.lora_name == lora_name:
                     return existing
 
-            # Try to resolve using available resolvers
+            base_model_name = self.model_config.model
             unique_id = abs(hash(lora_name))
+            found_adapter = False
+
+            # Try to resolve using available resolvers
             for resolver in self.lora_resolvers:
-                lora_request = await resolver.resolve_lora(lora_name)
+                lora_request = await resolver.resolve_lora(base_model_name, lora_name)
 
                 if lora_request is not None:
+                    found_adapter = True
                     lora_request.lora_int_id = unique_id
 
                     try:
                         await self.engine_client.add_lora(lora_request)
-                        # Successfully added, append and return
                         self.lora_requests.append(lora_request)
                         logger.info(
                             "Resolved and loaded LoRA adapter '%s' using %s",
                             lora_name, resolver.__class__.__name__)
                         return lora_request
                     except BaseException as e:
-                        # Log the error and try the next resolver
                         logger.warning(
                             "Failed to load LoRA '%s' resolved by %s: %s. "
                             "Trying next resolver.", lora_name,
                             resolver.__class__.__name__, e)
-                        continue  # Try the next resolver
+                        continue
 
-            # If no resolver could successfully resolve and load the LoRA
-            logger.warning(
-                "Could not resolve or load LoRA adapter '%s' with any "
-                "available resolver.", lora_name)
-            return None
+            if found_adapter:
+                # An adapter was found by at least one resolver, but all attempts to load it failed.
+                return create_error_response(
+                    message=f"LoRA adapter '{lora_name}' was found but could not be loaded.",
+                    err_type="BadRequestError",
+                    status_code=HTTPStatus.BAD_REQUEST)
+            else:
+                # No adapter was found
+                return create_error_response(
+                    message=f"LoRA adapter {lora_name} does not exist",
+                    err_type="NotFoundError",
+                    status_code=HTTPStatus.NOT_FOUND)
 
 
 def create_error_response(

@@ -20,13 +20,16 @@ class LoRAResolver(ABC):
     """
 
     @abstractmethod
-    async def resolve_lora(self, lora_name: str) -> Optional[LoRARequest]:
+    async def resolve_lora(
+        self, base_model_name: str, lora_name: str
+    ) -> Optional[LoRARequest]:
         """Abstract method to resolve and fetch a LoRA model adapter.
 
         Implements logic to locate and download LoRA adapter based on the name.
         Implementations might fetch from a blob storage or other sources.
 
         Args:
+            base_model_name: The name or identifier of the base model to resolve.
             lora_name: The name or identifier of the LoRA model to resolve.
 
         Returns:

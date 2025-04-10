@@ -125,21 +125,28 @@ class OpenAIServing:
         self,
         request: AnyRequest,
     ) -> Optional[ErrorResponse]:
+
+        error_response = None
+
         if self._is_model_supported(request.model):
             return None
         if request.model in [
                 lora.lora_name for lora in self.models.lora_requests
         ]:
             return None
-        if request.model is not None and (await self.models.resolve_lora(
-                request.model)):
-            return None
+        if request.model and (load_result := await self.models.resolve_lora(request.model)):
+            if isinstance(load_result, LoRARequest):
+                return None
+            if isinstance(load_result, ErrorResponse) and \
+                load_result.code == HTTPStatus.BAD_REQUEST.value:
+                error_response = load_result
         if request.model in [
                 prompt_adapter.prompt_adapter_name
                 for prompt_adapter in self.models.prompt_adapter_requests
         ]:
             return None
-        return self.create_error_response(
+
+        return error_response or self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
