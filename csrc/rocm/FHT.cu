@@ -1,4 +1,3 @@
-//#include <torch/extension.h>
 #include <torch/all.h>
 #include <hip/hip_bf16.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -101,7 +100,7 @@ void fast_hadamard_transform_kernel(HadamardParamsBase params) {
     load_input<kNChunks, kNElts, input_t>(x, x_vals, params.dim);
 
     hadamard_mult_thread<kLogNElts, kNChunks>(x_vals);
-    hadamard_mult_warp<kWarpSize,kLogWarpSize, 0, kNChunks, kNElts>(x_vals); //<- this is the problem - works for <5,0,2,8> but not for <5,0,28,4>
+    //hadamard_mult_warp<kWarpSize,kLogWarpSize, 0, kNChunks, kNElts>(x_vals); //<- this is the problem - works for <5,0,2,8> but not for <5,0,28,4>
     
     if constexpr (kNWarps > 1) {
         exchange_smem_pre<kNChunks, kChunksPerExchange, kNElts, kWarpSize, kNWarps, true, vec_t>(x_vals, smem_exchange);
@@ -136,14 +135,9 @@ void fast_hadamard_transform_kernel(HadamardParamsBase params) {
 }
 
 template<int kNThreads, int kLogN, typename input_t>
-void fast_hadamard_transform_launch_512(HadamardParamsBase &params, cudaStream_t stream) {
+void fast_hadamard_transform_launch(HadamardParamsBase &params, cudaStream_t stream) {
     using Ktraits = fast_hadamard_transform_kernel_traits<kNThreads, kLogN, input_t>;
     constexpr int kSmemSize = Ktraits::kSmemSize;
-
-    //std::cout << "kNChunks: " << Ktraits::kNChunks << std::endl;
-    //std::cout << "kNChunks: " << Ktraits::kNChunks << std::endl;
-    //std::cout << "kNElts: " << Ktraits::kNElts << std::endl;
-    //std::cout << "kNThreads: " << Ktraits::kNThreads << std::endl;
 
     dim3 grid(params.batch);
     auto kernel = &fast_hadamard_transform_kernel<Ktraits>;
@@ -151,25 +145,8 @@ void fast_hadamard_transform_launch_512(HadamardParamsBase &params, cudaStream_t
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template<int kNThreads, int kLogN, typename input_t>
-void fast_hadamard_transform_launch_1024(HadamardParamsBase &params, cudaStream_t stream) {
-    using Ktraits = fast_hadamard_transform_kernel_traits<kNThreads, kLogN, input_t>;
-    constexpr int kSmemSize = Ktraits::kSmemSize;
-
-    //std::cout << "kNChunks: " << Ktraits::kNChunks << std::endl;
-    //std::cout << "kNChunks: " << Ktraits::kNChunks << std::endl;
-    //std::cout << "kNElts: " << Ktraits::kNElts << std::endl;
-    //std::cout << "kNThreads: " << Ktraits::kNThreads << std::endl;
-
-    dim3 grid(params.batch);
-    auto kernel = &fast_hadamard_transform_kernel<Ktraits>;
-    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
-//specifically, for 14336
 at::Tensor
-fast_hadamard_transform_512(at::Tensor &x, double scale) {
+FHT(at::Tensor &x, double scale) {
 
     //NOTE: reshape and get batch_size
     const auto shapes_og = x.sizes();
@@ -192,44 +169,14 @@ fast_hadamard_transform_512(at::Tensor &x, double scale) {
     //NOTE: construct params
     HadamardParamsBase params;
     set_hadamard_params(params, batch_size, dim, 1, x, out, static_cast<float>(scale));
-    //std::cout<<params.log_N<<std::endl;
 
     auto stream = at::cuda::getCurrentCUDAStream();
 
-    fast_hadamard_transform_launch_512<64, 9, input_t>(params, stream);
-
-    return out.reshape(shapes_og);
-}
-
-at::Tensor
-fast_hadamard_transform_1024(at::Tensor &x, double scale) {
-
-    //NOTE: reshape and get batch_size
-    const auto shapes_og = x.sizes();
-    const int dim_og = x.size(-1);
-    x = x.reshape({-1, dim_og});
-    if (x.stride(-1) != 1) { x = x.contiguous(); }
-    const auto sizes = x.sizes();
-    const int batch_size = sizes[0];
-
-    //NOTE: mystery checks
-    CHECK_SHAPE(x, batch_size, dim_og);
-    TORCH_CHECK(x.stride(1) == 1);
-
-    //NOTE: get dim
-    const int dim = x.size(1);
-
-    //NOTE: get output tensor
-    at::Tensor out = torch::empty_like(x);
-
-    //NOTE: construct params
-    HadamardParamsBase params;
-    set_hadamard_params(params, batch_size, dim, 1, x, out, static_cast<float>(scale));
-    //std::cout<<params.log_N<<std::endl;
-
-    auto stream = at::cuda::getCurrentCUDAStream();
-
-    fast_hadamard_transform_launch_1024<64, 10, input_t>(params, stream);
+    if (dim_og==512){
+        fast_hadamard_transform_launch<64, 9, input_t>(params, stream);
+    } else if (dim_og==1024){
+        fast_hadamard_transform_launch<64, 10, input_t>(params, stream);
+    }
 
     return out.reshape(shapes_og);
 }
