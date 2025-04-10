@@ -103,9 +103,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         for slice_idx in range(len(lora_a_stacked)):
             y_s = y[slice_idx]
             lora_s = lora_a_stacked[slice_idx]
-            y_s = self.shrink(y_s, x, lora_s, scale)
-            y[slice_idx, :, :] = y_s = y_s
-
+            y_s = self.shrink(x, lora_s, scale)
+            y[slice_idx, :, :] = y_s  # type: ignore[index]
         return y
 
     def add_expand(self,
