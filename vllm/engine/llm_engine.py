@@ -2046,27 +2046,31 @@ class LLMEngine:
         *,
         prompt_type: Literal["encoder", "decoder"],
     ):
-        if prompt_type == "encoder" and self.tokenizer is not None:
-            tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
-            model_config = self.model_config
+        model_config = self.model_config
+        tokenizer = (None if self.tokenizer is None else
+                     self.tokenizer.get_lora_tokenizer(lora_request))
 
-            if model_config.is_multimodal_model:
+        prompt_ids = prompt_inputs["prompt_token_ids"]
+        if not prompt_ids:
+            if prompt_type == "encoder" and model_config.is_multimodal_model:
+                pass  # Mllama may have empty encoder inputs for text-only data
+            else:
+                raise ValueError(f"The {prompt_type} prompt cannot be empty")
+
+        max_prompt_len = self.model_config.max_model_len
+        if len(prompt_ids) >= max_prompt_len:
+            if prompt_type == "encoder" and model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
-                    model_config, tokenizer=tokenizer)
+                    model_config,
+                    tokenizer=tokenizer or object(),  # Dummy if no tokenizer
+                )
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
                 if mm_processor.pad_dummy_encoder_prompt:
                     return  # Skip encoder length check for Whisper
 
-        prompt_ids = prompt_inputs["prompt_token_ids"]
-
-        if not prompt_ids:
-            raise ValueError(f"The {prompt_type} prompt cannot be empty")
-
-        max_prompt_len = self.model_config.max_model_len
-        if len(prompt_ids) >= max_prompt_len:
-            if self.model_config.is_multimodal_model:
+            if model_config.is_multimodal_model:
                 suggestion = (
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
