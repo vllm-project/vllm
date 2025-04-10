@@ -1029,6 +1029,65 @@ class TPUModelRunner:
         self._precompile_backbone()
         self._precompile_select_hidden_states()
         self._precompile_sample_from_hidden()
+        
+    def profile_run(
+        self,
+        num_tokens: int,
+    ) -> None:
+        # Profile with multimodal encoder & encoder cache.
+        # TODO: handle encoder-decoder models once we support them.
+        if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
+                and self.encoder_cache_size > 0):
+
+            # NOTE: Currently model is profiled with a single non-text
+            # modality with the max possible input tokens even when
+            # it supports multiple.
+            dummy_data_modality, max_num_mm_items = max(
+                self.max_num_mm_items_by_modality.items(), key=lambda t: t[1])
+
+            encoder_budget = min(self.max_num_encoder_input_tokens,
+                                 self.encoder_cache_size)
+
+            logger.info(
+                "Encoder cache will be initialized with a budget of %d tokens,"
+                " and profiled with %s %s items of the maximum feature size.",
+                encoder_budget, max_num_mm_items, dummy_data_modality)
+
+            # Create dummy batch of multimodal inputs.
+            batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                dummy_data_modality, max_num_mm_items)
+
+            # Run multimodal encoder.
+            # Isolate encoder graph from post-processing to minimize
+            # impact of recompilation until it's fixed.
+            start = time.perf_counter()
+            xm.mark_step()
+            dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                **batched_dummy_mm_inputs)
+            xm.mark_step()
+            xm.wait_device_ops()
+            end = time.perf_counter()
+            logger.info(
+                "Multimodal Encoder profiling finished in in %.2f [secs].",
+                end - start)
+
+            assert len(dummy_encoder_outputs) == max_num_mm_items, (
+                "Expected dimension 0 of encoder outputs to match the number "
+                f"of multimodal data items: {max_num_mm_items}, got "
+                f"{len(dummy_encoder_outputs)=} instead. This is most likely "
+                "due to the 'get_multimodal_embeddings' method of the model "
+                "not implemented correctly.")
+
+            # Cache the dummy encoder outputs.
+            self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
+
+        # Trigger compilation for general shape.
+        self._dummy_run(num_tokens)
+
+        xm.mark_step()
+        xm.wait_device_ops()
+        self.encoder_cache.clear()
+        gc.collect()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
