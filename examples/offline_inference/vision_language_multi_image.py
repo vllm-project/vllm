@@ -768,13 +768,12 @@ if __name__ == "__main__":
                         type=int,
                         default=None,
                         help="Set the seed when initializing `vllm.LLM`.")
-    parser.add_argument("--num-images",
-                        "-n",
-                        type=lambda x: int(x) if 0 < int(x) <= 12 else \
-                            parser.error(
-                                f"expecting 0 < num-images <= 12, got {x}"),
-                        default=2,
-                        help="Number of images to use for the test.")
+    parser.add_argument(
+        "--num-images",
+        "-n",
+        choices=list(range(1, 13)),  # 12 is the max number of images
+        default=2,
+        help="Number of images to use for the demo.")
 
     args = parser.parse_args()
     main(args)
