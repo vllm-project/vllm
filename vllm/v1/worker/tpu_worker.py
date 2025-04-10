@@ -157,7 +157,7 @@ class TPUWorker:
             runner_kv_caches)
 
         self.model_runner.profile_run(
-            num_tokens=self.scheduler_config.max_num_batched_tokens, )
+            num_tokens=self.scheduler_config.max_num_batched_tokens)
 
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
