@@ -7,20 +7,17 @@ import torch
 import vllm.envs as envs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.lora.request import LoRARequest
     from vllm.pooling_params import PoolingParams
-    from vllm.sampling_params import SamplingParams
 else:
     ModelConfig = None
     VllmConfig = None
-    LoRARequest = None
     PoolingParams = None
-    SamplingParams = None
 
 logger = init_logger(__name__)
 
