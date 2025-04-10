@@ -12,7 +12,7 @@ namespace vllm {
 // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 // can be used to combine partial attention results (in the split-KV case)
 template <typename scalar_t>
-__device__ __forceinline__ void merge_attn_states_per_thread(
+__device__ __forceinline__ void merge_attn_states_common(
     scalar_t* output,   // [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
     float* output_lse,  // [NUM_HEADS, NUM_TOKENS]
     const scalar_t* __restrict__ prefix_output,  // [NUM_TOKENS, NUM_HEADS,
@@ -109,15 +109,15 @@ __global__ void merge_attn_states_kernel(
       constexpr uint pack_size = 16 / sizeof(scalar_t);
       const uint head_idx = thread_idx / (head_size / pack_size);
       const uint thr_idx = thread_idx % (head_size / pack_size);
-      merge_attn_states_per_thread<scalar_t>(
-          output, output_lse, prefix_output, prefix_lse, suffix_output,
-          suffix_lse, num_tokens, num_heads, head_size, token_idx, head_idx,
-          thr_idx);
+      merge_attn_states_common<scalar_t>(output, output_lse, prefix_output,
+                                         prefix_lse, suffix_output, suffix_lse,
+                                         num_tokens, num_heads, head_size,
+                                         token_idx, head_idx, thr_idx);
     } else {
       const uint thr_idx = thread_idx;
 #pragma unroll
       for (uint head_idx = 0; head_idx < num_heads; ++head_idx) {
-        merge_attn_states_per_thread<scalar_t>(
+        merge_attn_states_common<scalar_t>(
             output, output_lse, prefix_output, prefix_lse, suffix_output,
             suffix_lse, num_tokens, num_heads, head_size, token_idx, head_idx,
             thr_idx);
@@ -129,10 +129,10 @@ __global__ void merge_attn_states_kernel(
     const uint thread_idx = threadIdx.x;
     const uint thr_idx = thread_idx;
 
-    merge_attn_states_per_thread<scalar_t>(
-        output, output_lse, prefix_output, prefix_lse, suffix_output,
-        suffix_lse, num_tokens, num_heads, head_size, token_idx, head_idx,
-        thr_idx);
+    merge_attn_states_common<scalar_t>(output, output_lse, prefix_output,
+                                       prefix_lse, suffix_output, suffix_lse,
+                                       num_tokens, num_heads, head_size,
+                                       token_idx, head_idx, thr_idx);
   }
 }
 
