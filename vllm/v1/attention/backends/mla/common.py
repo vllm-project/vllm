@@ -214,7 +214,6 @@ except ImportError:
     # For rocm use upstream flash attention
     from flash_attn import flash_attn_varlen_func
     is_vllm_fa = False
-from vllm.attention.ops.triton_flash_attention import triton_attention
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -360,8 +359,11 @@ class MLACommonMetadataBuilder(Generic[M]):
         self.num_heads = model_config.get_num_attention_heads(
             runner.parallel_config)
         self.mla_dims = get_mla_dims(model_config)
-        self.aot_schedule = (get_flash_attn_version() == 3)
-        self.page_size = self.runner.block_size
+        self.aot_schedule = is_vllm_fa and (get_flash_attn_version() == 3)
+
+        # Dont try to access the runner on AMD
+        if self.aot_schedule:
+            self.page_size = self.runner.block_size
 
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
@@ -637,7 +639,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.o_proj = o_proj
         self.vllm_flash_attn_version = get_flash_attn_version()
 
-        self.triton_fa_func = triton_attention
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
         # latter has an additional parameter to control FA2 vs FA3
