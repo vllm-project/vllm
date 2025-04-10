@@ -8,7 +8,7 @@ from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 
 import cloudpickle
 import torch.nn as nn
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
