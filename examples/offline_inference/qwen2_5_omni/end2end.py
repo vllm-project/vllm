@@ -623,9 +623,9 @@ def parse_voice_type(voice_type) -> str:
 
     voice_types = {
         "晨煦": "m02",
-        "Ethan": "m02",
+        "ethan": "m02",
         "千雪": "f030",
-        "Chelsie": "f030",
+        "chelsie": "f030",
     }
     voice_type = voice_type.lower()
     return voice_types.get(voice_type, voice_type)
