@@ -804,16 +804,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
 
-            # For MLA the v head dim is smaller than qk head dim so we pad
-            # out v with 0s to match the qk head dim
-            v_padded = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
-
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
+            attn_output, attn_softmax_lse = \
+                self._flash_attn_varlen_diff_headdims(
                 q=q,
                 k=k,
-                v=v_padded,
+                v=v,
                 cu_seqlens_q=prefill_metadata.query_start_loc,
                 cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[i],
                 max_seqlen_q=prefill_metadata.max_query_len,
@@ -860,15 +855,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
-
-        output = self.flash_attn_varlen_func(
+        output = self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
-            v=v_padded,
+            v=v,
             cu_seqlens_q=attn_metadata.prefill.query_start_loc,
             cu_seqlens_k=attn_metadata.prefill.query_start_loc,
             max_seqlen_q=attn_metadata.prefill.max_query_len,

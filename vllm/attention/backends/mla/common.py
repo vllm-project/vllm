@@ -1240,40 +1240,19 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
 
-            # For MLA the v head dim is smaller than qk head dim so we pad
-            # out v with 0s to match the qk head dim
-            v_padded = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
-
-            if is_vllm_fa:
-                attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                    q=q,
-                    k=k,
-                    v=v_padded,
-                    cu_seqlens_q=prefill_metadata.query_start_loc,
-                    cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
-                    max_seqlen_q=prefill_metadata.max_query_len,
-                    max_seqlen_k=prefill_metadata.
-                    context_chunk_max_seq_lens[i],
-                    softmax_scale=self.scale,
-                    causal=False,  # Context is unmasked
-                    return_softmax_lse=True,
-                )
-            else:
-                attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
-                    q=q,
-                    k=k,
-                    v=v_padded,
-                    cu_seqlens_q=prefill_metadata.query_start_loc,
-                    cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
-                    max_seqlen_q=prefill_metadata.max_query_len,
-                    max_seqlen_k=prefill_metadata.
-                    context_chunk_max_seq_lens[i],
-                    softmax_scale=self.scale,
-                    causal=False,  # Context is unmasked
-                    return_attn_probs=True,
-                )
+            attn_output, attn_softmax_lse = \
+                self._flash_attn_varlen_diff_headdims(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
+                max_seqlen_q=prefill_metadata.max_query_len,
+                max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
+                softmax_scale=self.scale,
+                causal=False,  # Context is unmasked
+                return_softmax_lse=True,
+            )
 
             if output is None:
                 output = attn_output
