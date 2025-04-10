@@ -47,7 +47,7 @@ from .vision import (get_vision_encoder_info, scatter_patch_features,
 
 from PIL import Image
 import numpy as np
-from torchvision import transforms as T
+import torchvision.transforms as T
 
 
 class LlavaImagePixelInputs(TypedDict):
@@ -229,29 +229,18 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             mm_data=mm_data,
         )
 
-    def _get_dummy_images(self, width: int, height: int, num_images: int) -> list[torch.Tensor]:
+    def _get_dummy_images(self, width: int, height: int, num_images: int) -> list[Image.Image]:
         """Get dummy images for profiling.
         
         Returns:
-            A list of tensors with shape (1, 3, height, width) for each image.
-            The first dimension (1) represents num_patches.
+            A list of PIL Image objects with size (width, height).
         """
         # 创建一个基础的 RGB 图像
         base_image = np.full((height, width, 3), 255, dtype=np.uint8)
-        base_image = Image.fromarray(base_image)
-        
-        # 转换为张量并添加必要的维度
-        transform = T.Compose([
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
-        # 转换为张量并添加 patch 维度
-        image_tensor = transform(base_image)  # [3, height, width]
-        image_tensor = image_tensor.unsqueeze(0)  # [1, 3, height, width]
+        base_image = Image.fromarray(base_image, mode='RGB')
         
         # 复制到所需的图像数量
-        return [image_tensor for _ in range(num_images)]
+        return [base_image.copy() for _ in range(num_images)]
 
 
 class LlavaProcessingInfo(BaseLlavaProcessingInfo):
