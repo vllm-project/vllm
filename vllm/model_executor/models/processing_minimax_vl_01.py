@@ -2,7 +2,7 @@
 Processor class for MiniMaxVL01.
 """
 
-from typing import List, Union
+from typing import List, Union, Mapping, TypeVar
 
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
@@ -11,6 +11,7 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging
 
 from .image_processer import CustomBatchFeature
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 logger = logging.get_logger(__name__)
 
@@ -162,6 +163,11 @@ class MiniMaxVL01Processor(ProcessorMixin):
         self.patch_size = patch_size
         self.vision_feature_select_strategy = vision_feature_select_strategy
         self.image_token = image_token
+        
+        # 确保 tokenizer 是 PreTrainedTokenizerBase 类型
+        if hasattr(tokenizer, 'get_hf_tokenizer'):
+            tokenizer = tokenizer.get_hf_tokenizer()
+            
         super().__init__(image_processor.get_hf_processor(), tokenizer, chat_template=chat_template)
         self.patch_size = image_processor.patch_size
         self.grid_pinpoints = image_processor.image_grid_pinpoints
