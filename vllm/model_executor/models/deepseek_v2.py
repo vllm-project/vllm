@@ -30,7 +30,8 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
+                         get_current_vllm_config)
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -105,6 +106,9 @@ class DeepseekV2MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
+        vllm_config = get_current_vllm_config()
+        self.num_share_fusion_replicas = \
+            vllm_config.parallel_config.num_share_fusion_replicas
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
@@ -122,8 +126,10 @@ class DeepseekV2MoE(nn.Module):
             self.gate.e_score_correction_bias = None
 
         self.experts = FusedMoE(
-            num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
+            num_experts=config.n_routed_experts +
+            self.num_share_fusion_replicas,
+            top_k=config.num_experts_per_tok +
+            min(self.num_share_fusion_replicas, 1),
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             reduce_results=False,
@@ -134,7 +140,9 @@ class DeepseekV2MoE(nn.Module):
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias)
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            routed_scaling_factor=config.routed_scaling_factor,
+        )
 
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
@@ -151,8 +159,11 @@ class DeepseekV2MoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if self.n_shared_experts is not None:
+        if self.n_shared_experts is not None and \
+            self.num_share_fusion_replicas == 0:
             shared_output = self.shared_experts(hidden_states)
+        else:
+            shared_output = None
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         if hidden_states.dtype != torch.float16:
@@ -523,7 +534,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
@@ -677,6 +687,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.num_share_fusion_replicas = \
+            vllm_config.parallel_config.num_share_fusion_replicas
         self.model = DeepseekV2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
@@ -742,14 +754,29 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-
+        if self.num_share_fusion_replicas > 0:
+            weights_list = list(weights)
+            weights_dict = {k: v for (k, v) in weights_list}
+            for moe_layer in range(self.config.num_hidden_layers):
+                if moe_layer < self.config.first_k_dense_replace:
+                    continue
+                for num_repeat in range(self.num_share_fusion_replicas):
+                    prefix = f"model.layers.{moe_layer}.mlp.shared_experts."
+                    for k in weights_dict:
+                        if k.startswith(prefix):
+                            weights_list.append((k.replace(
+                                "shared_experts", "experts."
+                                f"{self.config.n_routed_experts + num_repeat}"
+                            ), weights_dict[k].clone()))
+            weights = weights_list
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts)
+            num_experts=self.config.n_routed_experts +
+            self.num_share_fusion_replicas)
 
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
