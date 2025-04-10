@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Generic, NamedTuple, Optional, TypeVar, cast
@@ -60,7 +60,35 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
 
         self.info = info
 
-    @abstractmethod
+    # TODO: @abstractmethod after transition
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        """
+        Build the text input corresponding to :code:`mm_counts`.
+        """
+        if (type(self).get_dummy_processor_inputs ==
+                BaseDummyInputsBuilder.get_dummy_processor_inputs):
+            raise NotImplementedError
+
+        logger.warning_once("`get_dummy_processor_inputs` has been split up "
+                            "into `get_dummy_text` and `get_dummy_mm_data`. "
+                            "These two methods will be marked as abstract "
+                            "in an upcoming release.")
+
+        seq_len = self.info.ctx.model_config.max_model_len
+        return self.get_dummy_processor_inputs(seq_len, mm_counts).prompt_text
+
+    # TODO: @abstractmethod after transition
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        """
+        Build the multimodal input which, after processing, results in
+        the maximum possible number of placeholder tokens.
+        """
+        raise NotImplementedError
+
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
@@ -70,7 +98,10 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         Build the input which, after processing, results in
         the maximum possible number of placeholder tokens.
         """
-        raise NotImplementedError
+        dummy_text = self.get_dummy_text(mm_counts)
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+
+        return ProcessorInputs(prompt_text=dummy_text, mm_data=dummy_mm_data)
 
     def _get_dummy_audios(
         self,

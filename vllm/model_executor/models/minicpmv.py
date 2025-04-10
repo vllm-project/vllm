@@ -48,7 +48,8 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    NestedTensors)
 from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
                                    ImageProcessorItems, ImageSize,
                                    ModalityData, ModalityDataItems,
@@ -57,7 +58,7 @@ from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import flatten_2d_lists
@@ -471,11 +472,20 @@ _I = TypeVar("_I",
 
 class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+
+        image_prompt_texts = self.info.image_pattern * num_images
+        video_prompt_texts = self.info.video_pattern * num_videos
+
+        return image_prompt_texts + video_prompt_texts
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
@@ -486,7 +496,7 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         num_video_frames = \
             self.info.get_num_frames_with_most_features(seq_len, mm_counts)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=image_width,
                                    height=image_height,
@@ -497,13 +507,6 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                                        num_images=num_video_frames)
             ] * num_videos,
         }
-
-        image_prompt_texts = self.info.image_pattern * num_images
-        video_prompt_texts = self.info.video_pattern * num_videos
-
-        return ProcessorInputs(prompt_text=image_prompt_texts +
-                               video_prompt_texts,
-                               mm_data=mm_data)
 
 
 class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
