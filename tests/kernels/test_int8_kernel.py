@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Adapted from https://github.com/sgl-project/sglang/blob/main/test/srt/test_int8_kernel.py
 import itertools
 
 import pytest
