@@ -68,7 +68,7 @@ class GuidedDecodingParams:
     @property
     def backend_name(self) -> str:
         """Return the backend name without any options.
-        
+
         For example if the backend is "xgrammar:no-fallback", returns "xgrammar"
         """
         return (self.backend or "").split(":")[0]

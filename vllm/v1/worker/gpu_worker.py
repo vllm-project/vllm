@@ -25,6 +25,8 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
 
+from green_ctx import make_shard_cached
+
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
@@ -137,7 +139,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how much 
+        """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
@@ -239,7 +241,13 @@ class Worker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
-        output = self.model_runner.execute_model(scheduler_output)
+        num_sms = scheduler_output.num_sms
+        if num_sms is not None:
+            shard = make_shard_cached(num_sms)
+            with shard.with_context():
+                output = self.model_runner.execute_model(scheduler_output)
+        else:
+            output = self.model_runner.execute_model(scheduler_output)
         return output if self.is_driver_worker else None
 
     def profile(self, is_start: bool = True):

@@ -62,6 +62,7 @@ class OutputProcessorOutput:
 
     request_outputs: list[RequestOutput]
     reqs_to_abort: list[str]
+    gpu_execution_time_ms: float
 
 
 class RequestState:
@@ -140,6 +141,7 @@ class RequestState:
         new_token_ids: list[int],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
+        gpu_execution_time_ms: float,
     ) -> Optional[RequestOutput]:
 
         finished = finish_reason is not None
@@ -161,13 +163,15 @@ class RequestState:
             if not outputs:
                 return None
 
-        return self._new_request_output(request_id, outputs, finished)
+        return self._new_request_output(request_id, outputs, finished,
+                                        gpu_execution_time_ms)
 
     def _new_request_output(
         self,
         request_id: str,
         outputs: list[CompletionOutput],
         finished: bool,
+        gpu_execution_time_ms: float,
     ) -> RequestOutput:
 
         if self.output_kind == RequestOutputKind.DELTA:
@@ -176,6 +180,8 @@ class RequestState:
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
 
+        assert gpu_execution_time_ms is not None
+
         return RequestOutput(
             request_id=request_id,
             prompt=self.prompt,
@@ -183,6 +189,7 @@ class RequestState:
             prompt_logprobs=prompt_logprobs,
             outputs=outputs,
             finished=finished,
+            gpu_execution_time_ms=gpu_execution_time_ms,
         )
 
     def _new_completion_output(
@@ -280,28 +287,29 @@ class OutputProcessor:
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: Optional[float] = None,
         iteration_stats: Optional[IterationStats] = None,
+        gpu_execution_time_ms: Optional[float] = None,
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
         1) Compute stats for logging
         2) Detokenize
         3) Create and handle RequestOutput objects:
-            * If there is a queue (for usage with AsyncLLM), 
+            * If there is a queue (for usage with AsyncLLM),
               put the RequestOutput objects into the queue for
               handling by the per-request generate() tasks.
 
-            * If there is no queue (for usage with LLMEngine), 
+            * If there is no queue (for usage with LLMEngine),
               return a list of RequestOutput objects.
 
         ****************** NOTE FOR DEVELOPERS ******************
 
         vLLM V1 minimizes the number of python loops over the full
-        batch to ensure system overheads are minimized. This is the 
+        batch to ensure system overheads are minimized. This is the
         only function that should loop over EngineCoreOutputs.
 
         If you need to touch every element of the batch, do it from
         within the loop below.
-        
+
         **********************************************************
         """
 
@@ -336,8 +344,10 @@ class OutputProcessor:
             req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
+            assert gpu_execution_time_ms is not None
             if request_output := req_state.make_request_output(
-                    new_token_ids, finish_reason, stop_reason):
+                    new_token_ids, finish_reason, stop_reason,
+                    gpu_execution_time_ms):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)
@@ -366,6 +376,7 @@ class OutputProcessor:
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
+            gpu_execution_time_ms=gpu_execution_time_ms,
         )
 
     def _update_stats_from_output(self, req_state: RequestState,

@@ -112,6 +112,8 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
+        self.num_sms = None
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -354,6 +356,11 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
 
+                # HACK: reset num_sms from new new request
+                if request.sampling_params.extra_args:
+                    self.num_sms = request.sampling_params.extra_args.get(
+                        "num_sms", None)
+
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = (
@@ -432,6 +439,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            num_sms=self.num_sms,
         )
 
         # Advance the number of computed tokens for the request AFTER
@@ -672,10 +680,13 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
 
         self.running = new_running
+        assert model_runner_output.gpu_execution_time_ms is not None
         engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
             scheduler_stats=self.make_stats(spec_decoding_stats),
+            gpu_execution_time_ms=model_runner_output.gpu_execution_time_ms,
         )
+        assert engine_core_outputs.gpu_execution_time_ms is not None
         if self.include_finished_set:
             #TODO currently sending duplicates here, improve this
             engine_core_outputs.finished_requests = (

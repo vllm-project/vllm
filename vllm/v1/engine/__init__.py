@@ -135,6 +135,7 @@ class EngineCoreOutputs(
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: Optional[SchedulerStats] = None
     timestamp: float = 0.0
+    gpu_execution_time_ms: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None
     finished_requests: Optional[set[str]] = None

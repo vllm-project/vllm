@@ -43,6 +43,7 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    gpu_execution_time_ms: Optional[float] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -54,7 +55,8 @@ class CompletionOutput:
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
                 f"finish_reason={self.finish_reason}, "
-                f"stop_reason={self.stop_reason})")
+                f"stop_reason={self.stop_reason}, "
+                f"gpu_execution_time_ms={self.gpu_execution_time_ms})")
 
 
 @dataclass
@@ -103,6 +105,7 @@ class RequestOutput:
         encoder_prompt_token_ids: The token IDs of the encoder prompt.
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
+        gpu_execution_time_ms: The time taken by the GPU to execute the request.
     """
 
     def __init__(
@@ -118,6 +121,7 @@ class RequestOutput:
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[list[int]] = None,
         num_cached_tokens: Optional[int] = None,
+        gpu_execution_time_ms: Optional[float] = None,
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
     ) -> None:
@@ -133,6 +137,7 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
+        self.gpu_execution_time_ms = gpu_execution_time_ms
 
     def add(self, next_output: "RequestOutput") -> None:
         """Merge subsequent RequestOutput into this one"""

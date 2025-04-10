@@ -223,7 +223,8 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs)
+            outputs.outputs,
+            gpu_execution_time_ms=outputs.gpu_execution_time_ms)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)

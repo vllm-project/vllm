@@ -319,8 +319,10 @@ class AsyncLLM(EngineClient):
 
                 for i, outputs_slice in enumerate(slices):
                     # 2) Process EngineCoreOutputs.
+                    assert outputs.gpu_execution_time_ms is not None
                     processed_outputs = self.output_processor.process_outputs(
-                        outputs_slice, outputs.timestamp, iteration_stats)
+                        outputs_slice, outputs.timestamp, iteration_stats,
+                        outputs.gpu_execution_time_ms)
                     # NOTE: RequestOutputs are pushed to their queues.
                     assert not processed_outputs.request_outputs
 

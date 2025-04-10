@@ -1062,8 +1062,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
+        start_event.record()
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
                 input_ids=input_ids,
@@ -1133,6 +1137,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # so that we could clear the sampled tokens before returning.
                 discard_sampled_tokens_req_indices.append(i)
 
+        end_event.record()
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         logprobs_tensors = sampler_output.logprobs_tensors
@@ -1235,6 +1240,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # in the next step.
             del draft_probs
 
+        end_event.synchronize()
+        gpu_execution_time_ms = start_event.elapsed_time(end_event)
+
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1242,6 +1250,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            gpu_execution_time_ms=gpu_execution_time_ms,
         )
 
     def generate_draft_token_ids(
