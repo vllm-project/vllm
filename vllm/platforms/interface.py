@@ -123,9 +123,6 @@ class Platform:
     def is_rocm_cdna(self) -> bool:
         return self.is_rocm() and self.has_cdna_target()
 
-    def is_rocm_rdna(self) -> bool:
-        return self.is_rocm() and self.has_rdna_target()
-
     def is_tpu(self) -> bool:
         return self._enum == PlatformEnum.TPU
 

@@ -37,14 +37,14 @@ default_eight_bit_dtype_triton = tl.float8e4b8
 default_eight_bit_dtype_torch = current_platform.fp8_dtype()
 default_float8_info = torch.finfo(default_eight_bit_dtype_torch)
 
-DEFAULT_FP8_MIN: triton.language.constexpr = default_float8_info.min
+FP8_MIN: triton.language.constexpr = default_float8_info.min
 
 # According to https://github.com/vllm-project/vllm/blob/main
 #              /csrc/quantization/utils.cuh#L31,
 # need to make the max for the uz datatype be 224.0 for accuracy reasons.
-DEFAULT_FP8_MAX: triton.language.constexpr = (
-    default_float8_info.max
-    if default_eight_bit_dtype_torch != torch.float8_e4m3fnuz else 224.0)
+FP8_MAX: triton.language.constexpr = (default_float8_info.max
+                                      if default_eight_bit_dtype_torch
+                                      != torch.float8_e4m3fnuz else 224.0)
 
 
 class MetaData:
@@ -280,8 +280,6 @@ def compute_alibi_tensor(alibi_slopes, seqlen_q, seqlen_k):
 
 @triton.jit
 def quant_fp8(x, scale):
-    FP8_MIN: tl.constexpr = DEFAULT_FP8_MIN
-    FP8_MAX: tl.constexpr = DEFAULT_FP8_MAX
     x *= scale
     x = tl.clamp(x, FP8_MIN, FP8_MAX)
     return x
@@ -322,36 +320,37 @@ def _attn_fwd_inner(
     BLOCK_N: tl.constexpr,
     OFFS_M: tl.constexpr,
     OFFS_N: tl.constexpr,
-    PRE_LOAD_V: tl.constexpr,
-    MASK_STEPS: tl.constexpr,
-    ENABLE_DROPOUT: tl.constexpr,
-    RETURN_ENCODED_SOFTMAX: tl.constexpr,
-    PADDED_HEAD: tl.constexpr,
-    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+    SHOULD_PRE_LOAD_V: tl.constexpr,
+    SHOULD_MASK_STEPS: tl.constexpr,
+    SHOULD_ENABLE_DROPOUT: tl.constexpr,
+    SHOULD_RETURN_ENCODED_SOFTMAX: tl.constexpr,
+    USE_PADDED_HEAD: tl.constexpr,
+    IS_ACTUAL_BLOCK_DMODEL: tl.constexpr,
     QK_SCALE: tl.constexpr,
-    EIGHT_BIT_GEMM: tl.constexpr,
+    IS_EIGHT_BIT_GEMM: tl.constexpr,
     USE_P_SCALE: tl.constexpr,
-    EIGHT_BIT_KV: tl.constexpr,
-    EIGHT_BIT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
+    IS_EIGHT_BIT_KV: tl.constexpr,
+    QUANT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
 ):
 
     # loop over k, v, and update accumulator
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
-        k_offs_n = start_n + tl.arange(0, BLOCK_N) if MASK_STEPS else None
-        k_offs_k = None if not PADDED_HEAD else tl.arange(0, BLOCK_DMODEL)
-        k = masked_load(k_ptrs, k_offs_k, k_offs_n, ACTUAL_BLOCK_DMODEL,
+        k_offs_n = start_n + tl.arange(0,
+                                       BLOCK_N) if SHOULD_MASK_STEPS else None
+        k_offs_k = None if not USE_PADDED_HEAD else tl.arange(0, BLOCK_DMODEL)
+        k = masked_load(k_ptrs, k_offs_k, k_offs_n, IS_ACTUAL_BLOCK_DMODEL,
                         actual_seqlen_k)
-        if PRE_LOAD_V:
+        if SHOULD_PRE_LOAD_V:
             # We can use the same offsets as k, just with dims transposed.
             v = masked_load(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k,
-                            ACTUAL_BLOCK_DMODEL)
+                            IS_ACTUAL_BLOCK_DMODEL)
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
         # TODO: This can be optimized to only be true for the padded block.
-        if MASK_STEPS:  # noqa: SIM102
+        if SHOULD_MASK_STEPS:  # noqa: SIM102
             # If this is the last block / iteration, we want to
             # mask if the sequence length is not a multiple of block size
             # a solution is to always do BLOCK_M // BLOCK_N + 1 steps if not
@@ -370,17 +369,17 @@ def _attn_fwd_inner(
             qk = tl.where(causal_mask, qk, float("-inf"))
 
         # -- compute qk ----
-        if EIGHT_BIT_GEMM:
+        if IS_EIGHT_BIT_GEMM:
             qk += ((((tl.dot(q, k).to(tl.float32) * q_descale)) * k_descale) *
                    QK_SCALE)
         else:
-            if EIGHT_BIT_KV:
+            if IS_EIGHT_BIT_KV:
                 k = (k * k_descale).to(q.type.element_ty)
             qk += (tl.dot(q, k) * QK_SCALE)
 
         if bias_ptrs is not None:
-            bias_offs_n = start_n + tl.arange(0,
-                                              BLOCK_N) if MASK_STEPS else None
+            bias_offs_n = start_n + tl.arange(
+                0, BLOCK_N) if SHOULD_MASK_STEPS else None
             bias = masked_load(bias_ptrs, OFFS_M, bias_offs_n, actual_seqlen_q,
                                actual_seqlen_k)
             # While bias is added after multiplying qk with sm_scale,
@@ -406,39 +405,39 @@ def _attn_fwd_inner(
 
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
-        if ENABLE_DROPOUT:
+        if SHOULD_ENABLE_DROPOUT:
             philox_offset = (batch_philox_offset +
                              start_m * BLOCK_M * actual_seqlen_k + start_n -
                              BLOCK_N)
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M,
                                 BLOCK_N, actual_seqlen_k)
-            if RETURN_ENCODED_SOFTMAX:
+            if SHOULD_RETURN_ENCODED_SOFTMAX:
                 tl.store(
                     encoded_sm_ptrs,
                     tl.where(keep, p, -p).to(encoded_sm_ptrs.type.element_ty))
             p = tl.where(keep, p, 0.0)
-        elif RETURN_ENCODED_SOFTMAX:
+        elif SHOULD_RETURN_ENCODED_SOFTMAX:
             tl.store(encoded_sm_ptrs, p.to(encoded_sm_ptrs.type.element_ty))
         # -- update output accumulator --
         alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
-        if not PRE_LOAD_V:
+        if not SHOULD_PRE_LOAD_V:
             v = masked_load(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k,
-                            ACTUAL_BLOCK_DMODEL)
+                            IS_ACTUAL_BLOCK_DMODEL)
         # -- update m_i and l_i
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
         m_i = m_ij
 
-        if EIGHT_BIT_GEMM:
+        if IS_EIGHT_BIT_GEMM:
             if USE_P_SCALE:
-                p = quant_fp8(p, p_scale).to(EIGHT_BIT_DTYPE)
+                p = quant_fp8(p, p_scale).to(QUANT_DTYPE)
                 acc += tl.dot(p, v)
             else:
                 # v is in eight_bit but p is not, we want the gemm in p's type
                 acc += tl.dot(p, v.to(p.type.element_ty))
         else:
-            if EIGHT_BIT_KV:
+            if IS_EIGHT_BIT_KV:
                 v = (v * v_descale).to(p.type.element_ty)
             acc += tl.dot(p.to(v.type.element_ty), v)
 
@@ -446,7 +445,7 @@ def _attn_fwd_inner(
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:
             bias_ptrs += BLOCK_N * stride_bn
-        if RETURN_ENCODED_SOFTMAX:
+        if SHOULD_RETURN_ENCODED_SOFTMAX:
             encoded_sm_ptrs += BLOCK_N
     return acc, l_i, m_i
 
@@ -458,7 +457,7 @@ def get_cdna_autotune_configs():
                 'BLOCK_M': 128,
                 'BLOCK_N': 128,
                 'waves_per_eu': 2,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -468,7 +467,7 @@ def get_cdna_autotune_configs():
                 'BLOCK_M': 128,
                 'BLOCK_N': 64,
                 'waves_per_eu': 2,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -478,7 +477,7 @@ def get_cdna_autotune_configs():
                 'BLOCK_M': 128,
                 'BLOCK_N': 64,
                 'waves_per_eu': 3,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -488,7 +487,7 @@ def get_cdna_autotune_configs():
                 'BLOCK_M': 128,
                 'BLOCK_N': 64,
                 'waves_per_eu': 1,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -498,14 +497,14 @@ def get_cdna_autotune_configs():
                 'BLOCK_M': 128,
                 'BLOCK_N': 32,
                 'waves_per_eu': 2,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
             num_warps=4),
     ], [
         'IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
-        'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
+        'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
     ]
 
 
@@ -516,7 +515,7 @@ def get_rdna_autotune_configs():
                 'BLOCK_M': 32,
                 'BLOCK_N': 32,
                 'waves_per_eu': 4,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -526,7 +525,7 @@ def get_rdna_autotune_configs():
                 'BLOCK_M': 32,
                 'BLOCK_N': 32,
                 'waves_per_eu': 2,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -536,7 +535,7 @@ def get_rdna_autotune_configs():
                 'BLOCK_M': 32,
                 'BLOCK_N': 16,
                 'waves_per_eu': 4,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -546,7 +545,7 @@ def get_rdna_autotune_configs():
                 'BLOCK_M': 32,
                 'BLOCK_N': 16,
                 'waves_per_eu': 2,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -556,7 +555,7 @@ def get_rdna_autotune_configs():
                 'BLOCK_M': 16,
                 'BLOCK_N': 16,
                 'waves_per_eu': 4,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -566,7 +565,7 @@ def get_rdna_autotune_configs():
                 'BLOCK_M': 16,
                 'BLOCK_N': 16,
                 'waves_per_eu': 2,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -577,14 +576,14 @@ def get_rdna_autotune_configs():
                 'BLOCK_M': 16,
                 'BLOCK_N': 16,
                 'waves_per_eu': 1,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
             num_warps=2),
     ], [
         'IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
-        'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
+        'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
     ]
 
 
@@ -594,7 +593,7 @@ def get_general_autotune_configs():
             {
                 'BLOCK_M': 128,
                 'BLOCK_N': 128,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -603,7 +602,7 @@ def get_general_autotune_configs():
             {
                 'BLOCK_M': 128,
                 'BLOCK_N': 64,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
@@ -612,22 +611,22 @@ def get_general_autotune_configs():
             {
                 'BLOCK_M': 128,
                 'BLOCK_N': 32,
-                'PRE_LOAD_V': False,
+                'SHOULD_PRE_LOAD_V': False,
                 'GRID_CU_MULTIP': 2
             },
             num_stages=1,
             num_warps=4),
     ], [
         'IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
-        'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
+        'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
     ]
 
 
 def get_autotune_configs():
-    if current_platform.is_rocm_rdna():
-        return get_rdna_autotune_configs()
-    elif current_platform.is_rocm_cdna():
+    if current_platform.is_rocm_cdna():
         return get_cdna_autotune_configs()
+    elif current_platform.is_rocm():
+        return get_rdna_autotune_configs()
     else:
         return get_general_autotune_configs()
 
@@ -696,7 +695,7 @@ def attn_fwd(
     alibi_slopes,
     HQ: tl.constexpr,
     HK: tl.constexpr,
-    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+    IS_ACTUAL_BLOCK_DMODEL: tl.constexpr,
     MAX_SEQLENS_Q: tl.constexpr,
     MAX_SEQLENS_K: tl.constexpr,
     VARLEN: tl.constexpr,
@@ -704,15 +703,15 @@ def attn_fwd(
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    PRE_LOAD_V: tl.constexpr,
+    SHOULD_PRE_LOAD_V: tl.constexpr,
     USE_BIAS: tl.constexpr,
-    ENABLE_DROPOUT: tl.constexpr,
-    RETURN_ENCODED_SOFTMAX: tl.constexpr,
+    SHOULD_ENABLE_DROPOUT: tl.constexpr,
+    SHOULD_RETURN_ENCODED_SOFTMAX: tl.constexpr,
     USE_ALIBI: tl.constexpr,
-    EIGHT_BIT: tl.constexpr,
+    IS_EIGHT_BIT: tl.constexpr,
     USE_P_SCALE: tl.constexpr,
-    EIGHT_BIT_KV: tl.constexpr,
-    EIGHT_BIT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
+    IS_EIGHT_BIT_KV: tl.constexpr,
+    QUANT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
 ):
 
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
@@ -832,8 +831,8 @@ def attn_fwd(
                     n_extra_tokens = BLOCK_N - seqlen_k
                 elif seqlen_k % BLOCK_N:
                     n_extra_tokens = seqlen_k % BLOCK_N
-                PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL
-                                             != BLOCK_DMODEL)
+                USE_PADDED_HEAD: tl.constexpr = (IS_ACTUAL_BLOCK_DMODEL
+                                                 != BLOCK_DMODEL)
 
                 # Compute pointers for all the tensors used in this kernel.
                 q_offset = (Q + off_z * stride_qz + off_h_q * stride_qh +
@@ -850,8 +849,9 @@ def attn_fwd(
                           offs_d[None, :] * stride_vn)
                 # Compute pointers for all scale tensors used in this kernel.
 
-                EIGHT_BIT_GEMM: tl.constexpr = EIGHT_BIT & (not EIGHT_BIT_KV)
-                if EIGHT_BIT:
+                IS_EIGHT_BIT_GEMM: tl.constexpr = IS_EIGHT_BIT & (
+                    not IS_EIGHT_BIT_KV)
+                if IS_EIGHT_BIT:
                     if k_descale_has_singleton:
                         k_descale_ptrs = k_descale_ptr
                     else:
@@ -862,7 +862,7 @@ def attn_fwd(
                     else:
                         v_descale_ptrs = v_descale_ptr + off_h_k
 
-                    if not EIGHT_BIT_KV:
+                    if not IS_EIGHT_BIT_KV:
                         if q_descale_has_singleton:
                             q_descale_ptrs = q_descale_ptr
                         else:
@@ -890,7 +890,7 @@ def attn_fwd(
                 else:
                     alibi_slope = None
 
-                if ENABLE_DROPOUT:
+                if SHOULD_ENABLE_DROPOUT:
                     off_hz = off_z * HQ + off_h_q
                     batch_philox_offset = (philox_offset_base +
                                            off_hz * seqlen_q * seqlen_k)
@@ -899,7 +899,7 @@ def attn_fwd(
                 # We can ask to return the dropout mask without doing any
                 # dropout. In this case, we return an invalid pointer so
                 # indicate the mask is not valid.
-                if RETURN_ENCODED_SOFTMAX:
+                if SHOULD_RETURN_ENCODED_SOFTMAX:
                     encoded_sm_base = (encoded_softmax +
                                        off_h_q * seqlen_q * seqlen_k)
                     encoded_sm_ptrs = (encoded_sm_base +
@@ -916,15 +916,15 @@ def attn_fwd(
                 QK_SCALE: tl.constexpr = SM_SCALE * 1.44269504089
                 # Q is loaded once at the beginning and shared by all N blocks.
                 q_ptrs_mask = offs_m[:, None] < seqlen_q
-                if PADDED_HEAD:
+                if USE_PADDED_HEAD:
                     q_ptrs_mask = q_ptrs_mask & (offs_d[None, :]
-                                                 < ACTUAL_BLOCK_DMODEL)
+                                                 < IS_ACTUAL_BLOCK_DMODEL)
                 q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0.0)
 
-                if EIGHT_BIT:
+                if IS_EIGHT_BIT:
                     k_descale = tl.load(k_descale_ptrs)
                     v_descale = tl.load(v_descale_ptrs)
-                    q_descale = None if EIGHT_BIT_KV else tl.load(
+                    q_descale = None if IS_EIGHT_BIT_KV else tl.load(
                         q_descale_ptrs)
                     if USE_P_SCALE:
                         p_scale = tl.load(p_scale_ptrs)
@@ -997,18 +997,18 @@ def attn_fwd(
                         BLOCK_N,
                         offs_m,
                         offs_n,
-                        # _, MASK_STEPS, ...
-                        PRE_LOAD_V,
+                        # _, SHOULD_MASK_STEPS, ...
+                        SHOULD_PRE_LOAD_V,
                         False,
-                        ENABLE_DROPOUT,
-                        RETURN_ENCODED_SOFTMAX,
-                        PADDED_HEAD,
-                        ACTUAL_BLOCK_DMODEL,
+                        SHOULD_ENABLE_DROPOUT,
+                        SHOULD_RETURN_ENCODED_SOFTMAX,
+                        USE_PADDED_HEAD,
+                        IS_ACTUAL_BLOCK_DMODEL,
                         QK_SCALE,
-                        EIGHT_BIT_GEMM,
+                        IS_EIGHT_BIT_GEMM,
                         USE_P_SCALE,
-                        EIGHT_BIT_KV,
-                        EIGHT_BIT_DTYPE)
+                        IS_EIGHT_BIT_KV,
+                        QUANT_DTYPE)
                     block_min = block_max
                     block_max = n_blocks * BLOCK_N
 
@@ -1023,7 +1023,7 @@ def attn_fwd(
                     v_ptrs += n_full_blocks * BLOCK_N * stride_vk
                     if USE_BIAS:
                         bias_ptrs += n_full_blocks * BLOCK_N * stride_bn
-                    if RETURN_ENCODED_SOFTMAX:
+                    if SHOULD_RETURN_ENCODED_SOFTMAX:
                         encoded_sm_ptrs += n_full_blocks * BLOCK_N
                     acc, l_i, m_i = _attn_fwd_inner(
                         acc,
@@ -1059,20 +1059,20 @@ def attn_fwd(
                         BLOCK_N,
                         offs_m,
                         offs_n,
-                        # _, MASK_STEPS, ...
-                        PRE_LOAD_V,
+                        # _, SHOULD_MASK_STEPS, ...
+                        SHOULD_PRE_LOAD_V,
                         True,
-                        ENABLE_DROPOUT,
-                        RETURN_ENCODED_SOFTMAX,
-                        PADDED_HEAD,
-                        ACTUAL_BLOCK_DMODEL,
+                        SHOULD_ENABLE_DROPOUT,
+                        SHOULD_RETURN_ENCODED_SOFTMAX,
+                        USE_PADDED_HEAD,
+                        IS_ACTUAL_BLOCK_DMODEL,
                         QK_SCALE,
-                        EIGHT_BIT_GEMM,
+                        IS_EIGHT_BIT_GEMM,
                         USE_P_SCALE,
-                        EIGHT_BIT_KV,
-                        EIGHT_BIT_DTYPE)
+                        IS_EIGHT_BIT_KV,
+                        QUANT_DTYPE)
 
-                if EIGHT_BIT and not EIGHT_BIT_KV:
+                if IS_EIGHT_BIT and not IS_EIGHT_BIT_KV:
                     if USE_P_SCALE:
                         acc *= p_descale
                     acc *= v_descale
@@ -1083,7 +1083,7 @@ def attn_fwd(
                 l_recip = 1 / l_i[:, None]
                 acc = acc * l_recip
 
-                if ENABLE_DROPOUT:
+                if SHOULD_ENABLE_DROPOUT:
                     acc = acc / (1 - dropout_p)
                 # If seqlen_q > seqlen_k but the delta is not a multiple of
                 # BLOCK_M, then we have one block with a row of all NaNs which
@@ -1093,7 +1093,7 @@ def attn_fwd(
                 end_m_idx = (start_m + 1) * BLOCK_M
                 start_m_idx = start_m * BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k
-                if EIGHT_BIT and not EIGHT_BIT_KV:  # noqa: SIM102
+                if IS_EIGHT_BIT and not IS_EIGHT_BIT_KV:  # noqa: SIM102
                     if o_descale_ptr is not None:
                         acc = quant_fp8(acc, o_descale)
 
@@ -1136,9 +1136,9 @@ def attn_fwd(
                                       dtype=tl.int1)
                 if overflow_size > 0:
                     o_ptrs_mask = o_ptrs_mask & (offs_m[:, None] < seqlen_q)
-                if PADDED_HEAD:
+                if USE_PADDED_HEAD:
                     o_ptrs_mask = o_ptrs_mask & (offs_d[None, :]
-                                                 < ACTUAL_BLOCK_DMODEL)
+                                                 < IS_ACTUAL_BLOCK_DMODEL)
                 tl.store(o_ptrs,
                          acc.to(Out.dtype.element_ty),
                          mask=o_ptrs_mask)
@@ -1305,7 +1305,7 @@ class _attention(torch.autograd.Function):
             alibi_slopes=metadata.alibi_slopes,
             HQ=nheads_q,
             HK=nheads_k,
-            ACTUAL_BLOCK_DMODEL=head_size,
+            IS_ACTUAL_BLOCK_DMODEL=head_size,
             MAX_SEQLENS_Q=metadata.max_seqlens_q,
             MAX_SEQLENS_K=metadata.max_seqlens_k,
             IS_CAUSAL=metadata.causal,
@@ -1313,17 +1313,17 @@ class _attention(torch.autograd.Function):
             BLOCK_DMODEL=padded_d_model,
             USE_BIAS=metadata.bias is not None,
             USE_ALIBI=metadata.alibi_slopes is not None,
-            ENABLE_DROPOUT=metadata.dropout_p > 0.0,
-            RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
-            EIGHT_BIT=metadata.eight_bit,
+            SHOULD_ENABLE_DROPOUT=metadata.dropout_p > 0.0,
+            SHOULD_RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
+            IS_EIGHT_BIT=metadata.eight_bit,
             USE_P_SCALE=metadata.eight_bit and metadata.use_p_scale,
-            EIGHT_BIT_KV=metadata.eight_bit and metadata.eight_bit_kv,
+            IS_EIGHT_BIT_KV=metadata.eight_bit and metadata.eight_bit_kv,
             PERSISTENT=metadata.persistent is not None,
             PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
             NUM_CU=NUM_CU,
             atomic_counter=atomic_counter,
             B=batch,
-            EIGHT_BIT_DTYPE=metadata.eight_bit_dtype_triton)
+            QUANT_DTYPE=metadata.eight_bit_dtype_triton)
 
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
