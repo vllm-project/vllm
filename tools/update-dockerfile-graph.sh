@@ -4,9 +4,6 @@
 
 set -euo pipefail
 
-# Make this script more verbose for debugging
-set -x
-
 # Check if docker/Dockerfile is staged for commit
 if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   echo "docker/Dockerfile has changed, updating dependency graph..."
