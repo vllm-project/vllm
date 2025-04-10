@@ -20,8 +20,6 @@ from vllm.distributed import (broadcast_tensor_dict, get_pp_group,
 
 from ..utils import init_test_distributed_environment, multi_process_parallel
 
-helper_fht=torch.ops._rocm_C.fast_hadamard_transform_512
-
 @ray.remote(num_gpus=1, max_calls=1)
 def test_quarot_r4(
     monkeypatch: pytest.MonkeyPatch,
