@@ -44,6 +44,7 @@ from .processing_minimax_vl_01 import MiniMaxVL01Processor
 from vllm.multimodal.processing import BaseProcessingInfo
 import numpy as np
 import numpy.typing as npt
+from .image_processer import ImageProcessor
 
 # Register the processors
 class LlavaNextImagePixelInputs(TypedDict):
@@ -82,7 +83,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(ImageProcessor, **kwargs)
 
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
@@ -296,7 +297,7 @@ class LlavaNextMultiModalProcessor(
 
         raise ValueError(f"Unexpected patch merge strategy: {strategy}")
 @MULTIMODAL_REGISTRY.register_processor(
-    LlavaNextMultiModalProcessor,
+    MiniMaxVL01Processor,
     info=LlavaNextProcessingInfo,
     dummy_inputs=LlavaDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
