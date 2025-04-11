@@ -1,0 +1,7 @@
+{
+    "local_hostname": "192.168.100.232",
+    "metadata_server": "etcd://10.239.129.81:2379",
+    "protocol": "tcp",
+    "device_name": "",
+    "master_server_address": "192.168.100.222:50001"
+}

@@ -1556,7 +1556,7 @@ class SchedulerConfig:
     def _verify_args(self) -> None:
         if (self.max_num_batched_tokens < self.max_model_len
                 and not self.chunked_prefill_enabled):
-            raise ValueError(
+            logger.warning(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
                 f"smaller than max_model_len ({self.max_model_len}). "
                 "This effectively limits the maximum sequence length to "
@@ -2622,7 +2622,7 @@ class KVTransferConfig(BaseModel):
 
     # The device used by kv connector to buffer the KV cache.
     # Currently only support 'cuda'.
-    kv_buffer_device: Optional[str] = "cuda"
+    kv_buffer_device: Optional[str] = "cpu"
 
     # The buffer size for TorchDistributedConnector. Measured in number of
     # bytes. Recommended value: 1e9 (about 1GB).

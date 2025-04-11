@@ -74,3 +74,25 @@ class KVTransferAgent:
 
         return self.connector.recv_kv_caches_and_hidden_states(
             model_executable, model_input, kv_caches)
+
+    def send_kv_caches_and_hidden_states_hpu(
+        self,
+        model_executable: torch.nn.Module,
+        model_input: "ModelInputForHPUWithSamplingMetadata",
+        kv_caches: List[torch.Tensor],
+        hidden_or_intermediate_states: Union[torch.Tensor,
+                                             IntermediateTensors],
+    ) -> None:
+        self.connector.send_kv_caches_and_hidden_states_hpu(
+            model_executable, model_input, kv_caches,
+            hidden_or_intermediate_states)
+
+    def recv_kv_caches_and_hidden_states_hpu(
+        self, model_executable: torch.nn.Module,
+        model_input: "ModelInputForHPUWithSamplingMetadata",
+        attn_metadata: object,
+        kv_caches: List[torch.Tensor]
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+               "ModelInputForHPUWithSamplingMetadata"]:
+        return self.connector.recv_kv_caches_and_hidden_states_hpu(
+            model_executable, model_input, attn_metadata, kv_caches)

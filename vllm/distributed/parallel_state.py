@@ -1072,7 +1072,7 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
         return
 
     if all([
-            vllm_config.kv_transfer_config.need_kv_parallel_group, _KV_TRANSFER
+            vllm_config.kv_transfer_config.is_kv_transfer_instance, _KV_TRANSFER
             is None
     ]):
         _KV_TRANSFER = kv_transfer.KVTransferAgent(

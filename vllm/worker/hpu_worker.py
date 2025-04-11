@@ -21,7 +21,8 @@ from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
+                                ensure_kv_transfer_initialized,
+                                init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -214,7 +215,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         # Initialize the distributed environment.
         if self.model_config.quantization == 'inc':
             self._set_env_vars()
-        init_worker_distributed_environment(self.parallel_config, self.rank,
+        init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.
@@ -511,13 +512,14 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
 
 def init_worker_distributed_environment(
-    parallel_config: ParallelConfig,
+    vllm_config: VllmConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
     backend = hpu_backend_string()
+    parallel_config = vllm_config.parallel_config
     init_distributed_environment(parallel_config.world_size,
                                  rank,
                                  distributed_init_method,
@@ -554,7 +556,7 @@ def init_worker_distributed_environment(
     assert dummy_tensor_hpu.item() == parallel_config.world_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
-
+    ensure_kv_transfer_initialized(vllm_config)
 
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
                                 max_model_len) -> None:
