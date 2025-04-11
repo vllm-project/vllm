@@ -281,6 +281,7 @@ def compute_probs_and_sample_next_token(
         draft_probs_buffer[:batch_size, speculative_token_idx, :] = logits
         draft_token_ids_buffer[:batch_size,
                                speculative_token_idx] = logits.argmax(dim=-1)
+        return
 
     is_greedy = sampling_metadata.temperature == -1
     temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
