@@ -184,7 +184,7 @@ class EngineArgs:
     enable_chunked_prefill: Optional[bool] = None
     disable_chunked_mm_input: bool = False
 
-    guided_decoding_backend: str = 'xgrammar'
+    guided_decoding_backend: str = DecodingConfig.guided_decoding_backend
     logits_processor_pattern: Optional[str] = None
 
     speculative_config: Optional[Dict[str, Any]] = None
@@ -402,13 +402,13 @@ class EngineArgs:
         parser.add_argument(
             '--guided-decoding-backend',
             type=str,
-            default='xgrammar',
+            default=DecodingConfig.guided_decoding_backend,
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
             'https://github.com/mlc-ai/xgrammar and '
             'https://github.com/guidance-ai/llguidance.'
             'Valid backend values are "xgrammar", "guidance", and "auto". '
-            'With "auto", we will make opinionated choices based on request'
+            'With "auto", we will make opinionated choices based on request '
             'contents and what the backend libraries currently support, so '
             'the behavior is subject to change in each release.')
         parser.add_argument(
@@ -1008,7 +1008,7 @@ class EngineArgs:
             action=StoreBoolean,
             default=EngineArgs.disable_chunked_mm_input,
             nargs="?",
-            const="False",
+            const="True",
             help="Disable multimodal input chunking attention for V1. "
             "If set to true and chunked prefill is enabled, we do not want to"
             " partially schedule a multimodal item. This ensures that if a "
