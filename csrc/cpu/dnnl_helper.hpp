@@ -114,9 +114,8 @@ class DNNLPrimitiveHelper {
 
     auto& stream = default_stream();
 
-    
     auto mat_weights_mem = b_m;
-    
+
 #ifdef __aarch64__
     if (matmul_pd.weights_desc() != b_m.get_desc()) {
       mat_weights_mem = dnnl::memory(matmul_pd.weights_desc(), engine);
