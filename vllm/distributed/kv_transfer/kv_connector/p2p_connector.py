@@ -200,9 +200,10 @@ class P2pConnector(KVConnectorBase):
 
             # check if both KV cache and the hidden states are received
             # If not, need to redo the forwarding to compute missing states
-            if not all([(num_computed_tokens == num_tokens), hidden is not None
-                        ]):
+            if not all([(num_computed_tokens == num_tokens), keys is not None,
+                        values is not None, hidden is not None]):
                 bypass_model_exec = False
+                break
 
             # update the end position based on how many tokens are cached.
             end_pos = start_pos + num_computed_tokens

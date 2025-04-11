@@ -59,8 +59,8 @@ class P2pNcclPipe:
         self.socks: Dict[str, Any] = {}  # remote_address: client socket
         self.comms: Dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
 
-        # self.buffer_size = 0
-        # self.buffer_size_threshold =  self.config.kv_buffer_size
+        self.buffer_size = 0
+        self.buffer_size_threshold = self.config.kv_buffer_size
 
         self.send_store_cv = threading.Condition()
         self.recv_store_cv = threading.Condition()
@@ -70,7 +70,7 @@ class P2pNcclPipe:
             target=self._listen_for_requests, daemon=True)
         self._listener_thread.start()
 
-        self._send_thread = threading.Thread(target=self._send_sync,
+        self._send_thread = threading.Thread(target=self._send_async,
                                              daemon=True)
         self._send_thread.start()
 
@@ -111,15 +111,16 @@ class P2pNcclPipe:
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
     ):
-        tensor = tensor.clone()
+        # tensor = tensor.clone()
         if remote_address is None:
             with self.recv_store_cv:
                 self.recv_store[tensor_id] = tensor
                 self.recv_store_cv.notify()
         else:
-            with self.send_store_cv:
-                self.send_store.append([tensor_id, remote_address, tensor])
-                self.send_store_cv.notify()
+            self._send_sync(tensor_id, tensor, remote_address)
+            # with self.send_store_cv:
+            #     self.send_store.append([tensor_id, remote_address, tensor])
+            #     self.send_store_cv.notify()
 
     def recv_tensor(
         self,
@@ -131,15 +132,22 @@ class P2pNcclPipe:
         if remote_address is None:
             start_time = time.time()
             with self.recv_store_cv:
-                while tensor_id not in self.recv_store:
-                    self.recv_store_cv.wait()
-                tensor = self.recv_store.pop(tensor_id)
+                if tensor_id not in self.recv_store:
+                    self.recv_store_cv.wait(timeout=0.001)
+                tensor = self.recv_store.pop(tensor_id, None)
             duration = time.time() - start_time
-            logger.info(
-                "🚧🚧🚧 Recv From %s, tensor_id: %s, shape: %s, "
-                "duration: %.3fms, size: %.3fGB", remote_address, tensor_id,
-                tensor.shape, duration * 1000,
-                tensor.element_size() * tensor.numel() / 1024**3)
+            if tensor is not None:
+                self.buffer_size -= (tensor.element_size() * tensor.numel())
+                logger.info(
+                    "🚧🚧🚧 Recv From %s, tensor_id: %s, shape: %s, "
+                    "duration: %.3fms, size: %.3fGB", remote_address,
+                    tensor_id, tensor.shape, duration * 1000,
+                    tensor.element_size() * tensor.numel() / 1024**3)
+            else:
+                logger.warning(
+                    "🚧🚧🚧 Recv From %s, tensor_id: %s, "
+                    "duration: %.3fms,", remote_address, tensor_id,
+                    duration * 1000)
             return tensor
 
         if remote_address not in self.socks:
@@ -188,6 +196,18 @@ class P2pNcclPipe:
                                                  torch, data["dtype"]),
                                              device=self.device)
 
+                        tensor_size = tensor.element_size() * tensor.numel()
+                        if (self.buffer_size + tensor_size
+                                > self.buffer_size_threshold):
+                            self.router_socket.send_multipart(
+                                [remote_address, b"2"])
+                            logger.warning(
+                                "Recv Tensor, Out Of Threshold, "
+                                "%s 👈 %s, data: %s", self.zmq_address,
+                                remote_address.decode(), data)
+                            continue
+
+                        self.buffer_size += tensor_size
                         self.router_socket.send_multipart(
                             [remote_address, b"0"])
                         comm, rank = self.comms[remote_address.decode()]
@@ -237,40 +257,49 @@ class P2pNcclPipe:
                         "Unexpected, Received message from %s, data: %s",
                         remote_address, data)
 
-    def _send_sync(self):
+    def _send_async(self):
         while True:
             with self.send_store_cv:
                 while not self.send_store:
                     self.send_store_cv.wait()
                 tensor_id, remote_address, tensor = self.send_store.popleft()
+            self._send_sync(tensor_id, tensor, remote_address)
 
-            if remote_address not in self.socks:
-                self._create_connect(remote_address)
+    def _send_sync(
+        self,
+        tensor_id: str,
+        tensor: torch.Tensor,
+        remote_address: typing.Optional[str] = None,
+    ):
+        if remote_address not in self.socks:
+            self._create_connect(remote_address)
 
-            sock = self.socks[remote_address]
-            comm, rank = self.comms[remote_address]
-            data = {
-                "cmd": "PUT",
-                "tensor_id": tensor_id,
-                "shape": tensor.shape,
-                "dtype": str(tensor.dtype).replace("torch.", "")
-            }
-            sock.send(msgpack.dumps(data))
+        sock = self.socks[remote_address]
+        comm, rank = self.comms[remote_address]
+        data = {
+            "cmd": "PUT",
+            "tensor_id": tensor_id,
+            "shape": tensor.shape,
+            "dtype": str(tensor.dtype).replace("torch.", "")
+        }
+        sock.send(msgpack.dumps(data))
 
-            response = sock.recv()
-            if response != b"0":
-                self.send_store.append([tensor_id, remote_address, tensor])
-                logger.warning(
-                    "Send Tensor, Peer Out Of Memory, %s 👉 %s, "
-                    "MyRank: %s, data: %s, tensor: %s, size: %fGB",
-                    self.zmq_address, remote_address, rank, data, tensor.shape,
-                    tensor.element_size() * tensor.numel() / 1024**3)
-                continue
+        response = sock.recv()
+        if response != b"0":
+            # with self.send_store_cv:
+            #     self.send_store.append([tensor_id, remote_address, tensor])
+            #     self.send_store_cv.notify()
+            logger.warning(
+                "Send Tensor, Peer Out Of Memory/Threshold, %s 👉 %s, "
+                "MyRank: %s, data: %s, tensor: %s, size: %fGB, response: %s",
+                self.zmq_address, remote_address, rank, data, tensor.shape,
+                tensor.element_size() * tensor.numel() / 1024**3,
+                response.decode())
+            return
 
-            self._send(comm, tensor.to(self.device), rank ^ 1)
-            logger.info(
-                "Send Tensor, %s 👉 %s, MyRank: %s, data: %s, tensor: %s",
-                self.zmq_address, remote_address, rank, data, tensor.shape)
+        self._send(comm, tensor.to(self.device), rank ^ 1)
+        logger.info("Send Tensor, %s 👉 %s, MyRank: %s, data: %s, tensor: %s",
+                    self.zmq_address, remote_address, rank, data, tensor.shape)
 
     def _ping(self):
         sock = self.context.socket(zmq.DEALER)
