@@ -332,8 +332,8 @@ MINIMAX_VL_01_INPUTS_DOCSTRING = r"""
             `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and 2 additional tensors of shape
             `(batch_size, num_heads, encoder_sequence_length, embed_size_per_head)`.
 
-            Contains pre-computed hidden-states (key and values in the self-attention blocks and in the cross-attention
-            blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
+            Contains pre-computed hidden-states (key and values in the self-attention
+            blocks and in the cross-attention blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
 
             If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those that
             don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of all
@@ -637,19 +637,10 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
         prompt_text = "test_image" + image_token * num_images
 
-        # 对文本进行 tokenization
-        tokenizer = self.info.get_tokenizer()
-        input_ids = tokenizer(prompt_text, return_tensors="pt").input_ids
-
-        # 将 input_ids 添加到 hf_processor_mm_kwargs 中
-        hf_processor_mm_kwargs = {
-            "input_ids": input_ids
-        }
-
         return ProcessorInputs(
             prompt_text=prompt_text,
             mm_data=mm_data,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs
+            hf_processor_mm_kwargs={}
         )
 
     def _get_dummy_images(
