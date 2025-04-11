@@ -19,6 +19,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
+from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -58,6 +59,7 @@ class EngineCore:
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
+        self.vllm_config = vllm_config
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
@@ -203,7 +205,15 @@ class EngineCore:
                 scheduler_stats=self.scheduler.make_stats(),
             )
         scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
+        try:
+            output = self.model_executor.execute_model(scheduler_output)
+        except BaseException as err:
+            # NOTE: This method is exception-free
+            dump_engine_exception(self.vllm_config, scheduler_output,
+                                  self.scheduler.make_stats())
+            # Re-raise exception
+            raise err
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
 
