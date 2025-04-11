@@ -72,7 +72,6 @@ steps:
 
 - label: Basic Correctness Test # 30min
   mirror_hardwares: [amd_experimental]
-  #mirror_hardwares: [amd]
   fast_check: true
   source_file_dependencies:
   - vllm/
@@ -97,7 +96,7 @@ steps:
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
 
 - label: Core Test # 10min
-  mirror_hardwares: [amd_experimental] [amd]
+  mirror_hardwares: [amd_experimental, amd]
   fast_check: true
   source_file_dependencies:
   - vllm/core
@@ -161,7 +160,7 @@ steps:
   - popd
 
 - label: Metrics, Tracing Test # 10min
-  mirror_hardwares: [amd_experimental] [amd]
+  mirror_hardwares: [amd_experimental, amd]
   num_gpus: 2
   source_file_dependencies:
   - vllm/
@@ -175,7 +174,7 @@ steps:
 #####  1 GPU test  #####
 
 - label: Regression Test # 5min
-  mirror_hardwares: [amd_experimental] [amd]
+  mirror_hardwares: [amd_experimental, amd]
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -185,7 +184,7 @@ steps:
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Engine Test # 10min
-  mirror_hardwares: [amd_experimental] [amd]
+  mirror_hardwares: [amd_experimental, amd]
   source_file_dependencies:
   - vllm/
   - tests/engine
@@ -247,7 +246,7 @@ steps:
     - VLLM_USE_V1=0 python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min
-  mirror_hardwares: [amd_experimental] [amd]
+  mirror_hardwares: [amd_experimental, amd]
   source_file_dependencies:
   - vllm/
   - tests/prefix_caching
@@ -266,7 +265,7 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LogitsProcessor Test # 5min
-  mirror_hardwares: [amd_experimental] [amd]
+  mirror_hardwares: [amd_experimental, amd]
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/model_executor/guided_decoding
@@ -345,7 +344,7 @@ steps:
     - pytest -v -s tensorizer_loader
 
 - label: Benchmarks # 9min
-  mirror_hardwares: [amd_experimental] [amd]
+  mirror_hardwares: [amd_experimental, amd]
   working_dir: "/vllm-workspace/.buildkite"
   source_file_dependencies:
   - benchmarks/
@@ -483,7 +482,7 @@ steps:
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
-  mirror_hardwares: [amd_experimental] [amd]
+  mirror_hardwares: [amd_experimental, amd]
   optional: true
   commands:
     - echo 'Testing custom models...'
@@ -495,7 +494,7 @@ steps:
 #####  multi gpus test  #####
 
 - label: Distributed Comm Ops Test # 7min
-  mirror_hardwares: [amd_experimental] [amd]
+  mirror_hardwares: [amd_experimental, amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
