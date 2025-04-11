@@ -127,6 +127,7 @@ class KVCacheManager:
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         if self.log_stats:
+            assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.requests += 1
         # When the request requires prompt logprobs, we skip prefix caching.
         if request.sampling_params.prompt_logprobs is not None:
@@ -148,6 +149,7 @@ class KVCacheManager:
         computed_blocks = (
             self.specialized_manager.find_longest_cache_hit(block_hashes))
         if self.log_stats:
+            assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)
 
@@ -321,6 +323,7 @@ class KVCacheManager:
         if not self.block_pool.reset_prefix_cache():
             return False
         if self.log_stats:
+            assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
         return True
 
