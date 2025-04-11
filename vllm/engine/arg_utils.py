@@ -356,9 +356,9 @@ class EngineArgs:
                                 **load_kwargs["download_dir"])
         load_group.add_argument('--model-loader-extra-config',
                                 **load_kwargs["model_loader_extra_config"])
-        parser.add_argument('--use-tqdm-on-load',
-                            action=argparse.BooleanOptionalAction,
-                            **load_kwargs["use_tqdm_on_load"])
+        load_group.add_argument('--use-tqdm-on-load',
+                                action=argparse.BooleanOptionalAction,
+                                **load_kwargs["use_tqdm_on_load"])
 
         parser.add_argument(
             '--config-format',
