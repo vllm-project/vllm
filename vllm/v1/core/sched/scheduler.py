@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Optional, Union
 
@@ -76,9 +76,12 @@ class Scheduler(SchedulerInterface):
         # Priority queues for requests.
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
-        # The requests that have been scheduled and are being executed
-        # by the executor.
-        self.scheduled_req_ids: set[str] = set()
+
+        # req_id -> Number of times the request has been scheduled.
+        # With PP, when the input prompt is divided into chunks, we can
+        # schedule a new chunk even before the previous chunk has completed
+        # the full pipeline stages. This helps reduce TTFT.
+        self.scheduled_req_ids: dict[str, int] = defaultdict(int)
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -88,8 +91,9 @@ class Scheduler(SchedulerInterface):
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
-        # Request id -> CachedRequestData
-        self._cached_reqs_data: dict[str, CachedRequestData] = {}
+        # Request id -> deque of CachedRequestData
+        self._cached_reqs_data: dict[
+            str, deque[CachedRequestData]] = defaultdict(deque)
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -153,11 +157,6 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            if request.request_id in self.scheduled_req_ids:
-                # This request has already been scheduled.
-                req_index += 1
-                continue
-
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
             if (0 < self.scheduler_config.long_prefill_token_threshold <
@@ -165,26 +164,29 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = (
                     self.scheduler_config.long_prefill_token_threshold)
             num_new_tokens = min(num_new_tokens, token_budget)
-            assert num_new_tokens > 0
 
             # Schedule encoder inputs.
+            encoder_inputs_to_schedule = None
+            new_encoder_budget = encoder_budget
             if request.has_encoder_inputs:
                 (encoder_inputs_to_schedule, num_new_tokens,
                  new_encoder_budget) = self._try_schedule_encoder_inputs(
                      request, request.num_computed_tokens, num_new_tokens,
                      encoder_budget)
-                if num_new_tokens == 0:
-                    # The request cannot be scheduled because the encoder budget
-                    # or the encoder cache is exhausted.
-                    # NOTE(woosuk): By using `continue` instead of `break` here,
-                    # we intentionally relax the strict FCFS scheduling policy
-                    # to allow lower-priority requests to be scheduled when a
-                    # higher-priority request is blocked by encoder constraints.
-                    req_index += 1
-                    continue
-            else:
-                encoder_inputs_to_schedule = None
-                new_encoder_budget = encoder_budget
+
+            if num_new_tokens == 0:
+                # The request cannot be scheduled because one of the following
+                # reasons:
+                # 1. No new tokens to schedule. This may happen when PP>1 and
+                #    we have already scheduled all prompt tokens but they are
+                #    not finished yet.
+                # 2. The encoder budget is exhausted.
+                # 3. The encoder cache is exhausted.
+                # NOTE(woosuk): Here, by doing `continue` instead of `break`,
+                # we do not strictly follow the FCFS scheduling policy and
+                # allow the lower-priority requests to be scheduled.
+                req_index += 1
+                continue
 
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
@@ -216,7 +218,7 @@ class Scheduler(SchedulerInterface):
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            self.scheduled_req_ids.add(request.request_id)
+            self.scheduled_req_ids[request.request_id] += 1
             if request.use_structured_output:
                 # PERF: in case of chunked prefill,
                 # request might not include any new tokens.
@@ -332,7 +334,7 @@ class Scheduler(SchedulerInterface):
                         request.request_id] = req_index
                 req_index += 1
                 self.running.append(request)
-                self.scheduled_req_ids.add(request.request_id)
+                self.scheduled_req_ids[request.request_id] += 1
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
@@ -463,18 +465,21 @@ class Scheduler(SchedulerInterface):
         num_regular_tokens = num_scheduled_tokens - num_scheduled_spec_tokens
         new_token_ids = request.all_token_ids[
             num_computed_tokens:num_computed_tokens + num_regular_tokens]
-        req_data = self._cached_reqs_data.get(request.request_id)
-        if req_data is not None:
+
+        req_data_queue = self._cached_reqs_data.get(request.request_id)
+        if req_data_queue:
+            req_data = req_data_queue.popleft()
             req_data.resumed_from_preemption = resumed_from_preemption
             req_data.new_token_ids = new_token_ids
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
         else:
+            # No cached request data, or all cached request data has been
+            # used by the scheduled requests.
             req_data = CachedRequestData.from_request(request,
                                                       resumed_from_preemption,
                                                       new_token_ids,
                                                       new_block_ids)
-            self._cached_reqs_data[request.request_id] = req_data
         return req_data
 
     def _try_schedule_encoder_inputs(
@@ -500,6 +505,9 @@ class Scheduler(SchedulerInterface):
         limitations, the method adjusts `num_new_tokens` to schedule only the
         decoder tokens up to just before the unschedulable encoder input.
         """
+        if num_new_tokens == 0 or not request.has_encoder_inputs:
+            return [], num_new_tokens, encoder_budget
+
         encoder_inputs_to_schedule: list[int] = []
         mm_positions = request.mm_positions
         assert mm_positions is not None
@@ -667,9 +675,15 @@ class Scheduler(SchedulerInterface):
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
-            self.scheduled_req_ids.remove(req_id)
+            self.scheduled_req_ids[req_id] -= 1
+            if self.scheduled_req_ids[req_id] == 0:
+                del self.scheduled_req_ids[req_id]
             if not stopped:
                 new_running.append(request)
+
+        # Return the cached request data to the queue so they can be reused.
+        for req_data in scheduler_output.scheduled_cached_reqs:
+            self._cached_reqs_data[req_data.req_id].append(req_data)
 
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(
@@ -713,7 +727,8 @@ class Scheduler(SchedulerInterface):
 
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
-                self.scheduled_req_ids.discard(request.request_id)
+                if request.request_id in self.scheduled_req_ids:
+                    del self.scheduled_req_ids[request.request_id]
             else:
                 self.waiting.remove(request)
             request.status = finished_status
@@ -733,10 +748,6 @@ class Scheduler(SchedulerInterface):
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
-
-    def get_num_unscheduled_requests(self) -> int:
-        """Number of requests that are not being processed by the executor."""
-        return self.get_num_unfinished_requests() - len(self.scheduled_req_ids)
 
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()

@@ -118,11 +118,6 @@ class SchedulerInterface(ABC):
         return self.has_unfinished_requests() or self.has_finished_requests()
 
     @abstractmethod
-    def get_num_unscheduled_requests(self) -> int:
-        """Number of requests that are not being processed by the executor."""
-        raise NotImplementedError
-
-    @abstractmethod
     def reset_prefix_cache(self) -> bool:
         """Reset the prefix cache for KV cache.
 
