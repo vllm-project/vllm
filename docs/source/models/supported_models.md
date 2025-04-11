@@ -1040,10 +1040,10 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 :::
 
-<sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.
-&nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`--hf-overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'`
-<sup>E</sup> Pre-computed embeddings can be inputted for this modality.
+<sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.  
+&nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:  
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`--hf-overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'`  
+<sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{important}
