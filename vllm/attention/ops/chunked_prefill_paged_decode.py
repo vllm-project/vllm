@@ -10,6 +10,9 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm import _custom_ops as ops
+from vllm.platforms.rocm import use_rocm_custom_paged_attention
+
 from .prefix_prefill import context_attention_fwd
 
 
@@ -33,26 +36,26 @@ def kernel_paged_attention_2d(
         num_query_heads: tl.constexpr,  # int
         num_queries_per_kv: tl.constexpr,  # int
         num_queries_per_kv_padded: tl.constexpr,  # int
-        block_table_stride: tl.constexpr,  # int
-        query_stride_0: tl.constexpr,  # int
-        query_stride_1: tl.constexpr,  # int, should be equal to head_size
-        output_stride_0: tl.constexpr,  # int
-        output_stride_1: tl.constexpr,  # int, should be equal to head_size
+        block_table_stride: tl.int64,  # int
+        query_stride_0: tl.int64,  # int
+        query_stride_1: tl.int64,  # int, should be equal to head_size
+        output_stride_0: tl.int64,  # int
+        output_stride_1: tl.int64,  # int, should be equal to head_size
         BLOCK_SIZE: tl.constexpr,  # int
         HEAD_SIZE: tl.constexpr,  # int
         HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
         USE_ALIBI_SLOPES: tl.constexpr,  # bool
         SLIDING_WINDOW: tl.constexpr,  # int
         x: tl.constexpr,  # int
-        stride_k_cache_0: tl.constexpr,  # int
-        stride_k_cache_1: tl.constexpr,  # int
-        stride_k_cache_2: tl.constexpr,  # int
-        stride_k_cache_3: tl.constexpr,  # int
-        stride_k_cache_4: tl.constexpr,  # int
-        stride_v_cache_0: tl.constexpr,  # int
-        stride_v_cache_1: tl.constexpr,  # int
-        stride_v_cache_2: tl.constexpr,  # int
-        stride_v_cache_3: tl.constexpr,  # int
+        stride_k_cache_0: tl.int64,  # int
+        stride_k_cache_1: tl.int64,  # int
+        stride_k_cache_2: tl.int64,  # int
+        stride_k_cache_3: tl.int64,  # int
+        stride_k_cache_4: tl.int64,  # int
+        stride_v_cache_0: tl.int64,  # int
+        stride_v_cache_1: tl.int64,  # int
+        stride_v_cache_2: tl.int64,  # int
+        stride_v_cache_3: tl.int64,  # int
         filter_by_query_len: tl.constexpr,  # bool
         query_start_len_ptr,  # [num_seqs+1]
 ):
@@ -212,6 +215,7 @@ def chunked_prefill_paged_decode(
     block_table,
     query_start_loc,
     seq_lens,
+    max_seq_len,
     max_query_len,
     k_scale,
     v_scale,
@@ -240,6 +244,7 @@ def chunked_prefill_paged_decode(
             b_loc=block_table,
             b_start_loc=query_start_loc,
             b_seq_len=seq_lens,
+            max_seq_len=max_seq_len,
             max_input_len=max_query_len,
             k_scale=k_scale,
             v_scale=v_scale,
@@ -275,43 +280,87 @@ def chunked_prefill_paged_decode(
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv),
                                     16)
 
-    kernel_paged_attention_2d[(
-        num_seqs,
-        num_kv_heads,
-    )](
-        output_ptr=output,
-        query_ptr=query,
-        key_cache_ptr=key_cache,
-        value_cache_ptr=value_cache,
-        block_tables_ptr=block_table,
-        seq_lens_ptr=seq_lens,
-        alibi_slopes_ptr=alibi_slopes,
-        scale=sm_scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        num_query_heads=num_query_heads,
-        num_queries_per_kv=num_queries_per_kv,
-        num_queries_per_kv_padded=num_queries_per_kv_padded,
-        block_table_stride=block_table.stride(0),
-        query_stride_0=query.stride(0),
-        query_stride_1=query.stride(1),
-        output_stride_0=output.stride(0),
-        output_stride_1=output.stride(1),
-        BLOCK_SIZE=block_size,
-        HEAD_SIZE=head_size,
-        HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-        USE_ALIBI_SLOPES=use_alibi_slopes,
-        SLIDING_WINDOW=sliding_window,
-        x=key_cache.shape[4],
-        stride_k_cache_0=key_cache.stride(0),
-        stride_k_cache_1=key_cache.stride(1),
-        stride_k_cache_2=key_cache.stride(2),
-        stride_k_cache_3=key_cache.stride(3),
-        stride_k_cache_4=key_cache.stride(4),
-        stride_v_cache_0=value_cache.stride(0),
-        stride_v_cache_1=value_cache.stride(1),
-        stride_v_cache_2=value_cache.stride(2),
-        stride_v_cache_3=value_cache.stride(3),
-        filter_by_query_len=True,
-        query_start_len_ptr=query_start_loc,
-    )
+    use_custom = use_rocm_custom_paged_attention(query.dtype, head_size,
+                                                 block_size,
+                                                 num_queries_per_kv,
+                                                 max_seq_len, sliding_window)
+    if use_custom:
+        _PARTITION_SIZE_ROCM = 256
+        max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
+                              _PARTITION_SIZE_ROCM)
+        assert _PARTITION_SIZE_ROCM % block_size == 0
+        total_num_seq = query.shape[0]
+        tmp_output = torch.empty(
+            size=(total_num_seq, num_query_heads, max_num_partitions,
+                  head_size),
+            dtype=output.dtype,
+            device=output.device,
+        )
+        exp_sums = torch.empty(
+            size=(total_num_seq, num_query_heads, max_num_partitions),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        max_logits = torch.empty_like(exp_sums)
+
+        ops.paged_attention_rocm(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            scale=sm_scale,
+            block_tables=block_table,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            block_size=block_size,
+            max_seq_len=max_seq_len,
+            alibi_slopes=alibi_slopes,
+            kv_cache_dtype=kv_cache_dtype,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+    else:
+        kernel_paged_attention_2d[(
+            num_seqs,
+            num_kv_heads,
+        )](
+            output_ptr=output,
+            query_ptr=query,
+            key_cache_ptr=key_cache,
+            value_cache_ptr=value_cache,
+            block_tables_ptr=block_table,
+            seq_lens_ptr=seq_lens,
+            alibi_slopes_ptr=alibi_slopes,
+            scale=sm_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            num_query_heads=num_query_heads,
+            num_queries_per_kv=num_queries_per_kv,
+            num_queries_per_kv_padded=num_queries_per_kv_padded,
+            block_table_stride=block_table.stride(0),
+            query_stride_0=query.stride(0),
+            query_stride_1=query.stride(1),
+            output_stride_0=output.stride(0),
+            output_stride_1=output.stride(1),
+            BLOCK_SIZE=block_size,
+            HEAD_SIZE=head_size,
+            HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+            USE_ALIBI_SLOPES=use_alibi_slopes,
+            SLIDING_WINDOW=sliding_window,
+            x=key_cache.shape[4],
+            stride_k_cache_0=key_cache.stride(0),
+            stride_k_cache_1=key_cache.stride(1),
+            stride_k_cache_2=key_cache.stride(2),
+            stride_k_cache_3=key_cache.stride(3),
+            stride_k_cache_4=key_cache.stride(4),
+            stride_v_cache_0=value_cache.stride(0),
+            stride_v_cache_1=value_cache.stride(1),
+            stride_v_cache_2=value_cache.stride(2),
+            stride_v_cache_3=value_cache.stride(3),
+            filter_by_query_len=True,
+            query_start_len_ptr=query_start_loc,
+        )

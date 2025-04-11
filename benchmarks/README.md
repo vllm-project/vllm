@@ -41,29 +41,39 @@ become available.
       <td><code>synthetic</code></td>
     </tr>
     <tr>
-      <td><strong>HuggingFace</strong></td>
-      <td style="text-align: center;">🟡</td>
-      <td style="text-align: center;">🟡</td>
-      <td>Specify your dataset path on HuggingFace</td>
+      <td><strong>HuggingFace-VisionArena</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>lmarena-ai/VisionArena-Chat</code></td>
     </tr>
     <tr>
-      <td><strong>VisionArena</strong></td>
+      <td><strong>HuggingFace-InstructCoder</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
-      <td><code>lmarena-ai/vision-arena-bench-v0.1</code> (a HuggingFace dataset)</td>
+      <td><code>likaixin/InstructCoder</code></td>
+    </tr>
+      <tr>
+      <td><strong>HuggingFace-AIMO</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>AI-MO/aimo-validation-aime</code> , <code>AI-MO/NuminaMath-1.5</code>, <code>AI-MO/NuminaMath-CoT</code></td>
+    </tr>
+    <tr>
+      <td><strong>HuggingFace-Other</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>lmms-lab/LLaVA-OneVision-Data</code>, <code>Aeala/ShareGPT_Vicuna_unfiltered</code></td>
     </tr>
   </tbody>
 </table>
 
 ✅: supported
 
+🟡: Partial support
+
 🚧: to be supported
 
-🟡: Partial support. Currently, HuggingFaceDataset only supports dataset formats
-similar to `lmms-lab/LLaVA-OneVision-Data` and `Aeala/ShareGPT_Vicuna_unfiltered`.
-If you need support for other dataset formats, please consider contributing.
-
-**Note**: VisionArena’s `dataset-name` should be set to `hf`
+**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`
 
 ---
 ## Example - Online Benchmark
@@ -71,8 +81,7 @@ If you need support for other dataset formats, please consider contributing.
 First start serving your model
 
 ```bash
-MODEL_NAME="NousResearch/Hermes-3-Llama-3.1-8B"
-vllm serve ${MODEL_NAME} --disable-log-requests
+vllm serve NousResearch/Hermes-3-Llama-3.1-8B --disable-log-requests
 ```
 
 Then run the benchmarking script
@@ -80,12 +89,13 @@ Then run the benchmarking script
 ```bash
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-MODEL_NAME="NousResearch/Hermes-3-Llama-3.1-8B"
-NUM_PROMPTS=10
-BACKEND="vllm"
-DATASET_NAME="sharegpt"
-DATASET_PATH="<your data path>/ShareGPT_V3_unfiltered_cleaned_split.json"
-python3 vllm/benchmarks/benchmark_serving.py --backend ${BACKEND} --model ${MODEL_NAME} --endpoint /v1/completions --dataset-name ${DATASET_NAME} --dataset-path ${DATASET_PATH} --num-prompts ${NUM_PROMPTS}
+python3 vllm/benchmarks/benchmark_serving.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --endpoint /v1/completions \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --num-prompts 10
 ```
 
 If successful, you will see the following output
@@ -122,88 +132,105 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
 ```
 
 ```bash
-MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
-NUM_PROMPTS=10
-BACKEND="openai-chat"
-DATASET_NAME="hf"
-DATASET_PATH="lmarena-ai/vision-arena-bench-v0.1"
-DATASET_SPLIT='train'
-
 python3 vllm/benchmarks/benchmark_serving.py \
-  --backend "${BACKEND}" \
-  --model "${MODEL_NAME}" \
-  --endpoint "/v1/chat/completions" \
-  --dataset-name "${DATASET_NAME}" \
-  --dataset-path "${DATASET_PATH}" \
-  --hf-split "${DATASET_SPLIT}" \
-  --num-prompts "${NUM_PROMPTS}"
+  --backend openai-chat \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name hf \
+  --dataset-path lmarena-ai/VisionArena-Chat \
+  --hf-split train \
+  --num-prompts 1000
 ```
 
-### HuggingFaceDataset Examples
+### InstructCoder Benchmark with Speculative Decoding
 
-Currently, HuggingFaceDataset only supports dataset formats
-similar to `lmms-lab/LLaVA-OneVision-Data` and `Aeala/ShareGPT_Vicuna_unfiltered`. If you need support for other dataset
-formats, please consider contributing.
+``` bash
+VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+    --speculative-model "[ngram]" \
+    --ngram_prompt_lookup_min 2 \
+    --ngram-prompt-lookup-max 5 \
+    --num_speculative_tokens 5
+```
+
+``` bash
+python3 benchmarks/benchmark_serving.py \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --dataset-name hf \
+    --dataset-path likaixin/InstructCoder \
+    --num-prompts 2048
+```
+
+### Other HuggingFaceDataset Examples
 
 ```bash
-# need a model with vision capability here
 vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
 ```
 
 **`lmms-lab/LLaVA-OneVision-Data`**
 
 ```bash
-MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
-NUM_PROMPTS=10
-BACKEND="openai-chat"
-DATASET_NAME="hf"
-DATASET_PATH="lmms-lab/LLaVA-OneVision-Data"
-DATASET_SPLIT='train'
-DATASET_SUBSET='chart2text(cauldron)'
 python3 vllm/benchmarks/benchmark_serving.py \
-  --backend "${BACKEND}" \
-  --model "${MODEL_NAME}" \
-  --endpoint "/v1/chat/completions" \
-  --dataset-name "${DATASET_NAME}" \
-  --dataset-path "${DATASET_PATH}" \
-  --hf-split "${DATASET_SPLIT}" \
-  --num-prompts "${NUM_PROMPTS}" \
-  --hf-subset "${DATASET_SUBSET}"
+  --backend openai-chat \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name hf \
+  --dataset-path lmms-lab/LLaVA-OneVision-Data \
+  --hf-split train \
+  --hf-subset "chart2text(cauldron)" \
+  --num-prompts 10
 ```
 
 **`Aeala/ShareGPT_Vicuna_unfiltered`**
 
 ```bash
-MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
-NUM_PROMPTS=10
-BACKEND="openai-chat"
-DATASET_NAME="hf"
-DATASET_PATH="Aeala/ShareGPT_Vicuna_unfiltered"
-DATASET_SPLIT='train'
 python3 vllm/benchmarks/benchmark_serving.py \
-  --backend "${BACKEND}" \
-  --model "${MODEL_NAME}" \
-  --endpoint "/v1/chat/completions" \
-  --dataset-name "${DATASET_NAME}" \
-  --dataset-path "${DATASET_PATH}" \
-  --hf-split "${DATASET_SPLIT}" \
-  --num-prompts "${NUM_PROMPTS}" \
+  --backend openai-chat \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name hf \
+  --dataset-path Aeala/ShareGPT_Vicuna_unfiltered \
+  --hf-split train \
+  --num-prompts 10
+```
+
+**`AI-MO/aimo-validation-aime`**
+
+``` bash
+python3 vllm/benchmarks/benchmark_serving.py \
+    --model Qwen/QwQ-32B \
+    --dataset-name hf \
+    --dataset-path AI-MO/aimo-validation-aime \
+    --num-prompts 10 \
+    --seed 42
+```
+
+### Running With Sampling Parameters
+
+When using OpenAI-compatible backends such as `vllm`, optional sampling
+parameters can be specified. Example client command:
+
+```bash
+python3 vllm/benchmarks/benchmark_serving.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --endpoint /v1/completions \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --top-k 10 \
+  --top-p 0.9 \
+  --temperature 0.5 \
+  --num-prompts 10
 ```
 
 ---
 ## Example - Offline Throughput Benchmark
 
 ```bash
-MODEL_NAME="NousResearch/Hermes-3-Llama-3.1-8B"
-NUM_PROMPTS=10
-DATASET_NAME="sonnet"
-DATASET_PATH="vllm/benchmarks/sonnet.txt"
-
 python3 vllm/benchmarks/benchmark_throughput.py \
-  --model "${MODEL_NAME}" \
-  --dataset-name "${DATASET_NAME}" \
-  --dataset-path "${DATASET_PATH}" \
-  --num-prompts "${NUM_PROMPTS}"
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset-name sonnet \
+  --dataset-path vllm/benchmarks/sonnet.txt \
+  --num-prompts 10
 ```
 
 If successful, you will see the following output
@@ -217,19 +244,13 @@ Total num output tokens:  1500
 ### VisionArena Benchmark for Vision Language Models
 
 ``` bash
-MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
-NUM_PROMPTS=10
-DATASET_NAME="hf"
-DATASET_PATH="lmarena-ai/vision-arena-bench-v0.1"
-DATASET_SPLIT="train"
-
 python3 vllm/benchmarks/benchmark_throughput.py \
-  --model "${MODEL_NAME}" \
-  --backend "vllm-chat" \
-  --dataset-name "${DATASET_NAME}" \
-  --dataset-path "${DATASET_PATH}" \
-  --num-prompts "${NUM_PROMPTS}" \
-  --hf-split "${DATASET_SPLIT}"
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --backend vllm-chat \
+  --dataset-name hf \
+  --dataset-path lmarena-ai/VisionArena-Chat \
+  --num-prompts 1000 \
+  --hf-split train
 ```
 
 The `num prompt tokens` now includes image token counts
@@ -240,29 +261,83 @@ Total num prompt tokens:  14527
 Total num output tokens:  1280
 ```
 
+### InstructCoder Benchmark with Speculative Decoding
+
+``` bash
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+VLLM_USE_V1=1 \
+python3 vllm/benchmarks/benchmark_throughput.py \
+    --dataset-name=hf \
+    --dataset-path=likaixin/InstructCoder \
+    --model=meta-llama/Meta-Llama-3-8B-Instruct \
+    --input-len=1000 \
+    --output-len=100 \
+    --num-prompts=2048 \
+    --async-engine \
+    --speculative-model="[ngram]" \
+    --ngram_prompt_lookup_min=2 \
+    --ngram-prompt-lookup-max=5 \
+    --num_speculative_tokens=5
+```
+
+```
+Throughput: 104.77 requests/s, 23836.22 total tokens/s, 10477.10 output tokens/s
+Total num prompt tokens:  261136
+Total num output tokens:  204800
+```
+
+### Other HuggingFaceDataset Examples
+
+**`lmms-lab/LLaVA-OneVision-Data`**
+
+```bash
+python3 vllm/benchmarks/benchmark_throughput.py \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --backend vllm-chat \
+  --dataset-name hf \
+  --dataset-path lmms-lab/LLaVA-OneVision-Data \
+  --hf-split train \
+  --hf-subset "chart2text(cauldron)" \
+  --num-prompts 10
+```
+
+**`Aeala/ShareGPT_Vicuna_unfiltered`**
+
+```bash
+python3 vllm/benchmarks/benchmark_throughput.py \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --backend vllm-chat \
+  --dataset-name hf \
+  --dataset-path Aeala/ShareGPT_Vicuna_unfiltered \
+  --hf-split train \
+  --num-prompts 10
+```
+
+**`AI-MO/aimo-validation-aime`**
+
+```bash
+python3 benchmarks/benchmark_throughput.py \
+  --model Qwen/QwQ-32B \
+  --backend vllm \
+  --dataset-name hf \
+  --dataset-path AI-MO/aimo-validation-aime \
+  --hf-split train \
+  --num-prompts 10
+```
+
 ### Benchmark with LoRA Adapters
 
 ``` bash
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-MODEL_NAME="meta-llama/Llama-2-7b-hf"
-BACKEND="vllm"
-DATASET_NAME="sharegpt"
-DATASET_PATH="<your data path>/ShareGPT_V3_unfiltered_cleaned_split.json"
-NUM_PROMPTS=10
-MAX_LORAS=2
-MAX_LORA_RANK=8
-ENABLE_LORA="--enable-lora"
-LORA_PATH="yard1/llama-2-7b-sql-lora-test"
-
 python3 vllm/benchmarks/benchmark_throughput.py \
-  --model "${MODEL_NAME}" \
-  --backend "${BACKEND}" \
-  --dataset_path "${DATASET_PATH}" \
-  --dataset_name "${DATASET_NAME}" \
-  --num-prompts "${NUM_PROMPTS}" \
-  --max-loras "${MAX_LORAS}" \
-  --max-lora-rank "${MAX_LORA_RANK}" \
-  ${ENABLE_LORA} \
-  --lora-path "${LORA_PATH}"
+  --model meta-llama/Llama-2-7b-hf \
+  --backend vllm \
+  --dataset_path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --dataset_name sharegpt \
+  --num-prompts 10 \
+  --max-loras 2 \
+  --max-lora-rank 8 \
+  --enable-lora \
+  --lora-path yard1/llama-2-7b-sql-lora-test
   ```

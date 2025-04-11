@@ -13,6 +13,11 @@ from vllm.platforms import current_platform
 from .utils import PunicaTensors, assert_close, generate_data_for_nslices
 
 
+@pytest.fixture(autouse=True)
+def reset_device(reset_default_device):
+    pass
+
+
 # Utility shrink and expand operations used as reference implementations.
 def sgmv_shrink_for_nslices(
         nslices: int, inputs_tensor: torch.Tensor,

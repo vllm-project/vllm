@@ -33,6 +33,7 @@ class BenchmarkSubcommand(CLISubcommand):
         bench_parser = subparsers.add_parser(
             "bench",
             help="vLLM bench subcommand.",
+            description="vLLM bench subcommand.",
             usage="vllm bench <bench_type> [options]")
         bench_subparsers = bench_parser.add_subparsers(required=True,
                                                        dest="bench_type")

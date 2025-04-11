@@ -58,7 +58,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 @pytest.mark.xfail(
     current_platform.is_rocm(),
     reason="MiniCPM-V dependency xformers incompatible with ROCm")
-@create_new_process_for_each_test()
 def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -78,6 +77,8 @@ def test_minicpmv_lora(minicpmv_lora_files):
         assert EXPECTED_OUTPUT[i].startswith(output2[i])
 
 
+@pytest.mark.skipif(current_platform.is_cuda_alike(),
+                    reason="Skipping to avoid redundant model tests")
 @pytest.mark.xfail(
     current_platform.is_rocm(),
     reason="MiniCPM-V dependency xformers incompatible with ROCm")
@@ -99,6 +100,8 @@ def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
         assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
 
 
+@pytest.mark.skipif(current_platform.is_cuda_alike(),
+                    reason="Skipping to avoid redundant model tests")
 @pytest.mark.xfail(
     current_platform.is_rocm(),
     reason="MiniCPM-V dependency xformers incompatible with ROCm")

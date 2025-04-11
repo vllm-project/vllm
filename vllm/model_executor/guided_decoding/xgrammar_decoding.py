@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, List
 
 import torch
 
+import vllm.envs
 from vllm.logger import init_logger
 
 try:
@@ -131,8 +132,13 @@ class GrammarCompilerCache:
                 encoded_vocab=config_data.encoded_vocab,
                 metadata=config_data.metadata,
             )
+            cache_size = vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024
             cls._cache[cache_key] = xgr.GrammarCompiler(
-                tokenizer_info, max_threads=config.max_threads)
+                tokenizer_info,
+                max_threads=config.max_threads,
+                cache_enabled=True,
+                cache_limit_bytes=cache_size,
+            )
 
         return cls._cache[cache_key]
 
@@ -320,7 +326,10 @@ class XGrammarLogitsProcessor:
             elif self.config.grammar_str is not None:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
             elif self.config.json_object:
-                self.ctx = compiler.compile_builtin_json_grammar()
+                any_whitespace = self.config.any_whitespace
+                self.ctx = compiler\
+                    .compile_json_schema('{"type": "object"}',
+                                         any_whitespace=any_whitespace)
             else:
                 raise ValueError(
                     "Invalid configuration for xgrammar logits processor")

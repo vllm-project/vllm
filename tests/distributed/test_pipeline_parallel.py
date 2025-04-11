@@ -217,7 +217,7 @@ EMBEDDING_MODELS = {  # type: ignore[var-annotated]
 
 MULTIMODAL_MODELS = {
     # [Decoder-only]
-    "Salesforce/blip2-opt-2.7b": PPTestSettings.fast(),
+    "Salesforce/blip2-opt-6.7b": PPTestSettings.fast(),
     "facebook/chameleon-7b": PPTestSettings.fast(),
     "adept/fuyu-8b": PPTestSettings.fast(),
     "THUDM/glm-4v-9b": PPTestSettings.fast(),
@@ -245,7 +245,7 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Llama-3.2-1B-Instruct",
-    # "ArthurZ/Ilama-3.2-1B", NOTE: Uncomment after #13905
+    "ArthurZ/Ilama-3.2-1B",
     "ibm/PowerLM-3b",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",

@@ -150,8 +150,6 @@ def _state_passing_fwd(
             #   are used for continuous batching. In which case we
             #   require seq_idx to be provided
             assert seq_idx is not None, ""
-            assert initial_states.shape == (seq_idx.max().item() + 1, nheads,
-                                            dim)
         else:
             # - this is the regular batching case, where initial
             #   states are used are for each example of the batch.

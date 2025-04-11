@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+import vllm.envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
@@ -76,7 +77,12 @@ class XgrammarBackend(StructuredOutputBackend):
                 tokenizer,
                 vocab_size=self.vocab_size,
             )
-        self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
+        self.compiler = xgr.GrammarCompiler(
+            tokenizer_info,
+            max_threads=8,
+            cache_enabled=True,
+            cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
+        )
 
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
@@ -84,7 +90,9 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_json_schema(
                 grammar_spec, any_whitespace=not self.disable_any_whitespace)
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
-            ctx = self.compiler.compile_builtin_json_grammar()
+            ctx = self.compiler.compile_json_schema(
+                '{"type": "object"}',
+                any_whitespace=not self.disable_any_whitespace)
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:

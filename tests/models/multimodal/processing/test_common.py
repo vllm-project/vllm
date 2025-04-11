@@ -246,6 +246,7 @@ def _test_processing_correctness_mistral(
 # yapf: disable
 @pytest.mark.parametrize("model_id", [
     "rhymes-ai/Aria",
+    "CohereForAI/aya-vision-8b",
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
     "deepseek-ai/deepseek-vl2-tiny",
@@ -256,6 +257,8 @@ def _test_processing_correctness_mistral(
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
     "HuggingFaceM4/Idefics3-8B-Llama3",
+    "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",

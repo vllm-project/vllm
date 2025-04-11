@@ -77,9 +77,9 @@ getting_started/v1_user_guide
 :caption: Models
 :maxdepth: 1
 
+models/supported_models
 models/generative_models
 models/pooling_models
-models/supported_models
 models/extensions/index
 :::
 

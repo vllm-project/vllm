@@ -35,7 +35,7 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            PoolingSequenceGroupOutput)
 
@@ -45,27 +45,25 @@ class PrithviGeoSpatialMAEProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {"image": 0}
-
 
 class PrithviGeoSpatialMAEInputBuilder(
         BaseDummyInputsBuilder[PrithviGeoSpatialMAEProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        return ProcessorInputs(
-            prompt_text="",
-            # This model input is fixed and is in the form of a torch Tensor.
-            # The size of pixel_values might change in the cases where we resize
-            # the input but never exceeds the dimensions below.
-            mm_data={
-                "pixel_values": torch.full((1, 6, 512, 512), 1.0),
-                "location_coords": torch.full((1, 2), 1.0)
-            })
+    ) -> MultiModalDataDict:
+        # This model input is fixed and is in the form of a torch Tensor.
+        # The size of pixel_values might change in the cases where we resize
+        # the input but never exceeds the dimensions below.
+        return {
+            "pixel_values": torch.full((1, 6, 512, 512), 1.0),
+            "location_coords": torch.full((1, 2), 1.0),
+        }
 
 
 class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):

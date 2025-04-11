@@ -92,8 +92,8 @@ def _validate_image_prompt_replacements_one(
         first_placeholder = image_placeholders[0]
 
         # NOTE: There is a BOS token
-        assert first_placeholder["offset"] == 1
-        assert first_placeholder["length"] == (
+        assert first_placeholder.offset == 1
+        assert first_placeholder.length == (
             len(processed_inputs["prompt_token_ids"]) - 1) // num_imgs
 
     except Exception as exc:

@@ -32,7 +32,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 # yapf conflicts with isort for this block
@@ -40,10 +41,9 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, BoundPromptUpdate,
                                         PlaceholderFeaturesInfo,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+                                        PromptReplacement, PromptUpdate)
 # yapf: enable
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -322,21 +322,6 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        max_image_tokens = self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
-        )
-
-        return {"image": max_image_tokens}
-
     def get_num_image_tokens(
         self,
         *,
@@ -359,30 +344,30 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
 
 class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        hf_processor = self.info.get_hf_processor()
+        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
+
+        return "".join(image_tokens[:num_images])
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        hf_processor = self.info.get_hf_processor()
-        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
-
-        return ProcessorInputs(
-            prompt_text="".join(image_tokens[:num_images]),
-            mm_data=mm_data,
-        )
 
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
@@ -443,12 +428,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                     processor=hf_processor,
                 )
 
-            image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
-
-            return PromptUpdateDetails(
-                full=image_tokens,
-                features=image_tokens,
-            )
+            return [_IMAGE_TOKEN_ID] * num_image_tokens
 
         num_images = mm_items.get_count("image", strict=False)
 
@@ -517,6 +497,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                         item_idx=p.item_idx,
                         start_idx=p.start_idx - 1,
                         tokens=p.tokens,
+                        is_embed=p.is_embed,
                     ) for p in ps
                 ]
                 for modality, ps in placeholders.items()
@@ -678,6 +659,9 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                                                 image_input["image_sizes"])
 
         return image_embeds
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

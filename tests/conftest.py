@@ -671,8 +671,9 @@ class HfRunner:
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
 
-    def encode(self, prompts: list[str]) -> list[list[torch.Tensor]]:
-        return self.model.encode(prompts)
+    def encode(self, prompts: list[str], *args,
+               **kwargs) -> list[list[torch.Tensor]]:
+        return self.model.encode(prompts, *args, **kwargs)
 
     def predict(self, prompts: list[list[str]]) -> torch.Tensor:
         return self.model.predict(prompts, convert_to_tensor=True)
@@ -1117,3 +1118,15 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "optional" in item.keywords:
             item.add_marker(skip_optional)
+
+
+@pytest.fixture(scope="session")
+def cli_config_file():
+    """Return the path to the CLI config file."""
+    return os.path.join(_TEST_DIR, "config", "test_config.yaml")
+
+
+@pytest.fixture(scope="session")
+def cli_config_file_with_model():
+    """Return the path to the CLI config file with model."""
+    return os.path.join(_TEST_DIR, "config", "test_config_with_model.yaml")

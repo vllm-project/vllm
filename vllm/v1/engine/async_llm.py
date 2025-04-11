@@ -424,8 +424,8 @@ class AsyncLLM(EngineClient):
     async def sleep(self, level: int = 1) -> None:
         await self.engine_core.sleep_async(level)
 
-    async def wake_up(self) -> None:
-        await self.engine_core.wake_up_async()
+    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        await self.engine_core.wake_up_async(tags)
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()

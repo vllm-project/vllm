@@ -56,7 +56,7 @@ def run_florence2():
 def run_mllama():
     engine_args = EngineArgs(
         model="meta-llama/Llama-3.2-11B-Vision-Instruct",
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": 1},
         dtype="half",

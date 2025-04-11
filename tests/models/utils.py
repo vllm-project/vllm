@@ -255,6 +255,7 @@ def build_model_context(
     model_id: str,
     task: TaskOption = "auto",
     dtype: Union[str, torch.dtype] = "auto",
+    model_config_kwargs: Optional[dict[str, Any]] = None,
     mm_processor_kwargs: Optional[dict[str, Any]] = None,
     limit_mm_per_prompt: Optional[dict[str, int]] = None,
     disable_mm_preprocessor_cache: bool = True,
@@ -274,6 +275,7 @@ def build_model_context(
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
+    model_config_kwargs = model_config_kwargs or {}
     model_config = ModelConfig(
         model_id,
         task=task,
@@ -286,5 +288,6 @@ def build_model_context(
         limit_mm_per_prompt=limit_mm_per_prompt,
         disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
         hf_overrides=model_info.hf_overrides,
+        **model_config_kwargs,
     )
     return InputContext(model_config)
