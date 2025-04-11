@@ -2,7 +2,9 @@
 
 import pickle
 from collections.abc import Sequence
+from dataclasses import asdict
 from inspect import isclass
+from itertools import chain
 from types import FunctionType
 from typing import Any, Optional, Union
 
@@ -12,11 +14,12 @@ import torch
 import zmq
 from msgspec import msgpack
 
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalFieldElem,
+                                    MultiModalKwargs, MultiModalKwargsItem,
+                                    NestedTensors)
+
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
-
-# TODO calibrate this size
-INLINE_BUF_SIZE_THRESHOLD = 256
 
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
@@ -26,29 +29,32 @@ class MsgpackEncoder:
 
     Note that unlike vanilla `msgspec` Encoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
+
+    By default, arrays below 256MB are serialized inline.
+    Larger will get sent via dedicated messages. 
+    Note that this is a per-tensor limit.
+
+    Sending multiple large messages via zeromq saturates memory very quickly.
+    See: https://github.com/vllm-project/vllm/issues/16185
     """
 
-    def __init__(self):
+    def __init__(self, size_threshold=256 * 1024 * 1024):
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
         # This is used as a local stash of buffers that we can then access from
         # our custom `msgspec` hook, `enc_hook`. We don't have a way to
         # pass custom data to the hook otherwise.
         self.aux_buffers: Optional[list[bytestr]] = None
+        self.size_threshold = size_threshold
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
+        return self.encode_into(obj, bytearray())
+
+    def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
         try:
-            self.aux_buffers = bufs = [b'']
-            bufs[0] = self.encoder.encode(obj)
             # This `bufs` list allows us to collect direct pointers to backing
             # buffers of tensors and np arrays, and return them along with the
             # top-level encoded buffer instead of copying their data into the
             # new buffer.
-            return bufs
-        finally:
-            self.aux_buffers = None
-
-    def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
-        try:
             self.aux_buffers = [buf]
             bufs = self.aux_buffers
             self.encoder.encode_into(obj, buf)
@@ -64,6 +70,25 @@ class MsgpackEncoder:
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
 
+        if isinstance(obj, MultiModalKwargs):
+            mm: MultiModalKwargs = obj
+            if mm.modalities:
+                # ignore the main dict, it will be re-indexed.
+                # pass a list of MultiModalKwargsItem, then see below
+                # Any tensors *not* indexed by modality will be ignored.
+                return list(mm._items_by_modality.values())
+            # just return the main dict if there are no modalities
+            return dict(mm)
+
+        if isinstance(obj, MultiModalKwargsItem):
+            ret = []
+            for elem in obj.values():
+                # Encode as plain dictionary + special handling for .field
+                d = asdict(elem)
+                d["field"] = elem.field.field_type()
+                ret.append(d)
+            return ret
+
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
             # problems serializing methods.
@@ -76,7 +101,7 @@ class MsgpackEncoder:
         self, obj: np.ndarray
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
-        if not obj.shape or obj.nbytes < INLINE_BUF_SIZE_THRESHOLD:
+        if not obj.shape or obj.nbytes < self.size_threshold:
             # Encode small arrays and scalars inline.
             data = obj.data
         else:
@@ -123,12 +148,44 @@ class MsgpackDecoder:
                 return self._decode_ndarray(obj)
             if issubclass(t, torch.Tensor):
                 return torch.from_numpy(self._decode_ndarray(obj))
+            if issubclass(t, MultiModalKwargs):
+                if isinstance(obj, list):
+                    return MultiModalKwargs.from_items(
+                        self._decode_mm_items(obj))
+                return MultiModalKwargs({
+                    k: self._decode_nested_tensors(v)
+                    for k, v in obj.items()
+                })
         return obj
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
         dtype, shape, data = arr
-        buffer = self.aux_buffers[data] if isinstance(data, int) else data
+        # Copy from inline representation, otherwise Torch is unhappy since
+        # the returned memory is non-writeable.
+        buffer = self.aux_buffers[data] if isinstance(
+            data, int) else bytearray(data).copy()
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
+
+    def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
+        all = []
+        for item in chain.from_iterable(obj):
+            elems = []
+            for v in item:
+                v["data"] = self._decode_nested_tensors(v["data"])
+                # Reconstruct the field processor using MultiModalFieldConfig
+                field = v["field"]
+                ctor = getattr(MultiModalFieldConfig, field[0])
+                v["field"] = ctor(None, *field[1:]).field
+                elems.append(MultiModalFieldElem(**v))
+            all.append(MultiModalKwargsItem.from_elems(elems))
+        return all
+
+    def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
+        if not isinstance(obj, list):
+            raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
+        if obj and isinstance(obj[0], str):
+            return torch.from_numpy(self._decode_ndarray(obj))
+        return [self._decode_nested_tensors(x) for x in obj]
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_PICKLE:
