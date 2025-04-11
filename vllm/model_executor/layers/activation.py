@@ -314,9 +314,14 @@ class ScaledActivation(nn.Module):
         param_data = param.data
         if self.input_is_parallel:
             tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
             shard_size = param_data.shape[0]
             start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
+            if shard_size * tp_size == loaded_weight.shape[0]:
+                loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
+            else:
+                # Assume sharding has been done on the weight.
+                assert shard_size == loaded_weight.shape[0]
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

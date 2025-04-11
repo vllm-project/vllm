@@ -418,6 +418,7 @@ class ColumnParallelLinear(LinearBase):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
         output_dim = getattr(param, "output_dim", None)
 
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
@@ -445,8 +446,12 @@ class ColumnParallelLinear(LinearBase):
         if output_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[output_dim]
             start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                 shard_size)
+            if shard_size * tp_size == loaded_weight.shape[output_dim]:
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
+                                                     shard_size)
+            else:
+                # Assume sharding has been done on the weight.
+                assert shard_size == loaded_weight.shape[output_dim]
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
@@ -559,9 +564,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     for i, _ in enumerate(self.output_sizes)
                 }
             return
-
+        tp_size = get_tensor_model_parallel_world_size()
         if is_gguf_weight:
-            tp_size = get_tensor_model_parallel_world_size()
             tp_rank = get_tensor_model_parallel_rank()
 
             output_dim = getattr(param, "output_dim", None)
@@ -604,6 +608,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_offsets.append((i, current_shard_offset, output_size))
                 current_shard_offset += output_size
             packed_dim = getattr(param, "packed_dim", None)
+            if (loaded_weight.shape[output_dim] *
+                    tp_size == current_shard_offset):
+                # The loaded weight has already been tp-sharded,
+                # divide the shard_offset and shard_size with tp_size
+                shard_offsets = [
+                    (shard_id, shard_offset // tp_size, shard_size // tp_size)
+                    for shard_id, shard_offset, shard_size in shard_offsets
+                ]
             for shard_id, shard_offset, shard_size in shard_offsets:
                 # Special case for Quantization.
                 # If quantized, we need to adjust the offset and size to account
@@ -663,8 +675,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                                            shard_size)
             start_idx = tp_rank * shard_size
             if not is_sharded_weight:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                     shard_size)
+                if shard_size * tp_size == loaded_weight.shape[output_dim]:
+                    loaded_weight = loaded_weight.narrow(
+                        output_dim, start_idx, shard_size)
+                else:
+                    # Assume sharding has been done on the weight.
+                    assert shard_size == loaded_weight.shape[output_dim]
         # Special case for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
@@ -940,8 +956,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                 }
             return
 
+        tp_size = get_tensor_model_parallel_world_size()
         if is_gguf_weight:
-            tp_size = get_tensor_model_parallel_world_size()
             tp_rank = get_tensor_model_parallel_rank()
 
             output_dim = getattr(param, "output_dim", None)
@@ -989,6 +1005,15 @@ class QKVParallelLinear(ColumnParallelLinear):
                                             False)
 
             packed_dim = getattr(param, "packed_dim", None)
+            if (loaded_weight.shape[output_dim] *
+                    tp_size == (self.total_num_heads +
+                                2 * self.total_num_kv_heads) * self.head_size):
+                # The loaded weight has already been tp-sharded,
+                # divide the shard_offset and shard_size with tp_size
+                shard_offsets = [
+                    (shard_id, shard_offset // tp_size, shard_size // tp_size)
+                    for shard_id, shard_offset, shard_size in shard_offsets
+                ]
             for shard_id, shard_offset, shard_size in shard_offsets:
                 # Special case for Quantized Weights.
                 # If quantized, we need to adjust the offset and size to account
@@ -1081,8 +1106,12 @@ class QKVParallelLinear(ColumnParallelLinear):
             start_idx = shard_id * shard_size
 
             if not is_sharded_weight:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                     shard_size)
+                if shard_size * tp_size == loaded_weight.shape[output_dim]:
+                    loaded_weight = loaded_weight.narrow(
+                        output_dim, start_idx, shard_size)
+                else:
+                    # Assume sharding has been done on the weight.
+                    assert shard_size == loaded_weight.shape[output_dim]
 
         # Special case for for AQLM codebooks.
         elif is_metadata:
@@ -1216,9 +1245,13 @@ class RowParallelLinear(LinearBase):
         param_data = param.data
         if input_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[input_dim]
-            start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(input_dim, start_idx,
-                                                 shard_size)
+            if shard_size * tp_size == loaded_weight.shape[input_dim]:
+                start_idx = tp_rank * shard_size
+                loaded_weight = loaded_weight.narrow(input_dim, start_idx,
+                                                     shard_size)
+            else:
+                # Assume sharding has been done on the weight.
+                assert shard_size == loaded_weight.shape[input_dim]
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
