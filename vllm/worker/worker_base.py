@@ -495,44 +495,17 @@ class WorkerWrapperBase:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        rpc_rank: int = 0,
     ) -> None:
-        """
-        Initialize the worker wrapper with the given vllm_config and rpc_rank.
-        Note: rpc_rank is the rank of the worker in the executor. In most cases,
-        it is also the rank of the worker in the distributed group. However,
-        when multiple executors work together, they can be different.
-        e.g. in the case of SPMD-style offline inference with TP=2,
-        users can launch 2 engines/executors, each with only 1 worker.
-        All workers have rpc_rank=0, but they have different ranks in the TP
-        group.
-        """
-        self.rpc_rank = rpc_rank
+        self.vllm_config = vllm_config
+        trust_remote_code = vllm_config.model_config.trust_remote_code
         self.worker: Optional[WorkerBase] = None
-        # do not store this `vllm_config`, `init_worker` will set the final
-        # one. TODO: investigate if we can remove this field in
-        # `WorkerWrapperBase`, `init_cached_hf_modules` should be
-        # unnecessary now.
-        if vllm_config.model_config is not None:
-            # it can be None in tests
-            trust_remote_code = vllm_config.model_config.trust_remote_code
-            if trust_remote_code:
-                # note: lazy import to avoid importing torch before initializing
-                from vllm.utils import init_cached_hf_modules
-                init_cached_hf_modules()
+        if trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils import init_cached_hf_modules
+            init_cached_hf_modules()
 
-    def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
-        """
-        Adjust the rpc_rank based on the given mapping.
-        It is only used during the initialization of the executor,
-        to adjust the rpc_rank of workers after we create all workers.
-        """
-        if self.rpc_rank in rank_mapping:
-            self.rpc_rank = rank_mapping[self.rpc_rank]
-
-    def update_environment_variables(self, envs_list: List[Dict[str,
-                                                                str]]) -> None:
-        envs = envs_list[self.rpc_rank]
+    @staticmethod
+    def update_environment_variables(envs: Dict[str, str]) -> None:
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
@@ -540,15 +513,11 @@ class WorkerWrapperBase:
             del os.environ[key]
         update_environment_variables(envs)
 
-    def init_worker(self, all_kwargs: List[Dict[str, Any]]) -> None:
+    def init_worker(self, *args, **kwargs):
         """
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
-        kwargs = all_kwargs[self.rpc_rank]
-        self.vllm_config = kwargs.get("vllm_config", None)
-        assert self.vllm_config is not None, (
-            "vllm_config is required to initialize the worker")
         enable_trace_function_call_for_thread(self.vllm_config)
 
         from vllm.plugins import load_general_plugins
@@ -591,12 +560,8 @@ class WorkerWrapperBase:
                     worker_extension_cls, worker_class, extended_calls)
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
-            self.worker = worker_class(**kwargs)
+            self.worker = worker_class(*args, **kwargs)
             assert self.worker is not None
-
-    def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
-        kv_cache_config = kv_cache_configs[self.rpc_rank]
-        self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
     def init_device(self):
         with set_current_vllm_config(self.vllm_config):
