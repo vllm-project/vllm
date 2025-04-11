@@ -58,9 +58,11 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponseData,
                                               ErrorResponse,
                                               LoadLoRAAdapterRequest,
+                                              NixlMetadataRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
+                                              RemotePrefillGenerateRequest,
                                               RerankRequest, RerankResponse,
                                               ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
@@ -72,6 +74,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from vllm.entrypoints.openai.serving_remote_prefill import OpenAIServingRemotePrefill
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
@@ -386,6 +389,8 @@ def transcription(request: Request) -> OpenAIServingTranscription:
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
+def remote_prefill(request: Request) -> OpenAIServingRemotePrefill:
+    return request.app.state.openai_serving_remote_prefill
 
 @router.get("/health")
 async def health(raw_request: Request) -> Response:
@@ -473,7 +478,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return base(raw_request).create_error_response(
             message="The model does not support Chat Completions API")
 
-    generator = await handler.create_chat_completion(request, raw_request)
+    remote_prefill_handler = remote_prefill(raw_request)
+    remote_prefill_params = remote_prefill_handler.get_remote_prefill_params(raw_request)
+
+    generator = await handler.create_chat_completion(request, raw_request, remote_prefill_params)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
@@ -659,6 +667,26 @@ async def do_rerank_v1(request: RerankRequest, raw_request: Request):
 async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
+@router.get("/nixl_metadata")
+async def get_nixl_metadata(raw_request: Request):
+    handler = remote_prefill(raw_request)
+
+    nixl_metdata = handler.nixl_metadata()
+    return JSONResponse(content=nixl_metdata.model_dump())
+
+@router.post("/remote_nixl_metadata", dependencies=[Depends(validate_json_request)])
+async def add_remote_nixl_metadata(request: NixlMetadataRequest ,raw_request: Request):
+    handler = remote_prefill(raw_request)
+    await handler.remote_nixl_metadata(request)
+    return Response(status_code=200)
+
+@router.post("/remote_prefill", dependencies=[Depends(validate_json_request)])
+@with_cancellation
+@load_aware_call
+async def remote_prefill_generate(request: RemotePrefillGenerateRequest, raw_request: Request):
+    handler = remote_prefill(raw_request)
+    await handler.remote_prefill(request)
+    return Response(status_code=200)
 
 TASK_HANDLERS: dict[str, dict[str, tuple]] = {
     "generate": {
@@ -1011,6 +1039,13 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
     ) if model_config.runner_type == "transcription" else None
+    # remote prefill
+    state.openai_serving_remote_prefill = OpenAIServingRemotePrefill(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+    )
     state.task = model_config.task
 
     state.enable_server_load_tracking = args.enable_server_load_tracking

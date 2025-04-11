@@ -495,6 +495,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             for notifs in all_new_notifs:
                 for req_ids in notifs.values():
                     for req_id in req_ids:
+                        # the notification value is changed to bytes in
+                        # nixl commit d40858a0545e285c1b5760909a763a2411d6c89f
+                        if isinstance(req_id, bytes):
+                            req_id = req_id.decode("utf-8")
                         request_notif_counter[req_id] += 1
 
             if request_notif_counter:
