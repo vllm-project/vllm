@@ -105,6 +105,7 @@ if TYPE_CHECKING:
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP: int = 200
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
 
@@ -694,6 +695,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_BUCKET_PADDING_GAP":
     lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
     if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
+
+    # JSONLogitsProcessor will attempt to denormalize JSON schemas that contain
+    # sub-schemas to work properly with Outlines. This is necessarily a
+    # recursive operation and the number of recursion levels is controlled by
+    # this cap. When set <= 0, the denormalization will be disabled.
+    "VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP":
+    lambda: int(os.environ.get("VLLM_OUTLINES_DENORMALIZE_RECURSION_CAP", 200)
+                ),
 
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
