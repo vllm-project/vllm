@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from concurrent.futures import Future
-from typing import Union
+from typing import Callable, Union
 
 import torch
 import torch.distributed as dist
@@ -61,6 +61,13 @@ class Executor(ExecutorBase):
         self.collective_rpc("initialize_from_config",
                             args=(kv_cache_configs, ))
         self.collective_rpc("compile_or_warm_up_model")
+
+    def register_failure_callback(self, callback: Callable):
+        """
+        Register a function to be called if the executor enters a permanent
+        failed state.
+        """
+        pass
 
     def determine_available_memory(self) -> list[int]:  # in bytes
         output = self.collective_rpc("determine_available_memory")
