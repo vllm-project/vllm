@@ -271,6 +271,8 @@ class P2pNcclPipe:
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
     ):
+        if remote_address is None:
+            return
         if remote_address not in self.socks:
             self._create_connect(remote_address)
 
