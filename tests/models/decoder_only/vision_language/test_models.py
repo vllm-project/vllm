@@ -433,8 +433,8 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         task="generate",
-        # use eager mode for hf runner since phi3v didn't work with flash_attn
-        hf_model_kwargs={"_attn_implementation": "eager"},
+        # use sdpa mode for hf runner since phi3v didn't work with flash_attn
+        hf_model_kwargs={"_attn_implementation": "sdpa"},
         use_tokenizer_eos=True,
         vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
         num_logprobs=10,
