@@ -815,3 +815,78 @@ class AIMODataset(HuggingFaceDataset):
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# ASR Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class ASRDataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a ASR dataset for transcription.
+    Tested on the following set:
+
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    | Dataset        | Domain                                 | Speaking Style           | hf-subset                   |
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    | LibriSpeech    | Audiobook                              | Narrated                 | release1, release2, release3|
+    |                |                                        |                          | release3-speaker-adaptation |
+    | VoxPopuli      | European Parliament                    | Oratory                  | en, de, it, fr,  ...        |
+    | TED-LIUM       | TED talks                              | Oratory                  | "LIUM/tedlium"              |
+    | GigaSpeech     | Audiobook, podcast, YouTube            | Narrated, spontaneous    |                             |
+    | SPGISpeech     | Financial meetings                     | Oratory, spontaneous     |                             |
+    | Earnings-22    | Financial meetings                     | Oratory, spontaneous     | "NeuML/earnings22"          |
+    | AMI            | Meetings                               | Spontaneous              | ihm, sdm                    |
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+
+    """ # noqa: E501
+    SUPPORTED_DATASET_PATHS = {
+        "openslr/librispeech_asr", "facebook/voxpopuli", "LIUM/tedlium",
+        "edinburghcstr/ami"
+    }
+
+    # TODO Whisper-specific. Abstract interface when more models are supported.
+    TRANSCRIPTION_PREAMBLE = "<|startoftranscript|><|en|><|transcribe|>"\
+                              "<|notimestamps|>"
+    skip_long_audios: bool = True
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        import librosa
+        prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
+        prompt_len = len(tokenizer(prompt).input_ids)
+        sampled_requests = []
+        skipped = 0
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            output_len = len(tokenizer._normalize(item['text']))
+            audio = item["audio"]
+            y, sr = audio["array"], audio["sampling_rate"]
+            duration_s = librosa.get_duration(y=y, sr=sr)
+            # Whisper max supported duration
+            if self.skip_long_audios and duration_s > 30:
+                skipped += 1
+                continue
+
+            mm_content = {"audio": (y, sr)}
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                    # language="en" will default to en on endpoint
+                ))
+        if skipped:
+            logger.warning("%d samples discarded from dataset due to" \
+                           " their length being greater than" \
+                           " what Whisper supports.", skipped)
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
