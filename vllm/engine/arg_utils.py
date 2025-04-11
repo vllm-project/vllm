@@ -154,6 +154,7 @@ class EngineArgs:
     tokenizer_pool_type: Union[str, Type["BaseTokenizerGroup"]] = "ray"
     tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
+    interleave_mm_strings: bool = False
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
     enable_lora: bool = False
@@ -684,6 +685,11 @@ class EngineArgs:
                   'images and 2 videos per prompt. Defaults to 1 for '
                   'each modality.'))
         parser.add_argument(
+            "--interleave-mm-strings",
+            action='store_true',
+            help=('Enable fully interleaved support for multimodal prompts, '
+                  'while using chat-template-content-format=string'))
+        parser.add_argument(
             '--mm-processor-kwargs',
             default=None,
             type=json.loads,
@@ -1089,6 +1095,7 @@ class EngineArgs:
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            interleave_mm_strings=self.interleave_mm_strings,
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,

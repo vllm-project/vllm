@@ -241,6 +241,9 @@ class ModelConfig:
             the model name will be the same as `model`.
         limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
+        interleave_mm_strings: Enable fully interleaved support for multimodal 
+            prompts, while using chat-template-content-format=string.
+            Defaults to False.
         use_async_output_proc: Whether to use async output processor.
             Defaults to True.
         config_format: The config format which shall be loaded.
@@ -329,6 +332,7 @@ class ModelConfig:
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, list[str]]] = None,
         limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+        interleave_mm_strings: bool = False,
         use_async_output_proc: bool = True,
         config_format: ConfigFormat = ConfigFormat.AUTO,
         hf_token: Optional[Union[bool, str]] = None,
@@ -484,6 +488,7 @@ class ModelConfig:
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(
             limit_mm_per_prompt)
+        self.interleave_mm_strings = interleave_mm_strings
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
 
