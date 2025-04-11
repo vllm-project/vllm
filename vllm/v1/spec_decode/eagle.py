@@ -82,7 +82,7 @@ class EagleProposer:
         assert self._draft_probs_buffer_shape.numel(
         ) == self._draft_probs_buffer.numel(
         ), "Size of self._draft_probs_buffer has been changed. "
-        "Make sure it remaiins the same."
+        "Make sure it remains the same."
 
         assert self._draft_token_ids_buffer_shape.numel(
         ) == self._draft_token_ids_buffer.numel(
