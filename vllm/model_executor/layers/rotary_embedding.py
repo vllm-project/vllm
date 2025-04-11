@@ -29,9 +29,12 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from transformers.utils import is_flash_attn_2_available
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
+if is_flash_attn_2_available():
+    from flash_attn.ops.triton.rotary import apply_rotary
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., :x.shape[-1] // 2]
@@ -100,6 +103,10 @@ class RotaryEmbedding(CustomOp):
         cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
+        if is_flash_attn_2_available():
+            self._use_flash_attn = True
+        else:
+            self._use_flash_attn = False
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -141,14 +148,20 @@ class RotaryEmbedding(CustomOp):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
+        if self._use_flash_attn:
+            query_rot = apply_rotary(query_rot.unsqueeze(0), cos, sin, 0).squeeze(0)
+        else:
+            query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., :self.rotary_dim]
         key_pass = key[..., self.rotary_dim:]
-        key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
+        if self._use_flash_attn:
+            key_rot = apply_rotary(key_rot.unsqueeze(0), cos, sin, 0).squeeze(0)
+        else:
+            key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -938,6 +951,10 @@ class MRotaryEmbedding(RotaryEmbedding):
         self.mrope_section = mrope_section
         if self.mrope_section:
             assert sum(self.mrope_section) == rotary_dim // 2
+        if is_flash_attn_2_available():
+            self._use_flash_attn = True
+        else:
+            self._use_flash_attn = False
 
     def forward(
         self,
@@ -977,14 +994,20 @@ class MRotaryEmbedding(RotaryEmbedding):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
+        if self._use_flash_attn:
+            query_rot = apply_rotary(query_rot.unsqueeze(0), cos, sin, 0).squeeze(0)
+        else:
+            query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., :self.rotary_dim]
         key_pass = key[..., self.rotary_dim:]
-        key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
+        if self._use_flash_attn:
+            key_rot = apply_rotary(key_rot.unsqueeze(0), cos, sin, 0).squeeze(0)
+        else:
+            key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
