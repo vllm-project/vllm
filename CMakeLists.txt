@@ -647,7 +647,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
-    "csrc/rocm/attention.cu")
+    "csrc/rocm/attention.cu"
+    "csrc/rocm/FHT.cu")
 
   define_gpu_extension_target(
     _rocm_C
