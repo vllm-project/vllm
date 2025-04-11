@@ -236,9 +236,13 @@ class EngineArgs:
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
+        def is_type_in_union(cls: type[Any], type: type[Any]) -> bool:
+            """Check if the class is a type in a union type."""
+            return get_origin(cls) is Union and type in get_args(cls)
+
         def is_optional(cls: type[Any]) -> bool:
             """Check if the class is an optional type."""
-            return get_origin(cls) is Union and type(None) in get_args(cls)
+            return is_type_in_union(cls, type(None))
 
         def get_kwargs(cls: type[Any]) -> Dict[str, Any]:
             cls_docs = get_attr_docs(cls)
@@ -256,6 +260,10 @@ class EngineArgs:
                 # Handle optional fields
                 if is_optional(field.type):
                     kwargs[name]["type"] = nullable_str
+                    continue
+                # Handle str in union fields
+                if is_type_in_union(field.type, str):
+                    kwargs[name]["type"] = str
                     continue
                 kwargs[name]["type"] = field.type
             return kwargs
