@@ -119,7 +119,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         sample = outputs.samples[0]
         seq = seq_group.first_seq
         if not is_async:
-            seq.append_token_id(sample.output_token, sample.logprobs)
+            seq.append_token_id(sample.output_token, sample.logprobs,
+                                sample.output_embed)
         if sampling_params.detokenize and self.detokenizer:
             new_char_count = self.detokenizer.decode_sequence_inplace(
                 seq, sampling_params)
