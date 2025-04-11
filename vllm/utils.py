@@ -234,6 +234,12 @@ class CacheInfo(NamedTuple):
 
         return self.hits / self.total
 
+    def __sub__(self, other: CacheInfo):
+        return CacheInfo(
+            hits=self.hits - other.hits,
+            total=self.total - other.total,
+        )
+
 
 class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
 
@@ -241,11 +247,12 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
                  capacity: float,
                  getsizeof: Optional[Callable[[_V], float]] = None):
         super().__init__(capacity, getsizeof)
+
         self.pinned_items = set[_K]()
-        self.capacity = capacity
 
         self._hits = 0
         self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
 
     def __delitem__(self, key: _K) -> None:
         run_on_remove = key in self
@@ -269,8 +276,26 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         """Return the internal order dictionary (read-only)."""
         return MappingProxyType(self._LRUCache__order)  # type: ignore
 
-    def stat(self) -> CacheInfo:
-        return CacheInfo(hits=self._hits, total=self._total)
+    @property
+    def capacity(self) -> float:
+        return self.maxsize
+
+    @property
+    def usage(self) -> float:
+        if self.maxsize == 0:
+            return 0
+
+        return self.currsize / self.maxsize
+
+    def stat(self, *, delta: bool = False) -> CacheInfo:
+        info = CacheInfo(hits=self._hits, total=self._total)
+
+        if delta:
+            info_delta = info - self._last_info
+            self._last_info = info
+            info = info_delta
+
+        return info
 
     def touch(self, key: _K) -> None:
         self._LRUCache__update(key)  # type: ignore
@@ -354,6 +379,10 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
     def clear(self) -> None:
         while len(self) > 0:
             self.remove_oldest(remove_pinned=True)
+
+        self._hits = 0
+        self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
 
     def popitem(self, remove_pinned: bool = False):
         """Remove and return the `(key, value)` pair least recently used."""

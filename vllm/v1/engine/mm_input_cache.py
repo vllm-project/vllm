@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Sequence
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from vllm.envs import VLLM_MM_INPUT_CACHE_GIB
 from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.processing import ProcessingCache
 from vllm.utils import is_list_of
+from vllm.v1.metrics.stats import MultiModalCacheStats
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 # The idea of multimodal preprocessing caching is based on having a client and
 # a server, where the client executes in the frontend process (=P0) and the
@@ -32,10 +36,29 @@ from vllm.utils import is_list_of
 
 class MirroredProcessingCache:
 
-    def __init__(self, model_config):
+    def __init__(self, model_config: "ModelConfig") -> None:
         self.use_cache = not model_config.disable_mm_preprocessor_cache
         self.mm_cache = ProcessingCache.get_lru_cache(VLLM_MM_INPUT_CACHE_GIB,
                                                       MultiModalKwargs)
+
+        self._stats = MultiModalCacheStats()
+
+    def make_stats(self) -> MultiModalCacheStats:
+        """Get (and reset) the multi-modal cache stats.
+
+        Returns:
+            The current multi-modal caching stats.
+        """
+        mm_cache = self.mm_cache
+
+        info_delta = mm_cache.stat(delta=True)
+        self._stats.hits = info_delta.hits
+        self._stats.queries = info_delta.total
+        self._stats.usage = mm_cache.usage
+
+        stats = self._stats
+        self._stats = MultiModalCacheStats()
+        return stats
 
     def get_and_update_p0(
         self,
@@ -80,3 +103,9 @@ class MirroredProcessingCache:
             full_mm_inputs.append(mm_input)
 
         return full_mm_inputs
+
+    def reset(self) -> bool:
+        self.mm_cache.clear()
+        self._stats.reset = True
+
+        return True

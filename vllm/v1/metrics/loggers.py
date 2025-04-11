@@ -9,9 +9,10 @@ import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import (CachingMetrics, IterationStats,
+                                   MultiModalCacheStatsCollection,
+                                   SchedulerStats)
 from vllm.v1.spec_decode.metrics import SpecDecodingMetrics
 
 logger = init_logger(__name__)
@@ -22,8 +23,12 @@ _LOCAL_LOGGING_INTERVAL_SEC = 5.0
 class StatLoggerBase(ABC):
 
     @abstractmethod
-    def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: Optional[IterationStats]):
+    def record(
+        self,
+        scheduler_stats: SchedulerStats,
+        mm_cache_stats: Optional[MultiModalCacheStatsCollection],
+        iteration_stats: Optional[IterationStats],
+    ):
         ...
 
     def log(self):  # noqa
@@ -36,9 +41,16 @@ class LoggingStatLogger(StatLoggerBase):
         self.engine_index = engine_index
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
-        # Prefix cache metrics. This cannot be reset.
+
+        # Caching metrics. This cannot be reset.
         # TODO: Make the interval configurable.
-        self.prefix_caching_metrics = PrefixCachingMetrics()
+        self.last_mm_cache_stats: Optional[
+            MultiModalCacheStatsCollection] = None
+        self.p0_processor_mm_caching_metrics = CachingMetrics()
+        self.p0_mirror_mm_caching_metrics = CachingMetrics()
+        self.p1_mirror_mm_caching_metrics = CachingMetrics()
+        self.prefix_caching_metrics = CachingMetrics()
+
         self.spec_decoding_metrics = SpecDecodingMetrics()
 
     def _reset(self, now):
@@ -58,9 +70,19 @@ class LoggingStatLogger(StatLoggerBase):
         # Compute summary metrics for tracked stats
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
-    def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: Optional[IterationStats]):
+    def record(
+        self,
+        scheduler_stats: SchedulerStats,
+        mm_cache_stats: Optional[MultiModalCacheStatsCollection],
+        iteration_stats: Optional[IterationStats],
+    ):
         """Log Stats to standard output."""
+        if mm_cache_stats:
+            self.p0_processor_mm_caching_metrics.observe(
+                mm_cache_stats.p0_processor)
+            self.p0_mirror_mm_caching_metrics.observe(mm_cache_stats.p0_mirror)
+            self.p1_mirror_mm_caching_metrics.observe(mm_cache_stats.p1_mirror)
+            self.last_mm_cache_stats = mm_cache_stats
 
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
@@ -99,6 +121,19 @@ class LoggingStatLogger(StatLoggerBase):
             scheduler_stats.gpu_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         )
+
+        if self.last_mm_cache_stats:
+            logger.info(
+                "P0 Processor MM cache: usage=%.1f%%, hit_rate=%.1f%%, "
+                "P0 Mirrored MM cache: usage=%.1f%%, hit_rate=%.1f%%, "
+                "P1 Mirrored MM cache: usage=%.1f%%, hit_rate=%.1f%%",
+                self.p0_processor_mm_caching_metrics.hit_rate * 100,
+                self.last_mm_cache_stats.p0_processor.usage * 100,
+                self.p0_mirror_mm_caching_metrics.hit_rate * 100,
+                self.last_mm_cache_stats.p0_mirror.usage * 100,
+                self.p1_mirror_mm_caching_metrics.hit_rate * 100,
+                self.last_mm_cache_stats.p1_mirror.usage * 100,
+            )
 
         if scheduler_stats.spec_decoding_stats is not None:
             self.spec_decoding_metrics.log()
@@ -153,6 +188,57 @@ class PrometheusStatLogger(StatLoggerBase):
             name="vllm:gpu_prefix_cache_hits",
             documentation=
             "GPU prefix cache hits, in terms of number of cached blocks.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        #
+        # Multi-modal cache
+        #
+        self.counter_p0_processor_mm_cache_usage = prometheus_client.Gauge(
+            name="vllm:p0_processor_mm_cache_usage",
+            documentation="Process 0 processor multi-modal cache usage. "
+            "1 means 100 percent usage.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_p0_processor_mm_cache_queries = prometheus_client.Counter(
+            name="vllm:p0_processor_mm_cache_queries",
+            documentation="Process 0 processor multi-modal cache queries.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_p0_processor_mm_cache_hits = prometheus_client.Counter(
+            name="vllm:p0_processor_mm_cache_hits",
+            documentation="Process 0 processor multi-modal cache hits.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_p0_mirror_mm_cache_usage = prometheus_client.Gauge(
+            name="vllm:p0_mirror_mm_cache_usage",
+            documentation="Process 0 mirrored multi-modal cache usage. "
+            "1 means 100 percent usage.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_p0_mirror_mm_cache_queries = prometheus_client.Counter(
+            name="vllm:p0_mirror_mm_cache_queries",
+            documentation="Process 0 mirrored multi-modal cache queries.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_p0_mirror_mm_cache_hits = prometheus_client.Counter(
+            name="vllm:p0_mirror_mm_cache_hits",
+            documentation="Process 0 mirrored multi-modal cache hits.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_p1_mirror_mm_cache_usage = prometheus_client.Gauge(
+            name="vllm:p1_mirror_mm_cache_usage",
+            documentation="Process 1 mirrored multi-modal cache usage. "
+            "1 means 100 percent usage.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_p1_mirror_mm_cache_queries = prometheus_client.Counter(
+            name="vllm:p1_mirror_mm_cache_queries",
+            documentation="Process 1 mirrored multi-modal cache queries.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_p1_mirror_mm_cache_hits = prometheus_client.Counter(
+            name="vllm:p1_mm_cache_hits",
+            documentation="Process 1 mirrored multi-modal cache hits.",
             labelnames=labelnames).labels(*labelvalues)
 
         #
@@ -353,8 +439,12 @@ class PrometheusStatLogger(StatLoggerBase):
             labelnames=metrics_info.keys()).labels(**metrics_info)
         info_gauge.set(1)
 
-    def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: Optional[IterationStats]):
+    def record(
+        self,
+        scheduler_stats: SchedulerStats,
+        mm_cache_stats: Optional[MultiModalCacheStatsCollection],
+        iteration_stats: Optional[IterationStats],
+    ):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
@@ -371,6 +461,28 @@ class PrometheusStatLogger(StatLoggerBase):
                 scheduler_stats.spec_decoding_stats.num_draft_tokens)
             self.counter_spec_decode_num_accepted_tokens.inc(
                 scheduler_stats.spec_decoding_stats.num_accepted_tokens)
+
+        if mm_cache_stats is not None:
+            self.counter_p0_processor_mm_cache_usage.set(
+                mm_cache_stats.p0_processor.usage)
+            self.counter_p0_processor_mm_cache_queries.inc(
+                mm_cache_stats.p0_processor.queries)
+            self.counter_p0_processor_mm_cache_hits.inc(
+                mm_cache_stats.p0_processor.hits)
+
+            self.counter_p0_mirror_mm_cache_usage.set(
+                mm_cache_stats.p0_mirror.usage)
+            self.counter_p0_mirror_mm_cache_queries.inc(
+                mm_cache_stats.p0_mirror.queries)
+            self.counter_p0_mirror_mm_cache_hits.inc(
+                mm_cache_stats.p0_mirror.hits)
+
+            self.counter_p1_mirror_mm_cache_usage.set(
+                mm_cache_stats.p1_mirror.usage)
+            self.counter_p1_mirror_mm_cache_queries.inc(
+                mm_cache_stats.p1_mirror.queries)
+            self.counter_p1_mirror_mm_cache_hits.inc(
+                mm_cache_stats.p1_mirror.hits)
 
         if iteration_stats is None:
             return

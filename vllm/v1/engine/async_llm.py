@@ -36,7 +36,9 @@ from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
                                      StatLoggerBase)
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import (IterationStats,
+                                   MultiModalCacheStatsCollection,
+                                   SchedulerStats)
 
 logger = init_logger(__name__)
 
@@ -335,9 +337,21 @@ class AsyncLLM(EngineClient):
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
+                if outputs.mm_cache_stats:
+                    mm_cache_stats = MultiModalCacheStatsCollection(
+                        p0_processor=self.processor.mm_registry.
+                        make_processor_cache_stats(),
+                        p0_mirror=self.processor.mm_input_cache_client.
+                        make_stats(),
+                        p1_mirror=outputs.mm_cache_stats,
+                    )
+                else:
+                    mm_cache_stats = None
+
                 self._record_stats(
                     engine_index=outputs.engine_index,
                     scheduler_stats=outputs.scheduler_stats,
+                    mm_cache_stats=mm_cache_stats,
                     iteration_stats=iteration_stats,
                 )
 
@@ -357,6 +371,7 @@ class AsyncLLM(EngineClient):
     def _record_stats(
         self,
         scheduler_stats: Optional[SchedulerStats],
+        mm_cache_stats: Optional[MultiModalCacheStatsCollection],
         iteration_stats: Optional[IterationStats],
         engine_index: int = 0,
     ):
@@ -366,6 +381,7 @@ class AsyncLLM(EngineClient):
         assert scheduler_stats is not None
         for stat_logger in self.stat_loggers[engine_index]:
             stat_logger.record(scheduler_stats=scheduler_stats,
+                               mm_cache_stats=mm_cache_stats,
                                iteration_stats=iteration_stats)
 
     def encode(
@@ -414,6 +430,9 @@ class AsyncLLM(EngineClient):
 
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
+
+    async def reset_mm_cache(self) -> None:
+        await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self,
                                  device: Optional[Device] = None) -> None:

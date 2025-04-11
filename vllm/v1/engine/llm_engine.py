@@ -239,6 +239,9 @@ class LLMEngine:
     def stop_profile(self):
         self.engine_core.profile(False)
 
+    def reset_mm_cache(self):
+        self.engine_core.reset_mm_cache()
+
     def reset_prefix_cache(self, device: Optional[Device] = None):
         self.engine_core.reset_prefix_cache()
 
