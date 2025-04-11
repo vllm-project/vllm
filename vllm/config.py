@@ -2573,6 +2573,11 @@ class LoRAConfig:
             logger.warning("LoRA with chunked prefill is still experimental "
                            "and may be unstable.")
 
+    def verify_lora_support(self):
+        if self.long_lora_scaling_factors is not None and envs.VLLM_USE_V1:
+            raise ValueError(
+                "V1 LoRA does not support long LoRA, please use V0.")
+
 
 @dataclass
 class PromptAdapterConfig:
@@ -3672,6 +3677,7 @@ class VllmConfig:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+            self.lora_config.verify_lora_support()
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
