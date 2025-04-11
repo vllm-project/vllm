@@ -23,6 +23,8 @@ def get_device_and_range():
         return device, 240.0
     elif 'HL-328' in device:
         return device, 448.0
+    elif 'HL-325' in device:
+        return device, 448.0
     else:
         raise ValueError(f"Unknown device: {device}")
 
