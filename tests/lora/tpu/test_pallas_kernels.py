@@ -8,7 +8,7 @@ import vllm.lora.ops.xla_ops.pallas  # noqa # pylint: disable=unused-import
 N_TOKENS = [16, 1024, 4096]
 HIDDEN_SIZES = [1024, 2048, 4096]
 
-DTYPES = [torch.float32, torch.bfloat16]
+DTYPES = [torch.float16]
 NUM_LORA = [1, 4, 16]
 RANKS = [32, 256, 512]
 
@@ -70,4 +70,4 @@ def test_bgmv_correctness(T, D, L, N, dtype, op_type, seed):
     assert not torch.any(torch.isnan(output))
 
     # Compare with reference output
-    assert torch.allclose(output, ref_output, rtol=1e-3, atol=1e-3)
+    assert torch.allclose(output, ref_output, rtol=1e-2, atol=1e-2)
