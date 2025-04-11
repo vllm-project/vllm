@@ -231,7 +231,8 @@ class MiniMaxVL01MultiModalProjector(nn.Module):
 
 
 MINIMAX_VL_01_START_DOCSTRING = r"""
-    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
+    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the
+    generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
     etc.)
 
@@ -515,7 +516,6 @@ class MiniMaxVL01MultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -634,9 +634,8 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                                    num_images=num_images)
         }
 
-        # 确保 image_sizes 与 pixel_values 的批次大小一致
-        if num_images > 0:
-            mm_data["image_sizes"] = [(target_height, target_width)] * num_images
+        # 注意：image_sizes 不应该作为单独的模态传递，而是作为 image 模态的一部分
+        # 在 processor 中会自动处理 image_sizes
 
         prompt_text = image_token * num_images
 
@@ -797,7 +796,7 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                 ]
                 input_ids should be: [
                     a b c d e f X X X X X g h i j k Y Y Y l m
-                    o p q r Z Z Z Z Z Z Z Z s t u v _ _ _ _ _
+                    o p q r Z Z Z Z Z Z Z s t u v _ _ _ _ _
                 ]
                 labels should be: [
                     a b c d e f _ _ _ _ _ g h i j k _ _ _ l m
@@ -822,8 +821,8 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                 cat_img = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
                 chart_img = Image.open(requests.get("https://github.com/haotian-liu/LLaVA/blob/1a91fc274d7c35a9b50b3cb29c4247ae5837ce39/images/llava_v1_5_radar.jpg?raw=true", stream=True).raw)
                 prompts = [
-                    "[INST] <image>\nWhat is shown in this image? [/INST]",
-                    "[INST] <image>\nWhat is shown in this image? [/INST]",
+                    "][<rewritten_image_token>\nWhat is shown in this image?<rewritten_image_token> ",
+                    "][<rewritten_image_token>\nWhat is shown in this image?<rewritten_image_token> ",
                 ]
                 inputs = processor(prompts, [chart_img, cat_img], return_tensors='pt', padding=True).to("cuda")
                     chart_img has 2634 tokens, while cat_img has 2340 tokens
@@ -932,7 +931,7 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
         attention_mask = attention_mask.to(target_device)
         input_ids = input_ids.to(target_device)
 
-        # 4. Fill the embeddings based on the mask. If we have ["hey" "<image>", "how", "are"]
+        # 4. Fill the embeddings based on the mask. If we have ["hey" "<rewritten_image_token>", "how", "are"]
         # we need to index copy on [0, 577, 578, 579] for the text and [1:576] for the image features
         final_embedding[batch_indices, text_to_overwrite] = inputs_embeds[batch_indices, non_image_indices]
         final_attention_mask[batch_indices, text_to_overwrite] = attention_mask[batch_indices, non_image_indices]
