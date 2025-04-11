@@ -513,7 +513,9 @@ class OpenAIServing:
         if raw_request is None:
             return default
 
-        return raw_request.headers.get("X-Request-Id", default)
+        return (raw_request.headers.get("X-Request-Id")
+                or raw_request.headers.get("X-Amzn-SageMaker-Inference-Id")
+                or default)
 
     @staticmethod
     def _get_decoded_token(logprob: Logprob,
