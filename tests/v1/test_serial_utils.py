@@ -104,7 +104,7 @@ def test_multimodal_kwargs():
     # 8 total tensors + top level buffer
     assert len(encoded) == 6
 
-    total_len = sum([len(x) for x in encoded])
+    total_len = sum(len(x) for x in encoded)
 
     # expected total encoding length, should be 4440, +-20 for minor changes
     assert total_len >= 4420 and total_len <= 4460
@@ -165,7 +165,7 @@ def nested_equal(a: NestedTensors, b: NestedTensors):
     if isinstance(a, torch.Tensor):
         return torch.equal(a, b)
     else:
-        return all([nested_equal(x, y) for (x, y) in zip(a, b)])
+        return all(nested_equal(x, y) for x, y in zip(a, b))
 
 
 def assert_equal(obj1: MyType, obj2: MyType):

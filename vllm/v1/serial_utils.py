@@ -75,9 +75,9 @@ class MsgpackEncoder:
                 # ignore the main dict, it will be re-indexed.
                 # pass a list of MultiModalKwargsItem, then see below
                 # Any tensors *not* indexed by modality will be ignored.
-                return [mm.get_items(m) for m in mm.modalities]
+                return mm._items_by_modality.values()
             # just return the main dict if there are no modalities
-            return {k: v for k, v in obj.items()}
+            return dict(mm)
 
         if isinstance(obj, MultiModalKwargsItem):
             # Encode as plain dictionary + special handling for '.field'
@@ -146,12 +146,12 @@ class MsgpackDecoder:
         if isclass(t):
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
-            if issubclass(t, MultiModalKwargs) and isinstance(obj, dict):
+            if issubclass(t, MultiModalKwargs) 
+                if isinstance(obj, list):
+                    return MultiModalKwargs.from_items(self._decode_items(obj))
                 return MultiModalKwargs(
-                    {k: self._decode_nested(obj[k])
-                     for k in obj})
-            if issubclass(t, MultiModalKwargs) and isinstance(obj, list):
-                return MultiModalKwargs.from_items(self._decode_items(obj))
+                    {k: self._decode_nested(v)
+                     for k in obj.items()})
             if issubclass(t, torch.Tensor):
                 return torch.from_numpy(self._decode_ndarray(obj))
         return obj
@@ -172,12 +172,12 @@ class MsgpackDecoder:
             all.append(MultiModalKwargsItem.from_elems(elems))
         return all
 
-    def _decode_nested(self, obj: Any) -> NestedTensors:
-        if isinstance(obj, list) and isinstance(obj[0], str):
+    def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
+        if not isinstance(obj, list):
+            raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
+        if obj and isinstance(obj[0], str):
             return torch.from_numpy(self._decode_ndarray(obj))
-        if isinstance(obj, list):
-            return [self._decode_nested(x) for x in obj]
-        raise TypeError(f"Unexpected NestedArray contents: {obj}")
+        return [self._decode_nested_tensors(x) for x in obj]
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_PICKLE:
