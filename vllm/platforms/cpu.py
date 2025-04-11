@@ -56,7 +56,10 @@ class CpuPlatform(Platform):
             logger.info("Using CPU MLA backend.")
             return "vllm.attention.backends.cpu_mla.CPUMLABackend"
         logger.info("Using Torch SDPA backend.")
-        return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
+        if use_v1:
+            return "vllm.attention.backends.torch_sdpa.TorchSDPABackendV1"
+        else:
+            return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -79,6 +82,12 @@ class CpuPlatform(Platform):
         # If the feature combo become valid
         if not model_config.enforce_eager:
             model_config.enforce_eager = True
+
+        if model_config.enable_sleep_mode:
+            logger.warning("sleep mode is not supported on CPU, disable it.")
+            model_config.enable_sleep_mode = False
+
+        model_config.disable_cascade_attn = True
 
         cache_config = vllm_config.cache_config
 
@@ -140,13 +149,30 @@ class CpuPlatform(Platform):
                 parallel_config.sd_worker_cls = \
                     "vllm.worker.cpu_worker.CPUWorker"
             else:
-                parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
+                if envs.VLLM_USE_V1:
+                    parallel_config.worker_cls = \
+                        "vllm.v1.worker.cpu_worker.CPUWorker"
+                else:
+                    parallel_config.worker_cls = \
+                        "vllm.worker.cpu_worker.CPUWorker"
+
+        # Note: workaround for v1 gpu_model_runner
+        from vllm.config import CompilationLevel
+        vllm_config.compilation_config.cudagraph_capture_sizes = []
+        vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION
+        vllm_config.compilation_config.custom_ops = []
 
         assert vllm_config.device_config.device_type == "cpu"
 
         #
         # Environment variables for CPU executor
         #
+
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        # Note: to avoid the error 'nthreads cannot be larger than environment
+        #  variable "NUMEXPR_MAX_THREADS" (64)'.
+        os.environ["NUMEXPR_MAX_THREADS"] = str(len(os.sched_getaffinity(0)))
 
         # Set default threads num for OpenMP parallel
         os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
@@ -203,3 +229,14 @@ class CpuPlatform(Platform):
         Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa
+
+    @classmethod
+    def supports_structured_output(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_v1(cls, model_config) -> bool:
+        """Returns whether the current platform can support v1 for the supplied
+        model configuration.
+        """
+        return True
