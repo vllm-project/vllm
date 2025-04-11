@@ -10,7 +10,7 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 from transformers.image_utils import to_numpy_array
-
+from transformers.models.llava import LlavaNextProcessor
 
 from .utils import AutoWeightsLoader, embed_multimodal, init_vllm_registered_model, maybe_prefix
 from vllm.config import VllmConfig
@@ -38,7 +38,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from .minimax_text_01 import MiniMaxText01ForCausalLM
 from vllm.transformers_utils.configs import MiniMaxText01Config, MiniMaxVL01Config
-from .llava_next import LlavaNextMultiModalProcessor, LlavaNextProcessingInfo
 from .llava import LlavaDummyInputsBuilder
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
@@ -401,14 +400,12 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(ImageProcessor, **kwargs)
-
+        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
         if hf_processor.patch_size is None:
             patch_size = self.get_vision_encoder_info().get_patch_size()
             hf_processor.patch_size = patch_size
-
         return hf_processor
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
