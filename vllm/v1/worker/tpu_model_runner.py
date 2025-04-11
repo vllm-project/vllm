@@ -623,13 +623,14 @@ class TPUModelRunner:
         # NOTE (NickLucche) here we diverge from logic in other runners, as we
         # assume to only have whole mm items to process. Hence we avoid the
         # intrinsic dynamism that `scatter_mm_placeholders` introduces.
-        for (req_id, input_id, _), output in zip(
+        for (req_id, input_id, pos_info), output in zip(
                 req_ids_pos,
                 encoder_outputs,
         ):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
-
+            assert pos_info.is_embed is None, "Expected all positions to be"\
+                " contiguous and embeddings."
             self.encoder_cache[req_id][input_id] = output
 
     def _gather_mm_embeddings(
@@ -665,6 +666,8 @@ class TPUModelRunner:
 
                 assert req_id in self.encoder_cache
                 assert i in self.encoder_cache[req_id]
+                assert pos_info.is_embed is None, "Expected all positions to"\
+                " be contiguous and embeddings."
                 encoder_output = self.encoder_cache[req_id][i]
                 mm_embeds.append(encoder_output)
         return mm_embeds
