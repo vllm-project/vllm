@@ -595,18 +595,17 @@ class ImageProcessor(BaseImageProcessor):
                 image,
                 self.image_grid_pinpoints
             )
-            #all_images = []
-            for image in image_patches:
-                transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(image)
+            all_images = []
+            for patch in image_patches:
+                transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(patch)
                 img_array = to_numpy_array(transform_img)
                 img_array = to_channel_dimension_format(img_array, data_format, input_channel_dim=input_data_format)
-                #all_images.append(img_array)
-                new_images.append(img_array)
-            #pixel_values = np.array(all_images)
-            #new_images.append(pixel_values)
-        
-        # if do_pad:
-        #     new_images = self._pad_for_batching(new_images)
+                all_images.append(img_array)
+            pixel_values = np.array(all_images)
+            new_images.append(pixel_values)
+
+        if do_pad:
+            new_images = self._pad_for_batching(new_images)
 
         data = {"pixel_values": new_images, "image_sizes": image_sizes}
         return CustomBatchFeature(data=data, tensor_type=return_tensors)
