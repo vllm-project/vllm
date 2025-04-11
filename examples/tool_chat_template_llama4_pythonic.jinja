@@ -11,7 +11,6 @@
 
 {#- This block extracts the system message, so we can slot it into the right place. #}
 {%- if messages[0]['role'] == 'system' %}
-    {%- set user_provided_system_message = true %}
     {%- if messages[0]['content'] is string %}
         {%- set system_message = messages[0]['content']|trim %}
     {%- else %}
@@ -19,9 +18,9 @@
     {%- endif %}
     {%- set messages = messages[1:] %}
 {%- else %}
-    {%- if tools is not none and not tools_in_user_message  %}
-        {#- Now system_message is default tool system message #}
-        {%- set system_message = "You are an expert in composing functions. You are given a question and a set of possible functions.\nBased on the question, you will need to make one or more function/tool calls to achieve the purpose.\nIf none of the function can be used, point it out. If the given question lacks the parameters required by the function,\nalso point it out. You should only return the function call in tools call sections.\n\nIf you decide to invoke any of the function(s), you MUST put it in the format of [func_name1(params_name1=params_value1, params_name2=params_value2...), func_name2(params)]\nYou SHOULD NOT include any other text in the response.\n\nHere is a list of functions in JSON format that you can invoke.\n " %}
+    {%- if tools is not none %}
+        {#- Add default tool system message when tools are provided #}
+        {%- set system_message = "You are a helpful assistant with tool calling capabilities. Only reply with a tool call if the function exists in the library provided by the user. If it doesn't exist, just reply directly in natural language. When you receive a tool call response, use the output to format an answer to the original user question." %}
     {%- else %}
         {%- set system_message = "" %}
     {%- endif %}
@@ -33,17 +32,17 @@
     {{- "<|header_start|>system<|header_end|>\n\n" }}
     {{- system_message }}
     {%- if tools is not none and not tools_in_user_message %}
+        {{-  "You are an expert in composing functions. You are given a question and a set of possible functions.\nBased on the question, you will need to make one or more function/tool calls to achieve the purpose.\nIf none of the function can be used, point it out. If the given question lacks the parameters required by the function,\nalso point it out. You should only return the function call in tools call sections.\n\nIf you decide to invoke any of the function(s), you MUST put it in the format of [func_name1(params_name1=params_value1, params_name2=params_value2...), func_name2(params)]\nYou SHOULD NOT include any other text in the response.\n\nHere is a list of functions in JSON format that you can invoke.\n " }}
         {%- for t in tools %}
             {{- t | tojson(indent=4) }}
             {{- "\n\n" }}
         {%- endfor %}
-        {{-  "You are a helpful assistant who can can answer general questions or invoke tools when necessary.\nIn addition to tool calls, you should also augment your responses by using the tool outputs." }}
     {%- endif %}
     {{- "<|eot|>" }}
 {%- endif %}
 
 {#- Custom tools are passed in a user message with some extra guidance #}
-{%- if tools_in_user_message and not tools is none %}
+{%- if tools_in_user_message and tools is not none %}
     {#- Extract the first user message so we can plug it in here #}
     {%- if messages | length != 0 %}
         {%- if messages[0]['content'] is string %}
@@ -54,7 +53,7 @@
         {%- set messages = messages[1:] %}
     {%- else %}
         {{- raise_exception("Cannot put tools in the first user message when there's no first user message!") }}
-{%- endif %}
+    {%- endif %}
     {{- '<|header_start|>user<|header_end|>\n\n' -}}
     {{- first_user_message}}
     {{- "\nHere is a list of functions in JSON format that you can invoke:"}}
@@ -95,18 +94,26 @@
             {%- endfor %}
         {%- endif %}
         {%- for tool_call in message.tool_calls %}
-           {{- '{"name": "' + tool_call.function.name + '", ' }}
-           {{- '"parameters": ' }}
-           {{- tool_call.function.arguments | tojson }}
-           {{- "}" }}
+            {{- tool_call.tool_name + '(' -}}
+            {%- for param in tool_call.arguments %}
+                {{- param + '=' -}}
+                {{- "%s" | format(tool_call.arguments[param]) -}}
+                {% if not loop.last %}, {% endif %}
+            {%- endfor %}
+            {{- ')' -}}
+            {% if not loop.last %}, {% endif %}
         {%- endfor %}
-       {{- "<|eot|>" }}
+        {{- "<|eom|>" }}
     {%- elif message.role == "tool" or message.role == "ipython" %}
         {{- "<|header_start|>ipython<|header_end|>\n\n" }}
-        {%- if message.content is mapping or message.content is iterable %}
+        {%- if message.content is string %}
             {{- message.content | tojson }}
         {%- else %}
-            {{- message.content }}
+            {%- for content in message['content']  %}
+                {%- if content['type']  == 'text' %}
+                    {{- content['text'] | tojson }}
+                {%- endif %}
+            {%- endfor %}
         {%- endif %}
         {{- "<|eom|>" }}
     {%- endif %}

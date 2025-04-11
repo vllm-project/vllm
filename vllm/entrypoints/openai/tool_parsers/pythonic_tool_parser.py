@@ -28,7 +28,7 @@ class _UnexpectedAstError(Exception):
 class PythonicToolParser(ToolParser):
     """
     Tool call parser for models that produce tool calls in a pythonic style,
-    such as Llama 3.2 models.
+    such as Llama 3.2 and Llama 4 models.
 
     Used when --enable-auto-tool-choice --tool-call-parser pythonic are all set
     """
@@ -61,7 +61,7 @@ class PythonicToolParser(ToolParser):
         """
         Extract the tool calls from a complete model response.
         """
-
+        print(f"{model_output=}")
         if not (self.TOOL_CALL_REGEX.match(model_output)):
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
