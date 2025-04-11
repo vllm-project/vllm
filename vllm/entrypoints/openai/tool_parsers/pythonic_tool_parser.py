@@ -61,7 +61,7 @@ class PythonicToolParser(ToolParser):
         """
         Extract the tool calls from a complete model response.
         """
-        print(f"{model_output=}")
+
         if not (self.TOOL_CALL_REGEX.match(model_output)):
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],

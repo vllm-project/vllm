@@ -1170,8 +1170,6 @@ def apply_hf_chat_template(
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one.")
 
-    logger.warning(f"{tools=}")
-    logger.warning(f"{conversation=}")
     return tokenizer.apply_chat_template(
         conversation=conversation,  # type: ignore[arg-type]
         tools=tools,  # type: ignore[arg-type]

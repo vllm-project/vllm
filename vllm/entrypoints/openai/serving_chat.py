@@ -135,8 +135,6 @@ class OpenAIServingChat(OpenAIServing):
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        logger.warning(f"{request=}")
-
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
@@ -175,8 +173,6 @@ class OpenAIServingChat(OpenAIServing):
             tool_dicts = None if request.tools is None else [
                 tool.model_dump() for tool in request.tools
             ]
-            logger.warning(f"{tool_dicts=}")
-            logger.warning(f"{request.tools=}")
 
             (
                 conversation,
@@ -197,9 +193,6 @@ class OpenAIServingChat(OpenAIServing):
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
-            logger.warning(f"{conversation=}")
-            logger.warning(f"{request_prompts=}")
-            logger.warning(f"{engine_prompts=}")
         except (ValueError, TypeError, RuntimeError,
                 jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
