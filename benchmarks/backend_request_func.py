@@ -436,6 +436,87 @@ async def async_request_openai_chat_completions(
     return output
 
 
+async def async_request_generate(
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    assert api_url.endswith("generate")
+
+    async with aiohttp.ClientSession(trust_env=True,
+                                     timeout=AIOHTTP_TIMEOUT) as session:
+        headers = {
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+            "Content-Type": "application/json"
+        }
+
+        tokenizer = AutoTokenizer.from_pretrained(request_func_input.model)
+        messages = [{"role": "user", "content": request_func_input.prompt}]
+        input_text = tokenizer.apply_chat_template(messages,
+                                                   tokenize=False,
+                                                   add_generation_prompt=True)
+
+        payload = {
+            "text": input_text,
+            "sampling_params": {
+                "skip_special_tokens": False,
+                "max_new_tokens": request_func_input.output_len,
+                "temperature": 0.6,
+                "top_p": 0.95,
+            },
+            "stream": True,
+        }
+
+        output = RequestFuncOutput()
+        output.prompt_len = request_func_input.prompt_len
+
+        ttft = 0.0
+        st = time.perf_counter()
+        most_recent_timestamp = st
+        generated_text = ""
+        try:
+            async with session.post(url=api_url, json=payload,
+                                    headers=headers) as response:
+                if response.status == 200:
+                    async for chunk_bytes in response.content:
+                        chunk_bytes = chunk_bytes.strip()
+                        if not chunk_bytes:
+                            continue
+
+                        chunk = chunk_bytes.decode("utf-8").removeprefix(
+                            "data: ")
+                        if chunk != "[DONE]":
+                            data = json.loads(chunk)
+                            text = data["text"].strip()
+                            timestamp = time.perf_counter()
+                            if ttft == 0.0:
+                                ttft = timestamp - st
+                                output.ttft = ttft
+                            else:
+                                output.itl.append(timestamp -
+                                                  most_recent_timestamp)
+
+                            most_recent_timestamp = timestamp
+                            generated_text = text
+                            output.output_tokens = data.get(
+                                "meta_info", {}).get("completion_tokens", 0)
+
+                    output.generated_text = generated_text
+                    output.latency = most_recent_timestamp - st
+                    output.success = True
+                else:
+                    output.error = response.reason or ""
+                    output.success = False
+        except Exception:
+            output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
+
+        if pbar:
+            pbar.update(1)
+        return output
+
+
 def get_model(pretrained_model_name_or_path: str) -> str:
     if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
         from modelscope import snapshot_download
@@ -496,6 +577,7 @@ ASYNC_REQUEST_FUNCS = {
     "tensorrt-llm": async_request_trt_llm,
     "scalellm": async_request_openai_completions,
     "sglang": async_request_openai_completions,
+    "generate": async_request_generate,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [
