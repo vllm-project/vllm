@@ -104,6 +104,13 @@ def _llava_vllm_to_hf_output(vllm_output: RunnerOutput, model: str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
+def llava_onevision_hf_model_kwargs(model: str) -> dict:
+    """Workaround to fix the sliding window issue in llava_onevision."""
+    config = AutoConfig.from_pretrained(model)
+    config.text_config.sliding_window = None
+    return config.to_dict()
+
+
 def llava_onevision_vllm_to_hf_output(vllm_output: RunnerOutput,
                                       model: str) -> RunnerOutput:
     """Sanitize vllm output [llava-onevision] to compare with hf output."""
@@ -195,6 +202,12 @@ def idefics3_trunc_hf_output(hf_output: RunnerOutput,
     if output_str.endswith("<end_of_utterance>"):
         output_str = output_str.split("<end_of_utterance>")[0]
     return output_ids, output_str, out_logprobs
+
+
+def smolvlm_trunc_hf_output(hf_output: RunnerOutput,
+                            model: str) -> RunnerOutput:
+    # Based on Idefics3
+    return idefics3_trunc_hf_output(hf_output, model)
 
 
 def minicpmv_trunc_hf_output(hf_output: RunnerOutput,

@@ -4,21 +4,22 @@ import ast
 import copy
 import enum
 import hashlib
-import importlib.metadata
+import inspect
 import json
 import sys
+import textwrap
 import warnings
 from collections import Counter
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
+                         replace)
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
                     Optional, Protocol, Union)
 
 import torch
-from packaging.version import Version
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
@@ -29,7 +30,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import CpuArchEnum
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.sampling_params import GuidedDecodingParams
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
@@ -40,8 +41,8 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, get_open_port, random_uuid,
-                        resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, is_torch_equal_or_newer,
+                        random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -104,6 +105,77 @@ class ModelImpl(str, enum.Enum):
     AUTO = "auto"
     VLLM = "vllm"
     TRANSFORMERS = "transformers"
+
+
+def get_attr_docs(cls: type[Any]) -> dict[str, str]:
+    """
+    Get any docstrings placed after attribute assignments in a class body.
+
+    https://davidism.com/mit-license/
+    """
+
+    def pairwise(iterable):
+        """
+        Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
+        
+        Can be removed when Python 3.9 support is dropped.
+        """
+        iterator = iter(iterable)
+        a = next(iterator, None)
+
+        for b in iterator:
+            yield a, b
+            a = b
+
+    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+
+    if not isinstance(cls_node, ast.ClassDef):
+        raise TypeError("Given object was not a class.")
+
+    out = {}
+
+    # Consider each pair of nodes.
+    for a, b in pairwise(cls_node.body):
+        # Must be an assignment then a constant string.
+        if (not isinstance(a, (ast.Assign, ast.AnnAssign))
+                or not isinstance(b, ast.Expr)
+                or not isinstance(b.value, ast.Constant)
+                or not isinstance(b.value.value, str)):
+            continue
+
+        doc = inspect.cleandoc(b.value.value)
+
+        # An assignment can have multiple targets (a = b = v), but an
+        # annotated assignment only has one target.
+        targets = a.targets if isinstance(a, ast.Assign) else [a.target]
+
+        for target in targets:
+            # Must be assigning to a plain name.
+            if not isinstance(target, ast.Name):
+                continue
+
+            out[target.id] = doc
+
+    return out
+
+
+def config(cls: type[Any]) -> type[Any]:
+    """
+    A decorator that ensures all fields in a dataclass have default values
+    and that each field has a docstring.
+    """
+    if not is_dataclass(cls):
+        raise TypeError("The decorated class must be a dataclass.")
+    attr_docs = get_attr_docs(cls)
+    for f in fields(cls):
+        if f.init and f.default is MISSING and f.default_factory is MISSING:
+            raise ValueError(
+                f"Field '{f.name}' in {cls.__name__} must have a default value."
+            )
+        if f.name not in attr_docs:
+            raise ValueError(
+                f"Field '{f.name}' in {cls.__name__} must have a docstring.")
+    return cls
 
 
 class ModelConfig:
@@ -173,6 +245,9 @@ class ModelConfig:
             Defaults to True.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
+        hf_token: The token to use as HTTP bearer authorization for remote files
+            . If `True`, will use the token generated when running 
+            `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
@@ -256,6 +331,7 @@ class ModelConfig:
         limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
         use_async_output_proc: bool = True,
         config_format: ConfigFormat = ConfigFormat.AUTO,
+        hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         disable_mm_preprocessor_cache: bool = False,
@@ -317,8 +393,8 @@ class ModelConfig:
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
             raise ValueError(
                 "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
-                "module was not found."
-                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile "
+                "module was not found. See "
+                "https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile "  # noqa: E501
                 "for instructions on how to install it.")
 
         # The tokenizer version is consistent with the model version by default.
@@ -354,9 +430,11 @@ class ModelConfig:
         self.hf_config = hf_config
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.attention_chunk_size = getattr(self.hf_text_config,
+                                            "attention_chunk_size", None)
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
-            self.model, revision)
+            self.model, hf_token=hf_token, revision=revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
@@ -411,6 +489,7 @@ class ModelConfig:
 
         self.is_attention_free = self._init_attention_free()
         self.is_hybrid = self._init_is_hybrid()
+        self.has_noops = self._init_has_noops()
         self.has_inner_state = self._init_has_inner_state()
 
         if current_platform.is_neuron():
@@ -509,6 +588,10 @@ class ModelConfig:
 
     def _init_is_hybrid(self) -> bool:
         return self.registry.is_hybrid_model(self.architectures)
+
+    def _init_has_noops(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return self.registry.is_noops_model(architectures)
 
     def _init_has_inner_state(self) -> bool:
         return self.registry.model_has_inner_state(self.architectures)
@@ -679,6 +762,13 @@ class ModelConfig:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
+        ROCM_UNSUPPORTED_MODELS = ['mllama']
+        if (self.hf_config.model_type in ROCM_UNSUPPORTED_MODELS
+                and not self.enforce_eager and current_platform.is_rocm()):
+            logger.warning(
+                "CUDA graph is not supported for %s on ROCm yet, fallback "
+                "to the eager mode.", self.hf_config.model_type)
+            self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
         """
@@ -756,6 +846,12 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
+
+        if parallel_config.distributed_executor_backend == "external_launcher":
+            assert self.seed is not None, (
+                "Seed must be set when using external launcher backend to "
+                "make sure sampling results are the same across workers.")
+
         total_num_attention_heads = getattr(self.hf_text_config,
                                             "num_attention_heads", 0)
         tensor_parallel_size = parallel_config.tensor_parallel_size
@@ -872,6 +968,14 @@ class ModelConfig:
             return getattr(self.hf_config.attn_config, "kv_n_heads",
                            self.hf_config.num_attention_heads)
 
+        if self.hf_config.model_type == "nemotron-nas":
+            for block in self.hf_config.block_configs:
+                if not block.attention.no_op:
+                    return self.hf_config.num_attention_heads \
+                        // block.attention.n_heads_in_group
+
+            raise RuntimeError("Couldn't determine number of kv heads")
+
         if self.is_attention_free:
             return 0
 
@@ -940,7 +1044,9 @@ class ModelConfig:
         # This function relies on 'layers_block_type' in hf_config,
         # for w/o this attribute, we will need to have workarounds like so
         attn_block_type = block_type == LayerBlockType.attention
-        is_transformer = not self.is_hybrid and not self.is_attention_free
+        is_transformer = not self.is_hybrid and \
+                            not self.has_noops and \
+                            not self.is_attention_free
         start, end = self.get_layers_start_end_indices(parallel_config)
 
         if is_transformer:
@@ -951,27 +1057,39 @@ class ModelConfig:
             # Note that this code assumes there
             # is only one type of attention-free block type.
             return 0 if attn_block_type else end - start
+        elif self.has_noops:
+            block_configs = self.hf_config.block_configs
+            return sum(not bc.attention.no_op
+                       for bc in block_configs[start:end])
         else:
-            # Hybrid model
+            # Hybrid model Jamba
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
-            if layers_block_type_value is None:
-                raise ValueError("The model is an hybrid without a "
-                                 "layers_block_type in the hf_config, "
-                                 "cannot determine the num of "
-                                 f"{block_type.value} layers")
+            if layers_block_type_value is not None:
+                if hasattr(self.hf_text_config,
+                           "model_type") and (self.hf_text_config.model_type
+                                              == "zamba2"):
+                    if attn_block_type:
+                        return sum(t == "hybrid"
+                                   for t in layers_block_type_value[start:end])
+                    else:
+                        return self.get_num_layers(parallel_config)
+                return sum(t == block_type.value
+                           for t in layers_block_type_value[start:end])
 
-            if hasattr(self.hf_text_config,
-                       "model_type") and (self.hf_text_config.model_type
-                                          == "zamba2"):
-                if attn_block_type:
-                    return sum(t == "hybrid"
-                               for t in layers_block_type_value[start:end])
-                else:
-                    return self.get_num_layers(parallel_config)
+            # Hybrid model Minimax
+            attn_type_list = getattr(self.hf_config, "attn_type_list", None)
+            if attn_type_list:
+                return sum(t == 1 for t in attn_type_list[start:end])
 
-            return sum(t == block_type.value
-                       for t in layers_block_type_value[start:end])
+            if layers_block_type_value is None and attn_type_list is None:
+                raise ValueError(
+                    "The model is an hybrid without a"
+                    "layers_block_type or an attn_type_list in the hf_config,"
+                    "cannot determine the num of "
+                    f"{block_type.value} layers")
+
+            return sum(t == 1 for t in attn_type_list[start:end])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
@@ -1084,6 +1202,11 @@ class ModelConfig:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_v1_compatible(architectures)
 
+    @property
+    def is_matryoshka(self) -> bool:
+        return (hasattr(self.hf_config, "matryoshka_dimensions")
+                or getattr(self.hf_config, "is_matryoshka", False))
+
 
 class CacheConfig:
     """Configuration for the KV cache.
@@ -1097,8 +1220,7 @@ class CacheConfig:
         is_attention_free: Whether the model is attention-free.
         num_gpu_blocks_override: Number of GPU blocks to use. This overrides the
             profiled num_gpu_blocks if specified. Does nothing if None.
-        sliding_window: Sliding window size for the KV cache. Can not work with
-            prefix caching enabled.
+        sliding_window: Sliding window size for the KV cache.
         enable_prefix_caching: Whether to enable prefix caching.
         cpu_offload_gb: Size of the CPU offload buffer in GiB.
     """
@@ -1384,61 +1506,77 @@ class LoadConfig:
             self.ignore_patterns = ["original/**/*"]
 
 
+@config
 @dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
-    pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
-    tensor_parallel_size: int = 1  # Number of tensor parallel groups.
-    data_parallel_size: int = 1  # Number of data parallel groups.
-    data_parallel_rank: int = 0  # Rank of the data parallel group.
-    # Local rank of the data parallel group, defaults to global rank.
+    pipeline_parallel_size: int = 1
+    """Number of pipeline parallel groups."""
+    tensor_parallel_size: int = 1
+    """Number of tensor parallel groups."""
+    data_parallel_size: int = 1
+    """Number of data parallel groups. MoE layers will be sharded according to
+    the product of the tensor parallel size and data parallel size."""
+    data_parallel_rank: int = 0
+    """Rank of the data parallel group."""
     data_parallel_rank_local: Optional[int] = None
-    # IP of the data parallel master.
+    """Local rank of the data parallel group, defaults to global rank."""
     data_parallel_master_ip: str = "127.0.0.1"
-    data_parallel_master_port: int = 29500  # Port of the data parallel master.
-    enable_expert_parallel: bool = False  # Use EP instead of TP for MoE layers.
+    """IP of the data parallel master."""
+    data_parallel_master_port: int = 29500
+    """Port of the data parallel master."""
+    enable_expert_parallel: bool = False
+    """Use expert parallelism instead of tensor parallelism for MoE layers."""
 
-    # Maximum number of multiple batches
-    # when load model sequentially. To avoid RAM OOM when using tensor
-    # parallel and large models.
     max_parallel_loading_workers: Optional[int] = None
+    """Maximum number of parallal loading workers when loading model
+    sequentially in multiple batches. To avoid RAM OOM when using tensor
+    parallel and large models."""
 
-    # Disable the custom all-reduce kernel and fall back to NCCL.
     disable_custom_all_reduce: bool = False
+    """Disable the custom all-reduce kernel and fall back to NCCL."""
 
-    # Config for the tokenizer pool. If None, will use synchronous tokenization.
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
+    """Config for the tokenizer pool. If None, will use synchronous
+    tokenization."""
 
-    # Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     ray_workers_use_nsight: bool = False
+    """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
-    # ray distributed model workers placement group.
     placement_group: Optional["PlacementGroup"] = None
+    """ray distributed model workers placement group."""
 
-    # Backend to use for distributed model
-    # workers, either "ray" or "mp" (multiprocessing). If the product
-    # of pipeline_parallel_size and tensor_parallel_size is less than
-    # or equal to the number of GPUs available, "mp" will be used to
-    # keep processing on a single host. Otherwise, this will default
-    # to "ray" if Ray is installed and fail otherwise. Note that tpu
-    # and hpu only support Ray for distributed inference.
     distributed_executor_backend: Optional[Union[str,
                                                  type["ExecutorBase"]]] = None
+    """Backend to use for distributed model
+    workers, either "ray" or "mp" (multiprocessing). If the product
+    of pipeline_parallel_size and tensor_parallel_size is less than
+    or equal to the number of GPUs available, "mp" will be used to
+    keep processing on a single host. Otherwise, this will default
+    to "ray" if Ray is installed and fail otherwise. Note that tpu
+    and hpu only support Ray for distributed inference."""
 
-    # the full name of the worker class to use. If "auto", the worker class
-    # will be determined based on the platform.
     worker_cls: str = "auto"
+    """The full name of the worker class to use. If "auto", the worker class
+    will be determined based on the platform."""
     sd_worker_cls: str = "auto"
+    """The full name of the worker class to use for speculative decofing. 
+    If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
+    """The full name of the worker extension class to use. The worker extension
+    class is dynamically inherited by the worker class. This is used to inject
+    new attributes and methods to the worker class for use in collective_rpc
+    calls."""
 
-    # world_size is TPxPP, it affects the number of workers we create.
     world_size: int = field(init=False)
-    # world_size_across_dp is TPxPPxDP, it is the size of the world
-    # including data parallelism.
+    """world_size is TPxPP, it affects the number of workers we create."""
     world_size_across_dp: int = field(init=False)
+    """world_size_across_dp is TPxPPxDP, it is the size of the world
+    including data parallelism."""
 
     rank: int = 0
+    """Global rank in distributed setup."""
 
     def get_next_dp_init_port(self) -> int:
         """
@@ -1587,11 +1725,12 @@ class ParallelConfig:
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
-        if current_platform.is_rocm():
+
+        if not current_platform.use_custom_allreduce():
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
-                "supported on AMD GPUs.")
+                "supported on current platform.")
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
@@ -1674,6 +1813,14 @@ class SchedulerConfig:
     policy: str = "fcfs"
 
     chunked_prefill_enabled: bool = field(init=False)
+
+    # If set to true and chunked prefill is enabled, we do not want to
+    # partially schedule a multimodal item. Only used in V1
+    # This ensures that if a request has a mixed prompt
+    # (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
+    # some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
+    # it will be scheduled as TTTT in one step and IIIIIIIIII in the next.
+    disable_chunked_mm_input: bool = False
 
     # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
     # or "mod.custom_class".
@@ -1841,7 +1988,10 @@ class DeviceConfig:
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
             if not self.device_type:
-                raise RuntimeError("Failed to infer device type")
+                raise RuntimeError(
+                    "Failed to infer device type, please set "
+                    "the environment variable `VLLM_LOGGING_LEVEL=DEBUG` "
+                    "to turn on verbose logging to help debug the issue.")
         else:
             # Device type is assigned explicitly
             self.device_type = device
@@ -2028,14 +2178,13 @@ class SpeculativeConfig:
 
     def __post_init__(self):
 
-        # Note: After next release, the method parameter will be used to
-        # specify the speculative method, which helps to extend the
-        # configuration of non-model-based proposers, and the model parameter
-        # will be used when the draft model or head is needed.
-        # If users do not specify the method, the speculative method will
-        # be detected automatically if possible. If the speculative method can
-        # not be detected, it will be considered as the draft-model-based
-        # method by default.
+        # Note: "method" is a new parameter that helps to extend the
+        # configuration of non-model-based proposers, and the "model" parameter
+        # will be used to set the draft model, eagle head, or additional weight
+        # when needed. If users do not specify "method", the speculative method
+        # will be detected automatically if possible. If the speculative method
+        # can not be detected, it will be considered as the "draft_model" by
+        # default.
 
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
@@ -2050,8 +2199,8 @@ class SpeculativeConfig:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
 
-        # Automatically configure the ngram method during configuration
-        # refactoring to ensure a smooth transition.
+        # Automatically configure the method for ngram when "model" is used
+        # instead of "method"
         if self.method is None and (self.model is not None
                                     and self.model in ("ngram", "[ngram]")):
             self.method = "ngram"
@@ -2133,9 +2282,10 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method == "eagle":
-                    if self.enable_chunked_prefill:
+                    if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
                         raise ValueError(
-                            "Chunked prefill and EAGLE are not compatible.")
+                            "Chunked prefill and EAGLE are not compatible "
+                            "when using V0.")
 
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
@@ -2340,12 +2490,10 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        if self.prompt_lookup_max is not None and self.prompt_lookup_max > 0:
-            draft_model = "ngram"
-        else:
-            draft_model = self.draft_model_config.model
+        method = self.method
+        model = None if method == "ngram" else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
+        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
 
 
 @dataclass
@@ -2408,9 +2556,9 @@ class LoRAConfig:
                 f"max_loras ({self.max_loras})")
 
     def verify_with_cache_config(self, cache_config: CacheConfig):
-        # TODO LoRA supports CPU offload.
-        if cache_config.cpu_offload_gb > 0:
-            raise ValueError("CPU offload is not supported with LoRA yet.")
+        if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:
+            raise ValueError(
+                "V0 LoRA does not support CPU offload, please use V1.")
 
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):
@@ -2424,6 +2572,11 @@ class LoRAConfig:
         if scheduler_config.chunked_prefill_enabled:
             logger.warning("LoRA with chunked prefill is still experimental "
                            "and may be unstable.")
+
+    def verify_lora_support(self):
+        if self.long_lora_scaling_factors is not None and envs.VLLM_USE_V1:
+            raise ValueError(
+                "V1 LoRA does not support long LoRA, please use V0.")
 
 
 @dataclass
@@ -2699,6 +2852,10 @@ def _get_and_verify_max_len(
             max_len_key = key if max_len < derived_max_model_len \
                 else max_len_key
             derived_max_model_len = min(derived_max_model_len, max_len)
+    # For Command-R / Cohere, Cohere2 / Aya Vision models
+    if tmp_max_len := getattr(hf_config, "model_max_length", None):
+        max_len_key = "model_max_length"
+        derived_max_model_len = tmp_max_len
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
@@ -2824,7 +2981,7 @@ class DecodingConfig:
 
     # Which guided decoding algo to use.
     # 'outlines' / 'lm-format-enforcer' / 'xgrammar'
-    guided_decoding_backend: str = 'xgrammar'
+    guided_decoding_backend: str = "auto" if envs.VLLM_USE_V1 else "xgrammar"
 
     reasoning_backend: Optional[str] = None
 
@@ -2849,7 +3006,7 @@ class DecodingConfig:
 
     def __post_init__(self):
         v0_valid_guided_backends = [
-            'outlines', 'lm-format-enforcer', 'xgrammar'
+            'outlines', 'lm-format-enforcer', 'xgrammar', 'auto'
         ]
         v1_valid_guided_backends = ['xgrammar', 'guidance', 'auto']
 
@@ -3221,7 +3378,7 @@ class CompilationConfig(BaseModel):
         #    and it is not yet a priority. RFC here:
         #    https://github.com/vllm-project/vllm/issues/14703
 
-        if Version(importlib.metadata.version('torch')) >= Version("2.6"):
+        if is_torch_equal_or_newer("2.6"):
             KEY = 'enable_auto_functionalized_v2'
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False
@@ -3520,6 +3677,7 @@ class VllmConfig:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+            self.lora_config.verify_lora_support()
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
@@ -3562,9 +3720,10 @@ class VllmConfig:
 
         if self.cache_config is not None and \
             self.cache_config.cpu_offload_gb > 0 and \
-            self.compilation_config.level != CompilationLevel.NO_COMPILATION:
+            self.compilation_config.level != CompilationLevel.NO_COMPILATION \
+                and not envs.VLLM_USE_V1:
             logger.warning(
-                "CPU offload is not supported with `torch.compile` yet."
+                "CPU offload is not supported with `torch.compile` in v0 yet."
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
