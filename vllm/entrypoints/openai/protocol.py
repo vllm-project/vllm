@@ -1389,7 +1389,8 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameters of the request.
-    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest]
+    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest,
+                RerankRequest]
 
     @field_validator('body', mode='plain')
     @classmethod
@@ -1400,10 +1401,13 @@ class BatchRequestInput(OpenAIBaseModel):
             return ChatCompletionRequest.model_validate(value)
         if url == "/v1/embeddings":
             return TypeAdapter(EmbeddingRequest).validate_python(value)
-        if url == "/v1/score":
+        if "/score" in url:
             return ScoreRequest.model_validate(value)
+        if "/rerank" in url:
+            return RerankRequest.model_validate(value)
         return TypeAdapter(Union[ChatCompletionRequest, EmbeddingRequest,
-                                 ScoreRequest]).validate_python(value)
+                                 ScoreRequest,
+                                 RerankRequest]).validate_python(value)
 
 
 class BatchResponseData(OpenAIBaseModel):
@@ -1415,7 +1419,7 @@ class BatchResponseData(OpenAIBaseModel):
 
     # The body of the response.
     body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
-                         ScoreResponse]] = None
+                         ScoreResponse, RerankResponse]] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
