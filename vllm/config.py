@@ -3880,7 +3880,9 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     try:
         _current_vllm_config = vllm_config
         yield
-    finally:
+    except Exception:
+        raise
+    else:
         logger.debug("enabled custom ops: %s",
                      vllm_config.compilation_config.enabled_custom_ops)
         logger.debug("disabled custom ops: %s",
@@ -3898,6 +3900,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
                 " does not support it. Please open an issue on GitHub"
                 " if you want it to be supported.",
                 vllm_config.model_config.model)
+    finally:
         _current_vllm_config = old_vllm_config
 
 
