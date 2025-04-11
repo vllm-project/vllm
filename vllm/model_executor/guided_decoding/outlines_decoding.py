@@ -10,17 +10,18 @@ from typing import Optional, Tuple, Union
 
 from transformers import PreTrainedTokenizerBase
 
+from vllm.config import ModelConfig
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
 from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import GuidedDecodingParams
-from vllm.config import ModelConfig
 
 
 class GuidedDecodingMode(Enum):
     JSON = "json"
     REGEX = "regex"
     CHOICE = "choice"
+
 
 global_thread_pool = None  # used for generating logits processor fsm
 
@@ -31,10 +32,8 @@ _MAX_THREADPOOL_WORKERS = 16
 
 
 async def get_outlines_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams,
-    tokenizer: PreTrainedTokenizerBase,
-    reasoner: Optional[ReasoningParser],
-    model_config: ModelConfig
+    guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizerBase,
+    reasoner: Optional[ReasoningParser], model_config: ModelConfig
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, None]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
@@ -60,10 +59,8 @@ async def get_outlines_guided_decoding_logits_processor(
 
 
 def get_local_outlines_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams,
-    tokenizer: PreTrainedTokenizerBase,
-    reasoner: Optional[ReasoningParser],
-    model_config: ModelConfig
+    guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizerBase,
+    reasoner: Optional[ReasoningParser], model_config: ModelConfig
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, None]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
@@ -74,7 +71,8 @@ def get_local_outlines_guided_decoding_logits_processor(
         return None
 
     return _get_logits_processor(guide, tokenizer, mode,
-                                 guided_params.whitespace_pattern, reasoner, model_config.get_vocab_size())
+                                 guided_params.whitespace_pattern, reasoner,
+                                 model_config.get_vocab_size())
 
 
 def _get_guide_and_mode(
@@ -98,21 +96,17 @@ def _get_guide_and_mode(
         return choices_regex, GuidedDecodingMode.CHOICE
     elif guided_params.grammar:
         raise ValueError(
-            "Outlines guided decoding backend no longer supports grammar guided generation. "
-            "Please use either the `xgrammar` or `guidance` backend"
-        )
+            "The `outlines` guided decoding backend no longer supports grammar guided generation. "
+            "Please use either the `xgrammar` or `guidance` backend")
     else:
         return None, None
 
 
 def _get_logits_processor(
-    guide: str,
-    tokenizer: PreTrainedTokenizerBase,
-    mode: GuidedDecodingMode,
-    whitespace_pattern: Union[str, None],
-    reasoner: Optional[ReasoningParser],
-    vocab_size: int
-) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
+        guide: str, tokenizer: PreTrainedTokenizerBase,
+        mode: GuidedDecodingMode, whitespace_pattern: Union[str, None],
+        reasoner: Optional[ReasoningParser],
+        vocab_size: int) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern,
                                    reasoner, vocab_size)

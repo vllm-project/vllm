@@ -413,10 +413,10 @@ class EngineArgs:
             'https://github.com/mlc-ai/xgrammar and '
             'https://github.com/guidance-ai/llguidance.'
             'https://github.com/dottxt-ai/outlines-core'
-            'Valid backend values are "xgrammar", "guidance", "outlines" and "auto". '
-            'With "auto", we will make opinionated choices based on request'
-            'contents and what the backend libraries currently support, so '
-            'the behavior is subject to change in each release.')
+            'Valid backend values are "xgrammar", "guidance", "outlines" and '
+            '"auto". With "auto", we will make opinionated choices based on '
+            'request contents and what the backend libraries currently support,'
+            ' so the behavior is subject to change in each release.')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,

@@ -51,14 +51,15 @@ def test_guided_logits_processors(zephyr_7B_tokenzer, sample_regex,
         f"Give an example IPv4 address with this regex: {sample_regex}")
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    # empty token id's gets tokens allowed at first state
-    regex_LP([], tensor)
+    for i in range(1, len(token_ids) + 1):
+        tensor = regex_LP(token_ids[:i], tensor)
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    json_LP([], tensor)
+    for i in range(1, len(token_ids) + 1):
+        tensor = json_LP(token_ids[:i], tensor)
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
