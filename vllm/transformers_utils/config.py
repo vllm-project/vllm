@@ -36,7 +36,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
-                                             Olmo2Config, RWConfig,
+                                             Olmo2Config, OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
@@ -75,6 +75,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
     "olmo2": Olmo2Config,
+    "ovis": OvisConfig,
     "solar": SolarConfig,
     "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
