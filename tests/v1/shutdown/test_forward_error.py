@@ -42,8 +42,6 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size: int,
     
     AsyncLLM always uses an MP client.
     """
-    if tensor_parallel_size > 1:
-        pytest.skip(reason="Parallelism > 1 not yet supported for this test.")
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
