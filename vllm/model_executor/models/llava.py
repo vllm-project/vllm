@@ -205,57 +205,30 @@ _I = TypeVar("_I", bound=BaseLlavaProcessingInfo)
 
 class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
+
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
-
-    def _get_dummy_images(self, width: int, height: int, num_images: int) -> list[Image.Image]:
-        """获取用于性能分析的虚拟图像。
-        
-        Args:
-            width: 目标图像宽度
-            height: 目标图像高度 
-            num_images: 需要生成的图像数量
-            
-        Returns:
-            包含指定数量 PIL Image 对象的列表,每个图像大小为 (width, height)
-        """
-        # 创建一个 RGB 格式的基础图像
-        base_image = np.zeros((height, width, 3), dtype=np.uint8)
-        # 填充一些随机值以模拟真实图像
-        base_image[..., 0] = 255  # R 通道
-        base_image[..., 1] = 128  # G 通道
-        base_image[..., 2] = 64   # B 通道
-        
-        # 转换为 PIL Image
-        base_image = Image.fromarray(base_image, mode='RGB')
-        
-        # 调整图像大小到目标尺寸
-        if base_image.size != (width, height):
-            base_image = base_image.resize((width, height))
-            
-        # 复制到所需的图像数量
-        return [base_image.copy() for _ in range(num_images)]
 
 
 class LlavaProcessingInfo(BaseLlavaProcessingInfo):
