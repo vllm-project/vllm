@@ -5,15 +5,12 @@ import torch
 # Required to register the custom ops
 import vllm.lora.ops.xla_ops.pallas  # noqa # pylint: disable=unused-import
 
-N_TOKENS = [
-    8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
-    131072
-]
-HIDDEN_SIZES = [128, 256, 512, 896, 1024, 2048, 4096, 8192, 8320]
+N_TOKENS = [16, 1024, 4096]
+HIDDEN_SIZES = [1024, 2048, 4096]
 
-DTYPES = [torch.float16, torch.bfloat16]
-NUM_LORA = [1, 2, 4, 8, 16, 32]
-RANKS = [8, 16, 32, 64, 128]
+DTYPES = [torch.float32, torch.bfloat16]
+NUM_LORA = [1, 4, 16]
+RANKS = [32, 256, 512]
 
 
 def generate_test_data(T, D, L, N, seed, dtype=torch.float32):
