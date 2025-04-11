@@ -4,10 +4,9 @@
 
 vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more! This functionality lets you serve models and interact with them using an HTTP client.
 
-In your terminal, you can install vLLM, then start the server with the [`vllm serve`](#vllm-serve) command. (You can also use our [Docker](#deployment-docker) image.)
+In your terminal, you can [install](../getting_started/installation.md) vLLM, then start the server with the [`vllm serve`](#vllm-serve) command. (You can also use our [Docker](#deployment-docker) image.)
 
 ```bash
-pip install vllm
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
 
