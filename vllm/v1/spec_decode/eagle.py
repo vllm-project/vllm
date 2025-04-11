@@ -36,15 +36,20 @@ class EagleProposer:
 
         # setup buffers for draft token ids and probs to be
         # reused across steps for Rejection Sampling
+        self.curr_num_tokens = -1
         self.curr_batch_size = -1
-        self._draft_token_ids_buffer = torch.zeros(max_batch_size,
+        
+        # packed tensor for [bs, num_speculative_tokens]
+        self._draft_token_ids_buffer = torch.zeros(max_batch_size, 
                                                    self.num_speculative_tokens,
-                                                   dtype=torch.int32,
+                                                   dtype=torch.long,
                                                    device=device)
+        
+        # packed tensor for [num_tokens, vocab_size]
         self._draft_token_ids_buffer_shape = self._draft_token_ids_buffer.shape
-        self._draft_probs_buffer = torch.zeros(max_batch_size,
-                                               self.num_speculative_tokens,
+        self._draft_probs_buffer = torch.zeros(max_batch_size * self.num_speculative_tokens,
                                                vocab_size,
+                                               # TODO(ekagra): pass dtype
                                                dtype=torch.float32,
                                                device=device)
         self._draft_probs_buffer_shape = self._draft_probs_buffer.shape
@@ -52,12 +57,12 @@ class EagleProposer:
     def get_draft_token_ids(self) -> torch.Tensor:
         # [batch_size, num_speculative_tokens]
         assert self.curr_batch_size != -1, "EagleProposer hasn't proposed yet."
-        return self._draft_token_ids_buffer[:self.curr_batch_size, :]
+        return self._draft_token_ids_buffer[:self.curr_batch_size]
 
     def get_draft_probs(self) -> torch.Tensor:
         # [batch_size, num_speculative_tokens, vocab_size]
-        assert self.curr_batch_size != -1, "EagleProposer hasn't proposed yet."
-        return self._draft_probs_buffer[:self.curr_batch_size, :, :]
+        assert self.curr_num_tokens != -1, "EagleProposer hasn't proposed yet."
+        return self._draft_probs_buffer[:self.curr_num_tokens]
 
     def propose(
         self,
@@ -102,6 +107,7 @@ class EagleProposer:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         self.curr_batch_size = batch_size
+        self.curr_num_tokens = batch_size * self.num_speculative_tokens
         last_token_indices = cu_num_tokens[1:] - 1
 
         input_ids = torch.empty_like(target_token_ids)
@@ -142,8 +148,11 @@ class EagleProposer:
             )
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
-        compute_probs_and_sample_next_token(logits, sampling_metadata, 0,
+        compute_probs_and_sample_next_token(logits, sampling_metadata, 
+                                            0,
+                                            self.num_speculative_tokens,
                                             batch_size,
+                                            self.arange,
                                             self._draft_token_ids_buffer,
                                             self._draft_probs_buffer)
 
@@ -159,8 +168,7 @@ class EagleProposer:
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         for speculative_token_idx in range(self.num_speculative_tokens - 1):
             # Update the inputs.
-            input_ids = self._draft_token_ids_buffer[:batch_size,
-                                                     speculative_token_idx]
+            input_ids = self._draft_token_ids_buffer[:batch_size, speculative_token_idx]
             positions += 1
             attn_metadata.max_seq_len += 1
             attn_metadata.seq_lens += 1
@@ -182,7 +190,9 @@ class EagleProposer:
             logits = self.model.compute_logits(hidden_states, None)
             compute_probs_and_sample_next_token(logits, sampling_metadata,
                                                 speculative_token_idx + 1,
+                                                self.num_speculative_tokens,
                                                 batch_size,
+                                                self.arange,
                                                 self._draft_token_ids_buffer,
                                                 self._draft_probs_buffer)
 
@@ -259,8 +269,14 @@ class EagleProposer:
 def compute_probs_and_sample_next_token(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    # index of the speculative token among num_speculative_tokens
     speculative_token_idx: int,
+    # max number of speculative tokens
+    num_speculative_tokens: int,
+    # current batch size
     batch_size: int,
+    # [batch_size + 1]
+    arange: torch.Tensor,
     # [batch_size, num_speculative_tokens]
     draft_token_ids_buffer: torch.Tensor,
     # [batch_size, num_speculative_tokens, vocab_size]
@@ -275,18 +291,19 @@ def compute_probs_and_sample_next_token(
     # as draft_token_ids, then draft_token_ids = logits.argmax(dim=-1)
     # would create a new tensor and not allow in-place writes.
 
+    draft_probs_buffer_indices = arange[:batch_size] * num_speculative_tokens + speculative_token_idx
+
     if sampling_metadata.all_greedy:
         # For greedy requests, draft_probs is not used in rejection sampling.
         # Therefore, we can just return the logits.
-        draft_probs_buffer[:batch_size, speculative_token_idx, :] = logits
-        draft_token_ids_buffer[:batch_size,
-                               speculative_token_idx] = logits.argmax(dim=-1)
+        draft_probs_buffer[draft_probs_buffer_indices] = logits.to(dtype=torch.float32)
+        draft_token_ids_buffer[:batch_size, speculative_token_idx] = logits.argmax(dim=-1)
         return
 
     is_greedy = sampling_metadata.temperature == -1
     temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
     logits.div_(temperature.view(-1, 1))
-    draft_probs_buffer[:batch_size, speculative_token_idx, :] = logits.softmax(
+    draft_probs_buffer[draft_probs_buffer_indices] = logits.softmax(
         dim=-1, dtype=torch.float32)
 
     # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
@@ -295,18 +312,15 @@ def compute_probs_and_sample_next_token(
     # of the generated tokens after rejection sampling.
 
     # TODO(woosuk): Consider seeds.
-    q = torch.empty_like(draft_probs_buffer[:batch_size,
-                                            speculative_token_idx, :])
+    q = torch.empty_like(draft_probs_buffer[draft_probs_buffer_indices])
     q.exponential_()
     draft_token_ids_buffer[:batch_size, speculative_token_idx] = \
-        draft_probs_buffer[:batch_size, speculative_token_idx, :] \
+        draft_probs_buffer[draft_probs_buffer_indices] \
         .div_(q) \
         .argmax(dim=-1) \
         .view(-1)
     if not sampling_metadata.all_random:
-        greedy_token_ids = draft_probs_buffer[:batch_size,
-                                              speculative_token_idx, :].argmax(
-                                                  dim=-1)
+        greedy_token_ids = draft_probs_buffer[draft_probs_buffer_indices].argmax(dim=-1)
         draft_token_ids_buffer[:batch_size, speculative_token_idx] = \
             torch.where(
             is_greedy,
