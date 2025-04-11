@@ -2609,11 +2609,6 @@ class PoolerConfig:
     ``math-shepherd-mistral-7b-prm`` model.
     """
 
-    is_matryoshka: bool = False
-    """
-    Indicates whether the embedding model supports Matryoshka representation.
-    """
-
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
