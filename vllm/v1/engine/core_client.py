@@ -627,9 +627,6 @@ class AsyncMPClient(MPClient):
 
         self.outputs_queue: asyncio.Queue[Union[EngineCoreOutputs,
                                                 Exception]] = asyncio.Queue()
-        self.outputs_handler: Optional[Callable[
-            [AsyncMPClient, EngineCoreOutputs], Awaitable[None]]] = None
-
         try:
             # If we are running in an asyncio event loop, start the queue task.
             # Otherwise, it will be started lazily. If it is not started here,
@@ -650,7 +647,10 @@ class AsyncMPClient(MPClient):
         decoder = self.decoder
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
-        output_handler = self.outputs_handler
+        output_handler: Optional[Callable[[AsyncMPClient, EngineCoreOutputs],
+                                          Awaitable[None]]] = getattr(
+                                              self.__class__,
+                                              "process_engine_outputs", None)
         _self_ref = weakref.ref(self) if output_handler else None
         output_path = self.output_path
         output_socket = make_zmq_socket(self.ctx, output_path,
