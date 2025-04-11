@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 GUIDED_DECODING_BACKENDS_V0 = [
-    "outlines", "lm-format-enforcer", "xgrammar", "guidance"
+    "outlines", "lm-format-enforcer", "xgrammar", "guidance", "auto"
 ]
 GUIDED_DECODING_BACKENDS_V1 = ["xgrammar", "guidance", "auto"]
 
