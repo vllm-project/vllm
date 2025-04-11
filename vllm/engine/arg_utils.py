@@ -407,10 +407,11 @@ class EngineArgs:
             ' (JSON schema / regex etc) by default. Currently support '
             'https://github.com/mlc-ai/xgrammar and '
             'https://github.com/guidance-ai/llguidance.'
-            'Valid backend values are "xgrammar", "guidance", and "auto". '
-            'With "auto", we will make opinionated choices based on request '
-            'contents and what the backend libraries currently support, so '
-            'the behavior is subject to change in each release.')
+            'https://github.com/dottxt-ai/outlines-core'
+            'Valid backend values are "xgrammar", "guidance", "outlines" and '
+            '"auto". With "auto", we will make opinionated choices based on '
+            'request contents and what the backend libraries currently support,'
+            ' so the behavior is subject to change in each release.')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,
@@ -1401,10 +1402,10 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Xgrammar and Guidance are supported.
+        # Xgrammar, Guidance and Outlines are supported.
         SUPPORTED_GUIDED_DECODING = [
             "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
+            "guidance:disable-any-whitespace", "outlines", "auto"
         ]
         if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
             _raise_or_fallback(feature_name="--guided-decoding-backend",
