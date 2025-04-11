@@ -210,13 +210,13 @@ class QuaRotR4(HadamardTransform):
                 raise ValueError(f"size_k={size_k} and size_FHT={size_FHT} do not match {self.actual_input_size}")
 
 
-        hadamard_k=hadamard_sizes[size_k].to(self._device).to(self._dtype)
+        hadamard_k=hadamard_sizes[size_k].to(self._device).bfloat16()
         #initialize the RowParallelLinear and load the weights
         self.hadamard_k=RowParallelLinear(input_size=size_k,
                                             output_size=size_k,
                                             bias=False,
                                             return_bias=False)
-        self.hadamard_k.to(self._device).to(self._dtype)
+        self.hadamard_k.to(self._device).bfloat16()
         self.hadamard_k.weight_loader(self.hadamard_k.weight,hadamard_k)
         self.k=size_k
         self.scale=1.0/torch.tensor(self.actual_input_size).sqrt()
