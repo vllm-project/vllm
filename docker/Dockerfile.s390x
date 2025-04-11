@@ -120,20 +120,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
     --mount=type=bind,from=pyarrow,source=/tmp/arrow/python/dist,target=/tmp/arrow-wheels \
     --mount=type=bind,from=torch-vision,source=/tmp/vision/dist,target=/tmp/vision-wheels/ \
-     sed -i '/^torch/d' requirements/build.txt && \
+     sed -i '/^torch/d' pyproject.toml && \
      ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/pyarrow-*.whl | head -n 1) && \
      VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl | head -n 1) && \
-    uv pip install -v \    
+    uv pip install -v \
         $ARROW_WHL_FILE  \
         $VISION_WHL_FILE \
         --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
         --index-strategy unsafe-best-match \
-        -r requirements/build.txt \
-        -r requirements/cpu.txt 
+        -r requirements/cpu.txt
 
 # Build and install vllm
 RUN --mount=type=cache,target=/root/.cache/uv \
-    VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
+    VLLM_TARGET_DEVICE=cpu python -m pip wheel --wheel-dir dist --verbose . && \
     uv pip install "$(echo dist/*.whl)[tensorizer]"
 
 # setup non-root user for vllm
