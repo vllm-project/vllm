@@ -144,8 +144,8 @@ class TpuPlatform(Platform):
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
     ) -> None:
-        """Raises if this request is unsupported on this platform"""
-        if isinstance(params,
-                      SamplingParams) and params.guided_decoding is not None:
+        # TPU V1 supports structured decoding.
+        if not envs.VLLM_USE_V1 and isinstance(
+                params, SamplingParams) and params.guided_decoding is not None:
             raise ValueError("Structured output is not supported on "
                              f"{cls.device_name}.")
