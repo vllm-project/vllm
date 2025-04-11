@@ -100,7 +100,7 @@ void fast_hadamard_transform_kernel(HadamardParamsBase params) {
     load_input<kNChunks, kNElts, input_t>(x, x_vals, params.dim);
 
     hadamard_mult_thread<kLogNElts, kNChunks>(x_vals);
-    //hadamard_mult_warp<kWarpSize,kLogWarpSize, 0, kNChunks, kNElts>(x_vals); //<- this is the problem - works for <5,0,2,8> but not for <5,0,28,4>
+    hadamard_mult_warp<kWarpSize,kLogWarpSize, 0, kNChunks, kNElts>(x_vals); //<- this is the problem - works for <5,0,2,8> but not for <5,0,28,4>
     
     if constexpr (kNWarps > 1) {
         exchange_smem_pre<kNChunks, kChunksPerExchange, kNElts, kWarpSize, kNWarps, true, vec_t>(x_vals, smem_exchange);
