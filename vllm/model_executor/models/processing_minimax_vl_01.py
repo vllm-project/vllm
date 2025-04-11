@@ -272,11 +272,7 @@ class MiniMaxVL01Processor(ProcessorMixin):
                 pixel_values = image_inputs["pixel_values"]
                 all_image_tokens = []
                 for pixel_value in pixel_values:
-                    # 确保图像数据是3维的
-                    if len(pixel_value.shape) == 2:
-                        # 如果是2维的，添加通道维度
-                        pixel_value = np.expand_dims(pixel_value, axis=0)
-                    height, width = get_image_size(pixel_value)
+                    height, width = get_image_size(to_numpy_array(pixel_value))
                     all_image_tokens.append(int(height*width/self.patch_size**2))
                 
                 prompt_strings = []
