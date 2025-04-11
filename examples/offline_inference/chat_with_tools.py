@@ -3,6 +3,7 @@
 # ruff: noqa
 import json
 import random
+import re
 import string
 
 from vllm import LLM
@@ -48,6 +49,7 @@ model_name = "mistralai/Mistral-7B-Instruct-v0.3"
 # or switch to "mistralai/Mistral-Nemo-Instruct-2407"
 # or "mistralai/Mistral-Large-Instruct-2407"
 # or any other mistral model with function calling ability
+# First-time usage: ensure access permission to the models.
 
 sampling_params = SamplingParams(max_tokens=8192, temperature=0.0)
 llm = LLM(model=model_name,
@@ -111,6 +113,9 @@ messages = [{
 
 outputs = llm.chat(messages, sampling_params=sampling_params, tools=tools)
 output = outputs[0].outputs[0].text.strip()
+print("\n\033[96m[Debug] Model raw response:\033[0m\n", repr(output))
+# Remove the '[TOOL_CALLS]' prefix if it exists, otherwise will cause the json parse fail
+output = re.sub(r'^\[TOOL_CALLS\]', '', output)
 
 # append the assistant message
 messages.append({
@@ -120,21 +125,33 @@ messages.append({
 
 # let's now actually parse and execute the model's output simulating an API call by using the
 # above defined function
-tool_calls = json.loads(output)
-tool_answers = [
-    tool_funtions[call['name']](**call['arguments']) for call in tool_calls
-]
+# Parse the output as JSON
+tool_calls = None
+try:
+    tool_calls = json.loads(output)
+    tool_answers = [
+        tool_funtions[call['name']](**call['arguments']) for call in tool_calls
+    ]
 
-# append the answer as a tool message and let the LLM give you an answer
-messages.append({
-    "role": "tool",
-    "content": "\n\n".join(tool_answers),
-    "tool_call_id": generate_random_id(),
-})
+    # append the answer as a tool message and let the LLM give you an answer
+    messages.append({
+        "role": "tool",
+        "content": "\n\n".join(tool_answers),
+        "tool_call_id": generate_random_id(),
+    })
+except json.JSONDecodeError:
+    print(
+        "\n\033[91mJSON parsing failed, the model returned non-structured content:\033[0m\n",
+        output)
 
 outputs = llm.chat(messages, sampling_params, tools=tools)
 
-print(outputs[0].outputs[0].text.strip())
+if tool_calls:
+    outputs = llm.chat(messages, sampling_params, tools=tools)
+    print("\nFinal model response with tool calls:\n",
+          outputs[0].outputs[0].text.strip())
+else:
+    print("\nNo valid tool calls were found.")
 # yields
 #   'The weather in Dallas, TX is 85 degrees fahrenheit. '
 #   'It is partly cloudly, with highs in the 90's.'
