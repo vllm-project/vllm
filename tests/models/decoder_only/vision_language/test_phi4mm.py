@@ -33,7 +33,6 @@ model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
 # Since the vision-lora and speech-lora co-exist with the base model,
 # we have to manually specify the path of the lora weights.
 vision_lora_path = os.path.join(model_path, "vision-lora")
-speech_lora_path = os.path.join(model_path, "speech-lora")
 speech_question = os.path.join(model_path, "examples",
                                "what_is_shown_in_this_image.wav")
 models = [model_path]
@@ -112,21 +111,17 @@ def run_test(
             enforce_eager=True,
     ) as vllm_model:
         lora_request = LoRARequest("vision", 1, vision_lora_path)
-        vllm_model.model.llm_engine.add_lora(lora_request=lora_request)
-        if any(audios is not None for _, _, audios in inputs):
-            lora_request = LoRARequest("speech", 2, speech_lora_path)
-            vllm_model.model.llm_engine.add_lora(lora_request=lora_request)
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
                                                 images=images,
-                                                audios=audios)
+                                                audios=audios,
+                                                lora_request=lora_request)
             for prompts, images, audios in inputs
         ]
 
-    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
-    hf_model_kwargs = {"_attn_implementation": "eager"}
+    hf_model_kwargs = {"_attn_implementation": "sdpa"}
     with hf_runner(model, dtype=dtype,
                    model_kwargs=hf_model_kwargs) as hf_model:
 
@@ -171,8 +166,6 @@ def run_test(
         )
 
 
-# Since we use _attn_implementation="eager" for hf_runner, there is more
-# significant numerical difference. The basic `logprobs=5` fails to pass.
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -184,7 +177,7 @@ def run_test(
         # Single-scale, batched
         [1.0, 1.0, 1.0],
         # Multi-scale
-        [0.7, 0.75, 1.0],
+        [0.25, 0.5, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
@@ -235,8 +228,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
 @pytest.mark.parametrize("max_model_len", [25600])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-@pytest.mark.xfail(
-    reason="Phi-4-MM multi-image inference is divergent with hf model.")
 def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
                              size_factors, dtype: str, max_model_len: int,
                              max_tokens: int, num_logprobs: int) -> None:
