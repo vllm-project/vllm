@@ -34,7 +34,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -547,11 +547,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             prompt_embeds = None
         else:
             tokens = [0] * (seq_len - context_len)
-            prompt_embeds = seq_data.prompt_embeds[context_len:seq_len]
-            if len(prompt_embeds) == 0:
-                # Sometimes the prompt_embeds can be fully processed, so the
-                # seq_data.prompt_embeds[context_len:seq_len] can be empty.
-                prompt_embeds = None
+            prompt_embeds = seq_data.get_token_embeddings(
+            )[context_len:seq_len]
+            # # prompt_embeds = seq_data.prompt_embeds
+            # prompt_embeds = seq_data.prompt_embeds[context_len:seq_len]
+            # # if len(prompt_embeds) == 0:
+            # #     # Sometimes the prompt_embeds can be fully processed, so the
+            # #     # seq_data.prompt_embeds[context_len:seq_len] can be empty.
+            # #     prompt_embeds = None
 
         token_types = seq_group_metadata.token_type_ids
 
@@ -887,6 +890,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                       dim=0).to(
                                           dtype=self.runner.model_config.dtype,
                                           device=self.runner.device)
+            assert len(inputs_embeds) == len(input_tokens)
 
         if not input_tokens and inputs_embeds is None:
             # This may happen when all prefill requests hit
@@ -1885,6 +1889,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_input.async_callback()
 
         # Sample the next token.
+        assert isinstance(self.model.sampler, Sampler)
+        original_include_gpu_probs_tensor = \
+            self.model.sampler.include_gpu_probs_tensor
+        if model_input.inputs_embeds is not None:
+            self.model.sampler.include_gpu_probs_tensor = True
+
         output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
@@ -1905,6 +1915,18 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             # the communication time as well.
             output.model_forward_time = (orig_model_forward_time +
                                          model_forward_time)
+
+        if model_input.inputs_embeds is not None:
+            self.model.sampler.include_gpu_probs_tensor = \
+                original_include_gpu_probs_tensor
+            if output.sampled_token_ids is not None:
+                output.sampled_token_embeds = self.model.get_input_embeddings(
+                    output.sampled_token_ids.squeeze(1))
+
+                for token_embed, sequence_group_output in zip(
+                        output.sampled_token_embeds, output.outputs):
+                    assert len(sequence_group_output.samples) == 1
+                    sequence_group_output.samples[0].output_embed = token_embed
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token

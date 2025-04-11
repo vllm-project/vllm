@@ -110,6 +110,11 @@ class SamplerOutput(
     # 'broadcasted' to all other PP ranks for next step.
     sampled_token_ids_cpu: Optional[torch.Tensor] = None
 
+    # On-device tensor containing the sampled token embeddings (embeddings
+    # corresponding to the sampled token ids). Used when prompt embeddings are
+    # specified in lieu of prompt token ids or text.
+    sampled_token_embeds: Optional[torch.Tensor] = None
+
     # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
 
@@ -183,7 +188,7 @@ class Sampler(nn.Module):
 
         # Whether or not the SamplerOutput should have on-device tensors
         # containing the sampled token ids and probabilities. This is used by
-        # speculative decoding.
+        # speculative decoding and when prompt embeddings are specified.
         self.include_gpu_probs_tensor = False
         self.should_modify_greedy_probs_inplace = False
 

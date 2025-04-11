@@ -167,6 +167,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                              sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]
+        output_embeds = [sample.output_embed for sample in valid_samples]
 
         # Truncate to max_tokens if necessary.
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
@@ -190,11 +191,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         is_prefill_sampled_token = seq.data.get_num_uncomputed_tokens() == 0
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
-        for output_token_id, output_logprob in zip(output_token_ids,
-                                                   output_logprobs):
+        for output_token_id, output_logprob, output_embed in zip(
+                output_token_ids, output_logprobs, output_embeds):
             seq.append_token_id(
                 token_id=output_token_id,
                 logprobs=output_logprob,
+                token_embed=output_embed,
             )
 
             if is_prefill_sampled_token:

@@ -198,11 +198,13 @@ def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio,
                 prompt_embeds=torch.rand(context_len, 10),
             )
             input_embeds_len += context_len
+            output_embed = torch.rand(10)
         else:
             seq_data = SequenceData.from_seqs(range(context_len))
+            output_embed = None
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
-        seq_data.append_token_id(1, 0)
+        seq_data.append_token_id(1, 0, output_embed)
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=False,
@@ -399,9 +401,11 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
                 [],
                 prompt_embeds=torch.rand(context_len, 10),
             )
+            output_embed = torch.rand(10)
         else:
             seq_data = SequenceData.from_seqs(range(context_len))
-        seq_data.append_token_id(1, 0)
+            output_embed = None
+        seq_data.append_token_id(1, 0, output_embed)
         seq_data.update_num_computed_tokens(context_len)
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",

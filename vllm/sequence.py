@@ -167,6 +167,7 @@ class SequenceData(msgspec.Struct,
         default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
 
     _prompt_embeds: Optional[torch.Tensor] = None
+    _output_embeds: Optional[torch.Tensor] = None
 
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
@@ -178,6 +179,7 @@ class SequenceData(msgspec.Struct,
     _num_cached_tokens: int = 0
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: list[int] = msgspec.field(default_factory=list)
+    _cached_all_token_embeds: Optional[torch.Tensor] = None
 
     # It is used to get delta input. It is reset when `get_delta_and_reset`
     # is called.
@@ -237,12 +239,21 @@ class SequenceData(msgspec.Struct,
         self._prompt_token_ids_tuple: tuple[int, ...] = tuple(
             self._prompt_token_ids)
         self._update_cached_all_tokens()
+        if self._prompt_embeds is not None:
+            self._update_cached_all_token_embeds()
 
     def _update_cached_all_tokens(self):
         assert isinstance(self._prompt_token_ids, array)
         assert isinstance(self._output_token_ids, array)
         self._cached_all_token_ids: list[int] = list(self._prompt_token_ids +
                                                      self._output_token_ids)
+
+    def _update_cached_all_token_embeds(self):
+        assert isinstance(self._prompt_embeds, torch.Tensor)
+        self._cached_all_token_embeds: torch.Tensor = self._prompt_embeds
+        if self._output_embeds is not None:
+            self._cached_all_token_embeds = torch.cat(
+                (self._cached_all_token_embeds, self._output_embeds), dim=0)
 
     @property
     def cumulative_logprob(self) -> float:
@@ -277,6 +288,16 @@ class SequenceData(msgspec.Struct,
         self._update_cached_all_tokens()
 
     @property
+    def output_token_embeds(self) -> tuple[int, ...]:
+        return tuple(self._output_token_ids)
+
+    @output_token_embeds.setter
+    def output_token_embeds(self,
+                            new_output_token_embeds: torch.Tensor) -> None:
+        self._output_token_ids = new_output_token_embeds
+        self._update_cached_all_token_embeds()
+
+    @property
     def output_token_ids_array(self) -> array:
         """Return the prompt token ids in array type.
 
@@ -293,6 +314,7 @@ class SequenceData(msgspec.Struct,
     @prompt_embeds.setter
     def prompt_embeds(self, prompt_embeds: torch.Tensor) -> None:
         self._prompt_embeds = prompt_embeds
+        self._update_cached_all_token_embeds()
 
     @property
     def mrope_position_delta(self) -> Optional[int]:
@@ -302,11 +324,26 @@ class SequenceData(msgspec.Struct,
     def mrope_position_delta(self, new_mrope_position_delta):
         self._mrope_position_delta = new_mrope_position_delta
 
-    def append_token_id(self, token_id: int, logprob: float) -> None:
+    def append_token_id(self,
+                        token_id: int,
+                        logprob: float,
+                        token_embed: Optional[torch.Tensor] = None) -> None:
         self._output_token_ids.append(token_id)
         self._new_appended_tokens.append(token_id)
         self._cached_all_token_ids.append(token_id)
         self._cumulative_logprob += logprob
+        if token_embed is not None:
+            # Do not pass in with batch or sequence dimensions
+            assert token_embed.ndim == 1
+            token_embed = token_embed.detach().cpu().unsqueeze(0)
+            if self._output_embeds is None:
+                self._output_embeds = token_embed
+            else:
+                self._output_embeds = torch.cat(
+                    (self._output_embeds, token_embed), dim=0)
+            assert self._cached_all_token_embeds is not None
+            self._cached_all_token_embeds = torch.cat(
+                (self._cached_all_token_embeds, token_embed), dim=0)
 
     def get_len(self) -> int:
         return len(self._output_token_ids) + len(self._prompt_token_ids)
@@ -319,6 +356,9 @@ class SequenceData(msgspec.Struct,
 
     def get_token_ids(self) -> list[int]:
         return self._cached_all_token_ids
+
+    def get_token_embeddings(self) -> Optional[torch.Tensor]:
+        return self._cached_all_token_embeds
 
     def get_prefix_token_ids(
             self, num_tokens: int
@@ -573,11 +613,12 @@ class Sequence:
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
 
-    def append_token_id(self, token_id: int, logprobs: dict[int,
-                                                            Logprob]) -> None:
+    def append_token_id(self, token_id: int, logprobs: dict[int, Logprob],
+                        token_embed: Optional[torch.Tensor]) -> None:
         assert token_id in logprobs
         self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id].logprob)
+        self.data.append_token_id(token_id, logprobs[token_id].logprob,
+                                  token_embed)
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -1077,10 +1118,12 @@ class SequenceOutput(
     parent_seq_id: int
     output_token: int
     logprobs: dict[int, Logprob]
+    output_embed: Optional[torch.Tensor] = None
 
     def __repr__(self) -> str:
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
                 f"output_token={self.output_token}, "
+                f"output_embed.shape={self.output_embed.shape}"
                 f"logprobs={self.logprobs})")
 
     def __eq__(self, other: object) -> bool:
