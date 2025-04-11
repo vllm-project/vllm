@@ -38,6 +38,7 @@ This living user guide outlines a few known **important changes and limitations*
 | **NVIDIA** | <nobr>🚀 Natively Supported</nobr>         |
 | **AMD**    | <nobr>🚧 WIP</nobr>           |
 | **TPU**    | <nobr>🚧 WIP</nobr>           |
+| **CPU**    | <nobr>🚧 WIP</nobr>           |
 #### Feature / Model
 
 | Feature / Model | Status |
