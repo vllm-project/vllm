@@ -417,11 +417,6 @@ class SamplingTensors:
             # k should not be greater than the vocab size.
             top_k = min(sampling_params.top_k, vocab_size)
             top_k = vocab_size if top_k == -1 else top_k
-            if temperature < _SAMPLING_EPS:
-                # NOTE: Zero temperature means deterministic sampling
-                # (i.e., greedy sampling or beam search).
-                # Set the temperature to 1 to avoid division by zero.
-                temperature = 1.0
             if not do_top_p_top_k and (top_p < 1.0 - _SAMPLING_EPS
                                        or top_k != vocab_size):
                 do_top_p_top_k = True
