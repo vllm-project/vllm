@@ -1440,7 +1440,8 @@ class LoadFormat(str, enum.Enum):
 class LoadConfig:
     """Configuration for loading the model weights."""
 
-    load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    load_format: Union[str, LoadFormat,
+                       "BaseModelLoader"] = LoadFormat.AUTO.value
     """The format of the model weights to load:
     - "auto" will try to load the weights in the safetensors format and fall
     back to the pytorch bin format if safetensors format is not available.
