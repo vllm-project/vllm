@@ -400,7 +400,7 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(ImageProcessor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
         if hf_processor.patch_size is None:
@@ -519,32 +519,29 @@ class MiniMaxVL01MultiModalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _process_image_input(self, image_input, image_grid_pinpoints, image_size, image_mean, image_std):
-        """Process image input and merge image patch embeddings based on specified strategy."""
-        if not isinstance(image_input, list):
-            image_input = [image_input]
-        
-        # 处理每个图像输入
-        processed_images = []
-        for img in image_input:
-            # 获取图像 patch
-            image_patches = self.get_image_patches(img, image_grid_pinpoints)
-            
-            # 处理每个 patch
-            processed_patches = []
-            for patch in image_patches:
-                # 转换图像
-                transform_img = _transform(image_size[0], image_size[1], image_mean, image_std)(patch)
-                img_array = to_numpy_array(transform_img)
-                processed_patches.append(img_array)
-            
-            # 将处理后的 patch 合并为一个数组
-            processed_images.append(np.array(processed_patches))
-        
-        # 对批次中的图像进行填充，使它们具有相同数量的 patch
-        processed_images = self._pad_for_batching(processed_images)
-        
-        return processed_images
+    def _process_image_input(
+        self,
+        image_input: LlavaNextImageInputs,
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        if image_input["type"] == "image_embeds":
+            return [image_input["data"]]
+
+        patch_embeddings = self._process_image_pixels(image_input)
+
+        image_sizes = image_input.get("image_sizes")
+        if image_sizes is None:
+            batch_size = len(image_input["data"])
+            vision_config = self.config.vision_config
+            default_height = default_width = vision_config.image_size
+            image_sizes = torch.as_tensor([[default_height, default_width]
+                                           for _ in range(batch_size)])
+
+        return [
+            self._merge_image_patch_embeddings(image_sizes[i],
+                                               patch_features_batch,
+                                               strategy="spatial_unpad")
+            for i, patch_features_batch in enumerate(patch_embeddings)
+        ]
 
     def _merge_image_patch_embeddings(self, image_size: torch.Tensor,
                                       patch_embeddings: torch.Tensor, *,
@@ -637,7 +634,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                                    num_images=num_images)
         }
 
-        prompt_text = "test_image" + image_token * num_images
+        prompt_text = image_token * num_images
 
         return ProcessorInputs(
             prompt_text=prompt_text,
@@ -661,7 +658,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 )
 @MULTIMODAL_REGISTRY.register_processor(MiniMaxVL01MultiModalProcessor, 
                                         info=MiniMaxVL01ProcessingInfo, 
-                                        dummy_inputs=LlavaDummyInputsBuilder)
+                                        dummy_inputs=MiniMaxVL01DummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
