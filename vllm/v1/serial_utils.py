@@ -174,12 +174,8 @@ class MsgpackDecoder:
                 v["data"] = self._decode_nested_tensors(v["data"])
                 # Reconstruct the field processor using MultiModalFieldConfig
                 field = v["field"]
-                if isinstance(field, list) and len(field) > 1:
-                    v["field"] = getattr(MultiModalFieldConfig,
-                                         field[0])(None, *field[1:]).field
-                else:
-                    v["field"] = getattr(MultiModalFieldConfig,
-                                         field)(None).field
+                ctor = getattr(MultiModalFieldConfig, field[0])
+                v["field"] = ctor(None, *field[1:]).field
                 elems.append(MultiModalFieldElem(**v))
             all.append(MultiModalKwargsItem.from_elems(elems))
         return all

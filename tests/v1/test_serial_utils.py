@@ -147,8 +147,8 @@ def test_multimodal_items_by_modality():
 
     total_len = sum([len(x) for x in encoded])
 
-    # expected total encoding length, should be 14252, +-20 for minor changes
-    assert total_len >= 14232 and total_len <= 14272
+    # expected total encoding length, should be 14287, +-20 for minor changes
+    assert total_len >= 14267 and total_len <= 14307
     decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
 
     # check all modalities were recovered and do some basic sanity checks
