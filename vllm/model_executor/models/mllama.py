@@ -52,16 +52,17 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalEncDecInputs,
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                                     MultiModalFieldConfig, MultiModalKwargs)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
-                                   MultiModalDataDict, MultiModalDataItems)
+                                   MultiModalDataItems)
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal, SupportsV0Only
@@ -106,16 +107,6 @@ class MllamaProcessingInfo(BaseProcessingInfo):
         image_size = self.get_hf_config().vision_config.image_size
         return calc_token_per_chunk(image_size)
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        vision_config = self.get_hf_config().vision_config
-        token_per_chunk = self.get_token_per_chunk_from_config()
-        mm_max_tokens = vision_config.max_num_tiles * token_per_chunk
-        return {"image": mm_max_tokens}
-
     def get_num_tiles_per_image(self, image_height: int,
                                 image_width: int) -> int:
         vision_config = self.get_hf_config().vision_config
@@ -141,30 +132,30 @@ class MllamaProcessingInfo(BaseProcessingInfo):
 
 class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        hf_processor = self.info.get_hf_processor()
-        image_token: str = hf_processor.image_token
-
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
 
 
 class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
@@ -211,6 +202,9 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         # }
 
         if mm_data:
+            hf_processor = self.info.get_hf_processor()
+            image_token: str = hf_processor.image_token
+
             # Since only the last group of consecutive images
             # are attended by the decoded tokens, we only need to
             # get the number of tokens for those images.
@@ -227,7 +221,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
             num_tokens = decode_tiles * token_per_chunk
             mm_inputs["encoder_prompt_token_ids"] = [image_token_id
                                                      ] * num_tokens
-            mm_inputs["encoder_prompt"] = "<|image|>" * num_tokens
+            mm_inputs["encoder_prompt"] = image_token * num_tokens
 
         return mm_inputs
 
@@ -1188,6 +1182,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         super().__init__()
         config: MllamaConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.text_config.vocab_size
         self.hidden_size = config.text_config.hidden_size
@@ -1324,6 +1319,9 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
             start_pos = end_pos
         cross_attention_states = cross_attention_states_flat
         return cross_attention_states
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_cross_attention_states(
         self,
@@ -1520,6 +1518,15 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                 weight_loader(param, loaded_weight)
                 updated_params.add(name)
         return updated_params
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_model")
 
 
 def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:
