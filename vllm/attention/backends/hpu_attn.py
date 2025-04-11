@@ -241,45 +241,40 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                                  attn_bias.shape[-1])
                 attn_bias = attn_bias.tile((1, self.num_kv_heads, 1, 1))
                 attn_bias.add_(position_bias)
-            if attn_metadata is None or attn_metadata.block_list is None:
-                out = ops.prompt_attention(
-                    impl=self.prefill_impl,
-                    query=query.view(query_shape),
-                    key=key.view(kv_shape),
-                    value=value.view(kv_shape),
-                    is_causal=True,
-                    attn_bias=attn_bias,
-                    valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                    **self.common_attention_args())
-            else:
-                # TODO: enable FusedSDPA
-                out = HPUPagedAttention.forward_prefix(
-                    query=query.view(query_shape),
-                    key=key.view(kv_shape),
-                    value=value.view(kv_shape),
-                    key_cache=key_cache,
-                    value_cache=value_cache,
-                    block_list=attn_metadata.block_list,
-                    attn_bias=attn_metadata.attn_bias,
-                    **self.common_attention_args())
+
+            block_list = attn_metadata.block_list if attn_metadata \
+                and attn_metadata.block_list is not None else None
+
+            out = ops.prompt_attention(
+                impl=self.prefill_impl,
+                query=query.view(query_shape),
+                key=key.view(kv_shape),
+                value=value.view(kv_shape),
+                is_causal=True,
+                attn_bias=attn_bias,
+                valid_seq_lengths=attn_metadata.seq_lens_tensor,
+                **self.common_attention_args(block_list, key_cache,
+                                             value_cache))
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
             output = HPUPagedAttention.forward_decode(
                 query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                block_list=attn_metadata.block_list,
                 block_mapping=attn_metadata.block_mapping,
                 block_bias=attn_metadata.attn_bias,
                 block_groups=attn_metadata.block_groups,
-                **self.common_attention_args())
+                **self.common_attention_args(attn_metadata.block_list,
+                                             key_cache, value_cache))
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
 
-    def common_attention_args(self):
+    def common_attention_args(self,
+                              block_list=None,
+                              key_cache=None,
+                              value_cache=None):
         fsdpa_op = self.fused_scaled_dot_product_attention.apply \
             if self.fused_scaled_dot_product_attention is not None else None
+
         return {
             'scale': self.scale,
             'matmul_qk_op': self.matmul_qk,
@@ -290,6 +285,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             'keys_fetch_func': self.k_cache.fetch_from_cache,
             'values_fetch_func': self.v_cache.fetch_from_cache,
             'softmax_op': self.softmax,
+            'block_list': block_list,
+            'key_cache': key_cache,
+            'value_cache': value_cache,
         }
 
     def forward_encoder_decoder(
@@ -371,13 +369,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Decoding run.
             output = HPUPagedAttention.forward_decode(
                 query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                block_list=block_list,
                 block_mapping=block_mapping,
                 block_bias=attn_bias,
                 block_groups=block_groups,
-                **self.common_attention_args())
+                **self.common_attention_args(block_list, key_cache,
+                                             value_cache))
         # Reshape the output tensor.
         return output.view(batch_size, -1, hidden_size)
 

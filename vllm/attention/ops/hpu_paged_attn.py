@@ -64,10 +64,6 @@ class HPUPagedAttention:
         return ops.flat_pa(**kwargs)
 
     @staticmethod
-    def forward_prefix(**kwargs) -> torch.Tensor:
-        return ops.prompt_attention_with_context(**kwargs)
-
-    @staticmethod
     def swap_blocks(
         src_kv_cache: Tuple[torch.Tensor, torch.Tensor],
         dst_kv_cache: Tuple[torch.Tensor, torch.Tensor],
