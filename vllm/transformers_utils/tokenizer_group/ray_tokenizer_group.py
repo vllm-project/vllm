@@ -113,7 +113,6 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
 
     def encode(self,
                prompt: str,
-               request_id: Optional[str] = None,
                lora_request: Optional[LoRARequest] = None,
                add_special_tokens: Optional[bool] = None) -> List[int]:
         """Encode a prompt using the tokenizer group.
@@ -133,8 +132,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         original_actor = actor
         try:
             ret = ray.get(
-                actor.encode.remote(request_id=request_id,
-                                    prompt=prompt,
+                actor.encode.remote(prompt=prompt,
                                     lora_request=lora_request,
                                     add_special_tokens=add_special_tokens))
         except ActorDiedError as e:
@@ -145,8 +143,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             actor = self._init_actor()
             try:
                 ret = ray.get(
-                    actor.encode.remote(request_id=request_id,
-                                        prompt=prompt,
+                    actor.encode.remote(prompt=prompt,
                                         lora_request=lora_request,
                                         add_special_tokens=add_special_tokens))
             except ActorDiedError as e:
@@ -164,7 +161,6 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
     async def encode_async(
             self,
             prompt: str,
-            request_id: Optional[str] = None,
             lora_request: Optional[LoRARequest] = None,
             add_special_tokens: Optional[bool] = None) -> List[int]:
         """Encode a prompt using the tokenizer group.
@@ -184,7 +180,6 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         original_actor = actor
         try:
             ret = await actor.encode.remote(
-                request_id=request_id,
                 prompt=prompt,
                 lora_request=lora_request,
                 add_special_tokens=add_special_tokens)
@@ -196,7 +191,6 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             actor = self._init_actor()
             try:
                 ret = await actor.encode.remote(
-                    request_id=request_id,
                     prompt=prompt,
                     lora_request=lora_request,
                     add_special_tokens=add_special_tokens)

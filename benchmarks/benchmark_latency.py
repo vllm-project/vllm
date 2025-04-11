@@ -7,7 +7,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -22,7 +22,7 @@ from vllm.utils import FlexibleArgumentParser
 
 
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
-                                     results: Dict[str, Any]) -> None:
+                                     results: dict[str, Any]) -> None:
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={"latency": results["latencies"]},
@@ -52,12 +52,13 @@ def main(args: argparse.Namespace):
         top_p=1.0,
         ignore_eos=True,
         max_tokens=args.output_len,
+        detokenize=not args.disable_detokenize,
     )
     print(sampling_params)
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_prompts: List[PromptType] = [{
+    dummy_prompts: list[PromptType] = [{
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
@@ -172,6 +173,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to save the latency results in JSON format.",
+    )
+    parser.add_argument(
+        "--disable-detokenize",
+        action="store_true",
+        help=("Do not detokenize responses (i.e. do not include "
+              "detokenization time in the latency measurement)"),
     )
 
     parser = EngineArgs.add_cli_args(parser)

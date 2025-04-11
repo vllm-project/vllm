@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict
-
 import pytest
 import requests
+from PIL import Image
+from transformers import AutoProcessor
 
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.multimodal.utils import encode_image_base64, fetch_image
@@ -30,8 +30,6 @@ def server():
     args = [
         "--task",
         "embed",
-        "--dtype",
-        "bfloat16",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -49,11 +47,23 @@ def server():
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> Dict[str, str]:
+def base64_encoded_image() -> dict[str, str]:
     return {
         image_url: encode_image_base64(fetch_image(image_url))
         for image_url in TEST_IMAGE_URLS
     }
+
+
+def get_hf_prompt_tokens(model_name, content, image_url):
+    processor = AutoProcessor.from_pretrained(model_name,
+                                              trust_remote_code=True,
+                                              num_crops=4)
+
+    placeholder = "<|image_1|> "
+    prompt = f"{placeholder}{content}"
+    images = [Image.open(requests.get(image_url, stream=True).raw)]
+    inputs = processor(prompt, images, return_tensors="pt")
+    return inputs.input_ids.shape[1]
 
 
 @pytest.mark.asyncio
@@ -61,6 +71,7 @@ def base64_encoded_image() -> Dict[str, str]:
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
                                image_url: str):
+    content_text = "Represent the given image."
     messages = [{
         "role":
         "user",
@@ -73,7 +84,7 @@ async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
             },
             {
                 "type": "text",
-                "text": "Represent the given image."
+                "text": content_text
             },
         ],
     }]
@@ -89,9 +100,12 @@ async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
     response.raise_for_status()
     embeddings = EmbeddingResponse.model_validate(response.json())
 
+    hf_prompt_tokens = get_hf_prompt_tokens(model_name, content_text,
+                                            image_url)
+
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
     assert len(embeddings.data[0].embedding) == 3072
     assert embeddings.usage.completion_tokens == 0
-    assert embeddings.usage.prompt_tokens == 763
-    assert embeddings.usage.total_tokens == 763
+    assert embeddings.usage.prompt_tokens == hf_prompt_tokens
+    assert embeddings.usage.total_tokens == hf_prompt_tokens

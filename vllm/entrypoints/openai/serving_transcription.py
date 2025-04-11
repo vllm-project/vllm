@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import io
-from typing import AsyncGenerator, Optional, Union, cast
+import time
+from collections.abc import AsyncGenerator
+from math import ceil
+from typing import Final, Optional, Union, cast
 
 from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (ErrorResponse,
-                                              RequestResponseMetadata,
-                                              TranscriptionRequest,
-                                              TranscriptionResponse,
-                                              TranscriptionResponseVerbose)
+from vllm.entrypoints.openai.protocol import (
+    DeltaMessage, ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
+    TranscriptionResponse, TranscriptionResponseStreamChoice,
+    TranscriptionStreamResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import PlaceholderModule
 
 try:
@@ -139,8 +142,6 @@ ISO639_1_OTHER_LANGS = {
 # As per https://platform.openai.com/docs/guides/speech-to-text#overview.
 # TODO configurable
 MAX_AUDIO_CLIP_FILESIZE_MB = 25
-# TODO get from processor.feature_extractor.chunk_length
-MAX_AUDIO_CLIP_DURATION_S = 30
 
 
 class OpenAIServingTranscription(OpenAIServing):
@@ -160,17 +161,23 @@ class OpenAIServingTranscription(OpenAIServing):
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
-        diff_sampling_param = self.model_config.get_diff_sampling_param()
-        if diff_sampling_param:
+        self.default_sampling_params = (
+            self.model_config.get_diff_sampling_param())
+        processor = cached_get_processor(model_config.model)
+        self.max_audio_clip_s = processor.feature_extractor.chunk_length
+        self.model_sr = processor.feature_extractor.sampling_rate
+        self.hop_length = processor.feature_extractor.hop_length
+
+        if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
-                diff_sampling_param)
+                self.default_sampling_params)
 
     async def _preprocess_transcription(
         self,
         request: TranscriptionRequest,
         audio_data: bytes,
-    ) -> PromptType:
+    ) -> tuple[PromptType, float]:
         # Validate request
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
@@ -196,9 +203,11 @@ class OpenAIServingTranscription(OpenAIServing):
 
         with io.BytesIO(audio_data) as bytes_:
             y, sr = librosa.load(bytes_)
-        if librosa.get_duration(y=y, sr=sr) > MAX_AUDIO_CLIP_DURATION_S:
+
+        duration = librosa.get_duration(y=y, sr=sr)
+        if duration > self.max_audio_clip_s:
             raise ValueError(
-                f"Maximum clip duration ({MAX_AUDIO_CLIP_DURATION_S}s) "
+                f"Maximum clip duration ({self.max_audio_clip_s}s) "
                 "exceeded.")
 
         prompt = {
@@ -211,13 +220,13 @@ class OpenAIServingTranscription(OpenAIServing):
             "decoder_prompt":
             f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
         }
-        return cast(PromptType, prompt)
+        return cast(PromptType, prompt), duration
 
     # TODO (varun) : Make verbose response work !
     async def create_transcription(
         self, audio_data: bytes, request: TranscriptionRequest,
         raw_request: Request
-    ) -> Union[TranscriptionResponse, TranscriptionResponseVerbose,
+    ) -> Union[TranscriptionResponse, AsyncGenerator[str, None],
                ErrorResponse]:
         """Transcription API similar to OpenAI's API.
 
@@ -238,8 +247,7 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(
                 "Currently only support response_format `text` or `json`")
 
-        # TODO cmpl->transcription?
-        request_id = f"cmpl-{self._base_request_id(raw_request)}"
+        request_id = f"trsc-{self._base_request_id(raw_request)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -259,7 +267,7 @@ class OpenAIServingTranscription(OpenAIServing):
                     "Currently do not support PromptAdapter for Transcription."
                 )
 
-            prompt = await self._preprocess_transcription(
+            prompt, duration_s = await self._preprocess_transcription(
                 request=request,
                 audio_data=audio_data,
             )
@@ -272,9 +280,8 @@ class OpenAIServingTranscription(OpenAIServing):
         try:
             # TODO(rob): subtract len of tokenized prompt.
             default_max_tokens = self.model_config.max_model_len
-            default_params = self.model_config.get_diff_sampling_param()
             sampling_params = request.to_sampling_params(
-                default_max_tokens, default_params)
+                default_max_tokens, self.default_sampling_params)
 
             self._log_inputs(
                 request_id,
@@ -292,7 +299,12 @@ class OpenAIServingTranscription(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        # TODO(rob): figure out a way to pipe streaming in.
+        if request.stream:
+            return self.transcription_stream_generator(request,
+                                                       result_generator,
+                                                       request_id,
+                                                       request_metadata,
+                                                       duration_s)
         # Non-streaming response.
         try:
             assert result_generator is not None
@@ -304,3 +316,106 @@ class OpenAIServingTranscription(OpenAIServing):
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
+
+    async def transcription_stream_generator(
+            self, request: TranscriptionRequest,
+            result_generator: AsyncGenerator[RequestOutput, None],
+            request_id: str, request_metadata: RequestResponseMetadata,
+            audio_duration_s: float) -> AsyncGenerator[str, None]:
+        created_time = int(time.time())
+        model_name = request.model
+        chunk_object_type: Final = "transcription.chunk"
+
+        completion_tokens = 0
+        num_prompt_tokens = 0
+
+        include_usage = request.stream_include_usage \
+            if request.stream_include_usage else False
+        include_continuous_usage = request.stream_continuous_usage_stats\
+              if include_usage and request.stream_continuous_usage_stats\
+                else False
+
+        try:
+            async for res in result_generator:
+                # On first result.
+                if res.prompt_token_ids is not None:
+                    # Do not account the 4-tokens `<|startoftranscript|>..`
+                    # Could be negative when language token is not specified.
+                    num_prompt_tokens = max(len(res.prompt_token_ids) - 4, 0)
+                    # NOTE(NickLucche) user can't pass encoder prompts directly
+                    # at least not to Whisper. One indicator of the encoder
+                    # amount of processing is the log-mel spectogram length.
+                    num_prompt_tokens += ceil(audio_duration_s *
+                                              self.model_sr / self.hop_length)
+
+                # We need to do it here, because if there are exceptions in
+                # the result_generator, it needs to be sent as the FIRST
+                # response (by the try...catch).
+
+                # Just one output (n=1) supported.
+                assert len(res.outputs) == 1
+                output = res.outputs[0]
+
+                delta_message = DeltaMessage(content=output.text)
+                completion_tokens += len(output.token_ids)
+
+                if output.finish_reason is None:
+                    # Still generating, send delta update.
+                    choice_data = TranscriptionResponseStreamChoice(
+                        delta=delta_message)
+                else:
+                    # Model is finished generating.
+                    choice_data = TranscriptionResponseStreamChoice(
+                        delta=delta_message,
+                        finish_reason=output.finish_reason,
+                        stop_reason=output.stop_reason)
+
+                chunk = TranscriptionStreamResponse(id=request_id,
+                                                    object=chunk_object_type,
+                                                    created=created_time,
+                                                    choices=[choice_data],
+                                                    model=model_name)
+
+                # handle usage stats if requested & if continuous
+                if include_continuous_usage:
+                    chunk.usage = UsageInfo(
+                        prompt_tokens=num_prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=num_prompt_tokens + completion_tokens,
+                    )
+
+                data = chunk.model_dump_json(exclude_unset=True)
+                yield f"data: {data}\n\n"
+
+            # Once the final token is handled, if stream_options.include_usage
+            # is sent, send the usage.
+            if include_usage:
+                final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
+                                        completion_tokens=completion_tokens,
+                                        total_tokens=num_prompt_tokens +
+                                        completion_tokens)
+
+                final_usage_chunk = TranscriptionStreamResponse(
+                    id=request_id,
+                    object=chunk_object_type,
+                    created=created_time,
+                    choices=[],
+                    model=model_name,
+                    usage=final_usage)
+                final_usage_data = (final_usage_chunk.model_dump_json(
+                    exclude_unset=True, exclude_none=True))
+                yield f"data: {final_usage_data}\n\n"
+
+            # report to FastAPI middleware aggregate usage across all choices
+            request_metadata.final_usage_info = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=num_prompt_tokens + completion_tokens)
+
+        except Exception as e:
+            # TODO: Use a vllm-specific Validation Error
+            logger.exception("Error in chat completion stream generator.")
+            data = self.create_streaming_error_response(str(e))
+            yield f"data: {data}\n\n"
+        # Send the final done message after all response.n are finished
+        yield "data: [DONE]\n\n"

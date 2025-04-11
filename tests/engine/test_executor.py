@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import pytest
 
@@ -22,8 +22,8 @@ class CustomUniExecutor(UniProcExecutor):
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       args: tuple = (),
+                       kwargs: Optional[dict] = None) -> list[Any]:
         # Drop marker to show that this was ran
         with open(".marker", "w"):
             ...

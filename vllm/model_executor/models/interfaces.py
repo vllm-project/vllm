@@ -4,7 +4,8 @@ from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
                     Protocol, Type, Union, overload, runtime_checkable)
 
 import torch
-from typing_extensions import TypeIs, TypeVar
+from torch import Tensor
+from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -15,12 +16,18 @@ from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
-    from vllm.multimodal.inputs import NestedTensors  # noqa: F401
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
 
-T = TypeVar("T", default="NestedTensors")
+MultiModalEmbeddings = Union[list[Tensor], Tensor, tuple[Tensor, ...]]
+"""
+The output embeddings must be one of the following formats:
+
+- A list or tuple of 2D tensors, where each tensor corresponds to
+    each input multimodal data item (e.g, image).
+- A single 3D tensor, with the batch dimension grouping the 2D tensors.
+"""
 
 
 @runtime_checkable
@@ -36,16 +43,11 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[T]:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
-
-        The output embeddings must be one of the following formats:
-    
-        - A list or tuple of 2D tensors, where each tensor corresponds to
-          each input multimodal data item (e.g, image).
-        - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 
         Note:
             The returned multimodal embeddings must be in the same order as
@@ -54,23 +56,35 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
+    def get_language_model(self) -> torch.nn.Module:
+        """
+        Returns the underlying language model used for text generation.
+
+        This is typically the `torch.nn.Module` instance responsible for 
+        processing the merged multimodal embeddings and producing hidden states
+
+        Returns:
+            torch.nn.Module: The core language model component.
+        """
+        ...
+
     # Only for models that support v0 chunked prefill
     # TODO(ywang96): Remove this overload once v0 is deprecated
     @overload
     def get_input_embeddings(
         self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[T] = None,
+        input_ids: Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         attn_metadata: Optional["AttentionMetadata"] = None,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         ...
 
     @overload
     def get_input_embeddings(
         self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[T] = None,
-    ) -> torch.Tensor:
+        input_ids: Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 
         input_ids and the multimodal embeddings generated from multimodal 
@@ -210,7 +224,7 @@ class SupportsPP(Protocol):
         self,
         *,
         intermediate_tensors: Optional["IntermediateTensors"],
-    ) -> Union[torch.Tensor, "IntermediateTensors"]:
+    ) -> Union[Tensor, "IntermediateTensors"]:
         """
         Accept :class:`IntermediateTensors` when PP rank > 0.
 
@@ -237,7 +251,7 @@ class _SupportsPPType(Protocol):
         self,
         *,
         intermediate_tensors: Optional["IntermediateTensors"],
-    ) -> Union[torch.Tensor, "IntermediateTensors"]:
+    ) -> Union[Tensor, "IntermediateTensors"]:
         ...
 
 
@@ -410,6 +424,35 @@ def is_hybrid(
 
 
 @runtime_checkable
+class HasNoOps(Protocol):
+    has_noops: ClassVar[Literal[True]] = True
+
+
+@runtime_checkable
+class _HasNoOpsType(Protocol):
+    has_noops: ClassVar[Literal[True]]
+
+
+@overload
+def has_noops(model: object) -> TypeIs[HasNoOps]:
+    ...
+
+
+@overload
+def has_noops(model: Type[object]) -> TypeIs[Type[HasNoOps]]:
+    ...
+
+
+def has_noops(
+    model: Union[Type[object], object]
+) -> Union[TypeIs[Type[HasNoOps]], TypeIs[HasNoOps]]:
+    if isinstance(model, type):
+        return isinstance(model, _HasNoOpsType)
+
+    return isinstance(model, HasNoOps)
+
+
+@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 
@@ -449,7 +492,7 @@ class SupportsQuant:
     packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
     quant_config: Optional[QuantizationConfig] = None
 
-    def __new__(cls, *args, **kwargs) -> "SupportsQuant":
+    def __new__(cls, *args, **kwargs) -> Self:
         instance = super().__new__(cls)
         quant_config = cls._find_quant_config(*args, **kwargs)
         if quant_config is not None:

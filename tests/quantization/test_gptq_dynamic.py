@@ -28,8 +28,10 @@ MODEL_QUANT = [
 
 
 @pytest.mark.parametrize("model_id, use_marlin_kernel", MODEL_QUANT)
-def test_gptq_with_dynamic(vllm_runner, model_id: str,
-                           use_marlin_kernel: bool):
+def test_gptq_with_dynamic(vllm_runner, model_id: str, use_marlin_kernel: bool,
+                           monkeypatch):
+    # vllm_runner.apply_model() relies on V0 internals.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
 
     vllm_model = vllm_runner(model_id, dtype=torch.float16, max_model_len=2048)
 

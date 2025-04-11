@@ -28,8 +28,8 @@ class VllmInductorPass(InductorPass):
         self.config = config
         self.pass_name = self.__class__.__name__
 
-    def dump_graph(self, graph: torch.fx.Graph, stage: str):
-        if stage in self.config.dump_graph_stages:
+    def dump_graph(self, graph: torch.fx.Graph, stage: str, always=False):
+        if stage in self.config.dump_graph_stages or always:
             # Make sure filename includes rank in the distributed setting
             parallel = p_is_init() and get_tp_world_size() > 1
             rank = f"-{get_tp_rank()}" if parallel else ""
@@ -49,3 +49,17 @@ class VllmInductorPass(InductorPass):
         self._end_time = time.perf_counter_ns()
         duration_ms = float(self._end_time - self._start_time) / 1.0e6
         logger.debug("%s completed in %.1f ms", self.pass_name, duration_ms)
+
+
+class PrinterInductorPass(VllmInductorPass):
+
+    def __init__(self,
+                 name: str,
+                 config: CompilationConfig.PassConfig,
+                 always=False):
+        super().__init__(config)
+        self.name = name
+        self.always = always
+
+    def __call__(self, graph: torch.fx.Graph):
+        self.dump_graph(graph, self.name, always=self.always)

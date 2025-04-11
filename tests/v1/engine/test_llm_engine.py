@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import pytest
 
-from tests.v1.engine.utils import PLP_APC_UNSUPPORTED_MSG
 from vllm import LLM, SamplingParams
 
 MODEL = "facebook/opt-125m"
@@ -15,8 +14,6 @@ DTYPE = "half"
 def _vllm_model(apc: bool, vllm_runner, monkeypatch):
     """Set up VllmRunner instance."""
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    # TODO(nick): Single-proc to work around a ZMQ shutdown hang for now.
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     return vllm_runner(
         MODEL,
         dtype=DTYPE,
@@ -47,13 +44,13 @@ def vllm_model_apc(vllm_runner, monkeypatch):
 
 
 def _get_test_sampling_params(
-    prompt_list: List[str],
+    prompt_list: list[str],
     seed: Optional[int] = 42,
-) -> Tuple[List[SamplingParams], List[int]]:
+) -> tuple[list[SamplingParams], list[int]]:
     """Generate random sampling params for a batch."""
 
     def get_mostly_n_gt1() -> int:
-        """Mostly n \in [2,20], ~1/3 n=1"""
+        r"""Mostly n \in [2,20], ~1/3 n=1"""
         x = random.randint(0, 28)
         if x < 10:
             return 1
@@ -81,7 +78,7 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
 
     # Validate each request response
     for out, n in zip(outputs, n_list):
-        completion_counts: Dict[str, int] = {}
+        completion_counts: dict[str, int] = {}
         # Assert correct number of completions
         assert len(out.outputs) == n, (
             f"{len(out.outputs)} completions; {n} expected.")
@@ -100,17 +97,3 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
             raise AssertionError(
                 f"{len(completion_counts)} unique completions; expected"
                 f" {n}. Repeats: {repeats}")
-
-
-def test_llm_engine_refuses_prompt_logprobs_with_apc(vllm_model_apc):
-    """Test passes if LLMEngine raises an exception when it is configured
-    for automatic prefix caching and it receives a request with
-    prompt_logprobs enabled, which is incompatible."""
-    model: LLM = vllm_model_apc.model
-    with pytest.raises(ValueError) as excinfo:
-        model.generate(
-            "Hello, my name is",
-            SamplingParams(temperature=0.8, top_p=0.95, prompt_logprobs=5))
-
-    # Validate exception string is correct
-    assert str(excinfo.value) == PLP_APC_UNSUPPORTED_MSG

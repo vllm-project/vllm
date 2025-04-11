@@ -18,7 +18,7 @@
 """ PyTorch Fuyu model."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import List, Literal, Optional, Set, Tuple, TypedDict
+from typing import Literal, Optional, Set, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
@@ -31,17 +31,17 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 
@@ -58,10 +58,12 @@ class FuyuImagePatchInputs(TypedDict):
     `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
     """
 
-    patches_per_image: List[int]
+    patches_per_image: list[int]
     """
-    List of number of total patches for each image in the batch.
-    This is used to restore the first two dimensions of `flat_data`.
+    The number of total patches for each image in the batch.
+
+    This is used to split the embeddings which has the first two dimensions
+    flattened just like `flat_data`.
     """
 
 
@@ -78,21 +80,6 @@ class FuyuProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        max_ncols, max_nrows = self.get_image_feature_grid_size(
-            image_width=target_width,
-            image_height=target_height,
-        )
-        max_image_tokens = (max_ncols + 1) * max_nrows
-
-        return {"image": max_image_tokens}
 
     def get_image_feature_grid_size(
         self,
@@ -118,6 +105,19 @@ class FuyuProcessingInfo(BaseProcessingInfo):
         nrows = math.ceil(image_height / patch_height)
         return ncols, nrows
 
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        ncols, nrows = self.get_image_feature_grid_size(
+            image_width=image_width,
+            image_height=image_height,
+        )
+
+        return ncols * nrows
+
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_image_processor()
         return ImageSize(width=image_processor.size["width"],
@@ -126,26 +126,24 @@ class FuyuProcessingInfo(BaseProcessingInfo):
 
 class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="",
-            mm_data=mm_data,
-        )
 
 
 class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
@@ -228,9 +226,9 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
             image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
                             [_NEWLINE_TOKEN_ID]) * nrows
 
-            return PromptUpdateDetails(
-                full=image_tokens + [bos_token_id],
-                features=image_tokens,
+            return PromptUpdateDetails.select_token_id(
+                image_tokens + [bos_token_id],
+                embed_token_id=_IMAGE_TOKEN_ID,
             )
 
         return [
@@ -255,7 +253,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.text_config.vocab_size
         self.image_token_id = _IMAGE_TOKEN_ID
         self.image_feature_size = config.patch_size**2 * config.num_channels
@@ -318,32 +315,40 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return None
 
     def _process_image_input(
-            self, image_input: FuyuImagePatchInputs) -> NestedTensors:
+            self, image_input: FuyuImagePatchInputs) -> MultiModalEmbeddings:
         image_patches_flat = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"]
 
         assert self.vision_embed_tokens is not None
         vision_embeddings_flat, _ = self.vision_embed_tokens(
             image_patches_flat)
+
         return vision_embeddings_flat.split(patches_per_image, dim=0)
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
-        vision_embeddings = self._process_image_input(image_input)
-        return vision_embeddings
+
+        return self._process_image_input(image_input)
 
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                _IMAGE_TOKEN_ID)
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                _IMAGE_TOKEN_ID,
+            )
         return inputs_embeds
 
     def forward(
