@@ -10,7 +10,7 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 from transformers.image_utils import to_numpy_array
-from transformers.models.llava import LlavaNextProcessor
+from transformers import LlavaNextProcessor
 
 from .utils import AutoWeightsLoader, embed_multimodal, init_vllm_registered_model, maybe_prefix
 from vllm.config import VllmConfig
