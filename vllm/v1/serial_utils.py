@@ -14,8 +14,9 @@ import torch
 import zmq
 from msgspec import msgpack
 
-from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargs,
-                                    MultiModalKwargsItem, NestedTensors)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalFieldElem,
+                                    MultiModalKwargs, MultiModalKwargsItem,
+                                    NestedTensors)
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
@@ -80,14 +81,13 @@ class MsgpackEncoder:
             return dict(mm)
 
         if isinstance(obj, MultiModalKwargsItem):
-            # Encode as plain dictionary + special handling for '.field'
-            rd = {}
-            for k, v in obj.items():
-                vv = asdict(v)
-                vv['field'] = pickle.dumps(v.field,
-                                           protocol=pickle.HIGHEST_PROTOCOL)
-                rd[k] = vv
-            return rd
+            ret = []
+            for elem in obj.values():
+                # Encode as plain dictionary + special handling for .field
+                d = asdict(elem)
+                d["field"] = elem.field.field_type()
+                ret.append(d)
+            return ret
 
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
@@ -167,9 +167,16 @@ class MsgpackDecoder:
         all = []
         for item in chain.from_iterable(obj):
             elems = []
-            for v in item.values():
-                v['data'] = self._decode_nested_tensors(v['data'])
-                v['field'] = pickle.loads(v['field'])
+            for v in item:
+                v["data"] = self._decode_nested_tensors(v["data"])
+                # Reconstruct the field processor using MultiModalFieldConfig
+                field = v["field"]
+                if isinstance(field, list) and len(field) > 1:
+                    v["field"] = getattr(MultiModalFieldConfig,
+                                         field[0])(None, **field[1:]).field
+                else:
+                    v["field"] = getattr(MultiModalFieldConfig,
+                                         field)(None).field
                 elems.append(MultiModalFieldElem(**v))
             all.append(MultiModalKwargsItem.from_elems(elems))
         return all
