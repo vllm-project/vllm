@@ -86,6 +86,7 @@ class GuidanceGrammar(StructuredOutputGrammar):
         if not self.printed_error:
             err = self.ll_matcher.get_error()
             if err:
+                breakpoint()
                 self.printed_error = True
                 logger.warning("LLMatcher error: %s", err)
 
@@ -109,11 +110,38 @@ class GuidanceGrammar(StructuredOutputGrammar):
         # For conversion between the two, see
         # https://github.com/guidance-ai/llguidance/blob/main/docs/fast_forward.md
 
+        if self.ll_matcher.validate_tokens(tokens) != len(tokens):
+            breakpoint()
+            pass
+
+        self.check_error()
+
         r = self.ll_matcher.consume_tokens(tokens)
 
         self.check_error()
 
         return r
+
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        """Checks if the list of tokens are accepted by the parser in sequence.
+        Will not advance the parser.
+
+        Returns the prefix list of tokens that are accepted by the parser.
+        """
+        if len(tokens) == 0:
+            return []
+        if self.ll_matcher.is_stopped():
+            return []
+
+        num_tokens = self.ll_matcher.validate_tokens(tokens)
+
+        self.check_error()
+
+        return tokens[:num_tokens]
+
+    def rollback(self, num_tokens: int) -> None:
+        self.ll_matcher.rollback(num_tokens)
+        self.check_error()
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         # this will automatically return [EOS] mask if the matcher is stopped
