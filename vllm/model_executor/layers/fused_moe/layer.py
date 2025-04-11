@@ -124,7 +124,7 @@ class AllToAllCache:
 
         with self._lock:
             instance = self._cache.get(key)
-            if instance is None:
+            if True or instance is None:
                 instance = pplx.AllToAll(**kwargs)
                 self._cache[key] = instance
             return instance
@@ -632,7 +632,7 @@ class FusedMoE(torch.nn.Module):
         self.quant_method = quant_method
 
         # TODO: move to method?
-        if False and self.dp_size > 1:
+        if self.dp_size > 1:
             max_num_tokens = MOE_DP_CHUNK_SIZE # // moe.dp_size
             world_size = moe.ep_size
             dp_size = moe.ep_size // moe.dp_size # dp_size actually means TP.
@@ -1053,6 +1053,8 @@ class FusedMoE(torch.nn.Module):
         for _ in range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
+
+            print(f"loop {chunk_start}:{chunk_end}")
 
             cu_tokens_across_dp_this_iter = torch.cumsum(
                 num_tokens_remaining_across_dp.clamp(

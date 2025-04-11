@@ -1683,12 +1683,18 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                     global_num_experts, expert_map
                 ))
         else:
-            stride = hidden_states.shape[1]
-            sorted_token_ids = torch.arange(0, hidden_states.shape[0], device=hidden_states.device, dtype=torch.int)
-            sorted_token_ids = sorted_token_ids * stride
-            expert_ids = torch.logical_not(torch.isnan(hidden_states)).sum(dim=(1,2)).nonzero()
-            num_tokens_post_padded = torch.zeros(1, device=hidden_states.device, dtype=torch.int)
+            #stride = hidden_states.shape[1]
+            sorted_token_ids = torch.arange(0, num_tokens*hidden_states.shape[1], device=hidden_states.device, dtype=torch.int)
+            sorted_token_ids = sorted_token_ids.flatten()
+            nans = torch.isnan(hidden_states).sum(dim=(1,2))
+            expert_ids = torch.where((nans > 0).flatten(), -1, torch.arange(0, nans.numel(), device=hidden_states.device, dtype=torch.int32))
+            #expert_ids = torch.repeat_interleave(expert_ids, hidden_states.shape[1], dim=0)
+            #print(f"EXPERT_IDS {nans.shape} {expert_ids}")
+            #num_tokens_post_padded = torch.tensor([num_tokens], device=hidden_states.device, dtype=torch.int32)
+            num_tokens_post_padded = torch.zeros(1, device=hidden_states.device, dtype=torch.int32)
+            num_tokens_post_padded.fill_(num_tokens)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+            #print(f"P = {sorted_token_ids}, {hidden_states.shape}")
 
         invoke_fused_moe_kernel(hidden_states,
                                 w1,

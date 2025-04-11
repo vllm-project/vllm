@@ -1150,6 +1150,7 @@ def get_tensor_model_parallel_rank():
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP
+
     nvshmem_finalize()
 
     if _TP:

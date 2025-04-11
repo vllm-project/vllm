@@ -46,6 +46,8 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         # Is this always going to be a1.device?
         device = a1.device
+        num_tokens = a1.shape[0]   # M
+        hidden_dim = a1.shape[-1]  # K
 
         assert expert_map is None, "NYI"
 
@@ -71,7 +73,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         expert_num_tokens = torch.empty(
             num_local_experts,
             dtype=torch.int32,
-            device=a1.device,
+            device=device,
         )
         expert_num_tokens.fill_(-1)  # debugging remove
 
@@ -79,7 +81,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         expert_x = torch.empty(
             (num_local_experts, self.max_num_tokens * num_dp, a1q.shape[-1]),
             dtype=a1q.dtype,
-            device=a1.device,
+            device=device,
         )
         expert_x.fill_(torch.nan)   # debugging remove
 
@@ -95,7 +97,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                     (expert_x.size(2) + block_size - 1) // block_size,
                 ),
                 dtype=torch.float32,
-                device=a1.device,
+                device=device,
             )
 
         # This argument is optional, defaults to indices.shape[0]
@@ -105,7 +107,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         bound_m = None
 
         # TODO: optimize this?
-        indices = rank_topk_ids.to(dtype=torch.uint32)
+        indices = rank_topk_ids.to(dtype=torch.uint32).to(device)
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -126,8 +128,17 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> None:
+        device = fused_expert_output.device
+        #device = torch.device("cuda", self.rank)
+        #device = get_dp_group().device
+        #assert fused_expert_output.device == device
+
+        print(f"COMBINE START {self.rank}")
+
         # This argument is optional
         #bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
+        #num_tokens = fused_expert_output.shape[0]   # M
+        #bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
         bound_m = None
 
         assert output.shape[0] <= self.max_num_tokens
@@ -143,5 +154,4 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
 
-        #print("END COMBINE")
-
+        print(f"COMBINE END {self.rank}")
