@@ -173,7 +173,7 @@ class MsgpackDecoder:
                 field = v["field"]
                 if isinstance(field, list) and len(field) > 1:
                     v["field"] = getattr(MultiModalFieldConfig,
-                                         field[0])(None, **field[1:]).field
+                                         field[0])(None, *field[1:]).field
                 else:
                     v["field"] = getattr(MultiModalFieldConfig,
                                          field)(None).field

@@ -9,7 +9,7 @@ import torch
 
 from vllm.multimodal.inputs import (MultiModalBatchedField,
                                     MultiModalFieldElem, MultiModalKwargs,
-                                    MultiModalKwargsItem, NestedTensors)
+                                    MultiModalKwargsItem, MultiModalSharedField, NestedTensors)
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
@@ -124,7 +124,7 @@ def test_multimodal_items_by_modality():
     )
     e3 = MultiModalFieldElem("image", "i0", torch.zeros(1000,
                                                         dtype=torch.int32),
-                             MultiModalBatchedField())
+                             MultiModalSharedField(4))
     e4 = MultiModalFieldElem("image", "i1", torch.zeros(1000,
                                                         dtype=torch.int32),
                              MultiModalBatchedField())
