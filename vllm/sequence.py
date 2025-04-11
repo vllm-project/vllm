@@ -613,8 +613,10 @@ class Sequence:
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
 
-    def append_token_id(self, token_id: int, logprobs: dict[int, Logprob],
-                        token_embed: Optional[torch.Tensor]) -> None:
+    def append_token_id(self,
+                        token_id: int,
+                        logprobs: dict[int, Logprob],
+                        token_embed: Optional[torch.Tensor] = None) -> None:
         assert token_id in logprobs
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob,
