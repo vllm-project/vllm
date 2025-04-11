@@ -107,7 +107,6 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
-    VLLM_DISABLE_MERGE_ATTN_CUDA_OP: bool = False
 
 
 def get_default_cache_root():
