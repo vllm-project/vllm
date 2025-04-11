@@ -855,6 +855,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `KimiVLForConditionalGeneration`
+  * Kimi-VL-A3B-Instruct, Kimi-VL-A3B-Thinking
+  * T + I<sup>+</sup>
+  * `moonshotai/Kimi-VL-A3B-Instruct`, `moonshotai/Kimi-VL-A3B-Thinking`
+  *
+  *
+  * ✅︎
 - * `Llama4ForConditionalGeneration`
   * Llama-4-17B-Omni-Instruct
   * T + I<sup>+</sup>
