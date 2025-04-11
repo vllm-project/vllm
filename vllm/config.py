@@ -2416,6 +2416,9 @@ class SpeculativeConfig:
                 elif (self.draft_model_config.hf_config.model_type ==
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "deepseek_mtp"):
+                    self.method = "mtp"
                 else:
                     self.method = "draft_model"
 

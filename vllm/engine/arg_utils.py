@@ -957,6 +957,8 @@ class EngineArgs:
         else:
             envs.set_vllm_use_v1(use_v1)
 
+        logger.info("use_v1: %s", use_v1)
+
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
             self._set_default_args_v1(usage_context)
@@ -1281,6 +1283,8 @@ class EngineArgs:
                 speculative_model = self.speculative_config.get("model")
                 if speculative_model in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
+            logger.info("Forcing to use V1 for speculative decoding.")
+            return True
             if not (is_ngram_enabled or is_eagle_enabled):
                 # Other speculative decoding methods are not supported yet.
                 _raise_or_fallback(feature_name="Speculative Decoding",

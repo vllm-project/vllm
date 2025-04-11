@@ -304,6 +304,7 @@ class MLACommonMetadata(Generic[D]):
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     query_start_loc: torch.Tensor
+    block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
     # New for MLA (compared to FlashAttention)
@@ -341,6 +342,7 @@ class MLACommonMetadataBuilder(Generic[M]):
                  metadata_cls: Optional[type[M]] = None):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
+        logger.info(f"self.metadata_cls: {self.metadata_cls}")
         self.runner = runner
         scheduler_config = runner.scheduler_config
         model_config = runner.model_config
@@ -352,8 +354,9 @@ class MLACommonMetadataBuilder(Generic[M]):
         self.aot_schedule = is_vllm_fa and (get_flash_attn_version() == 3)
 
         # Dont try to access the runner on AMD
-        if self.aot_schedule:
-            self.page_size = self.runner.block_size
+        #if self.aot_schedule:
+        # Need page_size to compute max_context_chunk
+        self.page_size = self.runner.block_size
 
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
@@ -557,6 +560,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         return self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             query_start_loc=query_start_loc,
+            block_table=block_table,
             slot_mapping=slot_mapping,
             head_dim=self.runner.model_config.get_head_size(),
             # MLACommonMetadata Chunk prefill specific
