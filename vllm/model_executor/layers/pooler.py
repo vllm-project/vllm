@@ -265,7 +265,6 @@ class PoolerHead(nn.Module):
 
                 if pooling_param.dimensions is not None:
                     vecs = vecs[:pooling_param.dimensions]
-                    vecs = F.normalize(vecs, p=2, dim=-1)
 
                 vecs = F.normalize(vecs, p=2, dim=-1)
                 pooled_data_list.append(vecs)
