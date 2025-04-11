@@ -21,7 +21,7 @@ class QuarkW8A8Fp8(QuarkScheme):
     def __init__(self, qscheme: str, is_static_input_scheme: Optional[bool]):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
-        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=True)
+        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=False)
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -41,10 +41,11 @@ class QuarkW8A8Fp8(QuarkScheme):
             )
 
             if current_platform.is_fp8_fnuz():
+                input_scale = getattr(layer, 'input_scale', None)
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
                     weight=weight,
                     weight_scale=max_w_scale,
-                    input_scale=layer.input_scale)
+                    input_scale=input_scale)
                 if input_scale is not None:
                     layer.input_scale = Parameter(input_scale,
                                                   requires_grad=False)
@@ -57,11 +58,12 @@ class QuarkW8A8Fp8(QuarkScheme):
             weight = layer.weight
 
             if current_platform.is_fp8_fnuz():
+                input_scale = getattr(layer, 'input_scale', None)
                 weight, weight_scale, input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
                         weight=weight,
                         weight_scale=layer.weight_scale,
-                        input_scale=layer.input_scale)
+                        input_scale=input_scale)
                 if input_scale is not None:
                     layer.input_scale = Parameter(input_scale,
                                                   requires_grad=False)
@@ -105,7 +107,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         # the newly added parameters
         if self.qscheme == "per_channel":
             weight_scale = ChannelQuantScaleParameter(
-                data=torch.empty((sum(output_partition_sizes), 1),
+                data=torch.empty((sum(output_partition_sizes)),
                                  dtype=torch.float32),
                 output_dim=0,
                 weight_loader=weight_loader)
