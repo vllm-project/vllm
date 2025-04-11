@@ -14,6 +14,9 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 _PARTITION_SIZE = 512
 
@@ -119,7 +122,12 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in Ipex is not supported yet, it will fall"
+                " back to global attention for long context.")
         if blocksparse_params is not None:
             raise ValueError(
                 "IPEX backend does not support block-sparse attention.")

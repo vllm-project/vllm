@@ -24,7 +24,7 @@ vLLM also supports model implementations that are available in Transformers. Thi
 
 To check if the modeling backend is Transformers, you can simply do this:
 
-```python 
+```python
 from vllm import LLM
 llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
@@ -55,7 +55,7 @@ If your model is neither supported natively by vLLM or Transformers, you can sti
 Simply set `trust_remote_code=True` and vLLM will run any model on the Model Hub that is compatible with Transformers.
 Provided that the model writer implements their model in a compatible way, this means that you can run new models before they are officially supported in Transformers or vLLM!
 
-```python 
+```python
 from vllm import LLM
 llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of your model
 llm.apply_model(lambda model: print(model.__class__))
@@ -160,6 +160,35 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+#### Using a proxy
+
+Here are some tips for loading/downloading models from Hugging Face using a proxy:
+
+- Set the proxy globally for your session (or set it in the profile file):
+
+```shell
+export http_proxy=http://your.proxy.server:port
+export https_proxy=http://your.proxy.server:port
+```
+
+- Set the proxy for just the current command:
+
+```shell
+https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
+
+# or use vllm cmd directly
+https_proxy=http://your.proxy.server:port  vllm serve <model_name> --disable-log-requests
+```
+
+- Set the proxy in Python interpreter:
+
+```python
+import os
+
+os.environ['http_proxy'] = 'http://your.proxy.server:port'
+os.environ['https_proxy'] = 'http://your.proxy.server:port'
+```
+
 ### ModelScope
 
 To use models from [ModelScope](https://www.modelscope.cn) instead of Hugging Face Hub, set an environment variable:
@@ -233,9 +262,9 @@ See [this page](#generative-models) for more information on how to use generativ
   * `facebook/bart-base`, `facebook/bart-large-cnn`, etc.
   *
   *
-- * `ChatGLMModel`
+- * `ChatGLMModel`, `ChatGLMForConditionalGeneration`
   * ChatGLM
-  * `THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.
+  * `THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, `ShieldLM-6B-chatglm3`, etc.
   * ✅︎
   * ✅︎
 - * `CohereForCausalLM`, `Cohere2ForCausalLM`
@@ -301,6 +330,11 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `GlmForCausalLM`
   * GLM-4
   * `THUDM/glm-4-9b-chat-hf`, etc.
+  * ✅︎
+  * ✅︎
+- * `Glm4ForCausalLM`
+  * GLM-4-0414
+  * `THUDM/GLM-4-32B-Chat-0414`, etc.
   * ✅︎
   * ✅︎
 - * `GPT2LMHeadModel`
@@ -850,6 +884,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `Llama4ForConditionalGeneration`
+  * Llama-4-17B-Omni-Instruct
+  * T + I<sup>+</sup>
+  * `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `LlavaForConditionalGeneration`
   * LLaVA-1.5
   * T + I<sup>E+</sup>
@@ -983,6 +1024,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `SmolVLMForConditionalGeneration`
+  * SmolVLM2
+  * T + I
+  * `SmolVLM2-2.2B-Instruct`
+  *
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
@@ -999,9 +1047,6 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{important}
-To use Gemma3 series models, you have to install Hugging Face Transformers library from source via
-`pip install git+https://github.com/huggingface/transformers`.
-
 Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
 You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": True}'`.
 :::
