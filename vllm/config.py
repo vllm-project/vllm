@@ -507,6 +507,8 @@ class ModelConfig:
                     if getattr(user_config, k) is None:
                         setattr(user_config, k, v)
 
+            user_config.is_matryoshka = self.is_matryoshka
+
             return user_config
 
         return None
@@ -2604,6 +2606,11 @@ class PoolerConfig:
     A list of indices for the vocabulary dimensions to be extracted,
     such as the token IDs of ``good_token`` and ``bad_token`` in the
     ``math-shepherd-mistral-7b-prm`` model.
+    """
+
+    is_matryoshka: bool = False
+    """
+    Indicates whether the embedding model supports Matryoshka representation.
     """
 
     def compute_hash(self) -> str:

@@ -47,32 +47,45 @@ class SimplePooler(nn.Module):
         normalize: bool,
         softmax: bool,
         step_tag_id: Optional[int] = None,
+        is_matryoshka: bool = False,
         returned_token_ids: Optional[List[int]] = None,
     ) -> "SimplePooler":
         if pooling_type == PoolingType.LAST:
             assert step_tag_id is None and returned_token_ids is None
-            return LastPool(normalize=normalize, softmax=softmax)
+            return LastPool(normalize=normalize,
+                            softmax=softmax,
+                            is_matryoshka=is_matryoshka)
         if pooling_type == PoolingType.ALL:
             assert step_tag_id is None and returned_token_ids is None
-            return AllPool(normalize=normalize, softmax=softmax)
+            return AllPool(normalize=normalize,
+                           softmax=softmax,
+                           is_matryoshka=is_matryoshka)
         if pooling_type == PoolingType.CLS:
             assert step_tag_id is None and returned_token_ids is None
-            return CLSPool(normalize=normalize, softmax=softmax)
+            return CLSPool(normalize=normalize,
+                           softmax=softmax,
+                           is_matryoshka=is_matryoshka)
         if pooling_type == PoolingType.MEAN:
             assert step_tag_id is None and returned_token_ids is None
-            return MeanPool(normalize=normalize, softmax=softmax)
+            return MeanPool(normalize=normalize,
+                            softmax=softmax,
+                            is_matryoshka=is_matryoshka)
         if pooling_type == PoolingType.STEP:
             return StepPool(normalize=normalize,
                             softmax=softmax,
                             step_tag_id=step_tag_id,
+                            is_matryoshka=is_matryoshka,
                             returned_token_ids=returned_token_ids)
 
         assert_never(pooling_type)
 
-    def __init__(self, *, normalize: bool, softmax: bool) -> None:
+    def __init__(self, *, normalize: bool, softmax: bool,
+                 is_matryoshka: bool) -> None:
         super().__init__()
 
-        self.head = PoolerHead(normalize=normalize, softmax=softmax)
+        self.head = PoolerHead(normalize=normalize,
+                               softmax=softmax,
+                               is_matryoshka=is_matryoshka)
 
     def get_prompt_lens(
         self,
@@ -175,9 +188,12 @@ class StepPool(SimplePooler):
         normalize: bool,
         softmax: bool,
         step_tag_id: Optional[int] = None,
+        is_matryoshka: bool = False,
         returned_token_ids: Optional[List[int]] = None,
     ):
-        super().__init__(normalize=normalize, softmax=softmax)
+        super().__init__(normalize=normalize,
+                         softmax=softmax,
+                         is_matryoshka=is_matryoshka)
 
         self.step_tag_id = step_tag_id
         self.returned_token_ids = returned_token_ids
@@ -212,11 +228,13 @@ class StepPool(SimplePooler):
 
 class PoolerHead(nn.Module):
 
-    def __init__(self, *, normalize: bool, softmax: bool) -> None:
+    def __init__(self, *, normalize: bool, softmax: bool,
+                 is_matryoshka: bool) -> None:
         super().__init__()
 
         self.normalize = normalize
         self.softmax = softmax
+        self.is_matryoshka = is_matryoshka
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
@@ -229,7 +247,7 @@ class PoolerHead(nn.Module):
                for pooling_param in pooling_params):
             # Batch processing is more efficient if there are no
             # requests that require changing dimensions
-            if self.normalize:
+            if self.normalize or self.is_matryoshka:
                 if isinstance(pooled_data, list):
                     pooled_data = [
                         F.normalize(data, p=2, dim=-1) for data in pooled_data
@@ -237,21 +255,19 @@ class PoolerHead(nn.Module):
                 else:
                     pooled_data = F.normalize(pooled_data, p=2, dim=-1)
         else:
-            # for matryoshka representation
+            # for matryoshka representation, always do normalize
             assert len(pooled_data) == len(pooling_params)
+            assert self.is_matryoshka is True
 
             pooled_data_list = []
             for i, pooling_param in enumerate(pooling_params):
                 vecs = pooled_data[i]
 
                 if pooling_param.dimensions is not None:
-                    # matryoshka representation, always normalize
                     vecs = vecs[:pooling_param.dimensions]
                     vecs = F.normalize(vecs, p=2, dim=-1)
-                else:
-                    if self.normalize:
-                        vecs = F.normalize(vecs, p=2, dim=-1)
 
+                vecs = F.normalize(vecs, p=2, dim=-1)
                 pooled_data_list.append(vecs)
             pooled_data = pooled_data_list
 
@@ -285,6 +301,7 @@ class Pooler(nn.Module):
             if pooler_config.softmax is not None else softmax,
             step_tag_id=pooler_config.step_tag_id
             if pooler_config.step_tag_id is not None else step_tag_id,
+            is_matryoshka=pooler_config.is_matryoshka,
             returned_token_ids=pooler_config.returned_token_ids
             if pooler_config.returned_token_ids is not None else
             returned_token_ids,
