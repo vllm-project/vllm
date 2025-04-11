@@ -20,7 +20,11 @@
 {%- else %}
     {%- if tools is not none %}
         {#- Add default tool system message when tools are provided #}
-        {%- set system_message = "You are a helpful assistant with tool calling capabilities. Only reply with a tool call if the function exists in the library provided by the user. If it doesn't exist, just reply directly in natural language. When you receive a tool call response, use the output to format an answer to the original user question." %}
+        {%- set system_message = "You are a helpful assistant with tool calling "
+            "capabilities. Only reply with a tool call if the function exists in the "
+            "library provided by the user. If it doesn't exist, just reply directly in "
+            "natural language. When you receive a tool call response, use the output to "
+            "format an answer to the original user question." %}
     {%- else %}
         {%- set system_message = "" %}
     {%- endif %}
@@ -32,7 +36,13 @@
     {{- "<|header_start|>system<|header_end|>\n\n" }}
     {{- system_message }}
     {%- if tools is not none and not tools_in_user_message %}
-        {{-  "You are an expert in composing functions. You are given a question and a set of possible functions.\nBased on the question, you will need to make one or more function/tool calls to achieve the purpose.\nIf none of the function can be used, point it out. If the given question lacks the parameters required by the function,\nalso point it out. You should only return the function call in tools call sections.\n\nIf you decide to invoke any of the function(s), you MUST put it in the format of [func_name1(params_name1=params_value1, params_name2=params_value2...), func_name2(params)]\nHere is a list of functions in JSON format that you can invoke.\n " }}
+        {{- "Tools: You have access to the following tools. You might need to use one "
+            "or more function/tool calls to fulfill the task. \n"
+            "If none are needed, then proceed to the response.\n\n"
+            "Tool Call Syntax: You can call tools using the following syntax:\n"
+            "[func_name1(params_name1=params_value1, params_name2=params_value2, ...), ...]\n"
+            "Do not include anything else when calling the tools with the syntax above.\n\n"
+            "Here is a list of functions in JSON format that you can invoke.\n " }}
         {%- for t in tools %}
             {{- t | tojson(indent=4) }}
             {{- "\n\n" }}
@@ -61,7 +71,10 @@
         {{- t | tojson(indent=4) }}
         {{- "\n\n" }}
     {%- endfor %}
-    {{- "Should you decide to return the function call(s), put them in the format of [func1(params_name=params_value, params_name2=params_value2...), func2(params)]\n\nYou SHOULD NOT include any other text in the response.<|eot|>"}}
+    {{- "Should you decide to return the function call(s), put them in the format "
+        "of [func_name1(params_name1=params_value1, params_name2=params_value2, "
+        "...), ...]\nDo not include anything else when calling the tools with the "
+        "syntax above." }}
 {%- endif %}
 
 {%- for message in messages %}
