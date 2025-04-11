@@ -878,9 +878,9 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
 - * `InternVLChatModel`
-  * InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
+  * InternVL 3.0, InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
-  * `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
+  * `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
   *
   * ✅︎
   * ✅︎
