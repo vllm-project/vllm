@@ -36,9 +36,11 @@ processor_for_vllm = int(os.getenv("PROCESSOR_FOR_VLLM", 0))
 def select_best_resolution(original_size, possible_resolutions):
     """
     Selects the best resolution from a list of possible resolutions based on the original size.
+
     Args:
         original_size (tuple): The original size of the image in the format (width, height).
         possible_resolutions (list): A list of possible resolutions in the format [(width1, height1), (width2, height2), ...].
+
     Returns:
         tuple: The best fit resolution in the format (width, height).
     """
@@ -66,9 +68,11 @@ def select_best_resolution(original_size, possible_resolutions):
 def divide_to_patches(image, patch_size):
     """
     Divides an image into patches of a specified size.
+
     Args:
         image (PIL.Image.Image): The input image.
         patch_size (int): The size of each patch.
+
     Returns:
         list: A list of PIL.Image.Image objects representing the patches.
     """
@@ -106,6 +110,7 @@ def image_size_to_num_patches(image_size, grid_pinpoints, patch_size):
 def get_anyres_image_grid_shape(image_size, grid_pinpoints, patch_size):
     """
     Calculate the shape of the image patch grid after the preprocessing for images of any resolution.
+
     Args:
         image_size (`tuple`):
             The size of the input image in the format (width, height).
@@ -114,6 +119,7 @@ def get_anyres_image_grid_shape(image_size, grid_pinpoints, patch_size):
             of the form `(height, width)`.
         patch_size (`int`):
             The size of each image patch.
+
     Returns:
         tuple: The shape of the image patch grid in the format (width, height).
     """
@@ -205,9 +211,11 @@ def get_hw_multiple_of(image_size, multiple, max_size=None):
 def resize_multiple_of(image, multiple, max_size=None):
     """
     Resize the image to the multiple of a number.
+
     Args:
         image (PIL.Image.Image): The input image.
         multiple (int): The number to which the image should be resized.
+
     Returns:
         PIL.Image.Image: The resized image.
     """
@@ -221,6 +229,7 @@ class CustomBatchFeature(BatchFeature):
     def convert_to_tensors(self, tensor_type: Optional[Union[str, TensorType]] = None):
         """
         Convert the inner content to tensors.
+
         Args:
             tensor_type (`str` or [`~utils.TensorType`], *optional*):
                 The type of tensors to use. If `str`, should be one of the values of the enum [`~utils.TensorType`]. If
@@ -258,11 +267,13 @@ class CustomBatchFeature(BatchFeature):
         """
         Send all values to device by calling `v.to(*args, **kwargs)` (PyTorch only). This should support casting in
         different `dtypes` and sending the `BatchFeature` to a different `device`.
+
         Args:
             args (`Tuple`):
                 Will be passed to the `to(...)` function of the tensors.
             kwargs (`Dict`, *optional*):
                 Will be passed to the `to(...)` function of the tensors.
+
         Returns:
             [`BatchFeature`]: The same instance after modification.
         """
@@ -340,7 +351,6 @@ class ImageProcessor(BaseImageProcessor):
         )
         self.image_grid_pinpoints = image_grid_pinpoints
         self.patch_size = patch_size
-        self.image_token = "<image>"
 
     def preprocess(self,
                     images,
@@ -365,30 +375,9 @@ class ImageProcessor(BaseImageProcessor):
     def resize_preprocess(self, images, return_tensors: Optional[Union[str, TensorType]] = None, data_format: Optional[ChannelDimension] = ChannelDimension.FIRST, input_data_format: Optional[Union[str, ChannelDimension]] = None, **kwargs):
         images = make_list_of_images(images)
         all_images = []
-        
-        # 如果 size 为 None，使用默认值 (224, 224)
-        if self.size is None:
-            self.size = (336, 336)
-            
-        # 如果 image_mean 或 image_std 为 None，使用默认值
-        if self.image_mean is None:
-            self.image_mean = (0.48145466, 0.4578275, 0.40821073)
-        if self.image_std is None:
-            self.image_std = (0.26862954, 0.26130258, 0.27577711)
-            
         for image in images:
-            # 检查 image 是否为 NumPy 数组
-            if isinstance(image, np.ndarray):
-                # 如果是 NumPy 数组，直接使用它
-                img_array = image
-            else:
-                # 如果是 PIL 图像，调整大小
-                width, height = self.size
-                resized_image = image.resize((width, height), Image.BICUBIC)
-                img_array = to_numpy_array(resized_image)
-                
-            # 应用变换
-            transform_img = _transform(self.size[1], self.size[0], self.image_mean, self.image_std)(Image.fromarray(img_array))
+            resized_image = image.resize(self.size, Image.BICUBIC)
+            transform_img = _transform(self.size[1], self.size[0], self.image_mean, self.image_std)(resized_image)
             all_images.append(to_numpy_array(transform_img))
 
         images = [
@@ -469,6 +458,7 @@ class ImageProcessor(BaseImageProcessor):
         Pads the `image` with the specified `padding` and `mode`. Padding can be in the (`height`, `width`)
         dimension of in the (`num_patches`) dimension. In the second case an iterable if tuples is expected
         as input.
+
         Args:
             image (`np.ndarray`):
                 The image to pad.
@@ -496,8 +486,10 @@ class ImageProcessor(BaseImageProcessor):
                     - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
                     - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
                 If unset, will use the inferred format of the input image.
+
         Returns:
             `np.ndarray`: The padded image.
+
         """
 
         # call the general `pad` if padding on `height/width`, otherwise it's the `num_patched` dim
@@ -529,6 +521,7 @@ class ImageProcessor(BaseImageProcessor):
     ):
         """
         Pads images on the `num_of_patches` dimension with zeros to form a batch of same number of patches.
+
         Args:
             pixel_values (`List[np.ndarray]`):
                 An array of pixel values of each images of shape (`batch_size`, `num_patches`, `image_in_3D`)
@@ -542,6 +535,7 @@ class ImageProcessor(BaseImageProcessor):
                     - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
                     - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
                 If unset, will use the inferred format of the input image.
+
         Returns:
             List[`np.ndarray`]: The padded images.
         """
@@ -591,7 +585,7 @@ class ImageProcessor(BaseImageProcessor):
     def anyres_preprocess(self, images, return_tensors: Optional[Union[str, TensorType]] = None, data_format: Optional[ChannelDimension] = ChannelDimension.FIRST, input_data_format: Optional[Union[str, ChannelDimension]] = None, do_pad: Optional[bool] = None, **kwargs):
         
         images = make_list_of_images(images)
-        all_patches = []
+        new_images = []
         image_sizes = []
 
         for image in images:
@@ -601,16 +595,18 @@ class ImageProcessor(BaseImageProcessor):
                 image,
                 self.image_grid_pinpoints
             )
-            patches_for_image = []
-            for patch in image_patches:
-                transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(patch)
+            #all_images = []
+            for image in image_patches:
+                transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(image)
                 img_array = to_numpy_array(transform_img)
                 img_array = to_channel_dimension_format(img_array, data_format, input_channel_dim=input_data_format)
-                patches_for_image.append(img_array)
-            all_patches.append(patches_for_image)
+                #all_images.append(img_array)
+                new_images.append(img_array)
+            #pixel_values = np.array(all_images)
+            #new_images.append(pixel_values)
         
         # if do_pad:
         #     new_images = self._pad_for_batching(new_images)
 
-        data = {"pixel_values": all_patches, "image_sizes": image_sizes}
+        data = {"pixel_values": new_images, "image_sizes": image_sizes}
         return CustomBatchFeature(data=data, tensor_type=return_tensors)

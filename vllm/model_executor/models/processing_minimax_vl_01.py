@@ -2,7 +2,7 @@
 Processor class for MiniMaxVL01.
 """
 
-from typing import List, Union, Mapping, TypeVar
+from typing import List, Union
 
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
@@ -10,13 +10,10 @@ from transformers.processing_utils import ProcessingKwargs, ProcessorMixin#, _va
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging
 
-from .image_processer import CustomBatchFeature
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-
+from .image_processor import CustomBatchFeature
 logger = logging.get_logger(__name__)
 
 import os
-import numpy as np
 
 LEGACY_PROCESSING = int(os.getenv('LEGACY_PROCESSING', 1))
 
@@ -59,9 +56,11 @@ def split_special_tokens(text, special_tokens):
 def select_best_resolution(original_size, possible_resolutions):
     """
     Selects the best resolution from a list of possible resolutions based on the original size.
+
     Args:
         original_size (tuple): The original size of the image in the format (width, height).
         possible_resolutions (list): A list of possible resolutions in the format [(width1, height1), (width2, height2), ...].
+
     Returns:
         tuple: The best fit resolution in the format (width, height).
     """
@@ -128,8 +127,10 @@ def get_num_token(img_h, img_w, grid_pinpoints, patch_size):
 class MiniMaxVL01Processor(ProcessorMixin):
     r"""
     Constructs a MiniMaxVL01 processor which wraps a MiniMaxVL01 image processor and a MiniMaxVL01 tokenizer into a single processor.
+
     [`MiniMaxVL01Processor`] offers all the functionalities of [`CLIPImageProcessor`] and [`LlamaTokenizerFast`]. See the
     [`~MiniMaxVL01Processor.__call__`] and [`~MiniMaxVL01Processor.decode`] for more information.
+
     Args:
         image_processor ([`CLIPImageProcessor`], *optional*):
             The image processor is a required input.
@@ -164,17 +165,6 @@ class MiniMaxVL01Processor(ProcessorMixin):
         self.patch_size = patch_size
         self.vision_feature_select_strategy = vision_feature_select_strategy
         self.image_token = image_token
-        
-        # 确保 tokenizer 是 PreTrainedTokenizerBase 类型
-        if hasattr(tokenizer, 'get_hf_tokenizer'):
-            tokenizer = tokenizer.get_hf_tokenizer()
-        elif hasattr(tokenizer, 'tokenizer'):
-            tokenizer = tokenizer.tokenizer
-            
-        # 确保 image_processor 是 ImageProcessor 类型
-        if hasattr(image_processor, 'get_hf_processor'):
-            image_processor = image_processor.get_hf_processor()
-            
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
         self.patch_size = image_processor.patch_size
         self.grid_pinpoints = image_processor.image_grid_pinpoints
@@ -195,6 +185,7 @@ class MiniMaxVL01Processor(ProcessorMixin):
         the text. To prepare the image(s), this method forwards the `images` and `kwrags` arguments to
         CLIPImageProcessor's [`~CLIPImageProcessor.__call__`] if `images` is not `None`. Please refer to the doctsring
         of the above two methods for more information.
+
         Args:
             images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `List[PIL.Image.Image]`, `List[np.ndarray]`, `List[torch.Tensor]`):
                 The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch
@@ -209,8 +200,10 @@ class MiniMaxVL01Processor(ProcessorMixin):
                 - `'pt'`: Return PyTorch `torch.Tensor` objects.
                 - `'np'`: Return NumPy `np.ndarray` objects.
                 - `'jax'`: Return JAX `jnp.ndarray` objects.
+
         Returns:
             [`BatchFeature`]: A [`BatchFeature`] with the following fields:
+
             - **input_ids** -- List of token ids to be fed to a model. Returned when `text` is not `None`.
             - **attention_mask** -- List of indices specifying which tokens should be attended to by the model (when
               `return_attention_mask=True` or if *"attention_mask"* is in `self.model_input_names` and if `text` is not
@@ -270,6 +263,10 @@ class MiniMaxVL01Processor(ProcessorMixin):
                         prompt_strings.append(final_text)
             elif self.process_image_mode == 'resize':
                 pixel_values = image_inputs["pixel_values"]
+                # height, width = get_image_size(to_numpy_array(pixel_values[0]))
+                # num_image_tokens = (height // self.patch_size) * (width // self.patch_size) + 1
+                # if self.vision_feature_select_strategy == "default":
+                #     num_image_tokens -= 1
                 all_image_tokens = []
                 for pixel_value in pixel_values:
                     height, width = get_image_size(to_numpy_array(pixel_value))
