@@ -160,6 +160,35 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+#### Using a proxy
+
+Here are some tips for loading/downloading models from Hugging Face using a proxy:
+
+- Set the proxy globally for your session (or set it in the profile file):
+
+```shell
+export http_proxy=http://your.proxy.server:port
+export https_proxy=http://your.proxy.server:port
+```
+
+- Set the proxy for just the current command:
+
+```shell
+https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
+
+# or use vllm cmd directly
+https_proxy=http://your.proxy.server:port  vllm serve <model_name> --disable-log-requests
+```
+
+- Set the proxy in Python interpreter:
+
+```python
+import os
+
+os.environ['http_proxy'] = 'http://your.proxy.server:port'
+os.environ['https_proxy'] = 'http://your.proxy.server:port'
+```
+
 ### ModelScope
 
 To use models from [ModelScope](https://www.modelscope.cn) instead of Hugging Face Hub, set an environment variable:
@@ -301,6 +330,11 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `GlmForCausalLM`
   * GLM-4
   * `THUDM/glm-4-9b-chat-hf`, etc.
+  * ✅︎
+  * ✅︎
+- * `Glm4ForCausalLM`
+  * GLM-4-0414
+  * `THUDM/GLM-4-32B-Chat-0414`, etc.
   * ✅︎
   * ✅︎
 - * `GPT2LMHeadModel`
@@ -844,9 +878,9 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
 - * `InternVLChatModel`
-  * InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
+  * InternVL 3.0, InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
-  * `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
+  * `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
   *
   * ✅︎
   * ✅︎
