@@ -68,6 +68,9 @@ class CPUModelRunner(GPUModelRunner):
             self._dummy_run(self.max_num_tokens)
         logger.info("Warming up done.")
 
+    def _init_device_properties(self) -> None:
+        pass
+
 
 @contextmanager
 def _set_global_compilation_settings():
