@@ -151,6 +151,7 @@ COPY --from=arrow-builder /tmp/control /dev/null
 COPY --from=cv-builder /tmp/control /dev/null
 
 ARG VLLM_TARGET_DEVICE=cpu
+ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 
 # this step installs vllm and populates uv cache
 # with all the transitive dependencies
