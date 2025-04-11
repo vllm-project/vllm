@@ -75,8 +75,8 @@ class TpuPlatform(Platform):
         from vllm.config import CompilationLevel
 
         cache_config = vllm_config.cache_config
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+        if cache_config:
+            cache_config.block_size = 256
 
         compilation_config = vllm_config.compilation_config
 
