@@ -15,7 +15,7 @@ import psutil
 import zmq
 import zmq.asyncio
 
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import CompilationConfig, ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger

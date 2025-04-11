@@ -137,7 +137,7 @@ class KVCacheManager:
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         self.prefix_cache_stats.requests += 1
-        
+
         # When the request requires prompt logprobs, we skip prefix caching.
         if request.sampling_params.prompt_logprobs is not None:
             return [], 0
@@ -159,7 +159,7 @@ class KVCacheManager:
             self.specialized_manager.find_longest_cache_hit(block_hashes))
         self.prefix_cache_stats.queries += len(block_hashes)
         self.prefix_cache_stats.hits += len(computed_blocks)
-        
+
         # Track evicted tokens from computed blocks
         for block in computed_blocks:
             if block and block.block_hash and block.block_hash.token_ids:
