@@ -146,14 +146,14 @@ class MsgpackDecoder:
         if isclass(t):
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
-            if issubclass(t, MultiModalKwargs) 
+            if issubclass(t, torch.Tensor):
+                return torch.from_numpy(self._decode_ndarray(obj))
+            if issubclass(t, MultiModalKwargs):
                 if isinstance(obj, list):
-                    return MultiModalKwargs.from_items(self._decode_items(obj))
+                    return MultiModalKwargs.from_items(self._decode_mm_items(obj))
                 return MultiModalKwargs(
                     {k: self._decode_nested(v)
                      for k in obj.items()})
-            if issubclass(t, torch.Tensor):
-                return torch.from_numpy(self._decode_ndarray(obj))
         return obj
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
@@ -161,7 +161,7 @@ class MsgpackDecoder:
         buffer = self.aux_buffers[data] if isinstance(data, int) else data
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
 
-    def _decode_items(self, obj: list) -> list[MultiModalKwargsItem]:
+    def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
         all = []
         for item in chain.from_iterable(obj):
             elems = []
