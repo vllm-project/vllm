@@ -1308,14 +1308,35 @@ class Scheduler:
         if num_prefill_groups > 0:
             scheduled_seq_groups = prefills.seq_groups
             scheduled_seq_groups.extend(running_scheduled.decode_seq_groups)
+            ignored_seq_groups_for_embeds = []
         else:
             scheduled_seq_groups = running_scheduled.decode_seq_groups
+            if len(scheduled_seq_groups) > 0:
+                using_prompt_embeds = scheduled_seq_groups[
+                    0].seq_group.uses_prompt_embeds()
+                ignored_seq_groups_for_embeds = []
+                indices_ignored = []
+                for i, seq_group in enumerate(scheduled_seq_groups):
+                    if using_prompt_embeds !=\
+                        seq_group.seq_group.uses_prompt_embeds():
+                        ignored_seq_groups_for_embeds.append(
+                            seq_group.seq_group)
+                        indices_ignored.append(i)
+                if len(ignored_seq_groups_for_embeds) > 0:
+                    scheduled_seq_groups = [
+                        group for i, group in enumerate(scheduled_seq_groups)
+                        if i not in indices_ignored
+                    ]
+            else:
+                ignored_seq_groups_for_embeds = []
+
         scheduled_seq_groups.extend(swapped_in.decode_seq_groups)
 
         blocks_to_copy = running_scheduled.blocks_to_copy
         blocks_to_copy.extend(swapped_in.blocks_to_copy)
 
         ignored_seq_groups = prefills.ignored_seq_groups
+        ignored_seq_groups.extend(ignored_seq_groups_for_embeds)
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
 
         return SchedulerOutputs(
