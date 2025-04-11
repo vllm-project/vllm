@@ -634,6 +634,10 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                                    num_images=num_images)
         }
 
+        # 确保 image_sizes 与 pixel_values 的批次大小一致
+        if num_images > 0:
+            mm_data["image_sizes"] = [(target_height, target_width)] * num_images
+
         prompt_text = image_token * num_images
 
         return ProcessorInputs(
