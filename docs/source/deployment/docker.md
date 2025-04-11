@@ -34,11 +34,11 @@ If you need to use those dependencies (having accepted the license terms),
 create a custom Dockerfile on top of the base image with an extra layer that installs them:
 
 ```Dockerfile
-FROM vllm/vllm-openai:v0.8.0
+FROM vllm/vllm-openai:v0.8.3
 
-# e.g. install the `audio` and `video` optional dependencies
+# e.g. install the `audio` optional dependencies
 # NOTE: Make sure the version of vLLM matches the base image!
-RUN uv pip install vllm[audio,video]==0.8.0
+RUN uv pip install --system vllm[audio]==0.8.3
 ```
 
 :::
@@ -52,7 +52,7 @@ with an extra layer that installs their code from source:
 ```Dockerfile
 FROM vllm/vllm-openai:latest
 
-RUN uv pip install git+https://github.com/huggingface/transformers.git
+RUN uv pip install --system git+https://github.com/huggingface/transformers.git
 ```
 
 :::
@@ -61,11 +61,11 @@ RUN uv pip install git+https://github.com/huggingface/transformers.git
 
 ## Building vLLM's Docker Image from Source
 
-You can build and run vLLM from source via the provided <gh-file:Dockerfile>. To build vLLM:
+You can build and run vLLM from source via the provided <gh-file:docker/Dockerfile>. To build vLLM:
 
 ```console
 # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
-DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai
+DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai --file docker/Dockerfile
 ```
 
 :::{note}
@@ -92,6 +92,7 @@ Keep an eye on memory usage with parallel jobs as it can be substantial (see exa
 # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
 $ python3 use_existing_torch.py
 $ DOCKER_BUILDKIT=1 docker build . \
+  --file docker/Dockerfile \
   --target vllm-openai \
   --platform "linux/arm64" \
   -t vllm/vllm-gh200-openai:latest \

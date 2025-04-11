@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import os
+import sys
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
     S3_ACCESS_KEY_ID: Optional[str] = None
     S3_SECRET_ACCESS_KEY: Optional[str] = None
     S3_ENDPOINT_URL: Optional[str] = None
+    VLLM_MODEL_REDIRECT_PATH: Optional[str] = None
     VLLM_CACHE_ROOT: str = os.path.expanduser("~/.cache/vllm")
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
@@ -40,16 +43,12 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_CPU_MOE_PREPACK: bool = True
-    VLLM_OPENVINO_DEVICE: str = "CPU"
-    VLLM_OPENVINO_KVCACHE_SPACE: int = 0
-    VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
-    VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
-    VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL: bool = True
+    VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -75,7 +74,14 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
+    VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_LINEAR: bool = True
+    VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = False
+    VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
+    VLLM_ROCM_MOE_PADDING: bool = True
+    VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -91,12 +97,16 @@ if TYPE_CHECKING:
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_DP_RANK: int = 0
+    VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
+    VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_XGRAMMAR_CACHE_MB: int = 0
 
 
 def get_default_cache_root():
@@ -129,7 +139,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
 
     # Target device of vLLM, supporting [cuda (by default),
-    # rocm, neuron, cpu, openvino]
+    # rocm, neuron, cpu]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
 
@@ -265,6 +275,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_API_KEY":
     lambda: os.environ.get("VLLM_API_KEY", None),
 
+    # Whether to log responses from API Server for debugging
+    "VLLM_DEBUG_LOG_API_SERVER_RESPONSE":
+    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").
+    lower() == "true",
+
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
     lambda: os.environ.get("S3_ACCESS_KEY_ID", None),
@@ -295,7 +310,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # this is used for configuring the default logging level
     "VLLM_LOGGING_LEVEL":
-    lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO"),
+    lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
 
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX":
@@ -341,7 +356,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
 
     # (CPU backend only) CPU key-value cache space.
-    # default is 4GB
+    # default is 4 GiB
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
 
@@ -356,28 +371,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_MOE_PREPACK":
     lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
 
-    # OpenVINO device selection
-    # default is CPU
-    "VLLM_OPENVINO_DEVICE":
-    lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
-
-    # OpenVINO key-value cache space
-    # default is 4GB
-    "VLLM_OPENVINO_KVCACHE_SPACE":
-    lambda: int(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "0")),
-
-    # OpenVINO KV cache precision
-    # default is bf16 if natively supported by platform, otherwise f16
-    # To enable KV cache compression, please, explicitly specify u8
-    "VLLM_OPENVINO_CPU_KV_CACHE_PRECISION":
-    lambda: os.getenv("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION", None),
-
-    # Enables weights compression during model export via HF Optimum
-    # default is False
-    "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
-    lambda:
-    (os.environ.get("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", "0").lower() in
-     ("on", "true", "1")),
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
@@ -389,15 +382,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (previously known as ADAG) API which optimizes the
     # control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
+    # Note that this variable is set to 1 in V1 by default
+    # when ray distributed executor is used.
     "VLLM_USE_RAY_COMPILED_DAG":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
 
-    # If the env var is set, it uses NCCL for communication in
-    # Ray's Compiled Graph. This flag is ignored if
-    # VLLM_USE_RAY_COMPILED_DAG is not set.
-    "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
-    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
-                 ),
+    # If the env var is set, Ray Compiled Graph uses the specified
+    # channel type to communicate between workers belonging to
+    # different pipeline-parallel stages.
+    # Available options:
+    # - "auto": use the default channel type
+    # - "nccl": use NCCL for communication
+    # - "shm": use shared memory and gRPC for communication
+    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
+    "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
+    lambda: os.getenv("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto"),
 
     # If the env var is set, it enables GPU communication overlap
     # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
@@ -435,9 +434,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
     # Cache size (in GiB) for multimodal input cache
-    # Default is 8GiB
+    # Default is 4 GiB
     "VLLM_MM_INPUT_CACHE_GIB":
-    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "8")),
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -528,9 +527,49 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
 
+    # Disable aiter ops unless specifically enabled.
+    # Acts as a parent switch to enable the rest of the other operations.
+    "VLLM_ROCM_USE_AITER":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1")),
+
+    # use aiter linear op if aiter ops are enabled
+    # The following list of related ops
+    # - scaled_mm (per-tensor / rowwise)
+    "VLLM_ROCM_USE_AITER_LINEAR":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in
+             ("true", "1")),
+
+    # Whether to use aiter moe ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_MOE":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
+             ("true", "1")),
+
+    # Whether to use aiter block scaled moe kernel.
+    # By default this is disabled.
+    "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE":
+    lambda:
+    (os.getenv("VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE", "false").lower() in
+     ("true", "1")),
+
+    # use aiter rms norm op if aiter ops are enabled.
+    "VLLM_ROCM_USE_AITER_RMSNORM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
+             ("true", "1")),
+
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
     lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
+
+    # Pad the weights for the moe kernel
+    "VLLM_ROCM_MOE_PADDING":
+    lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
+
+    # custom paged attention kernel for MI3* cards
+    "VLLM_ROCM_CUSTOM_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
+             ("true", "1")),
 
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
@@ -604,6 +643,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_RANK":
     lambda: int(os.getenv("VLLM_DP_RANK", "0")),
 
+    # Rank of the process in the data parallel setting.
+    # Defaults to VLLM_DP_RANK when not set.
+    "VLLM_DP_RANK_LOCAL":
+    lambda: int(
+        os.getenv("VLLM_DP_RANK_LOCAL", sys.modules[__name__].VLLM_DP_RANK)),
+
     # World size of the data parallel setting
     "VLLM_DP_SIZE":
     lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
@@ -620,6 +665,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
 
+    # Use model_redirect to redirect the model name to a local folder.
+    # `model_redirect` can be a json file mapping the model between
+    # repo_id and local folder:
+    # {"meta-llama/Llama-3.2-1B": "/tmp/Llama-3.2-1B"}
+    # or a space separated values table file:
+    # meta-llama/Llama-3.2-1B   /tmp/Llama-3.2-1B
+    "VLLM_MODEL_REDIRECT_PATH":
+    lambda: os.environ.get("VLLM_MODEL_REDIRECT_PATH", None),
+
     # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
     "VLLM_MARLIN_USE_ATOMIC_ADD":
     lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
@@ -634,6 +688,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
     if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
+
+    # Gap between padding buckets for the forward pass. So we have
+    # 8, we will run forward pass with [16, 24, 32, ...].
+    "VLLM_TPU_BUCKET_PADDING_GAP":
+    lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
+    if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
+
+    # Allow use of DeepGemm kernels for fused moe ops.
+    "VLLM_USE_DEEP_GEMM":
+    lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+
+    # Control the cache sized used by the xgrammar compiler. The default
+    # of 512 MB should be enough for roughly 1000 JSON schemas.
+    # It can be changed with this variable if needed for some reason.
+    "VLLM_XGRAMMAR_CACHE_MB":
+    lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
 }
 
 # end-env-vars-definition
@@ -664,3 +734,43 @@ def set_vllm_use_v1(use_v1: bool):
             "explicitly by the user. Please raise this as a Github "
             "Issue and explicitly set VLLM_USE_V1=0 or 1.")
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
+
+
+def compute_hash() -> str:
+    """
+    WARNING: Whenever a new key is added to this environment
+    variables, ensure that it is included in the factors list if
+    it affects the computation graph. For example, different values
+    of VLLM_PP_LAYER_PARTITION will generate different computation
+    graphs, so it is included in the factors list. The env vars that 
+    affect the choice of different kernels or attention backends should
+    also be included in the factors list.
+    """
+    factors: list[Any] = []
+
+    # summarize environment variables
+    def factorize(name: str):
+        if __getattr__(name):
+            factors.append(__getattr__(name))
+        else:
+            factors.append("None")
+
+    # The values of envs may affects the computation graph.
+    # TODO(DefTruth): hash all environment variables?
+    # for key in environment_variables:
+    #     factorize(key)
+    environment_variables_to_hash = [
+        "VLLM_PP_LAYER_PARTITION",
+        "VLLM_MLA_DISABLE",
+        "VLLM_USE_TRITON_FLASH_ATTN",
+        "VLLM_USE_TRITON_AWQ",
+        "VLLM_DP_RANK",
+        "VLLM_DP_SIZE",
+    ]
+    for key in environment_variables_to_hash:
+        if key in environment_variables:
+            factorize(key)
+
+    hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+
+    return hash_str

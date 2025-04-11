@@ -211,8 +211,8 @@ def _run_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
-                     max_model_len=4096,
-                     max_num_seqs=2,
+                     max_model_len=8192,
+                     max_num_seqs=3,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
@@ -422,10 +422,9 @@ def test_bnb_regression(
     llm = LLM(
         model=model,
         dtype=dtype,
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         quantization="bitsandbytes",
-        load_format="bitsandbytes",
     )
     sampling_params = SamplingParams(
         temperature=0,
@@ -476,7 +475,7 @@ def test_explicit_implicit_prompt(
     llm = LLM(
         model=model,
         dtype=dtype,
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         tensor_parallel_size=1,
     )
@@ -507,7 +506,7 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
     with global_force_attn_backend_context_manager(attn_backend), vllm_runner(
             model,
             dtype=dtype,
-            max_model_len=4096,
+            max_model_len=8192,
             max_num_seqs=2,
             tensor_parallel_size=1,
             limit_mm_per_prompt={"image":

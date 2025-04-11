@@ -16,13 +16,14 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
                                    VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -60,21 +61,6 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"video": 1}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        max_video_tokens = self.get_num_video_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(seq_len),
-        )
-
-        return {"video": max_video_tokens}
 
     def get_image_size_with_most_features(self) -> ImageSize:
         vision_encoder_info = self.get_vision_encoder_info()
@@ -130,9 +116,12 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 
         return num_frames
 
-    def get_num_frames_with_most_features(self, seq_len: int) -> int:
-        mm_config = self.ctx.get_mm_config()
-        max_videos = mm_config.get_limit_per_prompt("video")
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        max_videos = mm_counts.get("video", 0)
 
         max_total_frames = self._get_max_video_frames(seq_len)
 
@@ -142,22 +131,27 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 class LlavaNextVideoDummyInputsBuilder(
         BaseDummyInputsBuilder[LlavaNextVideoProcessingInfo]):
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_videos = mm_counts.get("video", 0)
 
         processor = self.info.get_hf_processor()
         video_token = processor.video_token
 
+        return video_token * num_videos
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        num_videos = mm_counts.get("video", 0)
+
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         target_num_frames = \
-            self.info.get_num_frames_with_most_features(seq_len)
+            self.info.get_num_frames_with_most_features(seq_len, mm_counts)
 
-        mm_data = {
+        return {
             "video":
             self._get_dummy_videos(
                 width=target_width,
@@ -166,11 +160,6 @@ class LlavaNextVideoDummyInputsBuilder(
                 num_videos=num_videos,
             )
         }
-
-        return ProcessorInputs(
-            prompt_text=video_token * num_videos,
-            mm_data=mm_data,
-        )
 
 
 class LlavaNextVideoMultiModalProcessor(
@@ -402,19 +391,23 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                h, w)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels)
-            return stacked_embeddings.view(b, num_frames,
-                                           *stacked_embeddings.shape[1:])
+            embeds = stacked_embeddings.view(b, num_frames,
+                                             *stacked_embeddings.shape[1:])
 
         elif is_list_of(video_pixels, torch.Tensor):
             frames_per_videos = [v.shape[0] for v in video_pixels]
             stacked_pixels = torch.cat(video_pixels, dim=0)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels)
-            return torch.split(stacked_embeddings, frames_per_videos, dim=0)
-
+            embeds = torch.split(stacked_embeddings, frames_per_videos, dim=0)
         else:
             raise ValueError(
                 f"Unsupported type of video input {type(video_pixels)}")
+
+        return [e.flatten(0, 1) for e in embeds]
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

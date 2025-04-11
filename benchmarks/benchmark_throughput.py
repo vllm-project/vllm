@@ -11,7 +11,8 @@ from typing import Any, Optional, Union
 
 import torch
 import uvloop
-from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
+from benchmark_dataset import (AIMODataset, BurstGPTDataset,
+                               ConversationDataset, InstructCoderDataset,
                                RandomDataset, SampleRequest, ShareGPTDataset,
                                SonnetDataset, VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
@@ -212,14 +213,17 @@ def run_hf(
     max_prompt_len = 0
     max_output_len = 0
     for i in range(len(requests)):
-        prompt, prompt_len, output_len = requests[i]
+        prompt = requests[i].prompt
+        prompt_len = requests[i].prompt_len
+        output_len = requests[i].expected_output_len
         # Add the prompt to the batch.
         batch.append(prompt)
         max_prompt_len = max(max_prompt_len, prompt_len)
         max_output_len = max(max_output_len, output_len)
         if len(batch) < max_batch_size and i != len(requests) - 1:
             # Check if we can add more requests to the batch.
-            _, next_prompt_len, next_output_len = requests[i + 1]
+            next_prompt_len = requests[i + 1].prompt_len
+            next_output_len = requests[i + 1].expected_output_len
             if (max(max_prompt_len, next_prompt_len) +
                     max(max_output_len, next_output_len)) <= 2048:
                 # We can add more requests to the batch.
@@ -300,6 +304,7 @@ def get_requests(args, tokenizer):
         "input_len": args.input_len,
         "output_len": args.output_len,
     }
+
     if args.dataset_path is None or args.dataset_name == "random":
         sample_kwargs["range_ratio"] = args.random_range_ratio
         sample_kwargs["prefix_len"] = args.prefix_len
@@ -317,18 +322,23 @@ def get_requests(args, tokenizer):
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
     elif args.dataset_name == "hf":
-        if args.backend != "vllm-chat":
-            raise ValueError(
-                "hf datasets only are supported by vllm-chat backend")
-        # Choose between VisionArenaDataset and HuggingFaceDataset based on
-        # provided parameters.
-        dataset_cls = (VisionArenaDataset if args.dataset_path
-                       == VisionArenaDataset.VISION_ARENA_DATASET_PATH
-                       and args.hf_subset is None else HuggingFaceDataset)
-        common_kwargs['dataset_subset'] = args.hf_subset
-        common_kwargs['dataset_split'] = args.hf_split
-        sample_kwargs["enable_multimodal_chat"] = True
-
+        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = VisionArenaDataset
+            common_kwargs['dataset_subset'] = None
+            common_kwargs['dataset_split'] = "train"
+            sample_kwargs["enable_multimodal_chat"] = True
+        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = InstructCoderDataset
+            common_kwargs['dataset_split'] = "train"
+        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = ConversationDataset
+            common_kwargs['dataset_subset'] = args.hf_subset
+            common_kwargs['dataset_split'] = args.hf_split
+            sample_kwargs["enable_multimodal_chat"] = True
+        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = AIMODataset
+            common_kwargs['dataset_subset'] = None
+            common_kwargs['dataset_split'] = "train"
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
@@ -462,9 +472,17 @@ def validate_args(args):
         warnings.warn("--hf-subset and --hf-split will be ignored \
                 since --dataset-name is not 'hf'.",
                       stacklevel=2)
-    elif args.dataset_name == "hf" and args.backend != "vllm-chat":
-        raise ValueError(
-            "When --dataset-name is 'hf', backend must be 'vllm-chat'")
+    elif args.dataset_name == "hf":
+        if args.dataset_path in (
+                VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+                | ConversationDataset.SUPPORTED_DATASET_PATHS):
+            assert args.backend == "vllm-chat", f"{args.dataset_path} needs to use vllm-chat as the backend."  #noqa: E501
+        elif args.dataset_path in (InstructCoderDataset.SUPPORTED_DATASET_PATHS
+                                   | AIMODataset.SUPPORTED_DATASET_PATHS):
+            assert args.backend == "vllm", f"{args.dataset_path} needs to use vllm as the backend."  #noqa: E501
+        else:
+            raise ValueError(
+                f"{args.dataset_path} is not supported by hf dataset.")
 
     # --random-range-ratio: only used when dataset_name is 'random'
     if args.dataset_name != 'random' and args.random_range_ratio is not None:
@@ -576,18 +594,22 @@ if __name__ == "__main__":
         default=None,
         help="Path to the lora adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.")
-    parser.add_argument("--prefix-len",
-                        type=int,
-                        default=None,
-                        help="Number of prefix tokens per request."
-                        "This is for the RandomDataset and SonnetDataset")
+    parser.add_argument(
+        "--prefix-len",
+        type=int,
+        default=0,
+        help="Number of fixed prefix tokens before the random "
+        "context in a request (default: 0).",
+    )
     # random dataset
     parser.add_argument(
         "--random-range-ratio",
         type=float,
-        default=None,
-        help="Range of sampled ratio of input/output length, "
-        "used only for RandomDataSet.",
+        default=0.0,
+        help="Range ratio for sampling input/output length, "
+        "used only for RandomDataset. Must be in the range [0, 1) to define "
+        "a symmetric sampling range "
+        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
 
     # hf dtaset

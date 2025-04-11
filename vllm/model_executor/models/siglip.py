@@ -33,9 +33,6 @@ class SiglipEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
     ) -> int:
         return self.get_patch_grid_length()**2
 
-    def get_max_image_tokens(self) -> int:
-        return self.get_patch_grid_length()**2
-
     def get_image_size(self) -> int:
         return self.vision_config.image_size
 
@@ -208,8 +205,10 @@ class SiglipMLP(nn.Module):
 
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        # Special handling for BNB quantization
-        if quant_config and quant_config.get_name() == "bitsandbytes":
+        # Special handling for BNB and torchao quantization
+        if quant_config and quant_config.get_name() in [
+                "bitsandbytes", "torchao"
+        ]:
             quantizable = True
         else:
             # For other quantization, we require the hidden size to be a

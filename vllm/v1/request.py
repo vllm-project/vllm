@@ -3,17 +3,16 @@
 import enum
 from typing import TYPE_CHECKING, Optional, Union
 
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
+from vllm.utils import is_list_of
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
-
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal import MultiModalKwargs
-    from vllm.multimodal.inputs import PlaceholderRange
 
 
 class Request:
@@ -23,9 +22,9 @@ class Request:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: list[int],
-        multi_modal_inputs: Optional[list["MultiModalKwargs"]],
+        multi_modal_inputs: Optional[list[MultiModalKwargs]],
         multi_modal_hashes: Optional[list[str]],
-        multi_modal_placeholders: Optional[list["PlaceholderRange"]],
+        multi_modal_placeholders: Optional[list[PlaceholderRange]],
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
         arrival_time: float,
@@ -59,6 +58,8 @@ class Request:
         self.mm_positions = multi_modal_placeholders or []
         self.mm_inputs = multi_modal_inputs or []
         self.mm_hashes: list[str] = multi_modal_hashes or []
+        self.num_encoder_inputs = len(self.mm_inputs)
+        self.has_encoder_inputs = self.num_encoder_inputs > 0
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
@@ -73,6 +74,11 @@ class Request:
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+        if request.mm_inputs is not None:
+            assert isinstance(request.mm_inputs, list)
+            assert is_list_of(request.mm_inputs, MultiModalKwargs), (
+                "mm_inputs was not updated in EngineCore.add_request")
+
         return cls(
             request_id=request.request_id,
             prompt=request.prompt,
@@ -93,9 +99,11 @@ class Request:
         token_ids: Union[int, list[int]],
     ) -> None:
         if isinstance(token_ids, int):
-            token_ids = [token_ids]
-        self._output_token_ids.extend(token_ids)
-        self._all_token_ids.extend(token_ids)
+            self._output_token_ids.append(token_ids)
+            self._all_token_ids.append(token_ids)
+        else:
+            self._output_token_ids.extend(token_ids)
+            self._all_token_ids.extend(token_ids)
 
     @property
     def num_tokens(self) -> int:
@@ -115,16 +123,9 @@ class Request:
     def get_finished_reason(self) -> Union[FinishReason, None]:
         return RequestStatus.get_finished_reason(self.status)
 
-    def has_encoder_inputs(self) -> bool:
-        return len(self.mm_inputs) > 0
-
-    @property
-    def num_encoder_inputs(self) -> int:
-        return len(self.mm_positions)
-
     def get_num_encoder_tokens(self, input_id: int) -> int:
         assert input_id < len(self.mm_positions)
-        num_tokens = self.mm_positions[input_id]["length"]
+        num_tokens = self.mm_positions[input_id].length
         return num_tokens
 
     @property

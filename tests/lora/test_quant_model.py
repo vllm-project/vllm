@@ -37,6 +37,14 @@ else:
     ]
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 def do_sample(llm: vllm.LLM,
               lora_path: str,
               lora_id: int,
@@ -69,21 +77,8 @@ def do_sample(llm: vllm.LLM,
     return generated_texts
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("tp_size", [1])
-def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
-                          tp_size):
-    if num_gpus_available < tp_size and \
-        tp_size > 1 and current_platform.is_cuda_alike():
-        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+def test_quant_model_lora(tinyllama_lora_files, model):
 
     llm = vllm.LLM(
         model=model.model_path,
@@ -91,7 +86,6 @@ def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
         max_num_seqs=16,
         max_loras=4,
         max_model_len=400,
-        tensor_parallel_size=tp_size,
         gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
         trust_remote_code=True,
@@ -185,7 +179,6 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
         enable_lora=True,
         max_num_seqs=16,
         max_loras=4,
-        tensor_parallel_size=1,
         gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
         trust_remote_code=True,

@@ -10,15 +10,24 @@ set -x
 set -o pipefail
 
 check_gpus() {
-  # check the number of GPUs and GPU type.
-  declare -g gpu_count=$(nvidia-smi --list-gpus | wc -l)
+  if command -v nvidia-smi; then
+    # check the number of GPUs and GPU type.
+    declare -g gpu_count=$(nvidia-smi --list-gpus | wc -l)
+  elif command -v amd-smi; then
+    declare -g gpu_count=$(amd-smi list | grep 'GPU' | wc -l)
+  fi
+
   if [[ $gpu_count -gt 0 ]]; then
     echo "GPU found."
   else
     echo "Need at least 1 GPU to run benchmarking."
     exit 1
   fi
-  declare -g gpu_type=$(nvidia-smi --query-gpu=name --format=csv,noheader | awk '{print $2}')
+  if command -v nvidia-smi; then
+    declare -g gpu_type=$(nvidia-smi --query-gpu=name --format=csv,noheader | awk '{print $2}')
+  elif command -v amd-smi; then
+    declare -g gpu_type=$(amd-smi static -g 0 -a | grep 'MARKET_NAME' | awk '{print $2}')
+  fi
   echo "GPU type is $gpu_type"
 }
 
@@ -90,9 +99,15 @@ kill_gpu_processes() {
 
 
   # wait until GPU memory usage smaller than 1GB
-  while [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)" -ge 1000 ]; do
-    sleep 1
-  done
+  if command -v nvidia-smi; then
+    while [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)" -ge 1000 ]; do
+      sleep 1
+    done
+  elif command -v amd-smi; then
+    while [ "$(amd-smi metric -g 0 | grep 'USED_VRAM' | awk '{print $2}')" -ge 1000 ]; do
+      sleep 1
+    done
+  fi
 
   # remove vllm config file
   rm -rf ~/.config/vllm
@@ -361,7 +376,7 @@ main() {
   # get the current IP address, required by benchmark_serving.py
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
   # turn of the reporting of the status of each request, to clean up the terminal output
-  export VLLM_LOG_LEVEL="WARNING"
+  export VLLM_LOGGING_LEVEL="WARNING"
 
   # prepare for benchmarking
   cd benchmarks || exit 1
