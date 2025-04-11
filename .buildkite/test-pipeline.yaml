@@ -97,8 +97,7 @@ steps:
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
 
 - label: Core Test # 10min
-  mirror_hardwares: [amd_experimental]
-  mirror_hardwares: [amd]
+  mirror_hardwares: [amd_experimental] [amd]
   fast_check: true
   source_file_dependencies:
   - vllm/core
@@ -108,10 +107,9 @@ steps:
   - pytest -v -s core
 
 - label: Entrypoints Test # 40min
-  mirror_hardwares: [amd_experimental]s
+  mirror_hardwares: [amd_experimental]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
@@ -163,8 +161,7 @@ steps:
   - popd
 
 - label: Metrics, Tracing Test # 10min
-  mirror_hardwares: [amd_experimental]
-  mirror_hardwares: [amd]
+  mirror_hardwares: [amd_experimental] [amd]
   num_gpus: 2
   source_file_dependencies:
   - vllm/
@@ -178,8 +175,7 @@ steps:
 #####  1 GPU test  #####
 
 - label: Regression Test # 5min
-  mirror_hardwares: [amd_experimental]
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd_experimental] [amd]
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -189,8 +185,7 @@ steps:
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Engine Test # 10min
-  mirror_hardwares: [amd_experimental]
-  mirror_hardwares: [amd]
+  mirror_hardwares: [amd_experimental] [amd]
   source_file_dependencies:
   - vllm/
   - tests/engine
@@ -205,7 +200,6 @@ steps:
 
 - label: V1 Test
   mirror_hardwares: [amd_experimental]
-  #mirror_hardwares: [amd]
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -230,7 +224,6 @@ steps:
 - label: Examples Test # 25min
   mirror_hardwares: [amd_experimental]
   working_dir: "/vllm-workspace/examples"
-  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/entrypoints
   - examples/
@@ -254,8 +247,7 @@ steps:
     - VLLM_USE_V1=0 python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min
-  mirror_hardwares: [amd_experimental]
-  mirror_hardwares: [amd]
+  mirror_hardwares: [amd_experimental] [amd]
   source_file_dependencies:
   - vllm/
   - tests/prefix_caching
@@ -274,8 +266,7 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LogitsProcessor Test # 5min
-  mirror_hardwares: [amd_experimental]
-  mirror_hardwares: [amd]
+  mirror_hardwares: [amd_experimental] [amd]
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/model_executor/guided_decoding
@@ -298,7 +289,6 @@ steps:
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amd_experimental]
-  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -335,7 +325,6 @@ steps:
 
 - label: Kernels Test %N # 1h each
   mirror_hardwares: [amd_experimental]
-  # mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - vllm/attention
@@ -346,7 +335,6 @@ steps:
 
 - label: Tensorizer Test # 11min
   mirror_hardwares: [amd_experimental]
-  # mirror_hardwares: [amd]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
@@ -357,9 +345,8 @@ steps:
     - pytest -v -s tensorizer_loader
 
 - label: Benchmarks # 9min
-  mirror_hardwares: [amd_experimental]
+  mirror_hardwares: [amd_experimental] [amd]
   working_dir: "/vllm-workspace/.buildkite"
-  mirror_hardwares: [amd]
   source_file_dependencies:
   - benchmarks/
   commands:
@@ -403,7 +390,6 @@ steps:
 - label: OpenAI-Compatible Tool Use # 20 min
   mirror_hardwares: [amd_experimental]
   fast_check: false
-  #mirror_hardwares: [ amd ]
   source_file_dependencies:
     - vllm/
     - tests/tool_use
@@ -426,7 +412,6 @@ steps:
 
 - label: Language Models Test (Standard) # 32min
   mirror_hardwares: [amd_experimental]
-  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
@@ -450,7 +435,6 @@ steps:
 
 - label: Multi-Modal Models Test (Standard) # 40min
   mirror_hardwares: [amd_experimental]
-  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
@@ -499,8 +483,7 @@ steps:
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
-  mirror_hardwares: [amd_experimental]
-  mirror_hardwares: [amd]
+  mirror_hardwares: [amd_experimental] [amd]
   optional: true
   commands:
     - echo 'Testing custom models...'
@@ -512,8 +495,7 @@ steps:
 #####  multi gpus test  #####
 
 - label: Distributed Comm Ops Test # 7min
-  mirror_hardwares: [amd_experimental]
-  mirror_hardwares: [amd]
+  mirror_hardwares: [amd_experimental] [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -544,7 +526,6 @@ steps:
 
 - label: Distributed Tests (2 GPUs) # 40min
   mirror_hardwares: [amd_experimental]
-  #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
