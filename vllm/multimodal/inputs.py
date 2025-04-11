@@ -354,11 +354,11 @@ class MultiModalFlatField(BaseMultiModalField):
                 concat = torch.concat(batch)
                 # Replace original tensors with slices into the new one,
                 # so that their memory can be freed.
-                off = 0
+                start = 0
                 for i in range(len(batch)):
-                    size = batch[i].shape[0]
-                    batch[i] = concat[off:off + size]
-                    off += size
+                    end = start + batch[i].shape[0]
+                    batch[i] = concat[start:end]
+                    start = end
                 return concat
 
         return [e for elem in batch for e in elem]
