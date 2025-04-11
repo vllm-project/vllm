@@ -17,7 +17,7 @@ from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
-                    Optional, Protocol, Union)
+                    Optional, Protocol, TypeVar, Union)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -45,6 +45,7 @@ from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
     from ray.util.placement_group import PlacementGroup
 
     from vllm.executor.executor_base import ExecutorBase
@@ -53,8 +54,11 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+
+    Config = TypeVar("Config", bound=DataclassInstance)
 else:
     QuantizationConfig = None
+    Config = TypeVar("Config")
 
 logger = init_logger(__name__)
 
@@ -159,7 +163,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     return out
 
 
-def config(cls: type[Any]) -> type[Any]:
+def config(cls: type[Config]) -> type[Config]:
     """
     A decorator that ensures all fields in a dataclass have default values
     and that each field has a docstring.
