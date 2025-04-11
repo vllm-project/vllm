@@ -1337,7 +1337,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
-        curr_hidden_states, a1_scale = moe_kernel_prepare_input(
+        qcurr_hidden_states, qa1_scale = moe_kernel_prepare_input(
             A=curr_hidden_states,
             B=w1,
             A_scale=a1_scale,
@@ -1353,10 +1353,10 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
-        invoke_fused_moe_kernel(curr_hidden_states,
+        invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
                                 intermediate_cache1,
-                                a1_scale,
+                                qa1_scale,
                                 w1_scale,
                                 w1_zp,
                                 curr_topk_weights,
@@ -1383,7 +1383,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
-        intermediate_cache2, a2_scale = moe_kernel_prepare_input(
+        qintermediate_cache2, qa2_scale = moe_kernel_prepare_input(
             A=intermediate_cache2,
             B=w2,
             A_scale=a2_scale,
@@ -1395,10 +1395,10 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             per_channel_quant=per_channel_quant,
             block_shape=block_shape)
 
-        invoke_fused_moe_kernel(intermediate_cache2,
+        invoke_fused_moe_kernel(qintermediate_cache2,
                                 w2,
                                 intermediate_cache3,
-                                a2_scale,
+                                qa2_scale,
                                 w2_scale,
                                 w2_zp,
                                 curr_topk_weights,
