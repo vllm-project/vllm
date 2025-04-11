@@ -7,8 +7,12 @@ import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -17,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton_jit_decorator
 from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -130,7 +135,7 @@ def block_quant_to_tensor_quant(
     return x_q_tensor, scale
 
 
-@triton.jit
+@triton_jit_decorator
 def _per_token_group_quant_fp8(
     # Pointers to inputs and output
     y_ptr,
@@ -176,7 +181,7 @@ def _per_token_group_quant_fp8(
     tl.store(y_s_ptr, y_s)
 
 
-@triton.jit
+@triton_jit_decorator
 def _per_token_group_quant_fp8_colmajor(
     # Pointers to inputs and output
     y_ptr,
@@ -310,7 +315,7 @@ def per_token_group_quant_fp8(
     return x_q, x_s
 
 
-@triton.jit
+@triton_jit_decorator
 def _w8a8_block_fp8_matmul(
     # Pointers to inputs and output
     A,
