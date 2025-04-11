@@ -16,18 +16,23 @@ NUM_WARPS = 4 if current_platform.is_rocm() else 8
 # To check compatibility
 IS_TURING = current_platform.get_device_capability() == (7, 5)
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
-                        "num_unroll_cache": 4, \
-                        "num_unroll_request": 1 } | \
-                        ({"kpack": 2, "waves_per_eu": 2} \
-                            if current_platform.is_rocm() else {}), \
-                        num_warps=4, \
-                        num_stages=1)
-    ],
-    key=["BLOCK_SIZE", "MAX_Q_LEN", "MAX_CTX_LEN"]
-)
+
+# Autotune is great idea but not yet performant nor stable. With Autotune, first
+# run is slower than others. Probably because graph capture doesn't run kernel,
+# probably by some other reason. So want to leave "template" of what could be
+# autotuned in this kernel to get even better perf.
+# @triton.autotune(
+#     configs=[
+#         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
+#                         "num_unroll_cache": 4, \
+#                         "num_unroll_request": 1 } | \
+#                         ({"kpack": 2, "waves_per_eu": 2} \
+#                             if current_platform.is_rocm() else {}), \
+#                         num_warps=4, \
+#                         num_stages=1)
+#     ],
+#     key=["BLOCK_SIZE", "MAX_Q_LEN", "MAX_CTX_LEN"]
+# )
 @triton.jit
 def _fwd_kernel(Q,
                 K,
@@ -836,6 +841,10 @@ def context_attention_fwd(q,
         )
         return
 
+    extra_kargs = {}
+    if current_platform.is_rocm():
+        extra_kargs = {"kpack": 2, "waves_per_eu": 2}
+
     max_seq_len = 0 if max_seq_len is None else max_seq_len
     grid = lambda META: (batch, head,
                          triton.cdiv(max_input_len, META["BLOCK_M"]))
@@ -884,6 +893,11 @@ def context_attention_fwd(q,
         BLOCK_DMODEL_PADDED=Lk_padded,
         SLIDING_WINDOW=sliding_window,
         SKIP_DECODE=skip_decode,
-        MAX_Q_LEN=triton.next_power_of_2(max_input_len),
-        MAX_CTX_LEN=triton.next_power_of_2(max_seq_len))
+        BLOCK_M=128,
+        BLOCK_N=64,
+        num_unroll_cache=4,
+        num_unroll_request=1,
+        num_warps=4,
+        num_stages=1,
+        **extra_kargs)
     return
