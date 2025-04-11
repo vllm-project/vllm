@@ -338,7 +338,7 @@ def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     Recursively flattens and concatenates NestedTensors on all but the last
     dimension.
     """
-
+    # TODO this recursive function is still causing issues
     if isinstance(embeddings, torch.Tensor):
         # Flatten all but the last dimension.
         return embeddings.flatten(0, -2)
@@ -388,9 +388,10 @@ def _merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
-    num_expected_tokens = is_multimodal.sum().item()
-    assert isinstance(num_expected_tokens, int)
-
+    # TODO
+    num_expected_tokens = is_multimodal.sum()#.item()
+    # assert isinstance(num_expected_tokens, int)
+    print("\n\DIO CANE", [mm.shape for mm in multimodal_embeddings], "\n\n")
     flattened = _flatten_embeddings(multimodal_embeddings)
     if flattened.shape[0] != num_expected_tokens:
         expr = _embedding_count_expression(multimodal_embeddings)
