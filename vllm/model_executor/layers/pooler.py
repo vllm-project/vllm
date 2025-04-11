@@ -221,24 +221,17 @@ class PoolerHead(nn.Module):
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
 
-        pooling_params: list[PoolingParams] = [
-            pooling_param for _, pooling_param in pooling_metadata.seq_groups
+        dimensions_list = [
+            pooling_param.dimensions
+            for _, pooling_param in pooling_metadata.seq_groups
         ]
-
-        if not all(pooling_param.dimensions is None
-                   for pooling_param in pooling_params):
+        if any(d is not None for d in dimensions_list):
             # change the output dimension
-            assert len(pooled_data) == len(pooling_params)
-
-            pooled_data_list = []
-            for i, pooling_param in enumerate(pooling_params):
-                vecs = pooled_data[i]
-
-                if pooling_param.dimensions is not None:
-                    vecs = vecs[:pooling_param.dimensions]
-
-                pooled_data_list.append(vecs)
-            pooled_data = pooled_data_list
+            assert len(pooled_data) == len(dimensions_list)
+            pooled_data = [
+                vecs if d is None else vecs[:d]
+                for vecs, d in zip(pooled_data, dimensions_list)
+            ]
 
         if self.normalize:
             if isinstance(pooled_data, list):
