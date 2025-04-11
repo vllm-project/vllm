@@ -1,20 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
-from typing import Dict, List, TYPE_CHECKING
-from functools import lru_cache
+from typing import TYPE_CHECKING
+from cachetools import LRUCache
 import sre_constants
 import sre_parse
 import re
 import json
 
 import torch
-from transformers.models.gpt2.tokenization_gpt2 import bytes_to_unicode
 
 from vllm.config import VllmConfig
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.model_executor.guided_decoding.outlines_logits_processors import _reduced_vocabulary
+from vllm.model_executor.guided_decoding.outlines_logits_processors import (get_vocabulary,
+                                                                            get_disk_cache)
 from vllm.utils import LazyLoader
 from vllm.sampling_params import SamplingParams
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -29,9 +30,27 @@ else:
 
 logger = init_logger(__name__)
 
-@lru_cache
+CACHE = None
+
+if envs.VLLM_V1_USE_OUTLINES_CACHE:
+    logger.warning("Enabling outlines cache. This is an unbounded on-disk "
+                   "cache. It may consume a lot of disk space and should "
+                   "not be used with untrusted clients.")
+    CACHE = get_disk_cache()
+else:
+    CACHE = LRUCache(maxsize=128)
+
+
 def _compile_index(regex_string: str, vocabulary: oc.Vocabulary) -> oc.Index:
-    return oc.Index(regex_string, vocabulary)
+    cache_key = f"{vocabulary._hash}_{regex_string}"
+    if CACHE is not None and cache_key in CACHE:
+        return CACHE[cache_key]
+
+    index = oc.Index(regex_string, vocabulary)
+    if CACHE is not None:
+        CACHE[cache_key] = index
+    
+    return index
 
 class OutlinesBackend(StructuredOutputBackend):
 
@@ -47,31 +66,7 @@ class OutlinesBackend(StructuredOutputBackend):
         tokenizer_group.ping()
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         
-        reduced_vocab = None
-        try:
-            vocab = tokenizer.get_vocab()
-            eos_token_id = None
-            if hasattr(
-                        tokenizer,
-                        "eos_token_id",
-                ) and tokenizer.eos_token_id is not None:
-                    eos_token_id = tokenizer.eos_token_id
-            else:
-                raise ValueError(
-                    f"Error during guided decoding setup: Tokenizer ({type(tokenizer)}) has no `eos_token_id`" 
-                    " property, but `eos_token_id` is required for guided decoding to work properly.")
-
-            reduced_vocab = _reduced_vocabulary(
-                tokenizer,
-                eos_token_id # type: ignore
-            )
-        except AttributeError as e:
-            raise ValueError(
-                f"Cannot get the vocabulary of the tokenizer "
-                f"{type(tokenizer)}. The tokenizer should have a "
-                "get_vocab method.") from e
-        
-        self.vocabulary = oc.Vocabulary(eos_token_id, reduced_vocab) # type: ignore[arg-type]
+        self.vocabulary = get_vocabulary(tokenizer)
     
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
@@ -117,7 +112,7 @@ class OutlinesGrammar(StructuredOutputGrammar):
         """
         for token in tokens:
             try:
-                self.guide.advance(token)
+                self.guide.advance(token, return_tokens=False)
                 self.num_processed_tokens += 1
             except ValueError:
                 return False
@@ -145,7 +140,7 @@ def validate_structured_output_request_outlines(params: SamplingParams):
     gd_params = params.guided_decoding
 
     if gd_params.regex:
-        validate_regex_buildable(gd_params.regex)
+        validate_regex_is_buildable(gd_params.regex)
     elif gd_params.json:
         if isinstance(gd_params.json, str):
             try:
@@ -156,13 +151,13 @@ def validate_structured_output_request_outlines(params: SamplingParams):
             schema = gd_params.json
         pattern = oc.json_schema.build_regex_from_schema(
             schema)
-        validate_regex_buildable(pattern)
+        validate_regex_is_buildable(pattern)
     elif gd_params.choice:
         choices = [
             re.escape(str(choice)) for choice in gd_params.choice
         ]
         regex = "(" + "|".join(choices) + ")"
-        validate_regex_buildable(regex)
+        validate_regex_is_buildable(regex)
     elif gd_params.grammar:
         raise ValueError("Outlines guided decoding backend does not support grammar specifications")
 
@@ -259,7 +254,7 @@ def _check_unsupported(parsed):
     return False
 
 
-def validate_regex_buildable(pattern: str) -> None:
+def validate_regex_is_buildable(pattern: str) -> None:
     """
     Validates that the input regex is not using unsupported features
     of the `regex-automata` crate (outlines_core regex engine), and has a

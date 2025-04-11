@@ -19,15 +19,16 @@ import os
 import re
 import json
 from diskcache import Cache
+from cachetools import LRUCache
 import diskcache as dc
 from typing import Dict, List, Optional, Union
+import importlib.metadata
 
 from pydantic import BaseModel
 
 import torch
 from transformers.models.gpt2.tokenization_gpt2 import bytes_to_unicode
 
-from outlines_core.outlines_core import __version__ as outlines_version
 from outlines_core.json_schema import build_regex_from_schema
 from outlines_core import Vocabulary, Index, Guide
 from outlines_core.kernels.torch import (
@@ -44,12 +45,12 @@ logger = init_logger(__name__)
 
 CACHE = None
 
-def get_cache() -> dc.Cache:
+def get_disk_cache() -> dc.Cache:
     """Get the context object that contains previously-computed return values."""
     outlines_cache_dir = os.getenv("OUTLINES_CACHE_DIR")
     xdg_cache_home = os.getenv("XDG_CACHE_HOME")
     home_dir = os.path.expanduser("~")
-
+    outlines_version = importlib.metadata.version("outlines_core")
 
     if outlines_cache_dir:
         # OUTLINES_CACHE_DIR takes precendence
@@ -75,15 +76,14 @@ def get_cache() -> dc.Cache:
 
     return memory
 
-cache = get_cache()
 
 if envs.VLLM_V0_USE_OUTLINES_CACHE:
     logger.warning("Enabling outlines cache. This is an unbounded on-disk "
                    "cache. It may consume a lot of disk space and should "
                    "not be used with untrusted clients.")
-    CACHE = get_cache()
+    CACHE = get_disk_cache()
 else:
-    pass
+    CACHE = LRUCache(maxsize=128)
 
 
 class BaseLogitsProcessor:
@@ -109,7 +109,7 @@ class BaseLogitsProcessor:
         if len(input_ids) > 0:
             if len(input_ids) == 1:
                 logger.info(f"advancing with token {input_ids[-1]} from initial state")
-            self._guide.advance(token_id=input_ids[-1])
+            self._guide.advance(token_id=input_ids[-1], return_tokens=False)
         
         self._guide.write_mask_into(
             data_ptr=self._mask.data_ptr(),
@@ -134,15 +134,16 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
     @classmethod
     def _get_guide(cls, regex_string: str, tokenizer: PreTrainedTokenizerBase) -> Guide:
-        cached_index = CACHE.get(regex_string) if CACHE is not None else None
-        if cached_index is not None:
-            return Guide(cached_index)
-
         vocabulary = get_vocabulary(tokenizer)
+        cache_key = f"{vocabulary._hash}_{regex_string}"
+        if CACHE is not None:
+            if cache_key in CACHE:
+                return Guide(CACHE[cache_key])
+
         index = Index(regex_string, vocabulary)
 
         if CACHE is not None:
-            CACHE[regex_string] = index
+            CACHE[cache_key] = index
 
         return Guide(index)
 
@@ -242,25 +243,34 @@ def _reduced_vocabulary(tokenizer: PreTrainedTokenizerBase, eos_token_id: int) -
     return vocabulary
 
 
-def get_vocabulary(tokenizer: PreTrainedTokenizerBase) -> Vocabulary:
+def get_vocabulary(tokenizer: AnyTokenizer) -> Vocabulary:
     """Get the `Vocabulary` object for a given tokenizer.
     """
     if getattr(tokenizer, "_outlines_vocabulary", False) is not None:
         return tokenizer._outlines_vocabulary
 
-    eos_token_id = None
-    if hasattr(
-                tokenizer,
-                "eos_token_id",
-        ) and tokenizer.eos_token_id is not None:
-            eos_token_id = tokenizer.eos_token_id
-    else:
+    try:
+        if hasattr(
+                    tokenizer,
+                    "eos_token_id",
+            ) and tokenizer.eos_token_id is not None:
+                eos_token_id = tokenizer.eos_token_id
+        else:
+            raise ValueError(
+                f"Error during guided decoding setup: Tokenizer ({type(tokenizer)}) has no `eos_token_id`" 
+                " property, but `eos_token_id` is required for guided decoding to work properly.")
+
+        reduced_vocab = _reduced_vocabulary(
+            tokenizer,
+            eos_token_id #type: ignore
+        )
+        vocabulary = Vocabulary(eos_token_id, reduced_vocab)
+        setattr(vocabulary, "_hash", hash(vocabulary.__repr__()))
+        setattr(tokenizer, "_outlines_vocabulary", vocabulary)
+
+        return vocabulary
+    except AttributeError as e:
         raise ValueError(
-            f"Error during guided decoding setup: Tokenizer ({type(tokenizer)}) has no `eos_token_id`" 
-            " property, but `eos_token_id` is required for guided decoding to work properly.")
-
-    reduced = _reduced_vocabulary(tokenizer, eos_token_id) # type: ignore
-    vocabulary = Vocabulary(eos_token_id, reduced)
-    setattr(tokenizer, "_outlines_vocabulary", vocabulary)
-
-    return vocabulary
+                f"Cannot get the vocabulary of the tokenizer "
+                f"({type(tokenizer)}). The tokenizer should have a "
+                "get_vocab method.") from e
