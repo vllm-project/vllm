@@ -75,7 +75,7 @@ class MsgpackEncoder:
                 # ignore the main dict, it will be re-indexed.
                 # pass a list of MultiModalKwargsItem, then see below
                 # Any tensors *not* indexed by modality will be ignored.
-                return mm._items_by_modality.values()
+                return list(mm._items_by_modality.values())
             # just return the main dict if there are no modalities
             return dict(mm)
 
@@ -150,10 +150,12 @@ class MsgpackDecoder:
                 return torch.from_numpy(self._decode_ndarray(obj))
             if issubclass(t, MultiModalKwargs):
                 if isinstance(obj, list):
-                    return MultiModalKwargs.from_items(self._decode_mm_items(obj))
-                return MultiModalKwargs(
-                    {k: self._decode_nested(v)
-                     for k in obj.items()})
+                    return MultiModalKwargs.from_items(
+                        self._decode_mm_items(obj))
+                return MultiModalKwargs({
+                    k: self._decode_nested_tensors(v)
+                    for k, v in obj.items()
+                })
         return obj
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
@@ -166,7 +168,7 @@ class MsgpackDecoder:
         for item in chain.from_iterable(obj):
             elems = []
             for v in item.values():
-                v['data'] = self._decode_nested(v['data'])
+                v['data'] = self._decode_nested_tensors(v['data'])
                 v['field'] = pickle.loads(v['field'])
                 elems.append(MultiModalFieldElem(**v))
             all.append(MultiModalKwargsItem.from_elems(elems))
