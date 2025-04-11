@@ -79,13 +79,10 @@ def create_scheduler(
     )
     cache_config.num_gpu_blocks = 10000
     return Scheduler(
-        scheduler_config,
-        model_config,
-        cache_config,
-        lora_config=None,
+        vllm_config,
         kv_cache_config=kv_cache_config,
-        log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
+        log_stats=True,
     )
 
 
