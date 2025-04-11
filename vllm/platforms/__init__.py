@@ -176,17 +176,26 @@ def cpu_platform_plugin() -> Optional[str]:
 
 
 def neuron_platform_plugin() -> Optional[str]:
-    is_neuron = False
+    tnx_installed = False
+    nxd_installed = False
     logger.debug("Checking if Neuron platform is available.")
     try:
         import transformers_neuronx  # noqa: F401
-        is_neuron = True
+        tnx_installed = True
         logger.debug("Confirmed Neuron platform is available because"
                      " transformers_neuronx is found.")
-    except ImportError as e:
-        logger.debug("Neuron platform is not available because: %s", str(e))
+    except ImportError:
         pass
 
+    try:
+        import neuronx_distributed_inference  # noqa: F401
+        nxd_installed = True
+        logger.debug("Confirmed Neuron platform is available because"
+                     " neuronx_distributed_inference is found.")
+    except ImportError:
+        pass
+
+    is_neuron = tnx_installed or nxd_installed
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
 
