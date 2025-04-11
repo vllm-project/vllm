@@ -793,16 +793,16 @@ class DPAsyncMPClient(AsyncMPClient):
     def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
                  log_stats: bool):
 
-        # Control message used for triggering dp idle mode loop.
-        self.start_dp_msg = (EngineCoreRequestType.START_DP.value,
-                             *self.encoder.encode(None))
-
         self.num_engines_running = 0
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
         self.outputs_handler = DPAsyncMPClient.process_engine_outputs  # type: ignore[assignment]
 
         super().__init__(vllm_config, executor_class, log_stats)
+
+        # Control message used for triggering dp idle mode loop.
+        self.start_dp_msg = (EngineCoreRequestType.START_DP.value,
+                             *self.encoder.encode(None))
 
         assert len(self.core_engines) > 1
 
