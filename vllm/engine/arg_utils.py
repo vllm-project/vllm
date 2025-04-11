@@ -101,8 +101,8 @@ class EngineArgs:
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
     allowed_local_media_path: str = ""
-    download_dir: Optional[str] = None
-    load_format: str = 'auto'
+    download_dir: Optional[str] = LoadConfig.download_dir
+    load_format: str = LoadConfig.load_format
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
@@ -174,8 +174,10 @@ class EngineArgs:
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
-    model_loader_extra_config: Optional[dict] = None
-    ignore_patterns: Optional[Union[str, List[str]]] = None
+    model_loader_extra_config: Optional[
+        dict] = LoadConfig.model_loader_extra_config
+    ignore_patterns: Optional[Union[str,
+                                    List[str]]] = LoadConfig.ignore_patterns
     preemption_mode: Optional[str] = None
 
     scheduler_delay_factor: float = 0.0
@@ -213,7 +215,7 @@ class EngineArgs:
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = None
-    use_tqdm_on_load: bool = True
+    use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -234,9 +236,13 @@ class EngineArgs:
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
+        def is_type_in_union(cls: type[Any], type: type[Any]) -> bool:
+            """Check if the class is a type in a union type."""
+            return get_origin(cls) is Union and type in get_args(cls)
+
         def is_optional(cls: type[Any]) -> bool:
             """Check if the class is an optional type."""
-            return get_origin(cls) is Union and type(None) in get_args(cls)
+            return is_type_in_union(cls, type(None))
 
         def get_kwargs(cls: type[Any]) -> Dict[str, Any]:
             cls_docs = get_attr_docs(cls)
@@ -254,6 +260,10 @@ class EngineArgs:
                 # Handle optional fields
                 if is_optional(field.type):
                     kwargs[name]["type"] = nullable_str
+                    continue
+                # Handle str in union fields
+                if is_type_in_union(field.type, str):
+                    kwargs[name]["type"] = str
                     continue
                 kwargs[name]["type"] = field.type
             return kwargs
@@ -333,38 +343,23 @@ class EngineArgs:
             "from directories specified by the server file system. "
             "This is a security risk. "
             "Should only be enabled in trusted environments.")
-        parser.add_argument('--download-dir',
-                            type=nullable_str,
-                            default=EngineArgs.download_dir,
-                            help='Directory to download and load the weights.')
-        parser.add_argument(
-            '--load-format',
-            type=str,
-            default=EngineArgs.load_format,
-            choices=[f.value for f in LoadFormat],
-            help='The format of the model weights to load.\n\n'
-            '* "auto" will try to load the weights in the safetensors format '
-            'and fall back to the pytorch bin format if safetensors format '
-            'is not available.\n'
-            '* "pt" will load the weights in the pytorch bin format.\n'
-            '* "safetensors" will load the weights in the safetensors format.\n'
-            '* "npcache" will load the weights in pytorch format and store '
-            'a numpy cache to speed up the loading.\n'
-            '* "dummy" will initialize the weights with random values, '
-            'which is mainly for profiling.\n'
-            '* "tensorizer" will load the weights using tensorizer from '
-            'CoreWeave. See the Tensorize vLLM Model script in the Examples '
-            'section for more information.\n'
-            '* "runai_streamer" will load the Safetensors weights using Run:ai'
-            'Model Streamer.\n'
-            '* "bitsandbytes" will load the weights using bitsandbytes '
-            'quantization.\n'
-            '* "sharded_state" will load weights from pre-sharded checkpoint '
-            'files, supporting efficient loading of tensor-parallel models\n'
-            '* "gguf" will load weights from GGUF format files (details '
-            'specified in https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n'
-            '* "mistral" will load weights from consolidated safetensors files '
-            'used by Mistral models.\n')
+        # Model loading arguments
+        load_kwargs = get_kwargs(LoadConfig)
+        load_group = parser.add_argument_group(
+            title="LoadConfig",
+            description=LoadConfig.__doc__,
+        )
+        load_group.add_argument('--load-format',
+                                choices=[f.value for f in LoadFormat],
+                                **load_kwargs["load_format"])
+        load_group.add_argument('--download-dir',
+                                **load_kwargs["download_dir"])
+        load_group.add_argument('--model-loader-extra-config',
+                                **load_kwargs["model_loader_extra_config"])
+        load_group.add_argument('--use-tqdm-on-load',
+                                action=argparse.BooleanOptionalAction,
+                                **load_kwargs["use_tqdm_on_load"])
+
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -770,14 +765,6 @@ class EngineArgs:
                             default=1,
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
-        parser.add_argument(
-            '--use-tqdm-on-load',
-            dest='use_tqdm_on_load',
-            action=argparse.BooleanOptionalAction,
-            default=EngineArgs.use_tqdm_on_load,
-            help='Whether to enable/disable progress bar '
-            'when loading model weights.',
-        )
 
         parser.add_argument(
             '--multi-step-stream-outputs',
@@ -806,15 +793,6 @@ class EngineArgs:
                             default=None,
                             help='The configurations for speculative decoding.'
                             ' Should be a JSON string.')
-
-        parser.add_argument('--model-loader-extra-config',
-                            type=nullable_str,
-                            default=EngineArgs.model_loader_extra_config,
-                            help='Extra config for model loader. '
-                            'This will be passed to the model loader '
-                            'corresponding to the chosen load_format. '
-                            'This should be a JSON string that will be '
-                            'parsed into a dictionary.')
         parser.add_argument(
             '--ignore-patterns',
             action="append",
