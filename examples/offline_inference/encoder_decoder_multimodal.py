@@ -25,6 +25,7 @@ def run_florence2():
         tokenizer="facebook/bart-large",
         max_num_seqs=8,
         trust_remote_code=True,
+        limit_mm_per_prompt={"image": 1},
         dtype="half",
     )
 
@@ -57,6 +58,7 @@ def run_mllama():
         model="meta-llama/Llama-3.2-11B-Vision-Instruct",
         max_model_len=8192,
         max_num_seqs=2,
+        limit_mm_per_prompt={"image": 1},
         dtype="half",
     )
 
@@ -89,6 +91,7 @@ def run_whisper():
         model="openai/whisper-large-v3-turbo",
         max_model_len=448,
         max_num_seqs=16,
+        limit_mm_per_prompt={"audio": 1},
         dtype="half",
     )
 
