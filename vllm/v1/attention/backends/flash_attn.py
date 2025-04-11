@@ -10,7 +10,7 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
