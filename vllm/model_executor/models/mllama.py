@@ -52,6 +52,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -1181,6 +1182,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         super().__init__()
         config: MllamaConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.text_config.vocab_size
         self.hidden_size = config.text_config.hidden_size
@@ -1516,6 +1518,15 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                 weight_loader(param, loaded_weight)
                 updated_params.add(name)
         return updated_params
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_model")
 
 
 def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:
