@@ -52,7 +52,7 @@ async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
 
     server_args = [
         "--max-model-len",
-        "4096",
+        "2516",
         "--max-num-seqs",
         "16",
         "--trust-remote-code",
