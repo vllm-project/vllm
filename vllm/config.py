@@ -1437,9 +1437,7 @@ class LoadConfig:
     """Configuration for loading the model weights."""
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
-    """
-    The format of the model weights to load:
-
+    """The format of the model weights to load:
     - "auto" will try to load the weights in the safetensors format and fall
     back to the pytorch bin format if safetensors format is not available.
     - "pt" will load the weights in the pytorch bin format.
@@ -1459,8 +1457,7 @@ class LoadConfig:
     - "gguf" will load weights from GGUF format files (details specified in
     https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
     - "mistral" will load weights from consolidated safetensors files used by
-    Mistral models.
-    """
+    Mistral models."""
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
