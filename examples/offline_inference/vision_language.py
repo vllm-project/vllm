@@ -8,6 +8,7 @@ on HuggingFace model repository.
 """
 import os
 import random
+from contextlib import contextmanager
 from dataclasses import asdict
 from typing import NamedTuple, Optional
 
@@ -291,6 +292,34 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
     prompts = [(
         f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
     ) for question in questions]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# SmolVLM2-2.2B-Instruct
+def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        enforce_eager=True,
+        mm_processor_kwargs={
+            "max_image_size": {
+                "longest_edge": 384
+            },
+        },
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
+    prompts = [
+        (f"<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:")
+        for question in questions
+    ]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -955,6 +984,7 @@ model_example_map = {
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
     "skywork_chat": run_skyworkr1v,
+    "smolvlm": run_smolvlm,
 }
 
 
@@ -1026,6 +1056,20 @@ def apply_image_repeat(image_repeat_prob, num_prompts, data,
     return inputs
 
 
+@contextmanager
+def time_counter(enable: bool):
+    if enable:
+        import time
+        start_time = time.time()
+        yield
+        elapsed_time = time.time() - start_time
+        print("-" * 50)
+        print("-- generate time = {}".format(elapsed_time))
+        print("-" * 50)
+    else:
+        yield
+
+
 def main(args):
     model = args.model_type
     if model not in model_example_map:
@@ -1084,17 +1128,16 @@ def main(args):
                 },
             } for i in range(args.num_prompts)]
 
-    if args.time_generate:
-        import time
-        start_time = time.time()
-        outputs = llm.generate(inputs, sampling_params=sampling_params)
-        elapsed_time = time.time() - start_time
-        print("-" * 50)
-        print("-- generate time = {}".format(elapsed_time))
-        print("-" * 50)
+    # Add LoRA request if applicable
+    lora_request = (req_data.lora_requests *
+                    args.num_prompts if req_data.lora_requests else None)
 
-    else:
-        outputs = llm.generate(inputs, sampling_params=sampling_params)
+    with time_counter(args.time_generate):
+        outputs = llm.generate(
+            inputs,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+        )
 
     print("-" * 50)
     for o in outputs:
