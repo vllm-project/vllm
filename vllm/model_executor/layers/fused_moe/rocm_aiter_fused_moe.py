@@ -63,40 +63,6 @@ def moe_sorting_ck_impl(
                                               expert_mask=expert_mask)
 
 
-# def moe_sorting_ck_fake(
-#     topk_ids: torch.Tensor,
-#     topk_weights: torch.Tensor,
-#     E: int,
-#     model_dim: int,
-#     dtype: torch.dtype,
-#     expert_mask: Optional[torch.Tensor] = None
-# ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-#            torch.Tensor]:
-#     # Create fake tensors with appropriate shapes
-#     # This is hardcoded for now for this function based on
-#     # aiter repository
-#     BLOCK_SIZE_M = 32
-#     device = topk_ids.device
-#     M, topk = topk_ids.shape
-#     max_num_tokens_padded = topk_ids.numel() + E * BLOCK_SIZE_M - topk
-#     max_num_m_blocks = int(
-#         (max_num_tokens_padded + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M)
-#     sorted_token_ids = torch.empty((max_num_tokens_padded, ),
-#                                    dtype=torch.int32,
-#                                    device=device)
-#     sorted_weight_buf = torch.empty((max_num_tokens_padded, ),
-#                                     dtype=torch.float,
-#                                     device=device)
-#     sorted_expert_ids = torch.empty((max_num_m_blocks, ),
-#                                     dtype=torch.int32,
-#                                     device=device)
-#     num_valid_ids = torch.empty((1), dtype=torch.int32, device=device)
-#     out_asm = torch.empty((M, model_dim), dtype=dtype, device=device)
-
-#     return sorted_token_ids, sorted_weight_buf, \
-#         sorted_expert_ids, num_valid_ids, out_asm
-
-
 def moe_sorting_ck_fake(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
