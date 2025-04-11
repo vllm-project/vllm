@@ -499,8 +499,8 @@ class ModelConfig:
 
         if self.runner_type == "pooling":
             user_config = override_pooler_config or PoolerConfig()
-            base_config = get_pooling_config(self.model, self.revision)
 
+            base_config = get_pooling_config(self.model, self.revision)
             if base_config is not None:
                 # Only set values that are not overridden by the user
                 for k, v in base_config.items():
@@ -510,7 +510,6 @@ class ModelConfig:
             if self.is_matryoshka:
                 if user_config.normalize is None:
                     user_config.normalize = True
-
                 elif not user_config.normalize:
                     raise ValueError(
                         "`normalize` must be enabled (set to True) "
