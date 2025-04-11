@@ -62,6 +62,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
+                                              RemotePrefillEpRequest,
                                               RemotePrefillGenerateRequest,
                                               RerankRequest, RerankResponse,
                                               ScoreRequest, ScoreResponse,
@@ -685,7 +686,22 @@ async def add_remote_nixl_metadata(request: NixlMetadataRequest ,raw_request: Re
 @load_aware_call
 async def remote_prefill_generate(request: RemotePrefillGenerateRequest, raw_request: Request):
     handler = remote_prefill(raw_request)
-    await handler.remote_prefill(request)
+    handler.remote_prefill(request)
+    return Response(status_code=200)
+
+@router.post("/add_remote_prefill_eps", dependencies=[Depends(validate_json_request)])
+async def add_remote_prefill_eps(request: RemotePrefillEpRequest ,raw_request: Request):
+    handler = remote_prefill(raw_request)
+    try:
+        await handler.add_remote_prefill_eps(request)
+    except (ValueError) as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+    return Response(status_code=200)
+
+@router.post("/remove_remote_prefill_eps", dependencies=[Depends(validate_json_request)])
+async def remove_remote_prefill_eps(request: RemotePrefillEpRequest ,raw_request: Request):
+    handler = remote_prefill(raw_request)
+    await handler.remove_remote_prefill_eps(request)
     return Response(status_code=200)
 
 TASK_HANDLERS: dict[str, dict[str, tuple]] = {

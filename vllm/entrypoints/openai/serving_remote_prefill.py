@@ -2,15 +2,12 @@
 
 import asyncio
 import aiohttp
-import time
-from collections.abc import AsyncGenerator, AsyncIterator
-from collections.abc import Sequence as GenericSequence
-from typing import Optional, Union, cast
+from collections import defaultdict
+from fastapi import Request
 import msgspec
 import threading
-
-import jinja2
-from fastapi import Request
+from typing import Optional
+from urllib.parse import urlparse
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -22,16 +19,12 @@ from vllm.remote_prefill import (RemotePrefillParams,
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (NixlMetadataRequest,
                                               NixlMetadataResponse,
+                                              RemotePrefillEpRequest,
                                               RemotePrefillGenerateRequest)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
-from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import merge_async_iterators
 from vllm.inputs.data import TokensPrompt
 
 from vllm.distributed.device_communicators.nixl import NixlMetadata
@@ -63,7 +56,9 @@ class OpenAIServingRemotePrefill(OpenAIServing):
             request_logger=request_logger,
         )
         
-        self.remote_prefill_endpoints = ["127.0.0.1:8090"]
+        self.remote_prefill_endpoint_map = defaultdict(int)
+        self.remote_prefill_endpoints = []
+        self.counter = 0
         
         self._request_queue = asyncio.Queue()
 
@@ -117,18 +112,21 @@ class OpenAIServingRemotePrefill(OpenAIServing):
 
         await self.engine_client.add_remote_nixl_metadata(metadata)
 
-    async def remote_prefill(self, request: RemotePrefillGenerateRequest):
+    def remote_prefill(self, request: RemotePrefillGenerateRequest):
         request = msgspec.json.decode(
             request.content.encode(encoding="utf-8"),
             type=RemotePrefillRequest,
         )
 
-        await self._request_queue.put(request)
+        self._request_queue.put_nowait(request)
 
     def get_remote_prefill_request_callback(self):
         # TODO: integrate prefill_queue to dynamo endpoint
         async def callback(request: RemotePrefillRequest):
-            remote_prefill_url = f"http://{self.remote_prefill_endpoints[0]}/remote_prefill"
+            endpoint = self.remote_prefill_endpoints[self.counter % len(self.remote_prefill_endpoints)]
+            self.counter = (self.counter + 1) % (2** 31 - 1)
+            remote_prefill_url = f"{endpoint}/remote_prefill"
+            logger.debug(f"Remote prefill endpoint: {remote_prefill_url}")
             request = RemotePrefillGenerateRequest(
                 content=str(msgspec.json.encode(request), encoding="utf-8"),
             )
@@ -138,8 +136,70 @@ class OpenAIServingRemotePrefill(OpenAIServing):
         return callback
 
     def get_remote_prefill_params(self, request: Request):
+        if len(self.remote_prefill_endpoints) == 0:
+            return None
+
         remote_prefill_params = RemotePrefillParams(
                 is_remote_prefill=True,
                 remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
         )
         return remote_prefill_params
+
+    def _update_remote_prefill_endpoints(self):
+        """Calculate remote prefill endpoints"""
+        if not self.remote_prefill_endpoint_map:
+            self.remote_prefill_endpoints = []
+
+        self.remote_prefill_endpoints = [ep for ep in self.remote_prefill_endpoint_map.keys() \
+                                         if self.remote_prefill_endpoint_map[ep] == 1]
+        #TODO: let's clean up the map with the value = 0
+        # and we should remote the nixl connections
+        logger.info(f"Remote prefill endpoints: {self.remote_prefill_endpoints}")
+        return self.remote_prefill_endpoints
+
+    async def add_remote_prefill_ep(self, ep: str):
+        add_remote_nixl_metadata_url = f"{ep}/remote_nixl_metadata"
+        get_remote_nixl_metadata_url = f"{ep}/nixl_metadata"
+        metadata = NixlMetadataRequest(
+            metadata=self.nixl_metadata().metadata,
+        )
+        async with aiohttp.ClientSession() as session:
+            async with session.post(add_remote_nixl_metadata_url, json=metadata.model_dump()) as resp:
+                if resp.status != 200:
+                    raise ValueError(f"add local nixl metadata to remote failed with status: {resp.status}")
+
+            async with session.get(get_remote_nixl_metadata_url) as response:
+                if response.status != 200:
+                    raise ValueError(f"get remote nixl metadata failed with status: {response.status}")
+                response_data = await response.json()
+                metadata = NixlMetadataResponse(**response_data)
+                request = NixlMetadataRequest(
+                    metadata=metadata.metadata
+                )
+                await self.remote_nixl_metadata(request)
+
+    async def add_remote_prefill_eps(self, request: RemotePrefillEpRequest):
+        if not request.endpoints or len(request.endpoints) == 0:
+            raise ValueError("Empty URL")
+        endpoints = [parsed for parsed in map(urlparse, request.endpoints) \
+                     if all([parsed.scheme, parsed.netloc]) and parsed.scheme in ["http", "https"]]
+        endpoints = [f"{x.scheme}://{x.netloc}" for x in endpoints]
+        if len(endpoints) == 0:
+            raise ValueError(f"No valid endpoints: {request.endpoints}")
+        for ep in endpoints:
+            try:
+                await self.add_remote_prefill_ep(ep)
+                self.remote_prefill_endpoint_map[ep] = 1
+            except ValueError as e:
+                logger.error(f"Failed to add remote prefill endpoint {ep}: {e}")
+                continue
+        self._update_remote_prefill_endpoints()
+
+    async def remove_remote_prefill_eps(self, request: RemotePrefillEpRequest):
+        if not request.endpoints or len(request.endpoints) == 0:
+            logger.error("No remote prefill endpoint to be removed")
+            return
+        for ep in request.endpoints:
+            if ep in self.remote_prefill_endpoint_map:
+                self.remote_prefill_endpoint_map[ep] = 0
+        self._update_remote_prefill_endpoints()
