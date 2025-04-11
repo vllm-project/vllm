@@ -583,6 +583,11 @@ def main(args: argparse.Namespace):
 
     use_deep_gemm = bool(args.use_deep_gemm)
 
+    if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
+        # Ray will set ROCR_VISIBLE_DEVICES for device visibility
+        del os.environ["HIP_VISIBLE_DEVICES"]
+
+
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])
     workers = [BenchmarkWorker.remote(args.seed) for _ in range(num_gpus)]
