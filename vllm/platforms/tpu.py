@@ -120,6 +120,11 @@ class TpuPlatform(Platform):
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")
 
+        if scheduler_config.is_multimodal_model and not \
+            scheduler_config.disable_chunked_mm_input:
+            raise ValueError("TPU does not support running Multimodal models"\
+            " without setting `--disable_chunked_mm_input`.")
+
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on TPU.")
