@@ -485,8 +485,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
-        tokens = list(
-            map(scheduler_output.num_scheduled_tokens.__getitem__, req_ids))
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         max_num_scheduled_tokens = max(tokens)
 
