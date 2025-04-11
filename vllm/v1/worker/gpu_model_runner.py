@@ -194,10 +194,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # Cache the device properties.
-        if torch.cuda.is_available():
-            self.device_properties = torch.cuda.get_device_properties(
-                self.device)
-            self.num_sms = self.device_properties.multi_processor_count
+        self._init_device_properties()
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = torch.zeros(self.max_num_tokens,
@@ -301,6 +298,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert not self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
         return batch_reordered
+
+    def _init_device_properties(self) -> None:
+        """Initialize attributes from torch.cuda.get_device_properties
+        """
+        self.device_properties = torch.cuda.get_device_properties(self.device)
+        self.num_sms = self.device_properties.multi_processor_count
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
