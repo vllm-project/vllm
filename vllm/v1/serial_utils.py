@@ -21,9 +21,6 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalFieldElem,
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
 
-# TODO calibrate this size
-INLINE_BUF_SIZE_THRESHOLD = 256
-
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
 
@@ -32,29 +29,32 @@ class MsgpackEncoder:
 
     Note that unlike vanilla `msgspec` Encoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
+
+    By default, arrays below 256MB are serialized inline.
+    Larger will get sent via dedicated messages. 
+    Note that this is a per-tensor limit.
+
+    Sending multiple large messages via zeromq saturates memory very quickly.
+    See: https://github.com/vllm-project/vllm/issues/16185
     """
 
-    def __init__(self):
+    def __init__(self, size_threshold=256 * 1024 * 1024):
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
         # This is used as a local stash of buffers that we can then access from
         # our custom `msgspec` hook, `enc_hook`. We don't have a way to
         # pass custom data to the hook otherwise.
         self.aux_buffers: Optional[list[bytestr]] = None
+        self.size_threshold = size_threshold
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
+        return self.encode_into(obj, bytearray())
+
+    def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
         try:
-            self.aux_buffers = bufs = [b'']
-            bufs[0] = self.encoder.encode(obj)
             # This `bufs` list allows us to collect direct pointers to backing
             # buffers of tensors and np arrays, and return them along with the
             # top-level encoded buffer instead of copying their data into the
             # new buffer.
-            return bufs
-        finally:
-            self.aux_buffers = None
-
-    def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
-        try:
             self.aux_buffers = [buf]
             bufs = self.aux_buffers
             self.encoder.encode_into(obj, buf)
@@ -101,7 +101,7 @@ class MsgpackEncoder:
         self, obj: np.ndarray
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
-        if not obj.shape or obj.nbytes < INLINE_BUF_SIZE_THRESHOLD:
+        if not obj.shape or obj.nbytes < self.size_threshold:
             # Encode small arrays and scalars inline.
             data = obj.data
         else:
@@ -160,7 +160,10 @@ class MsgpackDecoder:
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
         dtype, shape, data = arr
-        buffer = self.aux_buffers[data] if isinstance(data, int) else data
+        # Copy from inline representation, otherwise Torch is unhappy since
+        # the returned memory is non-writeable.
+        buffer = self.aux_buffers[data] if isinstance(
+            data, int) else bytearray(data).copy()
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
 
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:

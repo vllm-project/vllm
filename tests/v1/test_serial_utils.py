@@ -9,7 +9,8 @@ import torch
 
 from vllm.multimodal.inputs import (MultiModalBatchedField,
                                     MultiModalFieldElem, MultiModalKwargs,
-                                    MultiModalKwargsItem, MultiModalSharedField, NestedTensors)
+                                    MultiModalKwargsItem,
+                                    MultiModalSharedField, NestedTensors)
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
@@ -47,7 +48,7 @@ def test_encode_decode():
         unrecognized=UnrecognizedType(33),
     )
 
-    encoder = MsgpackEncoder()
+    encoder = MsgpackEncoder(size_threshold=256)
     decoder = MsgpackDecoder(MyType)
 
     encoded = encoder.encode(obj)
@@ -82,7 +83,7 @@ class MyRequest(msgspec.Struct):
 def test_multimodal_kwargs():
     d = {
         "foo":
-        torch.zeros(1000, dtype=torch.float16),
+        torch.zeros(20000, dtype=torch.float16),
         "bar": [torch.zeros(i * 1000, dtype=torch.int8) for i in range(3)],
         "baz": [
             torch.rand((256), dtype=torch.float16),
@@ -96,18 +97,18 @@ def test_multimodal_kwargs():
     # pack mm kwargs into a mock request so that it can be decoded properly
     req = MyRequest(mm=[MultiModalKwargs(d)])
 
-    encoder = MsgpackEncoder()
+    encoder = MsgpackEncoder(size_threshold=16 * 1024)
     decoder = MsgpackDecoder(MyRequest)
 
     encoded = encoder.encode(req)
 
-    # 8 total tensors + top level buffer
-    assert len(encoded) == 6
+    # Only "foo" is larger than threshold
+    assert len(encoded) == 2
 
     total_len = sum(len(x) for x in encoded)
 
-    # expected total encoding length, should be 4440, +-20 for minor changes
-    assert total_len >= 4420 and total_len <= 4460
+    # expected total encoding length, should be 24541, +-20 for minor changes
+    assert total_len >= 24521 and total_len <= 24561
     decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
     assert all(nested_equal(d[k], decoded[k]) for k in d)
 
@@ -141,13 +142,13 @@ def test_multimodal_items_by_modality():
 
     encoded = encoder.encode(req)
 
-    # 5 total tensors + top level buffer
-    assert len(encoded) == 8
+    # All messages are 'small', i.e. below 256MB default
+    assert len(encoded) == 1
 
     total_len = sum([len(x) for x in encoded])
 
-    # expected total encoding length, should be 7263, +-20 for minor changes
-    assert total_len >= 7243 and total_len <= 7283
+    # expected total encoding length, should be 14252, +-20 for minor changes
+    assert total_len >= 14232 and total_len <= 14272
     decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
 
     # check all modalities were recovered and do some basic sanity checks
@@ -176,3 +177,9 @@ def assert_equal(obj1: MyType, obj2: MyType):
         for a, b in zip(obj1.list_of_tensors, obj2.list_of_tensors))
     assert np.array_equal(obj1.numpy_array, obj2.numpy_array)
     assert obj1.unrecognized.an_int == obj2.unrecognized.an_int
+
+
+if __name__ == "__main__":
+    test_encode_decode()
+    test_multimodal_kwargs()
+    test_multimodal_items_by_modality()
