@@ -23,7 +23,11 @@ def cdiv_fn(x, y):
 
 
 @jitcache(
-    check_keys=["USE_ALIBI_SLOPES", "SLIDING_WINDOW", "filter_by_query_len"], )
+    check_keys=["USE_ALIBI_SLOPES", "SLIDING_WINDOW", "filter_by_query_len"], 
+    assume_const=['scale', 'k_scale', 'v_scale', 'query_stride_1', 
+                  'output_stride_1', 'stride_k_cache_0', 'stride_k_cache_1',
+                  'stride_k_cache_2', 'stride_k_cache_4', 'stride_v_cache_0',
+                  'stride_v_cache_1', 'stride_v_cache_2', 'stride_v_cache_2'],)
 @triton.jit
 def kernel_paged_attention_2d(
         output_ptr,  # [num_tokens, num_query_heads, head_size]
