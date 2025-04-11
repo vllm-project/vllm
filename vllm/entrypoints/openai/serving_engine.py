@@ -161,7 +161,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt: str,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
         if (self.model_config.encoder_config is not None
@@ -259,7 +259,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_input: Union[str, list[int]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
@@ -280,7 +280,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_inputs: Iterable[Union[str, list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
         """
@@ -309,7 +309,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> list[TextTokensPrompt]:
         """
@@ -344,7 +344,7 @@ class OpenAIServing:
         request: CompletionLikeRequest,
         tokenizer: AnyTokenizer,
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> tuple[list[TextTokensPrompt], list[TokensPrompt]]:
         request_prompts = await self._tokenize_prompt_input_or_inputs_async(
