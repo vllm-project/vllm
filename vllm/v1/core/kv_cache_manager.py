@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
@@ -13,6 +13,9 @@ from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 
 logger = init_logger(__name__)
 
@@ -27,6 +30,7 @@ class KVCacheManager:
         caching_hash_algo: str = "builtin",
         num_preallocate_tokens: int = 64,
         log_stats: bool = False,
+        connector: Optional["KVConnectorBase_V1"] = None,
     ) -> None:
         assert len(kv_cache_config.kv_cache_groups) == 1, (
             "KVCacheManager does not support hybrid models with more than 1 "
@@ -80,6 +84,11 @@ class KVCacheManager:
         # data for reempted ones.
         self.num_cached_block: dict[str, int] = {}
         self.prefix_cache_stats = PrefixCacheStats()
+
+        # KVConnector: buffer reqs for KVConnector. We write
+        # the external KVs to the "buffer" req and leverage
+        # prefix caching to share with the "real" req
+        self.kv_connector_buffer_req_ids: list[str] = []
 
     @property
     def usage(self) -> float:
@@ -164,7 +173,8 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[list[KVCacheBlock]] = None
+        new_computed_blocks: Optional[list[KVCacheBlock]] = None,
+        skip_preallocate: bool = False,
     ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -174,6 +184,7 @@ class KVCacheManager:
                 not include the tokens that have already been computed.
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
+            skip_preallocate: Whether to skip preallocating blocks.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -230,9 +241,8 @@ class KVCacheManager:
         if self.enable_caching:
             self.block_pool.touch(new_computed_blocks)
         else:
-            assert not new_computed_blocks, (
-                "Computed blocks should be empty when "
-                "prefix caching is disabled")
+            assert not new_computed_blocks, "Computed blocks should "\
+                "be empty when prefix caching is disabled"
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
@@ -246,8 +256,10 @@ class KVCacheManager:
         else:
             # Get new blocks from the free block pool considering
             # preallocated blocks.
+            num_preallocate_blocks = self.num_preallocate_blocks \
+                    if not skip_preallocate else 0
             num_new_blocks = min(
-                num_new_blocks + self.num_preallocate_blocks,
+                num_new_blocks + num_preallocate_blocks,
                 self.block_pool.get_num_free_blocks(),
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape
@@ -287,6 +299,22 @@ class KVCacheManager:
             request.request_id] = num_full_blocks_after_append
         return new_blocks
 
+    def _free_by_request_id(self, request_id: str) -> None:
+        """Free the blocks allocated for the request.
+
+        Args:
+            request_id: The request ID to free the blocks.
+        """
+        blocks = self.req_to_blocks.pop(request_id, [])
+        ordered_blocks: Iterable[KVCacheBlock] = blocks
+        if self.enable_caching:
+            # Free blocks in reverse order so that the tail blocks are
+            # freed first.
+            ordered_blocks = reversed(blocks)
+
+        self.block_pool.free_blocks(ordered_blocks)
+        self.num_cached_block.pop(request_id, None)
+
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         When caching is enabled, we free the blocks in reverse order so that
@@ -295,16 +323,7 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
-        # Default to [] in case a request is freed (aborted) before alloc.
-        blocks = self.req_to_blocks.pop(request.request_id, [])
-        ordered_blocks: Iterable[KVCacheBlock] = blocks
-        if self.enable_caching:
-            # Free blocks in reverse order so that the tail blocks are
-            # freed first.
-            ordered_blocks = reversed(blocks)
-
-        self.block_pool.free_blocks(ordered_blocks)
-        self.num_cached_block.pop(request.request_id, None)
+        self._free_by_request_id(request.request_id)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -368,10 +387,80 @@ class KVCacheManager:
                 break
         return num_common_blocks
 
+    def _free_block_hashes_by_request_id(self, request_id: str) -> None:
+        """Free the block hashes allocated for the request.
+
+        Args:
+            request_id: The request ID to free the block hashes.
+        """
+        self.req_to_block_hashes.pop(request_id, None)
+
     def free_block_hashes(self, request: Request) -> None:
         """Discard the block hashes for the request.
 
         NOTE: Unlike `free`, this method should be called only when the request
         is finished, not when it is preempted.
         """
-        self.req_to_block_hashes.pop(request.request_id, None)
+        self._free_block_hashes_by_request_id(request.request_id)
+
+    def alloc_and_get_external_blocks(
+        self,
+        request: "Request",
+        computed_blocks: list["KVCacheBlock"],
+        num_computed_tokens: int,
+        kv_connector: "KVConnectorBase_V1",
+    ) -> tuple[list["KVCacheBlock"], int]:
+
+        # Check for cache hit.
+        need_to_allocate = kv_connector.get_num_matched_tokens(
+            request, num_computed_tokens)
+        num_allocated_blocks = 0
+
+        # Cache hit: allocate buffer.
+        if need_to_allocate > 0:
+            # HACK: We don't want the scheduler see the blocks are allocated
+            # and associated with the current request. Instead, we want the
+            # scheduler find that the blocks are already allocated and they
+            # are associated with some other requests (i.e., the case of
+            # prefix caching.
+
+            old_req_id = request.request_id
+            request.request_id = f"{old_req_id}-buf-for-kv-connector"
+            allocated_blocks = self.allocate_slots(
+                request,
+                need_to_allocate,
+                computed_blocks,
+                skip_preallocate=True,
+            )
+            self.kv_connector_buffer_req_ids.append(request.request_id)
+            request.request_id = old_req_id
+
+            if allocated_blocks is None:
+                allocated_blocks = []
+
+            # Avoid over-allocating
+            num_expected_blocks = need_to_allocate // self.block_size
+            allocated_blocks = allocated_blocks[:num_expected_blocks]
+
+            # Back-off one block if the external KV is for all tokens
+            if (len(allocated_blocks) + len(computed_blocks)) \
+                    * self.block_size >= len(request.prompt_token_ids):
+                allocated_blocks = allocated_blocks[:-1]
+
+            computed_blocks = computed_blocks + (allocated_blocks or [])
+            num_allocated_blocks = len(allocated_blocks)
+
+        # Update internal state. In case of:
+        # * SharedStorageConnector: add req_id to _requests_need_load
+        #   so that we know to load this requests KVs later.
+        kv_connector.update_state_after_alloc(request, num_allocated_blocks)
+        num_computed_blocks = len(computed_blocks) * self.block_size
+        return computed_blocks, num_computed_blocks
+
+    def free_buffer_requests(self) -> None:
+        """Free buffer requests for the KV connector."""
+
+        for request_id in self.kv_connector_buffer_req_ids:
+            self._free_by_request_id(request_id)
+            self._free_block_hashes_by_request_id(request_id)
+        self.kv_connector_buffer_req_ids.clear()

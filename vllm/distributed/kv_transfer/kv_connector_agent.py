@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.logger import init_logger
@@ -21,7 +22,7 @@ from vllm.sequence import IntermediateTensors
 logger = init_logger(__name__)
 
 
-class KVTransferAgent:
+class KVConnectorAgent:
     """
     A class designated for distributed KV transfer
     
@@ -46,7 +47,7 @@ class KVTransferAgent:
         assert self.config.kv_transfer_config.is_kv_transfer_instance, "KV"\
             "TransferAgent should only be used when kv_connector is set."
 
-        self.connector = KVConnectorFactory.create_connector(
+        self.connector = KVConnectorFactory.create_connector_v0(
             rank, local_rank, config)
 
     def send_kv_caches_and_hidden_states(
@@ -57,12 +58,13 @@ class KVTransferAgent:
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
-
+        assert isinstance(self.connector, KVConnectorBase)
         self.connector.send_kv_caches_and_hidden_states(
             model_executable, model_input, kv_caches,
             hidden_or_intermediate_states)
 
     def close(self) -> None:
+        assert isinstance(self.connector, KVConnectorBase)
         self.connector.close()
 
     def recv_kv_caches_and_hidden_states(
@@ -71,6 +73,6 @@ class KVTransferAgent:
         kv_caches: List[torch.Tensor]
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
-
+        assert isinstance(self.connector, KVConnectorBase)
         return self.connector.recv_kv_caches_and_hidden_states(
             model_executable, model_input, kv_caches)
