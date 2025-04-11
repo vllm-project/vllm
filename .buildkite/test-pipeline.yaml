@@ -197,6 +197,7 @@ steps:
   source_file_dependencies:
     - vllm/
     - tests/v1
+  fast_check: true
   commands:
     # split the test to avoid interference
     - pytest -v -s v1/core
