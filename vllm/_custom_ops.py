@@ -138,6 +138,17 @@ def mla_decode_kvcache_cpu(
                                         block_tables, seq_lens)
 
 
+# merge attn states ops
+def merge_attn_states(output: torch.Tensor,
+                      prefix_output: torch.Tensor,
+                      prefix_lse: torch.Tensor,
+                      suffix_output: torch.Tensor,
+                      suffix_lse: torch.Tensor,
+                      output_lse: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C.merge_attn_states(output, output_lse, prefix_output,
+                                   prefix_lse, suffix_output, suffix_lse)
+
+
 # pos encoding ops
 def rotary_embedding(
     positions: torch.Tensor,

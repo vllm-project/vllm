@@ -52,6 +52,15 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
+#ifndef USE_ROCM
+void merge_attn_states(torch::Tensor& output,
+                       std::optional<torch::Tensor> output_lse,
+                       const torch::Tensor& prefix_output,
+                       const torch::Tensor& prefix_lse,
+                       const torch::Tensor& suffix_output,
+                       const torch::Tensor& suffix_lse);
+#endif
+
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
 
