@@ -27,7 +27,9 @@ def cdiv_fn(x, y):
     assume_const=['scale', 'k_scale', 'v_scale', 'query_stride_1', 
                   'output_stride_1', 'stride_k_cache_0', 'stride_k_cache_1',
                   'stride_k_cache_2', 'stride_k_cache_4', 'stride_v_cache_0',
-                  'stride_v_cache_1', 'stride_v_cache_2', 'stride_v_cache_2'],)
+                  'stride_v_cache_1', 'stride_v_cache_2', 'stride_v_cache_2'],
+    # cache_launch_grid=True,
+    )
 @triton.jit
 def kernel_paged_attention_2d(
         output_ptr,  # [num_tokens, num_query_heads, head_size]
@@ -65,8 +67,11 @@ def kernel_paged_attention_2d(
         stride_v_cache_3: tl.int64,  # int
         filter_by_query_len: tl.constexpr,  # bool
         query_start_len_ptr,  # [num_seqs+1]
+        num_seqs: int,
 ):
     seq_idx = tl.program_id(0)
+    if seq_idx >= num_seqs:
+        return
     kv_head_idx = tl.program_id(1)
 
     if filter_by_query_len:
@@ -339,7 +344,9 @@ def chunked_prefill_paged_decode(
             v_scale=v_scale,
         )
     else:
+        assert num_seqs <= 4096
         kernel_paged_attention_2d[(
+            # 4096,
             num_seqs,
             num_kv_heads,
         )](
@@ -378,4 +385,5 @@ def chunked_prefill_paged_decode(
             stride_v_cache_3=value_cache.stride(3),
             filter_by_query_len=True,
             query_start_len_ptr=query_start_loc,
+            num_seqs=num_seqs,
         )
