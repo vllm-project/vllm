@@ -1802,3 +1802,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
             connector=["audio_projection_for_vision", "audio_projection"],
             tower_model=["vision_encoder", "embed_tokens_extend"],
         )
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model

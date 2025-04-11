@@ -28,6 +28,7 @@ torchvision==0.21.0
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.5.4 # required for pixtral test
+num2words # required for smolvlm test
 opencv-python-headless >= 4.11.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.8 # required for model evaluation test
@@ -41,7 +42,7 @@ genai_perf==0.0.8
 tritonclient==2.51.0
 
 numba == 0.60.0; python_version == '3.9' # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
-numba == 0.61; python_version > '3.9'
+numba == 0.61.2; python_version > '3.9'
 numpy
 runai-model-streamer==0.11.0
 runai-model-streamer-s3==0.11.0
