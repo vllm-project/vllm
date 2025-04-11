@@ -400,7 +400,7 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(ImageProcessor, **kwargs)
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
         if hf_processor.patch_size is None:
@@ -661,7 +661,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 )
 @MULTIMODAL_REGISTRY.register_processor(MiniMaxVL01MultiModalProcessor, 
                                         info=MiniMaxVL01ProcessingInfo, 
-                                        dummy_inputs=MiniMaxVL01DummyInputsBuilder)
+                                        dummy_inputs=LlavaDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
