@@ -1121,9 +1121,11 @@ class SequenceOutput(
     output_embed: Optional[torch.Tensor] = None
 
     def __repr__(self) -> str:
+        output_embed_shape = \
+            self.output_embed.shape if self.output_embed is not None else None
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
                 f"output_token={self.output_token}, "
-                f"output_embed.shape={self.output_embed.shape}"
+                f"output_embed.shape={output_embed_shape}"
                 f"logprobs={self.logprobs})")
 
     def __eq__(self, other: object) -> bool:
