@@ -1054,7 +1054,7 @@ class BaseProcessingInfo:
             user_limit = user_mm_limits[modality]
             if supported_limit is not None and supported_limit < user_limit:
                 raise ValueError(
-                    f"You set or default to {modality}={user_limit} "
+                    f"You set or defaulted to {modality}={user_limit} "
                     f"in `--limit-mm-per-prompt`, but this model only "
                     f"supports at most {supported_limit} {modality} items.")
 
@@ -1132,7 +1132,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
             if num_items > allowed_limit:
                 raise ValueError(
-                    f"You set or defaultd to {modality}={allowed_limit} "
+                    f"You set or defaulted to {modality}={allowed_limit} "
                     f"in --limit-mm-per-prompt`, but passed {num_items} "
                     f"{modality} items in the same prompt.")
 
