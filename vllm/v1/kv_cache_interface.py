@@ -60,6 +60,7 @@ class FullAttentionSpec(KVCacheSpecBase):
     head_size: int
     dtype: torch.dtype
     use_mla: bool
+    kv_cache_dtype: torch.dtype
 
     @property
     def type_id(self) -> str:
@@ -70,7 +71,7 @@ class FullAttentionSpec(KVCacheSpecBase):
         # For MLA we only store a single latent vector
         coef = 1 if self.use_mla else 2
         return coef * self.block_size * self.num_kv_heads * self.head_size \
-                * get_dtype_size(self.dtype)
+                * get_dtype_size(self.kv_cache_dtype)
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes

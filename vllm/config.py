@@ -619,7 +619,7 @@ class ModelConfig:
         supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
-            "awq_marlin", "fbgemm_fp8", "compressed_tensors",
+            "awq_marlin", "fbgemm_fp8", "compressed_tensors", "ipex",
             "compressed-tensors", "experts_int8", "quark", "nvfp4"
         ]
         if self.quantization is not None:
@@ -1156,10 +1156,10 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "V1 does not yet support fp8 KV cache. "
-                    "Set VLLM_USE_V1=0 to enable fp8 kv cache.")
+            # if envs.VLLM_USE_V1:
+            #     raise NotImplementedError(
+            #         "V1 does not yet support fp8 KV cache. "
+            #         "Set VLLM_USE_V1=0 to enable fp8 kv cache.")
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "

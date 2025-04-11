@@ -73,7 +73,6 @@ class ipex_ops:
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> None:
-        assert kv_cache_dtype == "auto"
         num_heads = out.size(1)
         num_queries_per_tokens = num_heads // num_kv_heads
         ipex.llm.modules.PagedAttention.single_query_kv_attention(
@@ -191,10 +190,10 @@ class ipex_ops:
                                              key.contiguous(),
                                              value.contiguous(), out,
                                              seqlen_q.int(), seqlen_k.int(),
-                                             max_seqlen_q, max_seqlen_k,
+                                             None, max_seqlen_q, max_seqlen_k,
                                              pdropout, softmax_scale,
                                              zero_tensors, is_causal,
-                                             return_softmax, gen_,
+                                             return_softmax, gen_, -1, -1,
                                              logits_soft_cap)
 
     @staticmethod
@@ -211,6 +210,61 @@ class ipex_ops:
         assert kv_cache_dtype == "auto"
         ipex.llm.modules.PagedAttention.reshape_and_cache(
             key, value, key_cache, value_cache, slot_mapping)
+
+    @staticmethod
+    def reshape_and_cache_flash(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: float,
+        v_scale: float,
+    ) -> None:
+        # assert kv_cache_dtype == "auto"
+        ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
+            key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
+            k_scale, v_scale)
+
+    @staticmethod
+    def chunked_prefill(
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        seq_used_k: Optional[torch.Tensor],
+        block_table: torch.Tensor,
+        alibi_slopes: Optional[torch.Tensor],
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        p_dropout: float,
+        softmax_scale: float,
+        zero_tensors: bool,
+        is_casual: bool,
+        return_softmax: bool,
+        gen_: Optional[torch.Generator],
+        kv_cache_dtype: str,
+    ):
+        return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
+            output,
+            query.contiguous(),
+            key_cache,  # uint8
+            value_cache,  # uint8  
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            softmax_scale,
+            is_casual,
+            block_table,
+            alibi_slopes,
+            kv_cache_dtype=kv_cache_dtype,  # "fp8"
+            k_scale=1.0,
+            v_scale=1.0,
+        )
 
     @staticmethod
     def copy_blocks(key_caches: list[torch.Tensor],

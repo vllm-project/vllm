@@ -35,9 +35,15 @@ class Executor(ExecutorBase):
                     f"ExecutorBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
-            from vllm.v1.executor.ray_distributed_executor import (  # noqa
-                RayDistributedExecutor)
-            executor_class = RayDistributedExecutor
+            from vllm.platforms import current_platform
+            if current_platform.is_xpu():
+                from vllm.v1.executor.ray_distributed_executor import (  # noqa
+                    XPURayDistributedExecutor)
+                executor_class = XPURayDistributedExecutor
+            else:
+                from vllm.v1.executor.ray_distributed_executor import (  # noqa
+                    RayDistributedExecutor)
+                executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
             executor_class = MultiprocExecutor
