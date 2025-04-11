@@ -7,18 +7,20 @@ import pytest
 import torch
 
 from vllm.spec_decode.metrics import AsyncMetricsCollector
+from vllm.platforms import current_platform
 
 
 def test_initial_call_returns_none():
     """Expect first call to get metrics to return None.
     """
     spec_decode_sampler = MagicMock()
+    device_type = f'{current_platform.device_type}'
     spec_decode_sampler.num_accepted_tokens = torch.tensor(0,
                                                            dtype=torch.long,
-                                                           device='cuda')
+                                                           device=device_type)
     spec_decode_sampler.num_emitted_tokens = torch.tensor(0,
                                                           dtype=torch.long,
-                                                          device='cuda')
+                                                          device=device_type)
     spec_decode_sampler.num_draft_tokens = 0
 
     collector = AsyncMetricsCollector(spec_decode_sampler)
@@ -31,12 +33,13 @@ def test_second_call_returns_metrics():
     """Expect second call to not return None.
     """
     spec_decode_sampler = MagicMock()
+    device_type = f'{current_platform.device_type}'
     spec_decode_sampler.num_accepted_tokens = torch.tensor(0,
                                                            dtype=torch.long,
-                                                           device='cuda')
+                                                           device=device_type)
     spec_decode_sampler.num_emitted_tokens = torch.tensor(0,
                                                           dtype=torch.long,
-                                                          device='cuda')
+                                                          device=device_type)
     spec_decode_sampler.num_draft_tokens = 0
 
     collect_interval_s = 5.0
@@ -59,12 +62,13 @@ def test_nonzero_rank_noop(rank):
     """Verify nonzero ranks don't collect metrics.
     """
     spec_decode_sampler = MagicMock()
+    device_type = f'{current_platform.device_type}'
     spec_decode_sampler.num_accepted_tokens = torch.tensor(0,
                                                            dtype=torch.long,
-                                                           device='cuda')
+                                                           device=device_type)
     spec_decode_sampler.num_emitted_tokens = torch.tensor(0,
                                                           dtype=torch.long,
-                                                          device='cuda')
+                                                          device=device_type)
     spec_decode_sampler.num_draft_tokens = 0
 
     collector = AsyncMetricsCollector(spec_decode_sampler)
@@ -78,12 +82,13 @@ def test_noop_until_time():
     """Verify metrics aren't collected until enough time passes.
     """
     spec_decode_sampler = MagicMock()
+    device_type = f'{current_platform.device_type}'
     spec_decode_sampler.num_accepted_tokens = torch.tensor(0,
                                                            dtype=torch.long,
-                                                           device='cuda')
+                                                           device=device_type)
     spec_decode_sampler.num_emitted_tokens = torch.tensor(0,
                                                           dtype=torch.long,
-                                                          device='cuda')
+                                                          device=device_type)
     spec_decode_sampler.num_draft_tokens = 0
 
     collect_interval_s = 5.0
@@ -112,12 +117,13 @@ def test_timer_is_reset():
     is reset after collection.
     """
     spec_decode_sampler = MagicMock()
+    device_type = f'{current_platform.device_type}'
     spec_decode_sampler.num_accepted_tokens = torch.tensor(0,
                                                            dtype=torch.long,
-                                                           device='cuda')
+                                                           device=device_type)
     spec_decode_sampler.num_emitted_tokens = torch.tensor(0,
                                                           dtype=torch.long,
-                                                          device='cuda')
+                                                          device=device_type)
     spec_decode_sampler.num_draft_tokens = 0
 
     collect_interval_s = 5.0
@@ -168,12 +174,13 @@ def test_initial_metrics_has_correct_values(has_data: bool):
         num_draft_tokens, k)
 
     spec_decode_sampler = MagicMock()
+    device_type = f'{current_platform.device_type}'
     spec_decode_sampler.num_accepted_tokens = torch.tensor(num_accepted_tokens,
                                                            dtype=torch.long,
-                                                           device='cuda')
+                                                           device=device_type)
     spec_decode_sampler.num_emitted_tokens = torch.tensor(num_emitted_tokens,
                                                           dtype=torch.long,
-                                                          device='cuda')
+                                                          device=device_type)
     spec_decode_sampler.num_draft_tokens = num_draft_tokens
 
     collect_interval_s = 5.0
