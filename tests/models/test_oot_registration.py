@@ -88,8 +88,8 @@ def test_oot_registration_multimodal(
                   trust_remote_code=True,
                   gpu_memory_utilization=0.98,
                   max_model_len=4096,
-                  enforce_eager=True,
-                  limit_mm_per_prompt={"image": 1})
+                  enforce_eager=True)
+
         first_token = llm.get_tokenizer().decode(0)
         outputs = llm.generate(prompts, sampling_params)
 

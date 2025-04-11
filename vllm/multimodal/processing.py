@@ -15,7 +15,6 @@ import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
-import vllm.envs as envs
 from vllm.inputs import InputProcessingContext
 from vllm.jsontree import json_map_leaves, json_reduce_leaves
 from vllm.logger import init_logger
@@ -1035,13 +1034,6 @@ class BaseProcessingInfo:
         """
         raise NotImplementedError
 
-    def get_default_user_mm_limit(self) -> int:
-        """
-        Return the default allowed number of items for each modality
-        if not specified by the user.
-        """
-        return 999 if envs.VLLM_USE_V1 else 1
-
     def get_allowed_mm_limits(self) -> Mapping[str, int]:
         """
         Return the maximum allowed number of items for each modality.
@@ -1052,13 +1044,8 @@ class BaseProcessingInfo:
         supported_mm_limits = self.get_supported_mm_limits()
 
         mm_config = self.ctx.get_mm_config()
-        default_user_limit = self.get_default_user_mm_limit()
         user_mm_limits = {
-            modality:
-            mm_config.get_limit_per_prompt(
-                modality,
-                default=default_user_limit,
-            )
+            modality: mm_config.get_limit_per_prompt(modality)
             for modality in supported_mm_limits
         }
 
@@ -1067,10 +1054,9 @@ class BaseProcessingInfo:
             user_limit = user_mm_limits[modality]
             if supported_limit is not None and supported_limit < user_limit:
                 raise ValueError(
-                    f"You set {modality}={user_limit} (or defaulted to "
-                    f"{default_user_limit}) in `--limit-mm-per-prompt`, "
-                    f"but this model only supports at most {supported_limit} "
-                    f"{modality} items.")
+                    f"You set or default to {modality}={user_limit} "
+                    f"in `--limit-mm-per-prompt`, but this model only "
+                    f"supports at most {supported_limit} {modality} items.")
 
             allowed_limits[modality] = (user_limit if supported_limit is None
                                         else min(user_limit, supported_limit))
@@ -1131,7 +1117,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
         supported_mm_limits = self.info.get_supported_mm_limits()
-        default_user_limit = self.info.get_default_user_mm_limit()
         allowed_mm_limits = self.info.get_allowed_mm_limits()
 
         for modality, items in mm_items.items():
@@ -1147,9 +1132,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
             if num_items > allowed_limit:
                 raise ValueError(
-                    f"You set {modality}={allowed_limit} (or defaulted to "
-                    f"{default_user_limit}) in --limit-mm-per-prompt`, but "
-                    f"passed {num_items} {modality} items in the same prompt.")
+                    f"You set or defaultd to {modality}={allowed_limit} "
+                    f"in --limit-mm-per-prompt`, but passed {num_items} "
+                    f"{modality} items in the same prompt.")
 
         return mm_items
 
