@@ -385,9 +385,10 @@ class SamplingParams(
         if not -2.0 <= self.frequency_penalty <= 2.0:
             raise ValueError("frequency_penalty must be in [-2, 2], got "
                              f"{self.frequency_penalty}.")
-        if not 0.0 < self.repetition_penalty <= 2.0:
-            raise ValueError("repetition_penalty must be in (0, 2], got "
-                             f"{self.repetition_penalty}.")
+        if self.repetition_penalty <= 0.0:
+            raise ValueError(
+                "repetition_penalty must be greater than zero, got "
+                f"{self.repetition_penalty}.")
         if self.temperature < 0.0:
             raise ValueError(
                 f"temperature must be non-negative, got {self.temperature}.")
