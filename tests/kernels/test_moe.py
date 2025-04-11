@@ -327,6 +327,9 @@ def test_fused_marlin_moe(
             return
 
     if has_zp:
+        # we don't build kernel for int8 with zero
+        if num_bits == 8:
+            return
         quant_type = scalar_types.uint4 if num_bits == 4 else scalar_types.uint8
     else:
         quant_type = scalar_types.uint4b8 \
