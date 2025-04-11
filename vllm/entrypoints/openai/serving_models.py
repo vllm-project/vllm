@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               UnloadLoRAAdapterRequest)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.lora.resolver import LoRAResolver
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.utils import AtomicCounter
 
@@ -56,6 +57,7 @@ class OpenAIServingModels:
         base_model_paths: list[BaseModelPath],
         *,
         lora_modules: Optional[list[LoRAModulePath]] = None,
+        lora_resolver: Optional[LoRAResolver] = None,
         prompt_adapters: Optional[list[PromptAdapterPath]] = None,
     ):
         super().__init__()
@@ -66,6 +68,7 @@ class OpenAIServingModels:
 
         self.static_lora_modules = lora_modules
         self.lora_requests: list[LoRARequest] = []
+        self.lora_resolver = lora_resolver
         self.lora_id_counter = AtomicCounter(0)
 
         self.prompt_adapter_requests = []
