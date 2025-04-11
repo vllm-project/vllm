@@ -58,6 +58,7 @@ class Llama4JsonToolParser(ToolParser):
         Extract the tool calls from a complete model response.
         """
         # case -- if a tool call token is not present, return a text response
+        print(f"{model_output=}")
         if not (model_output.startswith(self.bot_token)
                 or model_output.startswith('{')):
             return ExtractedToolCallInformation(tools_called=False,
