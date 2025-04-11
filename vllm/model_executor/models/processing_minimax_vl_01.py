@@ -16,6 +16,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 logger = logging.get_logger(__name__)
 
 import os
+import numpy as np
 
 LEGACY_PROCESSING = int(os.getenv('LEGACY_PROCESSING', 1))
 
@@ -269,13 +270,13 @@ class MiniMaxVL01Processor(ProcessorMixin):
                         prompt_strings.append(final_text)
             elif self.process_image_mode == 'resize':
                 pixel_values = image_inputs["pixel_values"]
-                # height, width = get_image_size(to_numpy_array(pixel_values[0]))
-                # num_image_tokens = (height // self.patch_size) * (width // self.patch_size) + 1
-                # if self.vision_feature_select_strategy == "default":
-                #     num_image_tokens -= 1
                 all_image_tokens = []
                 for pixel_value in pixel_values:
-                    height, width = get_image_size(to_numpy_array(pixel_value))
+                    # 确保图像数据是3维的
+                    if len(pixel_value.shape) == 2:
+                        # 如果是2维的，添加通道维度
+                        pixel_value = np.expand_dims(pixel_value, axis=0)
+                    height, width = get_image_size(pixel_value)
                     all_image_tokens.append(int(height*width/self.patch_size**2))
                 
                 prompt_strings = []
