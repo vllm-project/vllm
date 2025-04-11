@@ -51,6 +51,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "topk, "
       "int moe_block_size, bool replicate_input, bool apply_weights)"
       " -> Tensor");
+  
   // conditionally compiled so impl registration is in source file
 
 #endif

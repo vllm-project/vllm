@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
+from vllm.scalar_type import scalar_types
 
 from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
                                    rocm_aiter_fused_experts,
@@ -1533,3 +1534,4 @@ def fused_moe(
                          a1_scale=a1_scale,
                          a2_scale=a2_scale,
                          block_shape=block_shape)
+
