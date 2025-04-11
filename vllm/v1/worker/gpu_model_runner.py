@@ -1643,7 +1643,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. Please add "
-                "-O %s or -O %s to use CUDA graphs.",
+                "-O %s for piecewise CUDA graphs (attention is skipped) or "
+                "-O %s for full CUDA graphs (attention included).",
                 CompilationLevel.PIECEWISE, CompilationLevel.FULL_GRAPH)
             return
 

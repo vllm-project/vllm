@@ -3188,7 +3188,7 @@ class CompilationConfig(BaseModel):
             We use string to avoid serialization issues when using compilation in a distributed setting.
             When the compilation level is 1 or 2, the backend is used for the compilation directly (it sees the whole graph).
             When the compilation level is 3, the backend is used for the piecewise compilation (it sees a part of the graph).
-            When the compilation level is 4, the backend is used for the full graph.
+            When the compilation level is 4, the backend is used for the full graph. This improves performance for smaller models.
         - custom_ops: fine-grained control over which custom ops to enable/disable.
             Use 'all' to enable all, 'none' to disable all.
             Also specify a list of custom op names to enable (prefixed with a '+'),
