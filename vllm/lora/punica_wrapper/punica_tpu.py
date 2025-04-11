@@ -10,8 +10,6 @@ from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from .punica_base import PunicaWrapperBase
 
 
-# The platforms that are compatible with the PyTorch-native implementation can
-# inherit this class
 class PunicaWrapperTPU(PunicaWrapperBase):
     """
     PunicaWrapperTPU is designed to manage and provide metadata for the punica
@@ -319,7 +317,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         return output.view_as(org_output)
 
-    def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
+    def _update_prefill_metadata(self,
+                                 token_lora_tensor: torch.Tensor) -> None:
         self.batch_size = 1
         self._lora_indices_per_batch[:self.batch_size].copy_(
             token_lora_tensor[:self.batch_size])
