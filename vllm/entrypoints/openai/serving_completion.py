@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               UsageInfo)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    TextTokensPrompt,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
@@ -190,6 +191,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if stream:
             return self.completion_stream_generator(
                 request,
+                request_prompts,
                 result_generator,
                 request_id,
                 created_time,
@@ -247,6 +249,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
+        request_prompts: list[TextTokensPrompt],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -273,7 +276,8 @@ class OpenAIServingCompletion(OpenAIServing):
             async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
-                prompt_text = res.prompt
+                prompt_text = (res.prompt if res.prompt is not None else
+                               request_prompts[prompt_idx]["prompt"])
 
                 # Prompt details are excluded from later streamed outputs
                 if res.prompt_token_ids is not None:
@@ -296,14 +300,13 @@ class OpenAIServingCompletion(OpenAIServing):
                             delta_token_ids = prompt_token_ids
                             out_logprobs = prompt_logprobs
                         else:
-                            assert prompt_logprobs is not None
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
                             delta_token_ids = [
                                 *prompt_token_ids, *output.token_ids
                             ]
                             out_logprobs = [
-                                *prompt_logprobs,
+                                *(prompt_logprobs or []),
                                 *(output.logprobs or []),
                             ]
                         has_echoed[i] = True
