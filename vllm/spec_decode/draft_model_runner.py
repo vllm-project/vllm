@@ -5,23 +5,11 @@ from typing import List, Optional
 import torch
 
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.sampler import SamplerOutput
-
-try:
-    try:
-        from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-    except (ModuleNotFoundError, ImportError):
-        # vllm_flash_attn is not installed, try the ROCm FA metadata
-        from vllm.attention.backends.rocm_flash_attn import (
-            ROCmFlashAttentionMetadata as FlashAttentionMetadata)
-except (ModuleNotFoundError, ImportError) as err:
-    raise RuntimeError(
-        "Draft model speculative decoding currently only supports "
-        "CUDA and ROCm flash attention backend.") from err
-
 from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
+from vllm.spec_decode.util import SUPPORTED_SPEC_DECODING_ATTENTION_METADATA
 from vllm.worker.model_runner_base import (ModelRunnerBase,
                                            ModelRunnerInputBase,
                                            ModelRunnerWrapperBase)
@@ -86,7 +74,12 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
-        assert isinstance(attn_metadata, FlashAttentionMetadata)
+        assert type(
+            attn_metadata
+        ) in SUPPORTED_SPEC_DECODING_ATTENTION_METADATA, (
+            "Draft model speculative decoding currently only supports "
+            f"{', '.join(sorted(cls.__name__ for cls in SUPPORTED_SPEC_DECODING_ATTENTION_METADATA))} backends."  # noqa
+        )
 
         attn_metadata.advance_step(model_input, sampled_token_ids,
                                    self.block_size, num_seqs, num_queries)
