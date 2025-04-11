@@ -232,9 +232,11 @@ class PoolerHead(nn.Module):
                  is_matryoshka: bool) -> None:
         super().__init__()
 
-        self.normalize = normalize
         self.softmax = softmax
         self.is_matryoshka = is_matryoshka
+
+        # for matryoshka representation, always do normalize
+        self.normalize = normalize or is_matryoshka
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
@@ -243,19 +245,9 @@ class PoolerHead(nn.Module):
             pooling_param for _, pooling_param in pooling_metadata.seq_groups
         ]
 
-        if all(pooling_param.dimensions is None
-               for pooling_param in pooling_params):
-            # Batch processing is more efficient if there are no
-            # requests that require changing dimensions
-            if self.normalize or self.is_matryoshka:
-                if isinstance(pooled_data, list):
-                    pooled_data = [
-                        F.normalize(data, p=2, dim=-1) for data in pooled_data
-                    ]
-                else:
-                    pooled_data = F.normalize(pooled_data, p=2, dim=-1)
-        else:
-            # for matryoshka representation, always do normalize
+        if not all(pooling_param.dimensions is None
+                   for pooling_param in pooling_params):
+            # change the output dimension
             assert len(pooled_data) == len(pooling_params)
             assert self.is_matryoshka is True
 
@@ -266,9 +258,16 @@ class PoolerHead(nn.Module):
                 if pooling_param.dimensions is not None:
                     vecs = vecs[:pooling_param.dimensions]
 
-                vecs = F.normalize(vecs, p=2, dim=-1)
                 pooled_data_list.append(vecs)
             pooled_data = pooled_data_list
+
+        if self.normalize:
+            if isinstance(pooled_data, list):
+                pooled_data = [
+                    F.normalize(data, p=2, dim=-1) for data in pooled_data
+                ]
+            else:
+                pooled_data = F.normalize(pooled_data, p=2, dim=-1)
 
         if self.softmax:
             if isinstance(pooled_data, list):
