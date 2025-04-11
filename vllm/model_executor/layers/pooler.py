@@ -228,7 +228,7 @@ class PoolerHead(nn.Module):
             # change the output dimension
             assert len(pooled_data) == len(dimensions_list)
             pooled_data = [
-                vecs if d is None else vecs[:d]
+                vecs if d is None else vecs[..., :d]
                 for vecs, d in zip(pooled_data, dimensions_list)
             ]
 
