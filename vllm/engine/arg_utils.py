@@ -1030,7 +1030,7 @@ class EngineArgs:
             action=StoreBoolean,
             default=EngineArgs.disable_chunked_mm_input,
             nargs="?",
-            const="False",
+            const="True",
             help="Disable multimodal input chunking attention for V1. "
             "If set to true and chunked prefill is enabled, we do not want to"
             " partially schedule a multimodal item. This ensures that if a "

@@ -322,6 +322,15 @@ def test_no_mm_input_chunking():
     assert len(output.finished_req_ids) == 0
     assert output.num_scheduled_tokens[requests[0].request_id] == 800
 
+    # Test that we fail if we disable chunked mm input and use too small
+    # of a max_num_batched_tokens for the mm input.
+    with pytest.raises(ValueError):
+        _ = create_scheduler(
+            model="llava-hf/llava-1.5-7b-hf",
+            max_num_batched_tokens=100,
+            disable_chunked_mm_input=True,
+        )
+
 
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
 def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
