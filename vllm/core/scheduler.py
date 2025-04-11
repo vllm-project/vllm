@@ -1305,6 +1305,7 @@ class Scheduler:
 
         # Merge lists
         num_prefill_groups = len(prefills.seq_groups)
+        ignored_seq_groups_for_embeds: List[SequenceGroup] = []
         if num_prefill_groups > 0:
             scheduled_seq_groups = prefills.seq_groups
             scheduled_seq_groups.extend(running_scheduled.decode_seq_groups)
@@ -1315,12 +1316,12 @@ class Scheduler:
                 using_prompt_embeds = scheduled_seq_groups[
                     0].seq_group.uses_prompt_embeds()
                 ignored_seq_groups_for_embeds = []
-                indices_ignored = []
-                for i, seq_group in enumerate(scheduled_seq_groups):
+                indices_ignored: List[int] = []
+                for i, schedule_seq_group in enumerate(scheduled_seq_groups):
                     if using_prompt_embeds !=\
-                        seq_group.seq_group.uses_prompt_embeds():
+                        schedule_seq_group.seq_group.uses_prompt_embeds():
                         ignored_seq_groups_for_embeds.append(
-                            seq_group.seq_group)
+                            schedule_seq_group.seq_group)
                         indices_ignored.append(i)
                 if len(ignored_seq_groups_for_embeds) > 0:
                     scheduled_seq_groups = [
