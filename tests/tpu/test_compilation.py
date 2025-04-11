@@ -44,7 +44,7 @@ def test_tpu_compilation():
             assert generated_text.startswith(answer)
 
     compiled_codes = sorted(
-        glob.glob(os.path.join(temp_dir, "__transformed_code*.py")))
+        glob.glob(os.path.join(temp_dir, "__transformed_code*for_forward.py")))
 
     for i, compiled_code in enumerate(compiled_codes):
         print("{} file: {}".format(i + 1, compiled_code))
@@ -52,15 +52,21 @@ def test_tpu_compilation():
     # We should only trigger Dynamo compilation 2 times:
     # 1. Forward pass without kv_caches
     # 2. Forward pass with kv_caches
-    # Check we have 4 compiled codes
+    # Check we have 2 compiled codes
     assert len(compiled_codes) == 2
 
     kv_cache_prefix = "kv_cache"
     attn_prefix = "ragged_paged_attention"
 
+    def extract_compiled_index(s):
+        parts = s.replace(".", "_").split("_")
+        numbers = [int(part) for part in parts if part.isdigit()]
+        return numbers[0]
+
     # Check all the compilations are as expected
-    compiled_fns = sorted(
-        glob.glob(os.path.join(temp_dir, "__compiled_fn*Captured*.py")))
+    compiled_fns = sorted(glob.glob(
+        os.path.join(temp_dir, "__compiled_fn*Captured*.py")),
+                          key=lambda s: extract_compiled_index(s))
 
     for i, compiled_fn in enumerate(compiled_fns):
         print("{} file: {}".format(i + 1, compiled_fn))

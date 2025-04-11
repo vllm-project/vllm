@@ -309,10 +309,6 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def supports_structured_output(cls) -> bool:
-        return True
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         return True
 

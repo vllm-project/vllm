@@ -15,12 +15,11 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
-from vllm.multimodal.profiling import ProcessorInputs
 
 from .intern_vit import InternVisionModel
 from .internvl import (BaseInternVLProcessingInfo, BaseInternVLProcessor,
@@ -87,28 +86,28 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
 
 class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        # The newline is necessary to separate ">" of the current item
+        # and "<" of the next item
+        return "<image>\n" * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            # The newline is necessary to separate ">" of the current item
-            # and "<" of the next item
-            prompt_text="<image>\n" * num_images,
-            mm_data=mm_data,
-        )
 
 
 class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):

@@ -29,7 +29,7 @@ def choose_scaled_mm_linear_kernel(
         compute_capability: Optional[int] = None
 ) -> Type[ScaledMMLinearKernel]:
     """
-    Choose an ScalledMMLinearKernel that can implement the given config for the 
+    Choose an ScaledMMLinearKernel that can implement the given config for the 
     given compute capability. Attempts to choose the best kernel in terms of 
     performance.
 

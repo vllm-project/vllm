@@ -76,6 +76,7 @@ def main():
         max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=0.8,
         speculative_config={
+            "method": "eagle",
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
             "draft_tensor_parallel_size": args.draft_tp,

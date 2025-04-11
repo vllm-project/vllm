@@ -199,13 +199,6 @@ def main(args):
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
     llm = LLM(**engine_args)
 
-    # To maintain code compatibility in this script, we add LoRA here.
-    # You can also add LoRA using:
-    # llm.generate(prompts, lora_request=lora_request,...)
-    if req_data.lora_requests:
-        for lora_request in req_data.lora_requests:
-            llm.llm_engine.add_lora(lora_request=lora_request)
-
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
     sampling_params = SamplingParams(temperature=0.2,
@@ -226,8 +219,15 @@ def main(args):
     if args.num_prompts > 1:
         # Batch inference
         inputs = [inputs] * args.num_prompts
+    # Add LoRA request if applicable
+    lora_request = (req_data.lora_requests *
+                    args.num_prompts if req_data.lora_requests else None)
 
-    outputs = llm.generate(inputs, sampling_params=sampling_params)
+    outputs = llm.generate(
+        inputs,
+        sampling_params=sampling_params,
+        lora_request=lora_request,
+    )
 
     for o in outputs:
         generated_text = o.outputs[0].text

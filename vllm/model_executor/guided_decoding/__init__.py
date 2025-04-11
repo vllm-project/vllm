@@ -33,6 +33,12 @@ def maybe_backend_fallback(
         logger.warning("%s Falling back to use %s instead.", message, fallback)
         guided_params.backend = fallback
 
+    # `auto` was added for V1 to explicitly declare a mode that has fallbacks
+    # in place. If that is specified with V0, treat it as `xgrammar`, as we have
+    # fallbacks enabled for that and it is the V0 default.
+    if guided_params.backend == "auto":
+        guided_params.backend = "xgrammar"
+
     # lm-format-enforce doesn't support grammar, fallback to xgrammar
     if guided_params.backend_name == "lm-format-enforcer":
         if guided_params.grammar is not None:

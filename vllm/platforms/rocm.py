@@ -304,10 +304,6 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def supports_structured_output(cls) -> bool:
-        return True
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName

@@ -258,10 +258,16 @@ class MultiModalRegistry:
         """
         if self.has_processor(model_config):
             processor = self.create_processor(model_config, disable_cache=True)
+            profiler = MultiModalProfiler(processor)
+
             seq_len = model_config.max_model_len
             mm_limits = self.get_mm_limits_per_prompt(model_config)
-            return processor.info.get_mm_max_tokens_per_item(
-                seq_len, mm_limits)
+
+            return profiler.get_mm_max_tokens(
+                seq_len,
+                {modality: 1
+                 for modality in mm_limits},
+            )
 
         return {
             key: plugin.get_max_multimodal_tokens(model_config)

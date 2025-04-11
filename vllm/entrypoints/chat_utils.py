@@ -1193,8 +1193,15 @@ def apply_mistral_chat_template(
         **kwargs,
     )
 
-    return tokenizer.apply_chat_template(
-        messages=messages,
-        tools=tools,
-        **kwargs,
-    )
+    try:
+        return tokenizer.apply_chat_template(
+            messages=messages,
+            tools=tools,
+            **kwargs,
+        )
+    # mistral-common uses assert statements to stop processing of input
+    # if input does not comply with the expected format.
+    # We convert those assertion errors to ValueErrors so they can be
+    # are properly caught in the preprocessing_input step
+    except AssertionError as e:
+        raise ValueError from e

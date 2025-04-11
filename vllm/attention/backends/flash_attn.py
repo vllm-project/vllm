@@ -326,7 +326,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             assert self.use_cuda_graph
 
         if turn_prefills_into_decodes:
-            # When Mutli-Step is enabled with Chunked-Prefill, prefills and
+            # When Multi-Step is enabled with Chunked-Prefill, prefills and
             # decodes are scheduled together. In the first step, all the
             # prefills turn into decodes. This update reflects that
             # conversion.

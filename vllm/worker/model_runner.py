@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
