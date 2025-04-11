@@ -245,6 +245,8 @@ Example supported models:
 * `meta-llama/Llama-3.2-3B-Instruct`\* (use with `examples/tool_chat_template_llama3.2_pythonic.jinja`)
 * `Team-ACE/ToolACE-8B` (use with `examples/tool_chat_template_toolace.jinja`)
 * `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with `examples/tool_chat_template_toolace.jinja`)
+* `meta-llama/Llama-4-Scout-17B-16E-Instruct`\* (use with `examples/tool_chat_template_llama4_pythonic.jinja`)
+* `meta-llama/Llama-4-Maverick-17B-128E-Instruct`\* (use with `examples/tool_chat_template_llama4_pythonic.jinja`)
 
 Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
