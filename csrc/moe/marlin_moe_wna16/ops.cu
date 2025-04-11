@@ -415,22 +415,22 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   auto kernel = MarlinDefault;
   if (false) {
   }
-  GPTQ_GET_IF_M1(vllm::kU4B8, 16, 4, 256)
+  GPTQ_GET_IF_M1(vllm::kU4B8, 8, 8, 256)
   GPTQ_GET_IF_M1(vllm::kU4B8, 8, 4, 128)
 
-  GPTQ_GET_IF_M234(vllm::kU4B8, 8, 8, 256)
+  GPTQ_GET_IF_M234(vllm::kU4B8, 16, 4, 256)
   GPTQ_GET_IF_M234(vllm::kU4B8, 8, 4, 128)
 
-  GPTQ_GET_IF_M1(vllm::kU8B128, 16, 4, 256)
+  GPTQ_GET_IF_M1(vllm::kU8B128, 8, 8, 256)
   GPTQ_GET_IF_M1(vllm::kU8B128, 8, 4, 128)
 
-  GPTQ_GET_IF_M234(vllm::kU8B128, 8, 8, 256)
+  GPTQ_GET_IF_M234(vllm::kU8B128, 16, 4, 256)
   GPTQ_GET_IF_M234(vllm::kU8B128, 8, 4, 128)
 
-  AWQ_GET_IF_M1(vllm::kU4, 16, 4, 256)
+  AWQ_GET_IF_M1(vllm::kU4, 8, 8, 256)
   AWQ_GET_IF_M1(vllm::kU4, 8, 4, 128)
 
-  AWQ_GET_IF_M234(vllm::kU4, 8, 8, 256)
+  AWQ_GET_IF_M234(vllm::kU4, 16, 4, 256)
   AWQ_GET_IF_M234(vllm::kU4, 8, 4, 128)
 
   return kernel;
