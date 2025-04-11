@@ -1035,28 +1035,13 @@ class BaseProcessingInfo:
         raise NotImplementedError
 
     def get_allowed_mm_limits(self) -> Mapping[str, int]:
-        """
-        Return the maximum allowed number of items for each modality.
-
-        - 1st priority: User config (`--limit-mm-per-prompt`)
-        - 2nd priority: Model definition (`get_supported_mm_limits`)
-        """
+        """Return the maximum allowed number of items for each modality."""
         supported_mm_limits = self.get_supported_mm_limits()
-
         mm_config = self.ctx.get_mm_config()
-        user_mm_limits = {
-            modality: mm_config.get_limit_per_prompt(modality)
-            for modality in supported_mm_limits
-        }
 
         allowed_limits = dict[str, int]()
         for modality, supported_limit in supported_mm_limits.items():
-            user_limit = user_mm_limits[modality]
-            if supported_limit is not None and supported_limit < user_limit:
-                raise ValueError(
-                    f"You set or defaulted to {modality}={user_limit} "
-                    f"in `--limit-mm-per-prompt`, but this model only "
-                    f"supports at most {supported_limit} {modality} items.")
+            user_limit = mm_config.get_limit_per_prompt(modality)
 
             allowed_limits[modality] = (user_limit if supported_limit is None
                                         else min(user_limit, supported_limit))
