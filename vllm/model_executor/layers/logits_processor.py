@@ -162,14 +162,14 @@ def _apply_logits_processors(
                     logits_row_ids_and_logits_row_futures.append(
                         (logits_row_idx,
                          _logits_processor_threadpool.submit(
-                             _apply_logits_processors_single_seq, logits_row,
-                             logits_processors, past_tokens_ids,
+                             _apply_logits_processors_single_seq, seq_id,
+                             logits_row, logits_processors, past_tokens_ids,
                              prompt_tokens_ids)))
                 else:
                     logits[logits_row_idx] = \
                         _apply_logits_processors_single_seq(
-                            logits_row, logits_processors, past_tokens_ids,
-                            prompt_tokens_ids)
+                            seq_id, logits_row, logits_processors,
+                            past_tokens_ids, prompt_tokens_ids)
 
         logits_processed += len(seq_group.sample_indices) + len(
             seq_group.prompt_logprob_indices)
@@ -183,14 +183,20 @@ def _apply_logits_processors(
     return logits
 
 
-def _apply_logits_processors_single_seq(logits_row, logits_processors,
+def _apply_logits_processors_single_seq(seq_id, logits_row, logits_processors,
                                         past_tokens_ids,
                                         prompt_tokens_ids) -> torch.Tensor:
+    kwargs = {
+        'seq_id': seq_id,
+        'prompt_tokens_ids': prompt_tokens_ids,
+    }
     for logits_processor in logits_processors:
-        parameters = inspect.signature(logits_processor).parameters
-        if len(parameters) == 3:
+        # check if the third argument is '**kwargs'
+        params = list(inspect.signature(logits_processor).parameters.values())
+        if len(params) == 3 and \
+                params[-1].kind == inspect.Parameter.VAR_KEYWORD:
             logits_row = logits_processor(prompt_tokens_ids, past_tokens_ids,
-                                          logits_row)
+                                          **kwargs)
         else:
             logits_row = logits_processor(past_tokens_ids, logits_row)
     return logits_row
