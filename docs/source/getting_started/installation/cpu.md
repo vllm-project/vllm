@@ -209,12 +209,22 @@ vLLM CPU backend supports the following vLLM features:
 - Chunked-prefill
 - Prefix-caching
 - FP8-E5M2 KV cache
+- torch.compile
 
 ## Related runtime environment variables
 
 - `VLLM_CPU_KVCACHE_SPACE`: specify the KV Cache size (e.g, `VLLM_CPU_KVCACHE_SPACE=40` means 40 GiB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
 - `VLLM_CPU_OMP_THREADS_BIND`: specify the CPU cores dedicated to the OpenMP threads. For example, `VLLM_CPU_OMP_THREADS_BIND=0-31` means there will be 32 OpenMP threads bound on 0-31 CPU cores. `VLLM_CPU_OMP_THREADS_BIND=0-31|32-63` means there will be 2 tensor parallel processes, 32 OpenMP threads of rank0 are bound on 0-31 CPU cores, and the OpenMP threads of rank1 are bound on 32-63 CPU cores.
 - `VLLM_CPU_MOE_PREPACK`: whether to use prepack for MoE layer. This will be passed to `ipex.llm.modules.GatedMLPMOE`. Default is `1` (True). On unsupported CPUs, you might need to set this to `0` (False).
+
+## torch.compile usage
+
+vLLM CPU backend supports `torch.compile` to reduce runtime overhead and generate better kernels. Using argument `-O[0-3]` to enable the feature:
+
+- `-O0`: eager mode, no optimization.
+- `-O1`: test-only, not recommended.
+- `-O2`: trace compute graph but execute with eager mode, using custom ops. This option can reduce some Python runtime overhead.
+- `-O3`: trace compute graph and generate kernels with the `inductor` backend without using custom ops. This option can bring better performance but requires some time to tune and compile kernels.
 
 ## Performance tips
 
