@@ -1006,6 +1006,7 @@ direct_register_custom_op(
     op_func=inplace_fused_experts,
     mutates_args=["hidden_states"],
     fake_impl=inplace_fused_experts_fake,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
 
@@ -1064,6 +1065,7 @@ direct_register_custom_op(
     op_func=outplace_fused_experts,
     mutates_args=[],
     fake_impl=outplace_fused_experts_fake,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
 
