@@ -117,20 +117,16 @@ __global__ void merge_attn_states_kernel(
   }
 
 /*@brief Merges the attention states from prefix and suffix
- * into the output tensor.
+ * into the output tensor. NUM_TOKENS: n, NUM_HEADS: h, HEAD_SIZE: d
  *
- * @param output [NUM_TOKENS, NUM_HEADS, HEAD_SIZE] The output
- * tensor to store the merged attention states.
- * @param output_lse [NUM_HEADS, NUM_TOKENS] Optional tensor to
- * store the log-sum-exp values.
- * @param prefix_output [NUM_TOKENS, NUM_HEADS, HEAD_SIZE] The
- * prefix attention states.
- * @param prefix_lse [NUM_HEADS, NUM_TOKENS] The log-sum-exp
- * values for the prefix attention states.
- * @param suffix_output [NUM_TOKENS, NUM_HEADS, HEAD_SIZE] The
- * suffix attention states.
- * @param suffix_lse [NUM_HEADS, NUM_TOKENS] The log-sum-exp
- * values for the suffix attention states.
+ * @param output [n,h,d] The output tensor to store the merged attention states.
+ * @param output_lse [h,d] Optional tensor to store the log-sum-exp values.
+ * @param prefix_output [n,h,d] The prefix attention states.
+ * @param prefix_lse [h,d] The log-sum-exp values for the prefix attention
+ * states.
+ * @param suffix_output [n,h,d] The suffix attention states.
+ * @param suffix_lse [h,d] The log-sum-exp values for the suffix attention
+ * states.
  */
 template <typename scalar_t>
 void merge_attn_states_launcher(torch::Tensor& output,

@@ -3,7 +3,6 @@ from typing import Optional
 
 import torch
 
-import vllm.envs as envs
 from vllm.platforms import current_platform
 
 
@@ -31,8 +30,7 @@ def merge_attn_states(
             return headdim % 4 == 0
         return headdim % 8 == 0
 
-    if ((not envs.VLLM_DISABLE_MERGE_ATTN_CUDA_OP)
-            and current_platform.is_cuda() and supported_dtypes(output)
+    if (current_platform.is_cuda() and supported_dtypes(output)
             and supported_headdim(output)):
         from vllm._custom_ops import merge_attn_states
         return merge_attn_states(output, prefix_output, prefix_lse,

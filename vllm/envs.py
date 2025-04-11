@@ -705,10 +705,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # It can be changed with this variable if needed for some reason.
     "VLLM_XGRAMMAR_CACHE_MB":
     lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
-
-    # Force disable merge_attn_states CUDA op, use Triton kernel.
-    "VLLM_DISABLE_MERGE_ATTN_CUDA_OP":
-    lambda: bool(int(os.getenv("VLLM_DISABLE_MERGE_ATTN_CUDA_OP", "0"))),
 }
 
 # end-env-vars-definition
