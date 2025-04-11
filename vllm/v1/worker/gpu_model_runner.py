@@ -1108,7 +1108,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             target_logits = logits[spec_decode_metadata.target_logits_indices]
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
-                None,  # draft_probs
+                self.drafter.get_draft_probs(),
                 target_logits,
                 bonus_token_ids,
                 sampling_metadata,
@@ -1220,7 +1220,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
-            draft_token_ids, draft_probs = self.drafter.propose(
+            self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -1230,10 +1230,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_table=attn_metadata.block_table,
                 sampling_metadata=sampling_metadata,
             )
-            spec_token_ids = draft_token_ids.tolist()
-            # TODO(woosuk): Cache draft_probs and use it for rejection sampling
-            # in the next step.
-            del draft_probs
+            spec_token_ids = self.drafter.get_draft_token_ids().tolist()
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1268,8 +1265,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             start_idx = self.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
-            drafter_output = self.drafter.propose(
-                self.input_batch.token_ids_cpu[i, :end_idx])
+            self.drafter.propose(self.input_batch.token_ids_cpu[i, :end_idx])
+            drafter_output = self.drafter.get_draft_token_ids()
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:

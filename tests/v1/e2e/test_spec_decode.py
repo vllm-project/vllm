@@ -44,8 +44,13 @@ def test_prompts():
 
 @pytest.fixture
 def sampling_config():
-    # Only support greedy for now
-    return SamplingParams(temperature=0, max_tokens=10, ignore_eos=False)
+    # return SamplingParams(temperature=0, max_tokens=10, ignore_eos=False)
+    return [ SamplingParams(temperature=0, max_tokens=10, ignore_eos=False),
+             SamplingParams(temperature=0.1, max_tokens=10, ignore_eos=False),
+             SamplingParams(temperature=0.2, max_tokens=10, ignore_eos=False),
+             SamplingParams(temperature=0.3, max_tokens=10, ignore_eos=False),
+            #  SamplingParams(temperature=1, top_p=0.75, max_tokens=10, ignore_eos=False),
+             ]
 
 
 @pytest.fixture
@@ -72,7 +77,9 @@ def test_ngram_correctness(
         m.setenv("VLLM_USE_V1", "1")
 
         ref_llm = LLM(model=model_name, max_model_len=1024)
-        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+        ref_outputs = []
+        for sampling_param in sampling_config:
+            ref_outputs.append(ref_llm.chat(test_prompts, sampling_param))
         del ref_llm
 
         spec_llm = LLM(
@@ -85,20 +92,22 @@ def test_ngram_correctness(
             },
             max_model_len=1024,
         )
-        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-        matches = 0
-        misses = 0
-        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-            if ref_output.outputs[0].text == spec_output.outputs[0].text:
-                matches += 1
-            else:
-                misses += 1
-                print(f"ref_output: {ref_output.outputs[0].text}")
-                print(f"spec_output: {spec_output.outputs[0].text}")
+        
+        for i, sampling_param in enumerate(sampling_config):
+            spec_output = spec_llm.chat(test_prompts, sampling_param)
+            matches = 0
+            misses = 0
+            for ref_output, spec_output in zip(ref_outputs[i], spec_output):
+                if ref_output.outputs[0].text == spec_output.outputs[0].text:
+                    matches += 1
+                else:
+                    misses += 1
+                    print(f"ref_output: {ref_output.outputs[0].text}")
+                    print(f"spec_output: {spec_output.outputs[0].text}")
 
-        # Heuristic: expect at least 70% of the prompts to match exactly
-        # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches > int(0.7 * len(ref_outputs))
+            # Heuristic: expect at least 70% of the prompts to match exactly
+            # Upon failure, inspect the outputs to check for inaccuracy.
+            assert matches > int(0.7 * len(ref_outputs[i]))
         del spec_llm
 
 
@@ -115,9 +124,13 @@ def test_eagle_correctness(
     '''
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
+        ref_outputs = []
+        spec_outputs = []
 
         ref_llm = LLM(model=model_name, max_model_len=1024)
-        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+
+        for sampling_param in sampling_config:
+            ref_outputs.append(ref_llm.chat(test_prompts, sampling_param))
         del ref_llm
 
         spec_llm = LLM(
@@ -129,18 +142,22 @@ def test_eagle_correctness(
             },
             max_model_len=1024,
         )
-        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-        matches = 0
-        misses = 0
-        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-            if ref_output.outputs[0].text == spec_output.outputs[0].text:
-                matches += 1
-            else:
-                misses += 1
-                print(f"ref_output: {ref_output.outputs[0].text}")
-                print(f"spec_output: {spec_output.outputs[0].text}")
 
-        # Heuristic: expect at least 70% of the prompts to match exactly
-        # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches > int(0.7 * len(ref_outputs))
+        for sampling_param in sampling_config:
+            spec_outputs.append(spec_llm.chat(test_prompts, sampling_param))
         del spec_llm
+
+        for i in range(len(sampling_config)):
+            matches = 0
+            misses = 0
+            for ref_output, spec_output in zip(ref_outputs[i], spec_outputs[i]):
+                if ref_output.outputs[0].text == spec_output.outputs[0].text:
+                    matches += 1
+                else:
+                    misses += 1
+                    print(f"ref_output: {ref_output.outputs[0].text}")
+                    print(f"spec_output: {spec_output.outputs[0].text}")
+
+            # Heuristic: expect at least 70% of the prompts to match exactly
+            # Upon failure, inspect the outputs to check for inaccuracy.
+            assert matches > int(0.7 * len(ref_outputs[i])), "Failed for sampling_param: " + str(sampling_config[i])

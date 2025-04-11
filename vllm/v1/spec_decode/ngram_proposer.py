@@ -10,6 +10,7 @@ from vllm.config import VllmConfig
 class NgramProposer:
 
     def __init__(self, vllm_config: VllmConfig):
+        self._draft_token_ids = None
         # Minimum length of the n-gram to match.
         self.min_n = vllm_config.speculative_config.prompt_lookup_min
         # Maximum length of the n-gram to match.
@@ -22,10 +23,16 @@ class NgramProposer:
         # This usually takes less than 1 second.
         self.propose(np.zeros(1024, dtype=np.int32))
 
+    def get_draft_token_ids(self):
+        return self._draft_token_ids
+
+    def get_draft_probs(self):
+        return None
+
     def propose(
         self,
         context_token_ids: np.ndarray,
-    ) -> Optional[np.ndarray]:
+    ):
         """Proposes the next sequence of tokens based on n-gram pattern 
         matching in the context. The function finds matches of the last n 
         tokens in the previous context, and returns k tokens that followed 
@@ -54,8 +61,9 @@ class NgramProposer:
         for n in range(self.max_n, self.min_n - 1, -1):
             result = _find_subarray_kmp(context_token_ids, n, self.k)
             if result is not None:
-                return result
-        return None
+                self._draft_token_ids = result
+                return
+        return
 
     def load_model(self, *args, **kwargs):
         # No model to load.

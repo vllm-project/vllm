@@ -45,6 +45,7 @@ def main():
     parser.add_argument("--enable_chunked_prefill", action='store_true')
     parser.add_argument("--max_num_batched_tokens", type=int, default=2048)
     parser.add_argument("--temp", type=float, default=0)
+    parser.add_argument("--log_output_filename", type=str, default="eagle_output.txt")
     args = parser.parse_args()
 
     model_dir = "meta-llama/Meta-Llama-3-8B-Instruct"
@@ -90,6 +91,22 @@ def main():
     outputs = llm.generate(prompt_token_ids=prompt_ids,
                            sampling_params=sampling_params)
 
+    # save output text in eagle_output.txt file for quality check
+    log_output_data = []
+    for i, output in enumerate(outputs):
+        input_text = tokenizer.decode(output.prompt_token_ids)
+        log_output_data.append({
+            "input": input_text,
+            "output": output.outputs[0].text
+        })
+    
+    with open("eagle_output.txt", "w") as f:
+        f.write(
+            json.dumps(log_output_data, indent=4, ensure_ascii=False))
+    print("-" * 50)
+    print(f"Output texts saved to {args.log_output_filename}")
+    print("-" * 50)
+    
     # calculate the average number of accepted tokens per forward pass, +1 is
     # to account for the token from the target model that's always going to be
     # accepted
