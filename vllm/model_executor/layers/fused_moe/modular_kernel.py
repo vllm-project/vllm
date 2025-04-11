@@ -312,6 +312,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
+        from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank)
+        print(f"START {hidden_states.shape} {topk_ids.shape} {get_tensor_model_parallel_rank()}/{get_dp_group().rank_in_group}")
+
         a1 = hidden_states
         E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
 
@@ -360,5 +363,7 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         self.dispatch_combine.combine(output, fused_out, topk_weights,
                                       topk_ids, apply_router_weight_on_input)
+
+        print(f"DONE {hidden_states.shape} {topk_ids.shape} {get_tensor_model_parallel_rank()}/{get_dp_group().rank_in_group}")
 
         return output
