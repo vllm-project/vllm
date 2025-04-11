@@ -11,10 +11,9 @@ jinja2>=3.1.6
 datasets # for benchmark scripts
 numba == 0.60.0 # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
 
-torch==2.7.0+xpu
-torchaudio
-torchvision
-pytorch-triton-xpu
-intel_extension_for_pytorch 
-oneccl_bind_pt
---extra-index-url=https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu-new/validation/IPEX/weekly/PVC/2025/vllm_BMG/ww12_public_release_2_7/
+pytorch-triton-xpu @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/pytorch_triton_xpu-3.3.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+torch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/torch-2.7.0%2Bxpu-cp310-cp310-linux_x86_64.whl
+torchaudio @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/torchaudio-2.7.0%2Bxpu-cp310-cp310-linux_x86_64.whl
+torchvision @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/torchvision-0.22.0%2Bxpu-cp310-cp310-linux_x86_64.whl
+intel-extension-for-pytorch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/intel_extension_for_pytorch-2.7.10.dev0%2Bxpu-cp310-cp310-linux_x86_64.whl
+oneccl_bind_pt @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/oneccl_bind_pt-2.7.0.dev0%2Bxpu-cp310-cp310-linux_x86_64.whl
