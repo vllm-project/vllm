@@ -24,6 +24,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import traceback
@@ -32,7 +33,7 @@ import uuid
 import warnings
 import weakref
 from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError, RawTextHelpFormatter)
+                      ArgumentTypeError)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
@@ -1222,8 +1223,21 @@ class StoreBoolean(Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawTextHelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
+
+    def _split_lines(self, text, width):
+        """
+        1. Sentences split across lines have their single newlines removed.
+        2. Paragraphs and explicit newlines are split into separate lines.
+        3. Each line is wrapped to the specified width (width of terminal).
+        """
+        # The patterns also include whitespace after the newline
+        single_newline = re.compile("(?<!\n)\n(?!\n)\s*")
+        multiple_newlines = re.compile("\n{2,}\s*")
+        text = single_newline.sub(' ', text)
+        lines = re.split(multiple_newlines, text)
+        return sum([textwrap.wrap(line, width) for line in lines], [])
 
     def add_arguments(self, actions):
         actions = sorted(actions, key=lambda x: x.option_strings)

@@ -1442,25 +1442,25 @@ class LoadConfig:
 
     load_format: Union[str, LoadFormat,
                        "BaseModelLoader"] = LoadFormat.AUTO.value
-    """The format of the model weights to load:
+    """The format of the model weights to load:\n
     - "auto" will try to load the weights in the safetensors format and fall
-    back to the pytorch bin format if safetensors format is not available.
-    - "pt" will load the weights in the pytorch bin format.
-    - "safetensors" will load the weights in the safetensors format.
+    back to the pytorch bin format if safetensors format is not available.\n
+    - "pt" will load the weights in the pytorch bin format.\n
+    - "safetensors" will load the weights in the safetensors format.\n
     - "npcache" will load the weights in pytorch format and store a numpy cache
-    to speed up the loading.
+    to speed up the loading.\n
     - "dummy" will initialize the weights with random values, which is mainly
-    for profiling.
+    for profiling.\n
     - "tensorizer" will use CoreWeave's tensorizer library for fast weight
     loading. See the Tensorize vLLM Model script in the Examples section for
-    more information.
+    more information.\n
     - "runai_streamer" will load the Safetensors weights using Run:ai Model
-    Streamer.
-    - "bitsandbytes" will load the weights using bitsandbytes quantization.
+    Streamer.\n
+    - "bitsandbytes" will load the weights using bitsandbytes quantization.\n
     - "sharded_state" will load weights from pre-sharded checkpoint files,
-    supporting efficient loading of tensor-parallel models.
+    supporting efficient loading of tensor-parallel models.\n
     - "gguf" will load weights from GGUF format files (details specified in
-    https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
+    https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n
     - "mistral" will load weights from consolidated safetensors files used by
     Mistral models."""
     download_dir: Optional[str] = None
