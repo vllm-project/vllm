@@ -10,6 +10,7 @@ from vllm.platforms import current_platform
 from .utils import ARGS, CONFIGS, ServerConfig
 
 
+# select models to test based on command line arguments
 def pytest_addoption(parser):
     parser.addoption("--models",
                      nargs="+",
@@ -26,16 +27,10 @@ def server_config(request):
     extended = request.config.getoption("--extended")
     models = request.config.getoption("--models")
 
-    config_keys_to_test = CONFIGS.keys()
-    if models:
-        config_keys_to_test = [
-            key for key in config_keys_to_test if key in models
-        ]
-    if not extended:
-        config_keys_to_test = [
-            key for key in config_keys_to_test
-            if not CONFIGS[key].get("extended", False)
-        ]
+    config_keys_to_test = [
+        key for key in CONFIGS if (models is None or key in models) and (
+            extended or not CONFIGS[key].get("extended", False))
+    ]
 
     config_key = request.param
     if config_key not in config_keys_to_test:
