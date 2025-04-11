@@ -489,7 +489,7 @@ class SonnetDataset(BenchmarkDataset):
         prefix_lines = self.data[:num_prefix_lines]
 
         samples = []
-        for _ in range(num_requests):
+        while len(samples) < num_requests:
             extra_lines = random.choices(self.data,
                                          k=num_input_lines - num_prefix_lines)
             prompt = f"{base_prompt}{''.join(prefix_lines + extra_lines)}"
@@ -497,13 +497,14 @@ class SonnetDataset(BenchmarkDataset):
             prompt_formatted = tokenizer.apply_chat_template(
                 msg, add_generation_prompt=True, tokenize=False)
             prompt_len = len(tokenizer(prompt_formatted).input_ids)
-            samples.append(
-                SampleRequest(
-                    prompt=prompt_formatted
-                    if return_prompt_formatted else prompt,
-                    prompt_len=prompt_len,
-                    expected_output_len=output_len,
-                ))
+            if prompt_len <= input_len:
+                samples.append(
+                    SampleRequest(
+                        prompt=prompt_formatted
+                        if return_prompt_formatted else prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=output_len,
+                    ))
         return samples
 
 
