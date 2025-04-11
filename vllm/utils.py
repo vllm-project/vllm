@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import concurrent
 import contextlib
@@ -25,6 +24,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import traceback
@@ -32,6 +32,8 @@ import types
 import uuid
 import warnings
 import weakref
+from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
+                      ArgumentTypeError)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
@@ -40,7 +42,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Type, TypeVar, Union, cast, overload)
+                    Optional, Tuple, Type, TypeVar, Union, cast, overload)
 from uuid import uuid4
 
 import cachetools
@@ -53,6 +55,7 @@ import torch.types
 import yaml
 import zmq
 import zmq.asyncio
+from packaging import version
 from packaging.version import Version
 from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
@@ -1208,7 +1211,7 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
     return wrapper
 
 
-class StoreBoolean(argparse.Action):
+class StoreBoolean(Action):
 
     def __call__(self, parser, namespace, values, option_string=None):
         if values.lower() == "true":
@@ -1220,15 +1223,28 @@ class StoreBoolean(argparse.Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
+
+    def _split_lines(self, text, width):
+        """
+        1. Sentences split across lines have their single newlines removed.
+        2. Paragraphs and explicit newlines are split into separate lines.
+        3. Each line is wrapped to the specified width (width of terminal).
+        """
+        # The patterns also include whitespace after the newline
+        single_newline = re.compile("(?<!\n)\n(?!\n)\s*")
+        multiple_newlines = re.compile("\n{2,}\s*")
+        text = single_newline.sub(' ', text)
+        lines = re.split(multiple_newlines, text)
+        return sum([textwrap.wrap(line, width) for line in lines], [])
 
     def add_arguments(self, actions):
         actions = sorted(actions, key=lambda x: x.option_strings)
         super().add_arguments(actions)
 
 
-class FlexibleArgumentParser(argparse.ArgumentParser):
+class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
     def __init__(self, *args, **kwargs):
@@ -1279,11 +1295,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             value = int(value)
         except ValueError:
             msg = "Port must be an integer"
-            raise argparse.ArgumentTypeError(msg) from None
+            raise ArgumentTypeError(msg) from None
 
         if not (1024 <= value <= 65535):
-            raise argparse.ArgumentTypeError(
-                "Port must be between 1024 and 65535")
+            raise ArgumentTypeError("Port must be between 1024 and 65535")
 
         return value
 
@@ -1935,12 +1950,13 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
 
 def direct_register_custom_op(
-    op_name: str,
-    op_func: Callable,
-    mutates_args: list[str],
-    fake_impl: Optional[Callable] = None,
-    target_lib: Optional[Library] = None,
-    dispatch_key: str = "CUDA",
+        op_name: str,
+        op_func: Callable,
+        mutates_args: list[str],
+        fake_impl: Optional[Callable] = None,
+        target_lib: Optional[Library] = None,
+        dispatch_key: str = "CUDA",
+        tags: Tuple[torch.Tag, ...] = (),
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -1979,7 +1995,7 @@ def direct_register_custom_op(
         import torch._custom_op.impl
         schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
-    my_lib.define(op_name + schema_str)
+    my_lib.define(op_name + schema_str, tags=tags)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
@@ -2189,6 +2205,8 @@ def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
     path: str,
     socket_type: Any,
+    bind: Optional[bool] = None,
+    identity: Optional[bytes] = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2207,16 +2225,24 @@ def make_zmq_socket(
     else:
         buf_size = -1  # Use system default buffer size
 
-    if socket_type == zmq.constants.PULL:
-        socket.setsockopt(zmq.constants.RCVHWM, 0)
-        socket.setsockopt(zmq.constants.RCVBUF, buf_size)
+    if bind is None:
+        bind = socket_type != zmq.PUSH
+
+    if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
+        socket.setsockopt(zmq.RCVHWM, 0)
+        socket.setsockopt(zmq.RCVBUF, buf_size)
+
+    if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
+        socket.setsockopt(zmq.SNDHWM, 0)
+        socket.setsockopt(zmq.SNDBUF, buf_size)
+
+    if identity is not None:
+        socket.setsockopt(zmq.IDENTITY, identity)
+
+    if bind:
         socket.bind(path)
-    elif socket_type == zmq.constants.PUSH:
-        socket.setsockopt(zmq.constants.SNDHWM, 0)
-        socket.setsockopt(zmq.constants.SNDBUF, buf_size)
-        socket.connect(path)
     else:
-        raise ValueError(f"Unknown Socket Type: {socket_type}")
+        socket.connect(path)
 
     return socket
 
@@ -2225,14 +2251,19 @@ def make_zmq_socket(
 def zmq_socket_ctx(
     path: str,
     socket_type: Any,
+    bind: Optional[bool] = None,
     linger: int = 0,
+    identity: Optional[bytes] = None,
 ) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
-        yield make_zmq_socket(ctx, path, socket_type)
-
+        yield make_zmq_socket(ctx,
+                              path,
+                              socket_type,
+                              bind=bind,
+                              identity=identity)
     except KeyboardInterrupt:
         logger.debug("Got Keyboard Interrupt.")
 
@@ -2564,3 +2595,20 @@ def sha256(input) -> int:
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
     return int.from_bytes(hashlib.sha256(input_bytes).digest(),
                           byteorder="big")
+
+
+def is_torch_equal_or_newer(target: str) -> bool:
+    """Check if the installed torch version is >= the target version.
+
+    Args:
+        target: a version string, like "2.6.0".
+
+    Returns:
+        Whether the condition meets.
+    """
+    try:
+        torch_version = version.parse(str(torch.__version__))
+        return torch_version >= version.parse(target)
+    except Exception:
+        # Fallback to PKG-INFO to load the package info, needed by the doc gen.
+        return Version(importlib.metadata.version('torch')) >= Version(target)
