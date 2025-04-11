@@ -9,6 +9,8 @@ import numpy as np
 import torch
 import torch.utils.checkpoint
 from torch import nn
+from transformers.image_utils import to_numpy_array
+
 
 from .utils import AutoWeightsLoader, embed_multimodal, init_vllm_registered_model, maybe_prefix
 from vllm.config import VllmConfig
@@ -62,7 +64,7 @@ from .processing_minimax_vl_01 import MiniMaxVL01Processor
 from vllm.multimodal.processing import BaseProcessingInfo
 import numpy as np
 import numpy.typing as npt
-from .image_processer import ImageProcessor
+from .image_processer import ImageProcessor, _transform
 
 logger = logging.get_logger(__name__)
 
@@ -520,29 +522,32 @@ class MiniMaxVL01MultiModalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _process_image_input(
-        self,
-        image_input: LlavaNextImageInputs,
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
-        if image_input["type"] == "image_embeds":
-            return [image_input["data"]]
-
-        patch_embeddings = self._process_image_pixels(image_input)
-
-        image_sizes = image_input.get("image_sizes")
-        if image_sizes is None:
-            batch_size = len(image_input["data"])
-            vision_config = self.config.vision_config
-            default_height = default_width = vision_config.image_size
-            image_sizes = torch.as_tensor([[default_height, default_width]
-                                           for _ in range(batch_size)])
-
-        return [
-            self._merge_image_patch_embeddings(image_sizes[i],
-                                               patch_features_batch,
-                                               strategy="spatial_unpad")
-            for i, patch_features_batch in enumerate(patch_embeddings)
-        ]
+    def _process_image_input(self, image_input, image_grid_pinpoints, image_size, image_mean, image_std):
+        """Process image input and merge image patch embeddings based on specified strategy."""
+        if not isinstance(image_input, list):
+            image_input = [image_input]
+        
+        # 处理每个图像输入
+        processed_images = []
+        for img in image_input:
+            # 获取图像 patch
+            image_patches = self.get_image_patches(img, image_grid_pinpoints)
+            
+            # 处理每个 patch
+            processed_patches = []
+            for patch in image_patches:
+                # 转换图像
+                transform_img = _transform(image_size[0], image_size[1], image_mean, image_std)(patch)
+                img_array = to_numpy_array(transform_img)
+                processed_patches.append(img_array)
+            
+            # 将处理后的 patch 合并为一个数组
+            processed_images.append(np.array(processed_patches))
+        
+        # 对批次中的图像进行填充，使它们具有相同数量的 patch
+        processed_images = self._pad_for_batching(processed_images)
+        
+        return processed_images
 
     def _merge_image_patch_embeddings(self, image_size: torch.Tensor,
                                       patch_embeddings: torch.Tensor, *,
