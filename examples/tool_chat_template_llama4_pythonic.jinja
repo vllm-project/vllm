@@ -94,7 +94,10 @@
             {%- endfor %}
         {%- endif %}
         {%- for tool_call in message.tool_calls %}
-            {{- tool_call.tool_name + '(' -}}
+            {%- if tool_call.function is defined %}
+                {%- set tool_call = tool_call.function %}
+            {%- endif %}
+            {{- tool_call.name + '(' -}}
             {%- for param in tool_call.arguments %}
                 {{- param + '=' -}}
                 {{- "%s" | format(tool_call.arguments[param]) -}}
