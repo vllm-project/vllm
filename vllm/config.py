@@ -507,8 +507,9 @@ class ModelConfig:
                     if getattr(user_config, k) is None:
                         setattr(user_config, k, v)
 
-            user_config.is_matryoshka = self.is_matryoshka
-
+            if self.is_matryoshka:
+                # for matryoshka representation, always do normalize
+                user_config.normalize = True
             return user_config
 
         return None
