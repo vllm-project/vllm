@@ -52,6 +52,31 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
+void convert_vertical_slash_indexes(
+    torch::Tensor& block_count,      // [BATCH, N_HEADS, NUM_ROWS]
+    torch::Tensor& block_offset,     // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
+    torch::Tensor& column_count,     // [BATCH, N_HEADS, NUM_ROWS]
+    torch::Tensor& column_index,     // [BATCH, N_HEADS, NUM_ROWS, NNZ_V]
+    torch::Tensor q_seqlens,         // [BATCH, ]
+    torch::Tensor kv_seqlens,        // [BATCH, ]
+    torch::Tensor vertical_indexes,  // [BATCH, N_HEADS, NNZ_V]
+    torch::Tensor slash_indexes,     // [BATCH, N_HEADS, NNZ_S]
+    int64_t context_size, int64_t block_size_M, int64_t block_size_N,
+    bool causal);
+
+void convert_vertical_slash_indexes_mergehead(
+    torch::Tensor& block_count,            // [BATCH, N_HEADS, NUM_ROWS]
+    torch::Tensor& block_offset,           // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
+    torch::Tensor& column_count,           // [BATCH, N_HEADS, NUM_ROWS]
+    torch::Tensor& column_index,           // [BATCH, N_HEADS, NUM_ROWS, NNZ_V]
+    torch::Tensor q_seqlens,               // [BATCH, ]
+    torch::Tensor kv_seqlens,              // [BATCH, ]
+    torch::Tensor vertical_indexes,        // [BATCH, N_HEADS, NNZ_V]
+    torch::Tensor slash_indexes,           // [BATCH, N_HEADS, NNZ_S]
+    torch::Tensor vertical_indices_count,  // [N_HEADS, ]
+    torch::Tensor slash_indices_count, int64_t context_size,
+    int64_t block_size_M, int64_t block_size_N, bool causal);
+
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
 
