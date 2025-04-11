@@ -591,7 +591,7 @@ class ImageProcessor(BaseImageProcessor):
     def anyres_preprocess(self, images, return_tensors: Optional[Union[str, TensorType]] = None, data_format: Optional[ChannelDimension] = ChannelDimension.FIRST, input_data_format: Optional[Union[str, ChannelDimension]] = None, do_pad: Optional[bool] = None, **kwargs):
         
         images = make_list_of_images(images)
-        new_images = []
+        all_patches = []
         image_sizes = []
 
         for image in images:
@@ -601,18 +601,16 @@ class ImageProcessor(BaseImageProcessor):
                 image,
                 self.image_grid_pinpoints
             )
-            #all_images = []
-            for image in image_patches:
-                transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(image)
+            patches_for_image = []
+            for patch in image_patches:
+                transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(patch)
                 img_array = to_numpy_array(transform_img)
                 img_array = to_channel_dimension_format(img_array, data_format, input_channel_dim=input_data_format)
-                #all_images.append(img_array)
-                new_images.append(img_array)
-            #pixel_values = np.array(all_images)
-            #new_images.append(pixel_values)
+                patches_for_image.append(img_array)
+            all_patches.append(patches_for_image)
         
         # if do_pad:
         #     new_images = self._pad_for_batching(new_images)
 
-        data = {"pixel_values": new_images, "image_sizes": image_sizes}
+        data = {"pixel_values": all_patches, "image_sizes": image_sizes}
         return CustomBatchFeature(data=data, tensor_type=return_tensors)
