@@ -885,7 +885,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
 - * `Llama4ForConditionalGeneration`
-  * Llama-4-17B-Omni-Instruct
+  * Llama4 Scout, Llama4 Maverick
   * T + I<sup>+</sup>
   * `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc.
   *
