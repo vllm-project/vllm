@@ -67,7 +67,3 @@ class NeuronPlatform(Platform):
     @classmethod
     def use_all_gather(cls) -> bool:
         return True
-
-    @classmethod
-    def supports_structured_output(cls) -> bool:
-        return True
