@@ -339,6 +339,7 @@ def test_structured_output(
                 "minLength": min_length
             }
         },
+        "required": ["description"]
     }
 
     sampling_params = SamplingParams(
