@@ -16,7 +16,7 @@ CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
 
 # TODO calibrate this size
-INLINE_BUF_SIZE_THRESHOLD = 256
+MIN_NOCOPY_BUF_SIZE = 512
 
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
@@ -76,14 +76,14 @@ class MsgpackEncoder:
         self, obj: np.ndarray
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
-        if not obj.shape or obj.nbytes < INLINE_BUF_SIZE_THRESHOLD:
-            # Encode small arrays and scalars inline.
+        if not obj.data.contiguous or obj.nbytes < MIN_NOCOPY_BUF_SIZE:
+            # Encode in-line if small or non-contiguous.
             data = obj.data
         else:
-            # Otherwise encode index of backing buffer.
-            obj = np.ascontiguousarray(obj)
+            # Otherwise encode index of backing buffer to avoid copy.
             data = len(self.aux_buffers)
-            self.aux_buffers.append(obj.data)
+            self.aux_buffers.append(data)
+
         # We serialize the ndarray as a tuple of native types.
         # The data is either inlined if small, or an index into a list of
         # backing buffers that we've stashed in `aux_buffers`.
