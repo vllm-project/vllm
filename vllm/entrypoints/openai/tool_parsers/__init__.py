@@ -7,6 +7,7 @@ from .hermes_tool_parser import Hermes2ProToolParser
 from .internlm2_tool_parser import Internlm2ToolParser
 from .jamba_tool_parser import JambaToolParser
 from .llama_tool_parser import Llama3JsonToolParser
+from .llama_usr_defined_tool_parser import Llama3UserDefinedCustomToolParser
 from .mistral_tool_parser import MistralToolParser
 from .phi4mini_tool_parser import Phi4MiniJsonToolParser
 from .pythonic_tool_parser import PythonicToolParser
@@ -15,5 +16,6 @@ __all__ = [
     "ToolParser", "ToolParserManager", "Granite20bFCToolParser",
     "GraniteToolParser", "Hermes2ProToolParser", "MistralToolParser",
     "Internlm2ToolParser", "Llama3JsonToolParser", "JambaToolParser",
-    "PythonicToolParser", "Phi4MiniJsonToolParser"
+    "PythonicToolParser", "Llama3UserDefinedCustomToolParser",
+    "Phi4MiniJsonToolParser"
 ]
