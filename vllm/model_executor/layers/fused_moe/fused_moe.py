@@ -429,8 +429,8 @@ def fused_moe_kernel(
                 accumulator += tl.dot(a, b) * a_scale[:,
                                                       None] * b_scale[None, :]
             else:
-                # fix out of shared memory issue
                 if use_fp8_w8a8:
+                    # acc used to enable fp8_fast_accum
                     accumulator = tl.dot(a, b, acc=accumulator)
                 else:
                     accumulator += tl.dot(a, b)
