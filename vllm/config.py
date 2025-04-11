@@ -499,20 +499,23 @@ class ModelConfig:
 
         if self.runner_type == "pooling":
             user_config = override_pooler_config or PoolerConfig()
-
-            if self.is_matryoshka and user_config.normalize is None:
-                user_config.normalize = True
-
             base_config = get_pooling_config(self.model, self.revision)
+
             if base_config is not None:
                 # Only set values that are not overridden by the user
                 for k, v in base_config.items():
                     if getattr(user_config, k) is None:
                         setattr(user_config, k, v)
 
-            if self.is_matryoshka and not user_config.normalize:
-                raise ValueError("`normalize` must be enabled (set to True) for "
-                                 "models that are compatible with Matryoshka Representation.")
+            if self.is_matryoshka:
+                if user_config.normalize is None:
+                    user_config.normalize = True
+
+                elif not user_config.normalize:
+                    raise ValueError(
+                        "`normalize` must be enabled (set to True) "
+                        "for models that are compatible with "
+                        "Matryoshka Representation.")
 
             return user_config
 
