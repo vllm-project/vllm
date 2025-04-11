@@ -195,7 +195,6 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
-
 from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
@@ -219,8 +218,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
-is_hip = current_platform.is_rocm()
 
 logger = init_logger(__name__)
 
