@@ -20,10 +20,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
-from vllm.v1.structured_output.backend_guidance import (
-    validate_guidance_grammar)
-from vllm.v1.structured_output.utils import (
-    validate_structured_output_request_xgrammar)
+from vllm.v1.structured_output import StructuredOutputManager
 
 
 class Processor:
@@ -124,10 +121,12 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
-        ]
+        from vllm.platforms import current_platform
+        if not current_platform.supports_structured_output():
+            raise ValueError("Structured output is not supported on "
+                             f"{current_platform.device_name}.")
+
+        supported_backends = StructuredOutputManager.supported_backends
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
             raise ValueError(f"Only {supported_backends} structured output is "
@@ -141,31 +140,8 @@ class Processor:
         else:
             params.guided_decoding.backend = engine_level_backend
 
-        # Request content validation
-        if engine_level_backend.startswith("xgrammar"):
-            # xgrammar with no fallback
-            validate_structured_output_request_xgrammar(params)
-            params.guided_decoding.backend = engine_level_backend
-        elif engine_level_backend == "auto":
-            # "auto" is an opt-in to opinionated behavior where we try to
-            # choose a backend based on request contents. This is not the
-            # default as it is less predictable and subject to change
-            # between releases as feature support changes.
-            try:
-                validate_structured_output_request_xgrammar(params)
-                params.guided_decoding.backend = "xgrammar"
-            except ValueError:
-                # The request includes some jsonschema feature(s) that
-                # are not supported in xgrammar. Fall back to guidance.
-                params.guided_decoding.backend = "guidance"
-
-        if engine_level_backend.startswith("guidance"):
-            # TODO ideally we would have the LLTokenizer here as Lark syntax
-            # allows <|special_token|> and similar, see
-            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
-            # Without tokenizer these are disallowed in grammars.
-            validate_guidance_grammar(params, tokenizer=None)
-            params.guided_decoding.backend = engine_level_backend
+        # Validate request content.
+        StructuredOutputManager.validate_grammar(engine_level_backend, params)
 
     def process_inputs(
         self,

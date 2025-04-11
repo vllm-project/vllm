@@ -179,7 +179,7 @@ class EngineCore:
         req = Request.from_engine_core_request(request)
         if req.use_structured_output:
             # Start grammar compilation asynchronously
-            self.structured_output_manager.grammar_init(req)
+            self.structured_output_manager.init_grammar(req)
 
         self.scheduler.add_request(req)
 

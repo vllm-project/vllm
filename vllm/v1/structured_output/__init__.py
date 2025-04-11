@@ -10,12 +10,14 @@ from vllm.logger import init_logger
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
+from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
     import torch
 
+    from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -23,6 +25,14 @@ logger = init_logger(__name__)
 
 class StructuredOutputManager:
     """Engine-level manager for structured output requests."""
+
+    supported_backends = [
+        "xgrammar",
+        "xgrammar:disable-any-whitespace",
+        "guidance",
+        "guidance:disable-any-whitespace",
+        "auto",
+    ]
 
     def __init__(self, vllm_config: VllmConfig):
         self.backend: Optional[StructuredOutputBackend] = None
@@ -36,20 +46,42 @@ class StructuredOutputManager:
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
 
-    def grammar_init(self, request: Request) -> None:
+    @classmethod
+    def validate_grammar(self, engine_level_backend: str,
+                         params: SamplingParams) -> None:
+        '''
+        Validate request content according to specific engine_level_backend
+        '''
+        if engine_level_backend.startswith("xgrammar"):
+            XgrammarBackend.validate_grammar(params)
+        elif engine_level_backend.startswith("guidance"):
+            GuidanceBackend.validate_grammar(params)
+        else:
+            # engine_level_backend == "auto"
+            # "auto" is an opt-in to opinionated behavior where we try to
+            # choose a backend based on request contents. This is not the
+            # default as it is less predictable and subject to change
+            # between releases as feature support changes.
+            try:
+                XgrammarBackend.validate_grammar(params)
+                engine_level_backend = "xgrammar"
+            except ValueError:
+                # The request includes some jsonschema feature(s) that
+                # are not supported in xgrammar. Fall back to guidance.
+                engine_level_backend = "guidance"
+
+        params.guided_decoding.backend = engine_level_backend
+
+    def init_grammar(self, request: Request) -> None:
         if request.structured_output_request is None:
             return
 
         # Initialize the backend the first time it is needed.
-        #
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
             backend_name = request.sampling_params.guided_decoding.backend_name
             if backend_name == "xgrammar":
-                from vllm.v1.structured_output.backend_xgrammar import (
-                    XgrammarBackend)
-
                 self.backend = XgrammarBackend(self.vllm_config)
             elif backend_name == "guidance":
                 self.backend = GuidanceBackend(self.vllm_config)
