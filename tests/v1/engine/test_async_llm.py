@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import ExitStack
 from typing import Optional
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,6 +14,7 @@ from vllm.inputs import PromptType
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -216,3 +218,38 @@ async def test_finished_flag(monkeypatch: pytest.MonkeyPatch, n: int,
         # Assert only the last output has the finished flag set
         assert all(not out.finished for out in outputs[:-1])
         assert outputs[-1].finished
+
+
+def get_customized_logger_mock() -> StatLoggerBase:
+    logger = LoggingStatLogger()
+    logger.log = MagicMock()
+    return logger
+
+
+@pytest.mark.parametrize(
+    "loggers",
+    [get_customized_logger_mock()],
+)
+@pytest.mark.asyncio
+async def test_customize_loggers(
+    monkeypatch,
+    loggers: Optional[list[StatLoggerBase]],
+):
+    """Test that we can customize the loggers.
+    If a customized logger is provided at the init, it should
+    be used directly.
+    """
+
+    with monkeypatch.context() as m, ExitStack() as after:
+        m.setenv("VLLM_USE_V1", "1")
+
+        engine = AsyncLLM.from_engine_args(
+            TEXT_ENGINE_ARGS,
+            stat_loggers=loggers,
+        )
+        after.callback(engine.shutdown)
+
+        await engine.do_log_stats()
+        for loggers in engine.stat_loggers:
+            for logger in loggers:
+                logger.log.assert_called_once()
