@@ -328,10 +328,10 @@ class EngineArgs:
                 elif can_be_type(field_type, float):
                     kwargs[name][
                         "type"] = optional_float if optional else float
-                elif can_be_type(field_type, str):
+                elif (can_be_type(field_type, str)
+                      or can_be_type(field_type, dict)
+                      or is_custom_type(field_type)):
                     kwargs[name]["type"] = optional_str if optional else str
-                elif is_custom_type(field_type):
-                    kwargs[name]["type"] = optional_str
                 else:
                     raise ValueError(
                         f"Unsupported type {field.type} for argument {name}. ")
