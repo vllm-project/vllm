@@ -196,7 +196,7 @@ class Scheduler(SchedulerInterface):
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
-                    num_spec_tokens=self.num_spec_tokens)
+                    num_lookahead_tokens=self.num_spec_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
