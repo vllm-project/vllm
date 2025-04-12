@@ -1631,6 +1631,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         ModelInputForGPUWithSamplingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
+    _fake_sample_output: Optional[SamplerOutput] = None
+
     def make_model_input_from_broadcasted_tensor_dict(
         self,
         tensor_dict: Dict[str, Any],
@@ -1822,11 +1824,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if model_input.async_callback is not None:
             model_input.async_callback()
 
-        # Sample the next token.
-        output: SamplerOutput = self.model.sample(
-            logits=logits,
-            sampling_metadata=model_input.sampling_metadata,
-        )
+        # in the producer side of pd disagg scenario, the next tokens are
+        # not needed. So we skip it
+        if self.need_skip_sampling() and self._fake_sample_output is not None:
+            output = self._fake_sample_output
+        else:
+            # Sample the next token.
+            output: SamplerOutput = self.model.sample(
+                logits=logits,
+                sampling_metadata=model_input.sampling_metadata,
+            )
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
                 and output is not None):
@@ -1859,6 +1866,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
             output.hidden_states = hidden_states
 
+        # save a fake output
+        if (self._fake_sample_output is None
+                and output is not None
+                and self.need_skip_sampling()):
+
+            self._fake_sample_output = output
+
         return [output]
 
     def need_recv_kv(self, model_input, kv_caches) -> bool:
@@ -1888,6 +1902,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         return self.vllm_config.kv_transfer_config.is_kv_consumer and (
             not is_profile_run) and is_prefill_run
+
+    def need_skip_sampling(self) -> bool:
+        """
+        check whether skip the step of sampling.
+        """
+
+        if self.vllm_config.kv_transfer_config is None:
+            return False
+
+        return self.vllm_config.kv_transfer_config.get_from_extra_config("skip_sampling", False)
 
     def need_send_kv(self, model_input, kv_caches) -> bool:
         """Check if we need to send kv-cache to the other worker.
