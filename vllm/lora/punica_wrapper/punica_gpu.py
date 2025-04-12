@@ -95,6 +95,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_a_stacked,
             y,
+    assert lora_ids.size(0) == num_token
             *self.token_mapping_meta.meta_args(x.size(0)),
             scale,
         )
