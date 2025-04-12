@@ -181,7 +181,7 @@ def run_test(
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_model_len", [4096])
+@pytest.mark.parametrize("max_model_len", [12800])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
 def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
@@ -225,7 +225,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_model_len", [10000])
+@pytest.mark.parametrize("max_model_len", [25600])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
 def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
@@ -258,7 +258,7 @@ def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
 
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_model_len", [10000])
+@pytest.mark.parametrize("max_model_len", [12800])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
 def test_vision_speech_models(hf_runner, vllm_runner, model, dtype: str,

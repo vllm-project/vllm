@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 from transformers import AutoModel, AutoTokenizer
 
-from vllm.multimodal.audio import resample_audio
+from vllm.multimodal.audio import resample_audio_librosa
 from vllm.sequence import SampleLogprobs
 
 from ....conftest import HfRunner, VllmRunner
@@ -135,9 +135,9 @@ def run_test(
                 [hf_prompt],
                 max_tokens,
                 num_logprobs=num_logprobs,
-                audios=[(resample_audio(audio[0],
-                                        orig_sr=audio[1],
-                                        target_sr=16000), 16000)])
+                audios=[(resample_audio_librosa(audio[0],
+                                                orig_sr=audio[1],
+                                                target_sr=16000), 16000)])
             for _, hf_prompt, audio in prompts_and_audios
         ]
 
