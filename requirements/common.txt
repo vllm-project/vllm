@@ -41,7 +41,6 @@ depyf==0.18.0 # required for profiling and debugging with compilation config
 cloudpickle # allows pickling lambda functions in model_executor/models/registry.py
 watchfiles # required for http server to monitor the updates of TLS files
 python-json-logger # Used by logging as per examples/other/logging_configuration.md
-scipy # Required for phi-4-multimodal-instruct
 ninja # Required for xgrammar, rocm, tpu, xpu
 opentelemetry-sdk>=1.26.0,<1.27.0  # vllm.tracing
 opentelemetry-api>=1.26.0,<1.27.0  # vllm.tracing

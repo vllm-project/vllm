@@ -6,7 +6,6 @@ from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
 import numpy as np
-import scipy.signal
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
@@ -26,6 +25,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.phi4mm_utils import resample_poly
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
@@ -765,10 +765,10 @@ class LogFbankProcessor:
 
         # Resample to 16000 or 8000 if needed
         if fs > 16000:
-            wav = scipy.signal.resample_poly(wav, 1, fs // 16000)
+            wav = resample_poly(wav, 1, fs // 16000)
             fs = 16000
         elif 8000 < fs < 16000:
-            wav = scipy.signal.resample_poly(wav, 1, fs // 8000)
+            wav = resample_poly(wav, 1, fs // 8000)
             fs = 8000
         elif fs < 8000:
             raise RuntimeError(f"Unsupported sample rate {fs}")
@@ -777,7 +777,7 @@ class LogFbankProcessor:
             if self._eightk_method == "resample":
                 # Input audio is 8 kHz. Convert to 16 kHz before feature
                 # extraction
-                wav = scipy.signal.resample_poly(wav, 2, 1)
+                wav = resample_poly(wav, 2, 1)
                 fs = 16000
             # Do nothing here for fillzero method
         elif fs != 16000:

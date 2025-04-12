@@ -7,6 +7,7 @@
 import math
 from typing import Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -1881,3 +1882,138 @@ def unfold_tensor(xs_pad, max_seq_len):
     # NT' x max_seq_len x D
     xs_pad = xs_pad.view(-1, max_seq_len, D)
     return xs_pad
+
+
+def firwin(numtaps, cutoff):
+    """
+    Design a simple lowpass FIR filter using a sinc function multiplied
+    by a Hamming window.
+
+    Parameters
+    ----------
+    numtaps : int
+        The number of filter taps (must be odd).
+    cutoff : float
+        Normalized cutoff frequency (0 < cutoff < 0.5); 1.0 here corresponds
+        to the Nyquist rate.
+
+    Returns
+    -------
+    h : 1D ndarray
+        The FIR filter coefficients.
+    """
+    numtaps = int(numtaps)
+    if numtaps % 2 == 0:
+        raise ValueError("numtaps must be odd.")
+    n = np.arange(numtaps)
+    center = (numtaps - 1) / 2.0
+    # Ideal impulse response (sinc-based)
+    h = np.sinc(2 * cutoff * (n - center))
+    h *= 2 * cutoff  # ensure unity gain at DC
+    # Apply a Hamming window for smoother response
+    w = np.hamming(numtaps)
+    h *= w
+    # Normalize to unity gain
+    h /= np.sum(h)
+    return h
+
+
+def upfirdn(x, h, up, down, axis=0):
+    """
+    Upsample, filter, and downsample a signal along a given axis.
+
+    Parameters
+    ----------
+    x : array_like
+        Input signal.
+    h : 1D ndarray
+        FIR filter coefficients.
+    up : int
+        Upsampling factor.
+    down : int
+        Downsampling factor.
+    axis : int, optional
+        Axis along which to perform the operation.
+
+    Returns
+    -------
+    y : ndarray
+        The filtered and decimated signal.
+    """
+    x = np.asarray(x)
+    h = np.asarray(h)
+    # Upsample: insert (up-1) zeros between every sample along the axis
+    new_shape = list(x.shape)
+    new_shape[axis] = x.shape[axis] * up
+    x_up = np.zeros(new_shape, dtype=x.dtype)
+    indexer = [slice(None)] * x.ndim
+    indexer[axis] = slice(0, new_shape[axis], up)
+    x_up[tuple(indexer)] = x
+
+    # Convolve along the specified axis using full convolution
+    def conv1d(v):
+        return np.convolve(v, h, mode='full')
+
+    y_conv = np.apply_along_axis(conv1d, axis, x_up)
+    # Downsample: take every down-th sample along the convolution axis
+    indexer = [slice(None)] * y_conv.ndim
+    indexer[axis] = slice(0, None, down)
+    return y_conv[tuple(indexer)]
+
+
+def resample_poly(x, up, down, axis=0):
+    """
+    Resample the signal using polyphase filtering.
+
+    This function upsamples the signal by 'up', applies a lowpass FIR filter,
+    and downsamples by 'down'.
+    The result has a sample rate multiplied by up/down.
+    The filter is designed so that the first output sample roughly matches
+    the first input sample.
+
+    Parameters
+    ----------
+    x : array_like
+        Input signal.
+    up : int
+        Upsampling factor.
+    down : int
+        Downsampling factor.
+    axis : int, optional
+        Axis along which to resample.
+
+    Returns
+    -------
+    y : ndarray
+        The resampled signal.
+        
+    Notes
+    -----
+    This implementation follows a strategy similar to SciPy's resample_poly 
+    https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.resample_poly.html
+    but is self-contained and depends only on NumPy and math.
+    """  # noqa: E501
+    x = np.asarray(x)
+    # Choose filter length; heuristic: 10 * max(up, down) taps on each side
+    max_rate = max(up, down)
+    half_len = 10 * max_rate
+    numtaps = 2 * half_len + 1
+    # Cutoff frequency (normalized): 1 / max(up, down)
+    cutoff = 1.0 / max_rate
+    h = firwin(numtaps, cutoff)
+    # Scale the filter coefficients by the up factor
+    h = h * up
+    # Apply the upfirdn process
+    y_full = upfirdn(x, h, up, down, axis=axis)
+    # The symmetric FIR filter introduces a delay of (numtaps - 1) / 2 samples.
+    delay = (numtaps - 1) // 2
+    # In the output domain, the delay is reduced by the downsampling factor.
+    trim = delay // down
+    # Expected output length (ceiling division)
+    n_in = x.shape[axis]
+    n_out = (n_in * up + down - 1) // down
+    # Slice y_full to remove the initial delay and take n_out samples on axis
+    slicer = [slice(None)] * y_full.ndim
+    slicer[axis] = slice(trim, trim + n_out)
+    y = y_full[tuple(slicer)]
+    return y
