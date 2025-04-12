@@ -1690,7 +1690,7 @@ class ParallelConfig:
             # current node and we aren't in a ray placement group.
 
             from vllm.executor import ray_utils
-            backend = "mp"
+            backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_neuron():
                 # neuron uses single process to control multiple devices
@@ -1769,13 +1769,19 @@ class SchedulerConfig:
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: Optional[int] = None
-    """Maximum number of tokens to be processed in a single iteration."""
+    max_num_batched_tokens: int = None  # type: ignore
+    """Maximum number of tokens to be processed in a single iteration.
+    
+    This config has no static default. If left unspecified by the user, it will
+    be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_num_seqs: Optional[int] = None
-    """Maximum number of sequences to be processed in a single iteration."""
+    max_num_seqs: int = None  # type: ignore
+    """Maximum number of sequences to be processed in a single iteration.
+    
+    This config has no static default. If left unspecified by the user, it will
+    be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_model_len: Optional[int] = None
+    max_model_len: int = None  # type: ignore
     """Maximum length of a sequence (including prompt and generated text). This
     is usually set in ModelConfig and should not be set here."""
 
@@ -1806,7 +1812,7 @@ class SchedulerConfig:
     """Apply a delay (of delay factor multiplied by previous
     prompt latency) before scheduling next prompt."""
 
-    enable_chunked_prefill: Optional[bool] = None
+    enable_chunked_prefill: bool = None  # type: ignore
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 

@@ -261,21 +261,24 @@ class EngineArgs:
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
-        def is_type_in_union(cls: type[Any], type: type[Any]) -> bool:
+        def is_type_in_union(cls: type[Any], type: Union[type,
+                                                         object]) -> bool:
             """Check if the class is a type in a union type."""
             return get_origin(cls) is Union and type in get_args(cls)
 
-        def get_type_from_union(cls: type[Any], type: type[Any]) -> type[Any]:
+        def get_type_from_union(cls: type[Any],
+                                type: Union[type, object]) -> type[Any]:
             """Get the type in a union type."""
             for arg in get_args(cls):
                 if arg is type:
                     return arg
+            raise ValueError(f"Type {type} not found in union type {cls}.")
 
         def is_optional(cls: type[Any]) -> bool:
             """Check if the class is an optional type."""
             return is_type_in_union(cls, type(None))
 
-        def can_be_type(cls: type[Any], type: type[Any]) -> bool:
+        def can_be_type(cls: type[Any], type: Union[type, object]) -> bool:
             """Check if the class can be of type."""
             return cls is type or get_origin(cls) is type or is_type_in_union(
                 cls, type)
