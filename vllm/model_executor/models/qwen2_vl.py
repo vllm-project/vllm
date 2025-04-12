@@ -720,7 +720,7 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
         self,
         data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> Optional[ModalityDataItems[Any, Any]]:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -734,7 +734,7 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
     def _parse_video_data(
         self,
         data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> Optional[ModalityDataItems[Any, Any]]:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,

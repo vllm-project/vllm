@@ -126,7 +126,7 @@ class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
     def _parse_audio_data(
         self,
         data: Union[dict[str, torch.Tensor], ModalityData[AudioItem]],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> Optional[ModalityDataItems[Any, Any]]:
         if isinstance(data, dict):
             return MiniCPMOAudioEmbeddingItems(
                 data,

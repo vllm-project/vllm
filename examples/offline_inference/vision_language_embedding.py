@@ -63,6 +63,7 @@ def run_e5_v(query: Query) -> ModelRequestData:
         model="royokong/e5-v",
         task="embed",
         max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -93,6 +94,7 @@ def run_vlm2vec(query: Query) -> ModelRequestData:
         task="embed",
         trust_remote_code=True,
         mm_processor_kwargs={"num_crops": 4},
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -130,6 +132,11 @@ def get_query(modality: QueryModality):
 def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
     query = get_query(modality)
     req_data = model_example_map[model](query)
+
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
 
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
     llm = LLM(**engine_args)
