@@ -40,11 +40,16 @@ class P2pNcclPipe:
         self._hostname = hostname
         self._port = port
 
+        # Each card corresponds to a ZMQ address.
         self.zmq_address = f"{self._hostname}:{self._port}"
+
+        # The `http_port` must be consistent with the port of OpenAI.
         self.http_address = (
             f"{self._hostname}:"
             f"{self.config.kv_connector_extra_config['http_port']}")
 
+        # If `proxy_ip` or `proxy_port` is `""`,
+        # then the ping thread will not be enabled.
         proxy_ip = self.config.get_from_extra_config("proxy_ip", "")
         proxy_port = self.config.get_from_extra_config("proxy_port", "")
         if proxy_ip == "" or proxy_port == "":
@@ -264,6 +269,8 @@ class P2pNcclPipe:
                         "Unexpected, Received message from %s, data: %s",
                         remote_address, data)
 
+    # Asynchronous sending may cause conflicts between P2P NCCL and
+    # NCCL used in TP/PP, which can lead to deadlock issues.
     def _send_async(self):
         while True:
             with self.send_store_cv:
