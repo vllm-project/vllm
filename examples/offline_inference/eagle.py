@@ -45,7 +45,11 @@ def main():
     parser.add_argument("--enable_chunked_prefill", action='store_true')
     parser.add_argument("--max_num_batched_tokens", type=int, default=2048)
     parser.add_argument("--temp", type=float, default=0)
+    parser.add_argument("--use_v1", type=str, default="1", help='1 or 0')
     args = parser.parse_args()
+
+    # TODO: remove this option once EAGLE in v1 is ready.
+    os.environ["VLLM_USE_V1"] = args.use_v1
 
     model_dir = "meta-llama/Meta-Llama-3-8B-Instruct"
     eagle_dir = "abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm"
@@ -94,10 +98,16 @@ def main():
     # to account for the token from the target model that's always going to be
     # accepted
     acceptance_counts = [0] * (args.num_spec_tokens + 1)
-    for output in outputs:
-        for step, count in enumerate(
-                output.metrics.spec_token_acceptance_counts):
-            acceptance_counts[step] += count
+    if args.use_v1 == '1':
+        for output in outputs:
+            for step, count in enumerate(
+                    output.spec_token_acceptance_counts[0]):
+                acceptance_counts[step] += count
+    else:
+        for output in outputs:
+            for step, count in enumerate(
+                    output.metrics.spec_token_acceptance_counts):
+                acceptance_counts[step] += count
 
     print("-" * 50)
     print(f"mean acceptance length: \

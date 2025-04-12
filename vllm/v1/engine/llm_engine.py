@@ -183,11 +183,20 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
         # Process raw inputs into the request.
-        request = self.processor.process_inputs(request_id, prompt, params,
-                                                arrival_time, lora_request,
-                                                trace_headers,
-                                                prompt_adapter_request,
-                                                priority)
+        num_spec_tokens = 0
+        if self.vllm_config.speculative_config is not None:
+            num_spec_tokens = (
+                self.vllm_config.speculative_config.num_speculative_tokens)
+        request = self.processor.process_inputs(
+            request_id,
+            prompt,
+            params,
+            arrival_time,
+            lora_request,
+            trace_headers,
+            prompt_adapter_request,
+            priority,
+            num_spec_tokens=num_spec_tokens)
 
         n = params.n if isinstance(params, SamplingParams) else 1
 

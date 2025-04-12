@@ -136,10 +136,9 @@ class RequestState:
         )
 
     def make_request_output(
-        self,
-        new_token_ids: list[int],
-        finish_reason: Optional[FinishReason],
+        self, new_token_ids: list[int], finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
+        spec_token_acceptance_counts: Optional[list[int]]
     ) -> Optional[RequestOutput]:
 
         finished = finish_reason is not None
@@ -150,7 +149,10 @@ class RequestState:
             return None
 
         completion_output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason)
+            new_token_ids,
+            finish_reason,
+            stop_reason,
+            spec_token_acceptance_counts=spec_token_acceptance_counts)
 
         request_id = self.request_id
         if self.parent_req is None:
@@ -186,10 +188,9 @@ class RequestState:
         )
 
     def _new_completion_output(
-        self,
-        token_ids: list[int],
-        finish_reason: Optional[FinishReason],
-        stop_reason: Union[int, str, None],
+            self, token_ids: list[int], finish_reason: Optional[FinishReason],
+            stop_reason: Union[int, str, None],
+            spec_token_acceptance_counts: Optional[list[int]]
     ) -> CompletionOutput:
 
         finished = finish_reason is not None
@@ -212,7 +213,8 @@ class RequestState:
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
-            stop_reason=stop_reason if finished else None)
+            stop_reason=stop_reason if finished else None,
+            spec_token_acceptance_counts=spec_token_acceptance_counts)
 
 
 class OutputProcessor:
@@ -337,7 +339,11 @@ class OutputProcessor:
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
-                    new_token_ids, finish_reason, stop_reason):
+                    new_token_ids,
+                    finish_reason,
+                    stop_reason,
+                    spec_token_acceptance_counts=engine_core_output.
+                    spec_token_acceptance_counts):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)

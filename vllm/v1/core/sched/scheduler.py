@@ -601,6 +601,10 @@ class Scheduler(SchedulerInterface):
                     num_draft_tokens=len(scheduled_spec_token_ids),
                     num_accepted_tokens=len(generated_token_ids) - 1)
 
+                for i in range(len(generated_token_ids)):
+                    if request.spec_token_acceptance_counts is not None:
+                        request.spec_token_acceptance_counts[i] += 1
+
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
             # OPTIMIZATION: Avoid list(set) if the set is empty.
@@ -662,7 +666,9 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                        events=request.take_events(),
+                        spec_token_acceptance_counts=request.
+                        spec_token_acceptance_counts))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
