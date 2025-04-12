@@ -78,12 +78,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
     """MoE method without quantization."""
 
     @staticmethod
-    def get_moe_method(
-        activation: str,
-        expert_map: Optional[torch.Tensor],
-    ) -> "UnquantizedFusedMoEMethod":
-        if (UnquantizedFusedCutlassMoEMethod.check_supported(
-                activation, expert_map)):
+    def get_moe_method(activation: str) -> "UnquantizedFusedMoEMethod":
+        if (UnquantizedFusedCutlassMoEMethod.check_supported(activation)):
             return UnquantizedFusedCutlassMoEMethod()
         else:
             return UnquantizedFusedTritonMoEMethod()
@@ -351,9 +347,7 @@ class UnquantizedFusedCutlassMoEMethod(FusedMoEMethodBase, CustomOp):
     """CUTLASS MoE method without quantization."""
 
     @staticmethod
-    def check_supported(activation: str,
-                        expert_map: Optional[torch.Tensor],
-                        error: bool = True) -> bool:
+    def check_supported(activation: str, error: bool = True) -> bool:
         required_capability = 90
         capability_tuple = current_platform.get_device_capability()
 
@@ -362,17 +356,19 @@ class UnquantizedFusedCutlassMoEMethod(FusedMoEMethodBase, CustomOp):
             arch_supported = (capability == required_capability
                               and not current_platform.is_cpu()
                               and not current_platform.is_rocm())
-            functions_supported = activation == "silu" and expert_map is None
-            if error and not arch_supported:
-                raise RuntimeError(
-                    "Method is not supported for the current device. Required ",
+            functions_supported = activation == "silu"
+            if not arch_supported:
+                warn_msg = (
+                    "UnquantizedFusedCutlassMoEMethod is not supported"
+                    "for the current device. Required "
                     f"GPU with capability: {required_capability}. Current "
                     f"capability: {capability}.")
-            elif error and not functions_supported:
-                raise RuntimeError(
-                    "Method is not supported for the required functionality. ",
-                    "Required activation: silu, expert map not supported.",
-                )
+                logger.warning(warn_msg)
+            if not functions_supported:
+                logger.warning(
+                    "UnquantizedFusedCutlassMoEMethod Method is not supported"
+                    "for the required functionality. "
+                    "Required activation: silu, expert map not supported.")
             return arch_supported and functions_supported
         else:
             return False
@@ -441,8 +437,6 @@ class UnquantizedFusedCutlassMoEMethod(FusedMoEMethodBase, CustomOp):
         activation: str = "silu",
     ) -> torch.Tensor:
         assert activation == "silu"
-        assert global_num_experts == layer.w13_weight.shape[0]
-        assert expert_map is None
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -466,6 +460,7 @@ class UnquantizedFusedCutlassMoEMethod(FusedMoEMethodBase, CustomOp):
             self.c_strides1,
             self.ab_strides2,
             self.c_strides2,
+            expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
@@ -637,8 +632,7 @@ class FusedMoE(torch.nn.Module):
         # for heuristic purposes, so it must be initialized first.
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
-                UnquantizedFusedMoEMethod.get_moe_method(
-                    self.activation, self.expert_map))
+                UnquantizedFusedMoEMethod.get_moe_method(self.activation))
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None

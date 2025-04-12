@@ -81,13 +81,13 @@ struct sm90_8_bit_config_N8192 {
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
-struct sm90_16_bit_config_default {
-  // M in (16, inf)
+struct sm90_16_bit_config_M512 {
+  // M in [1, 512]
   using KernelSchedule =
       cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
   using EpilogueSchedule =
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-  using TileShape = cute::Shape<cute::_64, cute::_256, cute::_128>;
+  using TileShape = cute::Shape<cute::_64, cute::_128, cute::_64>;
   using ClusterShape = cute::Shape<cute::_1, cute::_2, cute::_1>;
 
   using Cutlass3xGemm =
@@ -97,46 +97,14 @@ struct sm90_16_bit_config_default {
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
-struct sm90_16_bit_config_M16 {
-  // M in [1, 16]
+struct sm90_16_bit_config_default {
+  // M in (1024, inf]
   using KernelSchedule =
       cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
   using EpilogueSchedule =
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-  using TileShape = cute::Shape<cute::_64, cute::_64, cute::_128>;
-  using ClusterShape = cute::Shape<cute::_1, cute::_4, cute::_1>;
-
-  using Cutlass3xGemm =
-      cutlass_3x_moe_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                          KernelSchedule, EpilogueSchedule>;
-};
-
-template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue>
-struct sm90_16_bit_config_K8192 {
-  // K in [8192, inf)
-  using KernelSchedule =
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
-  using EpilogueSchedule =
-      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-  using TileShape = cute::Shape<cute::_128, cute::_128, cute::_128>;
-  using ClusterShape = cute::Shape<cute::_1, cute::_8, cute::_1>;
-
-  using Cutlass3xGemm =
-      cutlass_3x_moe_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                          KernelSchedule, EpilogueSchedule>;
-};
-
-template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue>
-struct sm90_16_bit_config_N8192 {
-  // N in [8192, inf)
-  using KernelSchedule =
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
-  using EpilogueSchedule =
-      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-  using TileShape = cute::Shape<cute::_64, cute::_128, cute::_256>;
-  using ClusterShape = cute::Shape<cute::_1, cute::_8, cute::_1>;
+  using TileShape = cute::Shape<cute::_64, cute::_256, cute::_64>;
+  using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
 
   using Cutlass3xGemm =
       cutlass_3x_moe_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
@@ -204,11 +172,7 @@ void run_cutlass_moe_mm_sm90_16_bit(
   TORCH_CHECK(b_tensors.size(0) > 0, "No input B tensors provided.");
   TORCH_CHECK(out_tensors.size(0) > 0, "No output tensors provided.");
 
-  using Cutlass3xGemmN8192 = typename sm90_16_bit_config_N8192<
-      InType, OutType, vllm::c3x::TrivialEpilogue>::Cutlass3xGemm;
-  using Cutlass3xGemmK8192 = typename sm90_16_bit_config_K8192<
-      InType, OutType, vllm::c3x::TrivialEpilogue>::Cutlass3xGemm;
-  using Cutlass3xGemmM16 = typename sm90_16_bit_config_M16<
+  using Cutlass3xGemmM512 = typename sm90_16_bit_config_M512<
       InType, OutType, vllm::c3x::TrivialEpilogue>::Cutlass3xGemm;
   using Cutlass3xGemmDefault = typename sm90_16_bit_config_default<
       InType, OutType, vllm::c3x::TrivialEpilogue>::Cutlass3xGemm;
@@ -217,16 +181,8 @@ void run_cutlass_moe_mm_sm90_16_bit(
   uint32_t const n = out_tensors.size(1);
   uint32_t const k = a_tensors.size(1);
 
-  if (n >= 8192) {
-    cutlass_moe_gemm_caller_16_bit<Cutlass3xGemmN8192>(
-        out_tensors, a_tensors, b_tensors, expert_offsets, problem_sizes,
-        a_strides, b_strides, c_strides);
-  } else if (k >= 8192) {
-    cutlass_moe_gemm_caller_16_bit<Cutlass3xGemmK8192>(
-        out_tensors, a_tensors, b_tensors, expert_offsets, problem_sizes,
-        a_strides, b_strides, c_strides);
-  } else if (m <= 16) {
-    cutlass_moe_gemm_caller_16_bit<Cutlass3xGemmM16>(
+  if (m <= 512) {
+    cutlass_moe_gemm_caller_16_bit<Cutlass3xGemmM512>(
         out_tensors, a_tensors, b_tensors, expert_offsets, problem_sizes,
         a_strides, b_strides, c_strides);
   } else {
