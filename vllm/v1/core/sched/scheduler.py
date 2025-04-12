@@ -114,9 +114,10 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
-        self.num_spec_tokens = 0
+        self.num_lookahead_tokens = 0
         if speculative_config and speculative_config.method == "eagle":
-            self.num_spec_tokens = speculative_config.num_speculative_tokens
+            self.num_lookahead_tokens = \
+                speculative_config.num_speculative_tokens
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -196,7 +197,7 @@ class Scheduler(SchedulerInterface):
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
-                    num_lookahead_tokens=self.num_spec_tokens)
+                    num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.

@@ -176,8 +176,8 @@ class KVCacheManager:
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
             num_lookahead_tokens: The number of speculative tokens to allocate.
-                This field is only used by eagle. We allocate the slots for
-                the propose heads.
+                This is used by spec decode proposers with kv-cache such 
+                as eagle.
 
         Blocks layout:
         -----------------------------------------------------------------------
