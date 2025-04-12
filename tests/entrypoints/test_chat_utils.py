@@ -842,6 +842,8 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
     assert isinstance(chat_template, str)
 
 
+# NOTE: Qwen2-Audio default chat template is specially defined inside
+# processor class instead of using `tokenizer_config.json`
 # yapf: disable
 @pytest.mark.parametrize(
     ("model", "expected_format"),
@@ -905,10 +907,10 @@ def test_resolve_content_format_hf_defined(model, expected_format):
      ("template_dse_qwen2_vl.jinja", "openai"),
      ("template_falcon_180b.jinja", "string"),
      ("template_falcon.jinja", "string"),
-     ("template_florence.jinja", "string"),
+     ("template_florence2.jinja", "string"),
      ("template_inkbot.jinja", "string"),
      ("template_llava.jinja", "string"),
-     ("template_telefim.jinja", "string"),
+     ("template_teleflm.jinja", "string"),
      ("template_vlm2vec.jinja", "openai"),
      ("tool_chat_template_granite_20b_fc.jinja", "string"),
      ("tool_chat_template_hermes.jinja", "string"),
