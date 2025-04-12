@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# yapf: disable
 import argparse
 import dataclasses
 import json
@@ -19,8 +20,9 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, ObservabilityConfig,
                          ParallelConfig, PoolerConfig, PromptAdapterConfig,
-                         SchedulerConfig, SpeculativeConfig, TaskOption,
-                         TokenizerPoolConfig, VllmConfig, get_attr_docs)
+                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                         TaskOption, TokenizerPoolConfig, VllmConfig,
+                         get_attr_docs)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -29,7 +31,9 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, StoreBoolean, is_in_ray_actor
+from vllm.utils import FlexibleArgumentParser, is_in_ray_actor
+
+# yapf: enable
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -147,11 +151,13 @@ class EngineArgs:
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
-    max_num_batched_tokens: Optional[int] = None
-    max_num_partial_prefills: Optional[int] = 1
-    max_long_partial_prefills: Optional[int] = 1
-    long_prefill_token_threshold: Optional[int] = 0
-    max_num_seqs: Optional[int] = None
+    max_num_batched_tokens: Optional[
+        int] = SchedulerConfig.max_num_batched_tokens
+    max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
+    max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
+    long_prefill_token_threshold: int = \
+        SchedulerConfig.long_prefill_token_threshold
+    max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
     revision: Optional[str] = None
@@ -187,20 +193,21 @@ class EngineArgs:
     lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
-    num_scheduler_steps: int = 1
-    multi_step_stream_outputs: bool = True
+    num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
+    multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[int] = None
-    num_lookahead_slots: int = 0
+    num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: Optional[
         dict] = LoadConfig.model_loader_extra_config
     ignore_patterns: Optional[Union[str,
                                     List[str]]] = LoadConfig.ignore_patterns
-    preemption_mode: Optional[str] = None
+    preemption_mode: Optional[str] = SchedulerConfig.preemption_mode
 
-    scheduler_delay_factor: float = 0.0
-    enable_chunked_prefill: Optional[bool] = None
-    disable_chunked_mm_input: bool = False
+    scheduler_delay_factor: float = SchedulerConfig.delay_factor
+    enable_chunked_prefill: Optional[
+        bool] = SchedulerConfig.enable_chunked_prefill
+    disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     guided_decoding_backend: str = DecodingConfig.guided_decoding_backend
     logits_processor_pattern: Optional[str] = None
@@ -212,8 +219,8 @@ class EngineArgs:
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
-    scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
-    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
+    scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
+    scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
 
     override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
@@ -552,14 +559,6 @@ class EngineArgs:
                             'block manager v2) is now the default. '
                             'Setting this flag to True or False'
                             ' has no effect on vLLM behavior.')
-        parser.add_argument(
-            '--num-lookahead-slots',
-            type=int,
-            default=EngineArgs.num_lookahead_slots,
-            help='Experimental scheduling config necessary for '
-            'speculative decoding. This will be replaced by '
-            'speculative config in the future; it is present '
-            'to enable correctness tests until then.')
 
         parser.add_argument('--seed',
                             type=int,
@@ -602,36 +601,6 @@ class EngineArgs:
             default=None,
             help='If specified, ignore GPU profiling result and use this number'
             ' of GPU blocks. Used for testing preemption.')
-        parser.add_argument('--max-num-batched-tokens',
-                            type=int,
-                            default=EngineArgs.max_num_batched_tokens,
-                            help='Maximum number of batched tokens per '
-                            'iteration.')
-        parser.add_argument(
-            "--max-num-partial-prefills",
-            type=int,
-            default=EngineArgs.max_num_partial_prefills,
-            help="For chunked prefill, the max number of concurrent \
-            partial prefills.")
-        parser.add_argument(
-            "--max-long-partial-prefills",
-            type=int,
-            default=EngineArgs.max_long_partial_prefills,
-            help="For chunked prefill, the maximum number of prompts longer "
-            "than --long-prefill-token-threshold that will be prefilled "
-            "concurrently. Setting this less than --max-num-partial-prefills "
-            "will allow shorter prompts to jump the queue in front of longer "
-            "prompts in some cases, improving latency.")
-        parser.add_argument(
-            "--long-prefill-token-threshold",
-            type=float,
-            default=EngineArgs.long_prefill_token_threshold,
-            help="For chunked prefill, a request is considered long if the "
-            "prompt is longer than this number of tokens.")
-        parser.add_argument('--max-num-seqs',
-                            type=int,
-                            default=EngineArgs.max_num_seqs,
-                            help='Maximum number of sequences per iteration.')
         parser.add_argument(
             '--max-logprobs',
             type=int,
@@ -816,28 +785,6 @@ class EngineArgs:
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
 
-        parser.add_argument(
-            '--multi-step-stream-outputs',
-            action=StoreBoolean,
-            default=EngineArgs.multi_step_stream_outputs,
-            nargs="?",
-            const="True",
-            help='If False, then multi-step will stream outputs at the end '
-            'of all steps')
-        parser.add_argument(
-            '--scheduler-delay-factor',
-            type=float,
-            default=EngineArgs.scheduler_delay_factor,
-            help='Apply a delay (of delay factor multiplied by previous '
-            'prompt latency) before scheduling next prompt.')
-        parser.add_argument(
-            '--enable-chunked-prefill',
-            action=StoreBoolean,
-            default=EngineArgs.enable_chunked_prefill,
-            nargs="?",
-            const="True",
-            help='If set, the prefill requests can be chunked based on the '
-            'max_num_batched_tokens.')
         parser.add_argument('--speculative-config',
                             type=json.loads,
                             default=None,
@@ -913,22 +860,43 @@ class EngineArgs:
             help="Disable async output processing. This may result in "
             "lower performance.")
 
-        parser.add_argument(
-            '--scheduling-policy',
-            choices=['fcfs', 'priority'],
-            default="fcfs",
-            help='The scheduling policy to use. "fcfs" (first come first served'
-            ', i.e. requests are handled in order of arrival; default) '
-            'or "priority" (requests are handled based on given '
-            'priority (lower value means earlier handling) and time of '
-            'arrival deciding any ties).')
-
-        parser.add_argument(
-            '--scheduler-cls',
-            default=EngineArgs.scheduler_cls,
-            help='The scheduler class to use. "vllm.core.scheduler.Scheduler" '
-            'is the default scheduler. Can be a class directly or the path to '
-            'a class of form "mod.custom_class".')
+        # Scheduler arguments
+        scheduler_kwargs = get_kwargs(SchedulerConfig)
+        scheduler_group = parser.add_argument_group(
+            title="SchedulerConfig",
+            description=SchedulerConfig.__doc__,
+        )
+        scheduler_group.add_argument(
+            '--max-num-batched-tokens',
+            **scheduler_kwargs["max_num_batched_tokens"])
+        scheduler_group.add_argument('--max-num-seqs',
+                                     **scheduler_kwargs["max_num_seqs"])
+        scheduler_group.add_argument(
+            "--max-num-partial-prefills",
+            **scheduler_kwargs["max_num_partial_prefills"])
+        scheduler_group.add_argument(
+            "--max-long-partial-prefills",
+            **scheduler_kwargs["max_long_partial_prefills"])
+        scheduler_group.add_argument(
+            "--long-prefill-token-threshold",
+            **scheduler_kwargs["long_prefill_token_threshold"])
+        scheduler_group.add_argument('--num-lookahead-slots',
+                                     **scheduler_kwargs["num_lookahead_slots"])
+        scheduler_group.add_argument('--scheduler-delay-factor',
+                                     **scheduler_kwargs["delay_factor"])
+        scheduler_group.add_argument(
+            '--enable-chunked-prefill',
+            **scheduler_kwargs["enable_chunked_prefill"])
+        scheduler_group.add_argument(
+            '--multi-step-stream-outputs',
+            **scheduler_kwargs["multi_step_stream_outputs"])
+        scheduler_group.add_argument('--scheduling-policy',
+                                     **scheduler_kwargs["policy"])
+        scheduler_group.add_argument(
+            "--disable-chunked-mm-input",
+            **scheduler_kwargs["disable_chunked_mm_input"])
+        parser.add_argument('--scheduler-cls',
+                            **scheduler_kwargs["scheduler_cls"])
 
         parser.add_argument(
             '--override-neuron-config',
@@ -1052,20 +1020,6 @@ class EngineArgs:
             "could be useful for preventing potential numerical issues. "
             "Note that even if this is set to False, cascade attention will be "
             "only used when the heuristic tells that it's beneficial.")
-
-        parser.add_argument(
-            "--disable-chunked-mm-input",
-            action=StoreBoolean,
-            default=EngineArgs.disable_chunked_mm_input,
-            nargs="?",
-            const="True",
-            help="Disable multimodal input chunking attention for V1. "
-            "If set to true and chunked prefill is enabled, we do not want to"
-            " partially schedule a multimodal item. This ensures that if a "
-            "request has a mixed prompt (like text tokens TTTT followed by "
-            "image tokens IIIIIIIIII) where only some image tokens can be "
-            "scheduled (like TTTTIIIII, leaving IIIII), it will be scheduled "
-            "as TTTT in one step and IIIIIIIIII in the next.")
 
         return parser
 
@@ -1420,7 +1374,7 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        if self.preemption_mode != EngineArgs.preemption_mode:
+        if self.preemption_mode != SchedulerConfig.preemption_mode:
             _raise_or_fallback(feature_name="--preemption-mode",
                                recommend_to_remove=True)
             return False
@@ -1431,17 +1385,17 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        if self.scheduling_policy != EngineArgs.scheduling_policy:
+        if self.scheduling_policy != SchedulerConfig.policy:
             _raise_or_fallback(feature_name="--scheduling-policy",
                                recommend_to_remove=False)
             return False
 
-        if self.num_scheduler_steps != EngineArgs.num_scheduler_steps:
+        if self.num_scheduler_steps != SchedulerConfig.num_scheduler_steps:
             _raise_or_fallback(feature_name="--num-scheduler-steps",
                                recommend_to_remove=True)
             return False
 
-        if self.scheduler_delay_factor != EngineArgs.scheduler_delay_factor:
+        if self.scheduler_delay_factor != SchedulerConfig.delay_factor:
             _raise_or_fallback(feature_name="--scheduler-delay-factor",
                                recommend_to_remove=True)
             return False
@@ -1525,9 +1479,9 @@ class EngineArgs:
 
         # No Concurrent Partial Prefills so far.
         if (self.max_num_partial_prefills
-                != EngineArgs.max_num_partial_prefills
+                != SchedulerConfig.max_num_partial_prefills
                 or self.max_long_partial_prefills
-                != EngineArgs.max_long_partial_prefills):
+                != SchedulerConfig.max_long_partial_prefills):
             _raise_or_fallback(feature_name="Concurrent Partial Prefill",
                                recommend_to_remove=False)
             return False
