@@ -49,10 +49,26 @@ DEVICE_OPTIONS = [
 ]
 
 
-def nullable_str(val: str):
-    if not val or val == "None":
+def optional_arg(val: str, type: type[Any]) -> Optional[Any]:
+    if val == "" or val == "None":
         return None
-    return val
+    try:
+        return type(val)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            f"Value {val} cannot be converted to {type}.") from e
+
+
+def optional_str(val: str) -> Optional[str]:
+    return optional_arg(val, str)
+
+
+def optional_int(val: str) -> Optional[int]:
+    return optional_arg(val, int)
+
+
+def optional_float(val: str) -> Optional[float]:
+    return optional_arg(val, float)
 
 
 def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
@@ -261,7 +277,7 @@ class EngineArgs:
                     continue
                 # Handle optional fields
                 if is_optional(field.type):
-                    kwargs[name]["type"] = nullable_str
+                    kwargs[name]["type"] = optional_str
                     continue
                 # Handle str in union fields
                 if is_type_in_union(field.type, str):
@@ -287,13 +303,13 @@ class EngineArgs:
             'which task to use.')
         parser.add_argument(
             '--tokenizer',
-            type=nullable_str,
+            type=optional_str,
             default=EngineArgs.tokenizer,
             help='Name or path of the huggingface tokenizer to use. '
             'If unspecified, model name or path will be used.')
         parser.add_argument(
             "--hf-config-path",
-            type=nullable_str,
+            type=optional_str,
             default=EngineArgs.hf_config_path,
             help='Name or path of the huggingface config to use. '
             'If unspecified, model name or path will be used.')
@@ -305,21 +321,21 @@ class EngineArgs:
             'the input. The generated output will contain token ids.')
         parser.add_argument(
             '--revision',
-            type=nullable_str,
+            type=optional_str,
             default=None,
             help='The specific model version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
         parser.add_argument(
             '--code-revision',
-            type=nullable_str,
+            type=optional_str,
             default=None,
             help='The specific revision to use for the model code on '
             'Hugging Face Hub. It can be a branch name, a tag name, or a '
             'commit id. If unspecified, will use the default version.')
         parser.add_argument(
             '--tokenizer-revision',
-            type=nullable_str,
+            type=optional_str,
             default=None,
             help='Revision of the huggingface tokenizer to use. '
             'It can be a branch name, a tag name, or a commit id. '
@@ -415,7 +431,7 @@ class EngineArgs:
             'the behavior is subject to change in each release.')
         parser.add_argument(
             '--logits-processor-pattern',
-            type=nullable_str,
+            type=optional_str,
             default=None,
             help='Optional regex pattern specifying valid logits processor '
             'qualified names that can be passed with the `logits_processors` '
@@ -596,7 +612,7 @@ class EngineArgs:
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',
-                            type=nullable_str,
+                            type=optional_str,
                             choices=[*QUANTIZATION_METHODS, None],
                             default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
@@ -660,7 +676,7 @@ class EngineArgs:
                             'asynchronous tokenization. Ignored '
                             'if tokenizer_pool_size is 0.')
         parser.add_argument('--tokenizer-pool-extra-config',
-                            type=nullable_str,
+                            type=optional_str,
                             default=EngineArgs.tokenizer_pool_extra_config,
                             help='Extra config for tokenizer pool. '
                             'This should be a JSON string that will be '
@@ -723,7 +739,7 @@ class EngineArgs:
                   'base model dtype.'))
         parser.add_argument(
             '--long-lora-scaling-factors',
-            type=nullable_str,
+            type=optional_str,
             default=EngineArgs.long_lora_scaling_factors,
             help=('Specify multiple scaling factors (which can '
                   'be different from base model scaling factor '
@@ -932,7 +948,7 @@ class EngineArgs:
             'class without changing the existing functions.')
         parser.add_argument(
             "--generation-config",
-            type=nullable_str,
+            type=optional_str,
             default="auto",
             help="The folder path to the generation config. "
             "Defaults to 'auto', the generation config will be loaded from "
