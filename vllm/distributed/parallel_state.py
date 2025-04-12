@@ -194,7 +194,6 @@ class GroupCoordinator:
 
         from vllm.platforms import current_platform
 
-        # TODO: fix it for other platforms
         if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
         elif current_platform.is_out_of_tree():
