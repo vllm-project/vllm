@@ -1301,6 +1301,31 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         raise AssertionError("This line should be unreachable.")
 
+    def _get_and_validate_encoder_lens(
+        self,
+        encoder_seq_lens: List[int],
+        num_tiles: List[List[int]],
+        num_tokens_per_tile: int,
+    ) -> List[int]:
+        # Get the actual number of encoder tokens for each sample.
+        # Because attn_metadata.encoder_seq_lens only counts the last
+        # group of images for each sample, which is used to cheat the
+        # block manager to allocate blocks for those images only.
+        # See MllamaMultiModalProcessor for more details.
+        actual_encoder_seq_lens = [
+            sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles
+        ]
+
+        # remove 0 encoder len entries for text-only requests for these
+        # assertions
+        attn_metadata_lens = [x for x in encoder_seq_lens if x > 0]
+        assert len(actual_encoder_seq_lens) == len(attn_metadata_lens)
+        for actual_len, last_group_len in zip(actual_encoder_seq_lens,
+                                              attn_metadata_lens):
+            assert actual_len >= last_group_len
+
+        return actual_encoder_seq_lens
+
     def flat_encoder_result(self, cross_attention_states: torch.Tensor,
                             attn_metadata: AttentionMetadata,
                             actual_encoder_seq_lens: List[int]):
@@ -1428,20 +1453,14 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         else:
             skip_cross_attention = False
 
-            # Get the actual number of encoder tokens for each sample.
-            # Because attn_metadata.encoder_seq_lens only counts the last
-            # group of images for each sample, which is used to cheat the
-            # block manager to allocate blocks for those images only.
-            # See MllamaMultiModalProcessor for more details.
-            num_tiles_tensor = kwargs.pop("num_tiles")
-            num_tiles = [t.tolist() for t in num_tiles_tensor]
+            num_tiles = [t.tolist() for t in kwargs.pop("num_tiles")]
             num_tokens_per_tile = calc_token_per_chunk(self.image_size)
-            actual_encoder_seq_lens = [
-                sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles
-            ]
-            for actual_len, last_group_len in zip(
-                    actual_encoder_seq_lens, attn_metadata.encoder_seq_lens):
-                assert actual_len >= last_group_len
+
+            actual_encoder_seq_lens = self._get_and_validate_encoder_lens(
+                attn_metadata.encoder_seq_lens,
+                num_tiles,
+                num_tokens_per_tile,
+            )
 
             cross_attention_states = self.get_cross_attention_states(
                 image_inputs, attn_metadata, actual_encoder_seq_lens)
