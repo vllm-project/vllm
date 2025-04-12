@@ -106,6 +106,28 @@ def with_retry(func: Callable[[], Any],
             retry_delay *= 2
 
 
+def check_is_model_downloaded(hub_type: str, repo_id: str) -> Optional[str]:
+    if hub_type == "huggingface":
+        from huggingface_hub import snapshot_download
+    else:
+        # modelscope
+        from modelscope.hub.snapshot_download import snapshot_download
+
+    try:
+        model_path = snapshot_download(repo_id=repo_id, local_files_only=True)
+        return model_path
+    except Exception as e:
+        logger.debug("Cannot find %s in the cached path: %s", repo_id, e)
+        return None
+
+
+def get_local_model_files(model_path: Path) -> list[str]:
+    return [
+        str(file.relative_to(model_path)) for file in model_path.rglob('*')
+        if file.is_file()
+    ]
+
+
 # @cache doesn't cache exceptions
 @cache
 def list_repo_files(
@@ -119,18 +141,22 @@ def list_repo_files(
     def lookup_files() -> list[str]:
         # directly list files if model is local
         if (local_path := Path(repo_id)).exists():
-            return [
-                str(file.relative_to(local_path))
-                for file in local_path.rglob('*') if file.is_file()
-            ]
+            return get_local_model_files(local_path)
         # if model is remote, use hf_hub api to list files
         try:
             if VLLM_USE_MODELSCOPE:
+                if model_path := check_is_model_downloaded(
+                        "modelscope", repo_id):
+                    return get_local_model_files(Path(model_path))
                 from vllm.transformers_utils.utils import (
                     modelscope_list_repo_files)
                 return modelscope_list_repo_files(repo_id,
                                                   revision=revision,
                                                   token=token)
+
+            if model_path := check_is_model_downloaded("huggingface", repo_id):
+                return get_local_model_files(Path(model_path))
+
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
