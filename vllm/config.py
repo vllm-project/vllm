@@ -1944,6 +1944,8 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
 
+        self.num_share_fusion_replicas = envs.VLLM_SHARED_EXPERT_FUSION_REPLICAS
+
         self._verify_args()
 
     @property

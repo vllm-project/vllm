@@ -891,6 +891,7 @@ class FusedMoE(torch.nn.Module):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
         self.routed_scaling_factor = routed_scaling_factor
+        self.num_share_fusion_replicas = num_share_fusion_replicas
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -1458,8 +1459,8 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-            routed_scaling_factor=self.routed_scaling_factor
-            )
+            routed_scaling_factor=self.routed_scaling_factor,
+            num_share_fusion_replicas=self.num_share_fusion_replicas)
 
         if self.dp_size > 1:
             final_hidden_states = get_ep_group().combine(final_hidden_states)

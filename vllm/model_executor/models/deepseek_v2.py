@@ -760,6 +760,26 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         if self.num_share_fusion_replicas > 0:
             weights_list = list(weights)
             weights_dict = {k: v for (k, v) in weights_list}
+            ## We first check if share expert have identical
+            ## suffixes as routed experts, if no, we raise error
+            for moe_layer in range(self.config.num_hidden_layers):
+                if moe_layer < self.config.first_k_dense_replace:
+                    continue
+                share_prefix = f"model.layers.{moe_layer}.mlp.shared_experts."
+                routed_prefix = f"model.layers.{moe_layer}.mlp.experts.0."
+
+                share_suffixes = set()
+                routed_suffixes = set()
+                for k in weights_dict:
+                    if k.startswith(share_prefix):
+                        share_suffixes.add(k.replace(share_prefix, ""))
+                    if k.startswith(routed_prefix):
+                        routed_suffixes.add(k.replace(routed_prefix, ""))
+            if routed_suffixes != share_suffixes:
+                raise ValueError(
+                    "Share expert and routed experts are not identical"
+                    "thus cannot enable share expert fusion")
+
             for moe_layer in range(self.config.num_hidden_layers):
                 if moe_layer < self.config.first_k_dense_replace:
                     continue
