@@ -129,6 +129,17 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         video = np.full((num_frames, width, height, 3), 255)
         return [video] * num_videos
 
+    def _get_dummy_timeseries(
+        self,
+        *,
+        length: int,
+        num_timeseries: int,
+    ) -> list[npt.NDArray]:
+        if num_timeseries == 0:
+            return []
+        timeseries = np.zeros(length)
+        return [timeseries] * num_timeseries
+
 
 class MultiModalProfiler(Generic[_I]):
     """

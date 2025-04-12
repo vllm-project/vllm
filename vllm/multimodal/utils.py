@@ -21,6 +21,7 @@ from .audio import AudioMediaIO
 from .base import MediaIO
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .inputs import PlaceholderRange
+from .time_series import TimeSeriesMediaIO
 from .video import VideoMediaIO
 
 _M = TypeVar("_M")
@@ -269,6 +270,35 @@ class MediaConnector:
 
         return image_embedding_io.load_base64("", data)
 
+    def fetch_timeseries(
+        self,
+        timeseries_url: str,
+    ) -> torch.Tensor:
+        """
+        Load time series data from a URL.
+        """
+        timeseries_io = TimeSeriesMediaIO()
+
+        return self.load_from_url(
+            timeseries_url,
+            timeseries_io,
+            fetch_timeout=envs.VLLM_TIMESERIES_FETCH_TIMEOUT)
+
+    async def fetch_timeseries_async(
+        self,
+        timeseries_url: str,
+    ) -> torch.Tensor:
+        """
+        Asynchronously load time series data from a URL.
+        """
+        timeseries_io = TimeSeriesMediaIO()
+
+        return await self.load_from_url_async(
+            timeseries_url,
+            timeseries_io,
+            fetch_timeout=envs.VLLM_TIMESERIES_FETCH_TIMEOUT,
+        )
+
 
 global_media_connector = MediaConnector()
 """The global [`MediaConnector`][vllm.multimodal.utils.MediaConnector]
@@ -277,6 +307,7 @@ instance used by vLLM."""
 fetch_audio = global_media_connector.fetch_audio
 fetch_image = global_media_connector.fetch_image
 fetch_video = global_media_connector.fetch_video
+fetch_timeseries = global_media_connector.fetch_timeseries
 
 
 def encode_audio_base64(
@@ -307,6 +338,13 @@ def encode_video_base64(frames: npt.NDArray) -> str:
     image_io = ImageMediaIO()
     video_io = VideoMediaIO(image_io)
     return video_io.encode_base64(frames)
+
+
+def encode_timeseries_base64(timeseries: list[list[float]],
+                             format: str = "csv") -> str:
+    """Encode time series data as base64."""
+    timeseries_io = TimeSeriesMediaIO()
+    return timeseries_io.encode_base64(timeseries, format)
 
 
 def merge_and_sort_multimodal_metadata(

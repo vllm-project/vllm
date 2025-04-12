@@ -47,6 +47,19 @@ Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
 """
 
+HfTimeSeriesItem: TypeAlias = Union[list[float], list[list[float]], np.ndarray,
+                                    "torch.Tensor"]
+"""
+Represents a single time series
+item, which can be passed to a time series processor.
+
+Can be a list of values (univariate time series), list of lists 
+(multivariate time series), or numpy array.
+
+Alternatively, a tensor that is treated as time series embeddings;
+these are directly passed to the model without preprocessing.
+"""
+
 ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor"]
 """
 A `transformers.image_utils.ImageInput` representing a single image
@@ -82,6 +95,18 @@ which are treated as audio embeddings;
 these are directly passed to the model without HF processing.
 """
 
+TimeSeriesItem: TypeAlias = Union[HfTimeSeriesItem, torch.Tensor]
+"""
+Represents a single time series
+item, which can be passed to a time series processor.
+
+Can be a list of values (univariate time series), list of lists
+(multivariate time series), or numpy array.
+
+Alternatively, a tensor that is treated as time series embeddings;
+these are directly passed to the model without preprocessing.
+"""
+
 ModalityData: TypeAlias = Union[_T, list[_T]]
 """
 Either a single data item, or a list of data items.
@@ -103,6 +128,9 @@ class MultiModalDataBuiltins(TypedDict, total=False):
 
     audio: ModalityData[AudioItem]
     """The input audio(s)."""
+
+    timeseries: ModalityData[TimeSeriesItem]
+    """The input time series data."""
 
 
 MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]

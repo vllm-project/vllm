@@ -14,9 +14,10 @@ from typing_extensions import TypeAlias, TypeGuard, assert_never
 from vllm.utils import LazyLoader, is_list_of
 
 from .audio import AudioResampler
-from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
-                     ImageItem, ModalityData, MultiModalDataDict,
-                     MultiModalFieldConfig, MultiModalKwargs, VideoItem)
+from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfTimeSeriesItem,
+                     HfVideoItem, ImageItem, ModalityData, MultiModalDataDict,
+                     MultiModalFieldConfig, MultiModalKwargs, TimeSeriesItem,
+                     VideoItem)
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -89,7 +90,11 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
         return self.data[index]
 
     def get_processor_data(self) -> Mapping[str, object]:
-        return {f"{self.modality}s": self.data}
+        # "timeseries" is a special case because it already ends in "s"
+        if self.modality == "timeseries":
+            return {f"{self.modality}": self.data}
+        else:
+            return {f"{self.modality}s": self.data}
 
     def get_passthrough_data(self) -> Mapping[str, object]:
         return {}
@@ -246,6 +251,31 @@ class VideoEmbeddingItems(EmbeddingItems):
 
     def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
         super().__init__(data, "video")
+
+
+class TimeSeriesProcessorItems(ProcessorBatchItems[HfTimeSeriesItem]):
+    """Class for handling time series data items."""
+
+    def __init__(self, data: Sequence[HfTimeSeriesItem]) -> None:
+        super().__init__(data, "timeseries")
+
+    def get_series_length(self, item_idx: int) -> int:
+        """Get the length of the time series."""
+        series = self.get(item_idx)
+        if isinstance(series, (np.ndarray, torch.Tensor)):
+            return series.shape[0]
+        elif isinstance(series, list):
+            return len(series)
+        else:
+            raise TypeError(
+                f"Unsupported type for time series: {type(series)}")
+
+
+class TimeSeriesEmbeddingItems(EmbeddingItems):
+    """Class for handling time series embedding items."""
+
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
+        super().__init__(data, "timeseries")
 
 
 _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
@@ -438,11 +468,27 @@ class MultiModalDataParser:
 
         return VideoProcessorItems(data_items)
 
+    def _parse_timeseries_data(
+        self,
+        data: ModalityData[TimeSeriesItem],
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        """Parse time series data."""
+        if self._is_empty(data):
+            return None
+
+        if self._is_embeddings(data):
+            return TimeSeriesEmbeddingItems(data)
+
+        return TimeSeriesProcessorItems(
+            data if is_list_of(data, (np.ndarray, torch.Tensor,
+                                      list)) else [data])
+
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {
             "audio": self._parse_audio_data,
             "image": self._parse_image_data,
             "video": self._parse_video_data,
+            "timeseries": self._parse_timeseries_data,
         }
 
     def parse_mm_data(self,
