@@ -16,6 +16,7 @@ NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 120, 256]
 BLOCK_SIZES = [8, 16, 32]
+CACHE_LAYOUTS = ["NHD", "HND"]
 
 # Parameters for MLA tests.
 KV_LORA_RANKS = [512]
@@ -220,6 +221,7 @@ def test_reshape_and_cache(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("kv_layout", CACHE_LAYOUTS)
 @torch.inference_mode()
 def test_reshape_and_cache_flash(
     kv_cache_factory_flashinfer,
@@ -232,6 +234,7 @@ def test_reshape_and_cache_flash(
     seed: int,
     device: str,
     kv_cache_dtype: str,
+    kv_layout: str,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
@@ -242,7 +245,7 @@ def test_reshape_and_cache_flash(
     slot_mapping = torch.tensor(slot_mapping_lst,
                                 dtype=torch.long,
                                 device=device)
-
+    is_NHD = kv_layout == "NHD"
     qkv = torch.randn(num_tokens,
                       3,
                       num_heads,
@@ -264,6 +267,11 @@ def test_reshape_and_cache_flash(
     )
     key_cache, value_cache = key_caches[0].contiguous(
     ), value_caches[0].contiguous()
+    page_stride, head_stride = num_heads * head_size, head_size
+    if not is_NHD:
+        key_cache = torch.permute(key_cache, (0, 2, 1, 3)).contiguous()
+        value_cache = torch.permute(value_cache, (0, 2, 1, 3)).contiguous()
+        page_stride, head_stride = head_size, head_size * block_size
     del key_caches
     del value_caches
 
@@ -285,10 +293,13 @@ def test_reshape_and_cache_flash(
     # Call the reshape_and_cache kernel.
     opcheck(torch.ops._C_cache_ops.reshape_and_cache_flash,
             (key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
+             block_size, page_stride, head_stride,
              k_scale, v_scale),
             cond=(head_size == HEAD_SIZES[0]))
     ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
-                                slot_mapping, kv_cache_dtype, k_scale, v_scale)
+                                slot_mapping, kv_cache_dtype,
+                                block_size, page_stride, head_stride,
+                                k_scale, v_scale)
 
     if kv_cache_dtype == "fp8":
         result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
@@ -310,8 +321,12 @@ def test_reshape_and_cache_flash(
     for i in range(num_tokens):
         block_idx = block_indicies_lst[i]
         block_offset = block_offsets_lst[i]
-        cloned_key_cache[block_idx, block_offset, :, :] = key[i]
-        cloned_value_cache[block_idx, block_offset, :, :] = value[i]
+        if is_NHD:
+            cloned_key_cache[block_idx, block_offset, :, :] = key[i]
+            cloned_value_cache[block_idx, block_offset, :, :] = value[i]
+        else:
+            cloned_key_cache[block_idx, :, block_offset, :] = key[i]
+            cloned_value_cache[block_idx, :, block_offset, :] = value[i]
 
     if kv_cache_dtype == "fp8":
         torch.testing.assert_close(result_key_cache,
