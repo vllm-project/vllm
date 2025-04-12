@@ -186,6 +186,8 @@ class SamplingParams(
         allowed_token_ids: If provided, the engine will construct a logits
             processor which only retains scores for the given token ids.
             Defaults to None.
+        return_hidden_states: If provided, hidden states of the last attention
+            block are returned in the output
         extra_args: Arbitrary additional args, that can be used by custom
             sampling implementations. Not used by any in-tree sampling
             implementations.
@@ -232,6 +234,9 @@ class SamplingParams(
     logit_bias: Optional[dict[int, float]] = None
     allowed_token_ids: Optional[list[int]] = None
     extra_args: Optional[dict[str, Any]] = None
+
+    # Output hidden states or not
+    return_hidden_states: Optional[bool] = None
 
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
