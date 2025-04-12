@@ -124,14 +124,7 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance",
-            "guidance:disable-any-whitespace", "auto"
-        ]
         engine_level_backend = self.decoding_config.guided_decoding_backend
-        if engine_level_backend not in supported_backends:
-            raise ValueError(f"Only {supported_backends} structured output is "
-                             "supported in V1.")
         if params.guided_decoding.backend:
             if params.guided_decoding.backend != engine_level_backend:
                 raise ValueError("Request-level structured output backend "
