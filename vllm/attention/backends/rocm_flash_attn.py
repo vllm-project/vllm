@@ -27,6 +27,7 @@ _PARTITION_SIZE_ROCM = 256
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
+    accept_output_buffer: bool = True
 
     @staticmethod
     def get_name() -> str:
@@ -613,6 +614,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        assert output is not None, "Output tensor must be provided."
+
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
             assert value is not None
@@ -656,7 +659,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             assert attn_metadata.num_encoder_tokens is not None
             num_prefill_tokens = attn_metadata.num_encoder_tokens
 
-        output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
         # QKV for prefill.
@@ -708,7 +710,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         query,
                         key,
                         value,
-                        None,
+                        output[:num_prefill_tokens],
                         query_seq_start_loc,
                         key_seq_start_loc,
                         query_max_seq_len,
@@ -737,6 +739,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         query,
                         key,
                         value,
+                        output[:num_prefill_tokens],
                         query_seq_start_loc,
                         num_prefill_tokens,
                         self.num_heads,
@@ -749,6 +752,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         q=query,
                         k=key,
                         v=value,
+                        out=output[:num_prefill_tokens],
                         cu_seqlens_q=query_seq_start_loc,
                         cu_seqlens_k=key_seq_start_loc,
                         max_seqlen_q=prefill_meta.max_prefill_seq_len,
@@ -762,10 +766,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
                 # common code for prefill
                 assert output[:num_prefill_tokens].shape == out.shape
-                if output.shape[0] > num_prefill_tokens:
-                    output[:num_prefill_tokens] = out
-                else:
-                    output = out
+
             else:
                 # prefix-enabled attention -
                 # not applicable for encoder-only models
@@ -818,14 +819,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     device=output.device,
                 )
                 max_logits = torch.empty_like(exp_sums)
-                if num_prefill_tokens > 0:
-                    out = output[num_prefill_tokens:]
-                else:
-                    out = output
 
                 query_start_loc = None
                 ops.paged_attention_rocm(
-                    out,
+                    output[num_prefill_tokens:],
                     exp_sums,
                     max_logits,
                     tmp_output,
@@ -878,6 +875,7 @@ def _sdpa_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    output: torch.Tensor,
     seq_lens: List[int],
     num_tokens: int,
     num_heads: int,
@@ -886,9 +884,9 @@ def _sdpa_attention(
     attn_masks: Optional[List[torch.Tensor]] = None,
 ) -> torch.Tensor:
     start = 0
-    output = torch.empty((num_tokens, num_heads, head_size),
-                         dtype=query.dtype,
-                         device=query.device)
+    assert output.shape == (num_tokens, num_heads, head_size)
+    assert output.dtype == query.dtype
+    assert output.device == query.device
 
     for i, seq_len in enumerate(seq_lens):
         end = start + seq_len
