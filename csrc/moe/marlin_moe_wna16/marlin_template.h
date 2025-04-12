@@ -884,7 +884,7 @@ __global__ void Marlin(
   int4* sh_g_idx = sh_b + (stages * b_sh_stage);
   int4* sh_zp = sh_g_idx + (stages * g_idx_stage);
   int4* sh_s = sh_zp + (stages * zp_sh_stage);
-  int4* sh_red = sh_new;
+  int4* sh_red = sh_b;
 
   // Register storage for double buffer of shared memory reads.
   FragA frag_a[2][thread_m_blocks];
@@ -942,19 +942,24 @@ __global__ void Marlin(
   };
   // Asynchronously fetch the next A, B and s tile from global to the next
   // shared memory pipeline location.
+  int a_remaining_load_count_in_slice = stages;
   auto fetch_to_shared = [&](int pipe, int a_off, bool pred = true) {
     if (pred) {
       int4* sh_a_stage = sh_a + a_sh_stage * pipe;
+      if (prob_k > thread_k_blocks * 16 * stages || slice_col == 0 ||
+          a_remaining_load_count_in_slice > 0) {
+        a_remaining_load_count_in_slice--;
   #pragma unroll
-      for (int i = 0; i < a_sh_wr_iters; i++) {
-        int a_idx = a_gl_rd_delta_i * i + a_gl_rd + a_gl_rd_delta_o * a_off;
-        int row = a_idx / a_gl_stride;
-        int64_t sorted_row = 0;
-        if (!m_block_size_8 || row < 8)
-          sorted_row = sh_block_sorted_ids[row] / top_k;
-        int64_t true_idx = sorted_row * a_gl_stride + a_idx % a_gl_stride;
-        cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]], &A[true_idx],
-                       row < block_num_valid_tokens);
+        for (int i = 0; i < a_sh_wr_iters; i++) {
+          int a_idx = a_gl_rd_delta_i * i + a_gl_rd + a_gl_rd_delta_o * a_off;
+          int row = a_idx / a_gl_stride;
+          int64_t sorted_row = 0;
+          if (!m_block_size_8 || row < 8)
+            sorted_row = sh_block_sorted_ids[row] / top_k;
+          int64_t true_idx = sorted_row * a_gl_stride + a_idx % a_gl_stride;
+          cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]], &A[true_idx],
+                         row < block_num_valid_tokens);
+        }
       }
       int4* sh_b_stage = sh_b + b_sh_stage * pipe;
   #pragma unroll
@@ -1770,6 +1775,7 @@ __global__ void Marlin(
         break;
       }
     }
+    a_remaining_load_count_in_slice = 0;
 
     a_gl_rd += a_gl_rd_delta_o * stages;
     slice_k_start += tb_k * stages;
@@ -1871,6 +1877,7 @@ __global__ void Marlin(
       if (last || use_atomic_add)
         // only the last block in a slice actually writes the result
         write_result();
+      if (slice_row) a_remaining_load_count_in_slice = stages;
       slice_row = 0;
       slice_col_par++;
       slice_col++;
