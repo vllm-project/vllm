@@ -88,7 +88,7 @@ def single_marlin_moe(
     if global_num_experts == -1:
         global_num_experts = E
     sorted_token_ids, expert_ids, num_tokens_post_padded = \
-        moe_align_block_size(topk_ids, block_size_m, E)
+        moe_align_block_size(topk_ids, block_size_m, expert_map)
 
     if workspace is None:
         max_workspace_size = (max(2 * N, K) // 64) * \
@@ -307,6 +307,8 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
 
     torch.ops._C.silu_and_mul(intermediate_cache2,
                               intermediate_cache1.view(-1, 2 * N))
+    
+    intermediate_cache3.zero_()
 
     intermediate_cache3 = ops.moe_wna16_marlin_gemm(
         intermediate_cache2,
