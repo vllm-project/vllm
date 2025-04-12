@@ -258,9 +258,24 @@ class EngineArgs:
             """Check if the class is a type in a union type."""
             return get_origin(cls) is Union and type in get_args(cls)
 
+        def get_type_from_union(cls: type[Any], type: type[Any]) -> type[Any]:
+            """Get the type in a union type."""
+            for arg in get_args(cls):
+                if arg is type:
+                    return arg
+
         def is_optional(cls: type[Any]) -> bool:
             """Check if the class is an optional type."""
             return is_type_in_union(cls, type(None))
+
+        def can_be_type(cls: type[Any], type: type[Any]) -> bool:
+            """Check if the class can be of type."""
+            return cls is type or get_origin(cls) is type or is_type_in_union(
+                cls, type)
+
+        def is_custom_type(cls: type[Any]) -> bool:
+            """Check if the class is a custom type."""
+            return cls.__module__ != "builtins"
 
         def get_kwargs(cls: type[Any]) -> Dict[str, Any]:
             cls_docs = get_attr_docs(cls)
@@ -271,19 +286,41 @@ class EngineArgs:
                 default = (field.default_factory
                            if field.default is MISSING else field.default)
                 kwargs[name] = {"default": default, "help": cls_docs[name]}
-                # When using action="store_true"
-                # add_argument doesn't accept type
-                if field.type is bool:
-                    continue
-                # Handle optional fields
-                if is_optional(field.type):
+
+                # Make note of if the field is optional and get the actual
+                # type of the field if it is
+                optional = is_optional(field.type)
+                field_type = get_args(
+                    field.type)[0] if optional else field.type
+
+                if can_be_type(field_type, bool):
+                    # Creates --no-<name> and --<name> flags
+                    kwargs[name]["action"] = argparse.BooleanOptionalAction
+                    kwargs[name]["type"] = bool
+                elif can_be_type(field_type, Literal):
+                    # Creates choices from Literal arguments
+                    if is_type_in_union(field_type, Literal):
+                        field_type = get_type_from_union(field_type, Literal)
+                    choices = get_args(field_type)
+                    kwargs[name]["choices"] = choices
+                    choice_type = type(choices[0])
+                    assert all(type(c) is choice_type for c in choices), (
+                        f"All choices must be of the same type. "
+                        f"Got {choices} with types {[type(c) for c in choices]}"
+                    )
+                    kwargs[name]["type"] = choice_type
+                elif can_be_type(field_type, int):
+                    kwargs[name]["type"] = optional_int if optional else int
+                elif can_be_type(field_type, float):
+                    kwargs[name][
+                        "type"] = optional_float if optional else float
+                elif can_be_type(field_type, str):
+                    kwargs[name]["type"] = optional_str if optional else str
+                elif is_custom_type(field_type):
                     kwargs[name]["type"] = optional_str
-                    continue
-                # Handle str in union fields
-                if is_type_in_union(field.type, str):
-                    kwargs[name]["type"] = str
-                    continue
-                kwargs[name]["type"] = field.type
+                else:
+                    raise ValueError(
+                        f"Unsupported type {field.type} for argument {name}. ")
             return kwargs
 
         # Model arguments
@@ -375,7 +412,6 @@ class EngineArgs:
         load_group.add_argument('--model-loader-extra-config',
                                 **load_kwargs["model_loader_extra_config"])
         load_group.add_argument('--use-tqdm-on-load',
-                                action=argparse.BooleanOptionalAction,
                                 **load_kwargs["use_tqdm_on_load"])
 
         parser.add_argument(
@@ -457,7 +493,6 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             '--distributed-executor-backend',
-            choices=['ray', 'mp', 'uni', 'external_launcher'],
             **parallel_kwargs["distributed_executor_backend"])
         parallel_group.add_argument(
             '--pipeline-parallel-size', '-pp',
@@ -468,18 +503,15 @@ class EngineArgs:
                                     **parallel_kwargs["data_parallel_size"])
         parallel_group.add_argument(
             '--enable-expert-parallel',
-            action='store_true',
             **parallel_kwargs["enable_expert_parallel"])
         parallel_group.add_argument(
             '--max-parallel-loading-workers',
             **parallel_kwargs["max_parallel_loading_workers"])
         parallel_group.add_argument(
             '--ray-workers-use-nsight',
-            action='store_true',
             **parallel_kwargs["ray_workers_use_nsight"])
         parallel_group.add_argument(
             '--disable-custom-all-reduce',
-            action='store_true',
             **parallel_kwargs["disable_custom_all_reduce"])
         # KV cache arguments
         parser.add_argument('--block-size',
