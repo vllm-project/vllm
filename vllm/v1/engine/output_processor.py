@@ -239,18 +239,46 @@ class OutputProcessor:
         self,
         request_ids: Iterable[str],
     ) -> list[str]:
-        request_ids_to_abort = []
-        for request_id in request_ids:
-            req_state = self.request_states.pop(request_id, None)
+        request_ids_to_abort = self.flatten_req_to_abort(request_ids)
+        self.free_aborted_reqs(request_ids_to_abort)
+        return request_ids_to_abort
+
+    def flatten_req_to_abort(self, req_ids: Iterable[str]) -> list[str]:
+        ret = []
+        for req_id in req_ids:
+            parent = self.parent_requests.pop(req_id, None)
+            if parent is None:
+                ret.append(req_id)
+            else:
+                ret.extend(parent.child_requests)
+        return ret
+
+    def free_aborted_reqs(self, req_ids: Iterable[str]):
+        """
+        Handles aborted requests. This method is triggered when the frontend
+        detects that a request has ended, such as when the client disconnects
+        or the detokenizer detects a stop string.
+        """
+        for req_id in req_ids:
+            req_state = self.request_states.pop(req_id, None)
             if req_state is not None:
                 self.lora_states.abort_request(req_state)
-                request_ids_to_abort.append(request_id)
-            else:
-                parent = self.parent_requests.pop(request_id, None)
-                if parent and parent.child_requests:
-                    self.abort_requests(parent.child_requests)
-                    request_ids_to_abort.extend(parent.child_requests)
-        return request_ids_to_abort
+        # TODO: handle _update_stats_from_finished here
+        # may need to add some parameters, such as iteration_stats and
+        # finished_reason.
+        return
+
+    def free_finished_reqs(self, req_ids: Iterable[str]):
+        """
+        Handle a finished request. This method is called when EngineCore detects
+        that the request has ended, and the resources related to the request
+        maintained by EngineCore have been released.
+        """
+        for req_id in req_ids:
+            req_state = self.request_states.pop(req_id)
+            self.lora_states.finish_request(req_state)
+        # TODO: handle _update_stats_from_finished here
+        return
 
     def add_request(
         self,
@@ -286,23 +314,29 @@ class OutputProcessor:
         1) Compute stats for logging
         2) Detokenize
         3) Create and handle RequestOutput objects:
-            * If there is a queue (for usage with AsyncLLM), 
+            * If there is a queue (for usage with AsyncLLM),
               put the RequestOutput objects into the queue for
               handling by the per-request generate() tasks.
 
-            * If there is no queue (for usage with LLMEngine), 
+            * If there is no queue (for usage with LLMEngine),
               return a list of RequestOutput objects.
 
         ****************** NOTE FOR DEVELOPERS ******************
 
         vLLM V1 minimizes the number of python loops over the full
-        batch to ensure system overheads are minimized. This is the 
+        batch to ensure system overheads are minimized. This is the
         only function that should loop over EngineCoreOutputs.
 
         If you need to touch every element of the batch, do it from
         within the loop below.
-        
+
         **********************************************************
+
+        NOTE: Stop string requests are finished externally to this function
+        because we must first send EngineCoreRequestType.ABORT to EngineCore
+        before cleaning up the request states in the Frontend. This prevents
+        the Frontend from adding two requests with duplicate RequestIds to
+        EngineCore simultaneously.
         """
 
         request_outputs: list[RequestOutput] = []
@@ -347,7 +381,6 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
-                self.request_states.pop(req_id)
                 # Remove parent request if applicable.
                 parent_req = req_state.parent_req
                 if parent_req and not parent_req.child_requests:
@@ -356,6 +389,8 @@ class OutputProcessor:
                     # If req not finished in EngineCore, but Detokenizer
                     # detected stop string, abort needed in EngineCore.
                     reqs_to_abort.append(req_id)
+                else:
+                    self.free_finished_reqs((req_id, ))
 
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,
@@ -398,7 +433,6 @@ class OutputProcessor:
             num_prompt_tokens=len(req_state.prompt_token_ids),
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats)
-        self.lora_states.finish_request(req_state)
 
         ParentRequest.observe_finished_request(
             req_state.parent_req, iteration_stats,
