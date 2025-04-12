@@ -437,9 +437,9 @@ class UnquantizedFusedCutlassMoEMethod(FusedMoEMethodBase, CustomOp):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-
         assert activation == "silu"
         assert global_num_experts == layer.w13_weight.shape[0]
         assert expert_map is None
@@ -466,6 +466,7 @@ class UnquantizedFusedCutlassMoEMethod(FusedMoEMethodBase, CustomOp):
             self.c_strides1,
             self.ab_strides2,
             self.c_strides2,
+            apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
 
