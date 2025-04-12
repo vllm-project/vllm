@@ -7,10 +7,12 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
-                    Tuple, Type, TypeVar, Union, cast, get_args, get_origin)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping,
+                    Optional, Tuple, Type, TypeVar, Union, cast, get_args,
+                    get_origin)
 
 import torch
+from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm import version
@@ -52,17 +54,20 @@ DEVICE_OPTIONS = [
     "hpu",
 ]
 
+# object is used to allow for special typing forms
 T = TypeVar("T")
+TypeHint = Union[type[Any], object]
+TypeHintT = Union[type[T], object]
 
 
-def optional_arg(val: str, type: T) -> Optional[T]:
+def optional_arg(val: str, return_type: type[T]) -> Optional[T]:
     if val == "" or val == "None":
         return None
     try:
-        return type(val)
+        return cast(Callable, return_type)(val)
     except ValueError as e:
         raise argparse.ArgumentTypeError(
-            f"Value {val} cannot be converted to {type}.") from e
+            f"Value {val} cannot be converted to {return_type}.") from e
 
 
 def optional_str(val: str) -> Optional[str]:
@@ -263,35 +268,33 @@ class EngineArgs:
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
-        def is_type_in_union(cls: type[Any], type: Union[type,
-                                                         object]) -> bool:
+        def is_type_in_union(cls: TypeHint, type: TypeHint) -> bool:
             """Check if the class is a type in a union type."""
             is_union = get_origin(cls) is Union
             type_in_union = type in [get_origin(a) or a for a in get_args(cls)]
             return is_union and type_in_union
 
-        def get_type_from_union(cls: type[Any],
-                                type: Union[type, object]) -> type[Any]:
+        def get_type_from_union(cls: TypeHint, type: TypeHintT) -> TypeHintT:
             """Get the type in a union type."""
             for arg in get_args(cls):
                 if (get_origin(arg) or arg) is type:
                     return arg
             raise ValueError(f"Type {type} not found in union type {cls}.")
 
-        def is_optional(cls: type[Any]) -> bool:
+        def is_optional(cls: TypeHint) -> TypeIs[Union[Any, None]]:
             """Check if the class is an optional type."""
             return is_type_in_union(cls, type(None))
 
-        def can_be_type(cls: type[Any], type: Union[type, object]) -> bool:
+        def can_be_type(cls: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
             """Check if the class can be of type."""
             return cls is type or get_origin(cls) is type or is_type_in_union(
                 cls, type)
 
-        def is_custom_type(cls: type[Any]) -> bool:
+        def is_custom_type(cls: TypeHint) -> bool:
             """Check if the class is a custom type."""
             return cls.__module__ != "builtins"
 
-        def get_kwargs(cls: type[Any]) -> Dict[str, Any]:
+        def get_kwargs(cls: type[Any]) -> dict[str, Any]:
             cls_docs = get_attr_docs(cls)
             kwargs = {}
             for field in fields(cls):
