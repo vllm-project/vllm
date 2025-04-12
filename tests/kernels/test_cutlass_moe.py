@@ -234,7 +234,10 @@ def run_16_bit(moe_tensors: MOETensors,
     if not with_ep:
         return cutlass_moe(**kwargs)
 
-    return run_with_expert_maps(num_experts, num_local_experts, **kwargs)
+    return run_with_expert_maps(
+        num_experts,
+        num_local_experts,  # type: ignore[arg-type]
+        **kwargs)
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
