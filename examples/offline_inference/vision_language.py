@@ -1096,13 +1096,6 @@ def main(args):
     }
     llm = LLM(**engine_args)
 
-    # To maintain code compatibility in this script, we add LoRA here.
-    # You can also add LoRA using:
-    # llm.generate(prompts, lora_request=lora_request,...)
-    if req_data.lora_requests:
-        for lora_request in req_data.lora_requests:
-            llm.llm_engine.add_lora(lora_request=lora_request)
-
     # Don't want to check the flag multiple times, so just hijack `prompts`.
     prompts = req_data.prompts if args.use_different_prompt_per_request else [
         req_data.prompts[0]
