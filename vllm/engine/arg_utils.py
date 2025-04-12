@@ -266,13 +266,15 @@ class EngineArgs:
         def is_type_in_union(cls: type[Any], type: Union[type,
                                                          object]) -> bool:
             """Check if the class is a type in a union type."""
-            return get_origin(cls) is Union and type in get_args(cls)
+            is_union = get_origin(cls) is Union
+            type_in_union = type in [get_origin(a) or a for a in get_args(cls)]
+            return is_union and type_in_union
 
         def get_type_from_union(cls: type[Any],
                                 type: Union[type, object]) -> type[Any]:
             """Get the type in a union type."""
             for arg in get_args(cls):
-                if arg is type:
+                if (get_origin(arg) or arg) is type:
                     return arg
             raise ValueError(f"Type {type} not found in union type {cls}.")
 
