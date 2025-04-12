@@ -159,7 +159,6 @@ class OpenAIServingRemotePrefill(OpenAIServing):
 
     async def add_remote_prefill_ep(self, ep: str):
         add_remote_nixl_metadata_url = f"{ep}/remote_nixl_metadata"
-        get_remote_nixl_metadata_url = f"{ep}/nixl_metadata"
         metadata = NixlMetadataRequest(
             metadata=self.nixl_metadata().metadata,
         )
@@ -167,16 +166,6 @@ class OpenAIServingRemotePrefill(OpenAIServing):
             async with session.post(add_remote_nixl_metadata_url, json=metadata.model_dump()) as resp:
                 if resp.status != 200:
                     raise ValueError(f"add local nixl metadata to remote failed with status: {resp.status}")
-
-            async with session.get(get_remote_nixl_metadata_url) as response:
-                if response.status != 200:
-                    raise ValueError(f"get remote nixl metadata failed with status: {response.status}")
-                response_data = await response.json()
-                metadata = NixlMetadataResponse(**response_data)
-                request = NixlMetadataRequest(
-                    metadata=metadata.metadata
-                )
-                await self.remote_nixl_metadata(request)
 
     async def add_remote_prefill_eps(self, request: RemotePrefillEpRequest):
         if not request.endpoints or len(request.endpoints) == 0:
