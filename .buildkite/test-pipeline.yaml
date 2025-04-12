@@ -378,8 +378,10 @@ steps:
   source_file_dependencies:
     - vllm/
     - tests/tool_use
+    - tests/mistral_tool_use
   commands:
     - pytest -v -s tool_use
+    - pytest -v -s mistral_tool_use
 
 #####  models test  #####
 
