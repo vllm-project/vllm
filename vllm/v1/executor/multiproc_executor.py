@@ -173,8 +173,9 @@ class MultiprocExecutor(Executor):
             self.rpc_broadcast_mq.enqueue(
                 (send_method, args, kwargs, rank0_reply_only))
 
-            responses = [None] * self.world_size
-            for w in (self.workers[0], ) if rank0_reply_only else self.workers:
+            workers = (self.workers[0], ) if rank0_reply_only else self.workers
+            responses = [None] * len(workers)
+            for w in workers:
                 dequeue_timeout = timeout - (time.monotonic() - start_time
                                              ) if timeout is not None else None
                 status, result = w.worker_response_mq.dequeue(
