@@ -195,8 +195,7 @@ def main(args):
     audio_count = args.num_audios
     req_data = model_example_map[model](question_per_audio_count[audio_count],
                                         audio_count)
-    if req_data.lora_requests:
-        assert req_data.engine_args.enable_lora
+
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
     llm = LLM(**engine_args)
 

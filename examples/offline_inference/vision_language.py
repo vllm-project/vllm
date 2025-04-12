@@ -1081,8 +1081,6 @@ def main(args):
     questions = mm_input["questions"]
 
     req_data = model_example_map[model](questions, modality)
-    if req_data.lora_requests:
-        assert req_data.engine_args.enable_lora
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
 
     llm = LLM(**engine_args)

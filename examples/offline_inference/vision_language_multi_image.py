@@ -659,8 +659,6 @@ def run_generate(model, question: str, image_urls: list[str],
     req_data = model_example_map[model](question, image_urls)
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
-    if req_data.lora_requests:
-        assert engine_args.get("enable_lora", False)
     llm = LLM(**engine_args)
 
     sampling_params = SamplingParams(temperature=0.0,
@@ -688,8 +686,6 @@ def run_generate(model, question: str, image_urls: list[str],
 def run_chat(model: str, question: str, image_urls: list[str],
              seed: Optional[int]):
     req_data = model_example_map[model](question, image_urls)
-    if req_data.lora_requests:
-        assert req_data.engine_args.enable_lora
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
     llm = LLM(**engine_args)
 
