@@ -63,6 +63,7 @@ def run_e5_v(query: Query) -> ModelRequestData:
         model="royokong/e5-v",
         task="embed",
         max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -93,6 +94,7 @@ def run_vlm2vec(query: Query) -> ModelRequestData:
         task="embed",
         trust_remote_code=True,
         mm_processor_kwargs={"num_crops": 4},
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
