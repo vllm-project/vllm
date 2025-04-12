@@ -178,6 +178,12 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
               topk_weights: torch.Tensor,
               topk_ids: torch.Tensor,
               num_local_experts: Optional[int] = None) -> torch.Tensor:
+    assert not any([
+        t is None for t in [
+            moe_tensors.w1_q, moe_tensors.w2_q, moe_tensors.w1_scale,
+            moe_tensors.w2_scale, moe_tensors.a_scale
+        ]
+    ])
 
     kwargs = {
         'a': moe_tensors.a,
@@ -199,6 +205,7 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
     if not with_ep:
         return cutlass_moe(**kwargs)
 
+    assert num_local_experts is not None
     return run_with_expert_maps(num_experts, num_local_experts, **kwargs)
 
 
