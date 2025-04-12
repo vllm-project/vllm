@@ -95,14 +95,14 @@ class Processor:
         """Validate logit_bias token IDs are within vocabulary range."""
         if not params.logit_bias:
             return
-            
+
         vocab_size = self.model_config.get_vocab_size()
         invalid_token_ids = []
-        
+
         for token_id in params.logit_bias:
             if token_id < 0 or token_id >= vocab_size:
                 invalid_token_ids.append(token_id)
-                
+
         if invalid_token_ids:
             raise ValueError(
                 f"token_id(s) {invalid_token_ids} in logit_bias contain "
