@@ -1522,6 +1522,9 @@ class LoadConfig:
             self.ignore_patterns = ["original/**/*"]
 
 
+DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
+
+
 @config
 @dataclass
 class ParallelConfig:
@@ -1563,7 +1566,7 @@ class ParallelConfig:
     placement_group: Optional["PlacementGroup"] = None
     """ray distributed model workers placement group."""
 
-    distributed_executor_backend: Optional[Union[str,
+    distributed_executor_backend: Optional[Union[DistributedExecutorBackend,
                                                  type["ExecutorBase"]]] = None
     """Backend to use for distributed model
     workers, either "ray" or "mp" (multiprocessing). If the product
