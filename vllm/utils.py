@@ -1233,8 +1233,8 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
         3. Each line is wrapped to the specified width (width of terminal).
         """
         # The patterns also include whitespace after the newline
-        single_newline = re.compile("(?<!\n)\n(?!\n)\s*")
-        multiple_newlines = re.compile("\n{2,}\s*")
+        single_newline = re.compile(r"(?<!\n)\n(?!\n)\s*")
+        multiple_newlines = re.compile(r"\n{2,}\s*")
         text = single_newline.sub(' ', text)
         lines = re.split(multiple_newlines, text)
         return sum([textwrap.wrap(line, width) for line in lines], [])
