@@ -165,8 +165,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # By default, the system utilizes optimized block size and
             # vmem_limit_bytes parameters from the kernel repository. However,
             # these can be manually adjusted for debugging if necessary.
-            num_kv_pages_per_block=None,
-            num_queries_per_block=None,
+            num_kv_pages_per_block=8,
+            num_queries_per_block=32,
             vmem_limit_bytes=None,
             use_kernel=True,
             sm_scale=self.scale,
