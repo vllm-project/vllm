@@ -825,6 +825,48 @@ def build_app(args: Namespace) -> FastAPI:
         allow_headers=args.allowed_headers,
     )
 
+    # Endpoints that directly access model weights and need sleep status check
+    model_access_endpoints = [
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/embeddings",
+        "/pooling",
+        "/score", 
+        "/v1/score",
+        "/rerank", 
+        "/v1/rerank", 
+        "/v2/rerank",
+        "/v1/audio/transcriptions",
+        "/invocations"
+    ]
+
+    @app.middleware("http")
+    async def check_sleep_status_middleware(request: Request, call_next):
+        # Only check sleep status for endpoints that access model weights
+        url_path = request.url.path
+        if app.root_path and url_path.startswith(app.root_path):
+            url_path = url_path[len(app.root_path):]
+            
+        if url_path in model_access_endpoints and request.method == "POST":
+            try:
+                is_sleeping = await engine_client(request).is_sleeping()
+                if is_sleeping:
+                    return JSONResponse(
+                        content={
+                            "error": {
+                                "message": "Model is currently in sleep mode. Please wake it up first with a POST request to /wake_up",
+                                "type": "ModelSleepingError",
+                                "code": 503
+                            }
+                        },
+                        status_code=503
+                    )
+            except Exception as e:
+                # Log the error but don't prevent the request from proceeding
+                logger.warning(f"Error checking sleep status: {e}")
+        
+        return await call_next(request)
+
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_, exc):
         err = ErrorResponse(message=str(exc),
