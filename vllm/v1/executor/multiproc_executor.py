@@ -7,13 +7,14 @@ import sys
 import time
 import traceback
 import weakref
+from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from threading import Thread
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
 
@@ -28,12 +29,15 @@ from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_mp_context,
                         get_open_port)
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
+
+EXECUTE_MODEL_TIMEOUT_S = 30
 
 
 class MultiprocExecutor(Executor):
@@ -133,11 +137,22 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
+    def execute_model(
+        self,
+        scheduler_output,
+    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
+        (output, ) = self.collective_rpc("execute_model",
+                                         args=(scheduler_output, ),
+                                         rank0_reply_only=True,
+                                         timeout=EXECUTE_MODEL_TIMEOUT_S)
+        return output
+
     def collective_rpc(self,
                        method: Union[str, Callable],
-                       timeout: Optional[float] = None,
+                       timeout: Optional[float] = 180.0,
                        args: tuple = (),
-                       kwargs: Optional[dict] = None) -> list[Any]:
+                       kwargs: Optional[dict] = None,
+                       rank0_reply_only: bool = False) -> list[Any]:
         start_time = time.monotonic()
         kwargs = kwargs or {}
 
@@ -153,10 +168,11 @@ class MultiprocExecutor(Executor):
             else:
                 send_method = cloudpickle.dumps(
                     method, protocol=pickle.HIGHEST_PROTOCOL)
-            self.rpc_broadcast_mq.enqueue((send_method, args, kwargs))
+            self.rpc_broadcast_mq.enqueue(
+                (send_method, args, kwargs, rank0_reply_only))
 
             responses = [None] * self.world_size
-            for w in self.workers:
+            for w in (self.workers[0], ) if rank0_reply_only else self.workers:
                 dequeue_timeout = timeout - (time.monotonic() - start_time
                                              ) if timeout is not None else None
                 status, result = w.worker_response_mq.dequeue(
@@ -326,7 +342,8 @@ class WorkerProc:
                       "See stack trace for root cause.")
 
         pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
-        ready_proc_handles = []
+        ready_proc_handles: list[Optional[WorkerProcHandle]] = (
+            [None] * len(unready_proc_handles))
         while pipes:
             ready = multiprocessing.connection.wait(pipes.keys())
             for pipe in ready:
@@ -341,7 +358,7 @@ class WorkerProc:
                     # Extract the message queue handle.
                     worker_response_mq = MessageQueue.create_from_handle(
                         response["handle"], 0)
-                    ready_proc_handles.append(
+                    ready_proc_handles[unready_proc_handle.rank] = (
                         WorkerProcHandle.from_unready_handle(
                             unready_proc_handle, worker_response_mq))
 
@@ -353,7 +370,7 @@ class WorkerProc:
                     # Close connection.
                     pipe.close()
 
-        return ready_proc_handles
+        return cast(list[WorkerProcHandle], ready_proc_handles)
 
     def shutdown(self):
         self.rpc_broadcast_mq = None
@@ -435,7 +452,7 @@ class WorkerProc:
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
         while True:
-            method, args, kwargs = self.rpc_broadcast_mq.dequeue()
+            method, args, kwargs, rank0_only = self.rpc_broadcast_mq.dequeue()
 
             try:
                 if isinstance(method, str):
@@ -450,9 +467,11 @@ class WorkerProc:
                 logger.exception("WorkerProc hit an exception.")
                 # exception might not be serializable, so we convert it to
                 # string, only for logging purpose.
-                self.worker_response_mq.enqueue(
-                    (WorkerProc.ResponseStatus.FAILURE, str(e)))
+                if not rank0_only or self.rank == 0:
+                    self.worker_response_mq.enqueue(
+                        (WorkerProc.ResponseStatus.FAILURE, str(e)))
                 continue
 
-            self.worker_response_mq.enqueue(
-                (WorkerProc.ResponseStatus.SUCCESS, output))
+            if not rank0_only or self.rank == 0:
+                self.worker_response_mq.enqueue(
+                    (WorkerProc.ResponseStatus.SUCCESS, output))
