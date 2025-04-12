@@ -39,7 +39,7 @@ class BlockPool:
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
-        # {block_hash: {block ID: block}}. A cached block is
+        # {block_hash: {block ID: {group ID: block}}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.
         # The cached block may be used by running requests or in the
         # free_block_queue that could potentially be evicted.
@@ -49,15 +49,17 @@ class BlockPool:
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
         self.cached_block_hash_to_block: dict[BlockHashType, dict[
-            int, KVCacheBlock]] = defaultdict(dict)
+            int, dict[int, KVCacheBlock]]] = defaultdict(dict)
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
         # avoid freeing it.
         self.null_block = self.free_block_queue.popleft()
 
-    def get_cached_block(self,
-                         block_hash: BlockHashType) -> Optional[KVCacheBlock]:
+    def get_cached_block(
+        self,
+        block_hash: BlockHashType,
+    ) -> Optional[dict[int, KVCacheBlock]]:
         """Get a cached block by the block hash, or None if cache miss.
         If there are duplicated blocks, we return the first block in the cache.
 
