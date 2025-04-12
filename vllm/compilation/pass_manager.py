@@ -11,6 +11,7 @@ from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
 from .inductor_pass import CustomGraphPass, InductorPass
 from .noop_elimination import NoOpEliminationPass
+from .sequence_parallelism import SequenceParallelismPass
 
 logger = init_logger(__name__)
 
@@ -47,6 +48,9 @@ class PostGradPassManager(CustomGraphPass):
 
         if pass_config.enable_fusion:
             self.passes += [FusionPass.instance(pass_config)]
+
+        if pass_config.enable_sequence_parallelism:
+            self.passes += [SequenceParallelismPass.instance(pass_config)]
 
         self.fix_functionalization = FixFunctionalizationPass(pass_config)
 

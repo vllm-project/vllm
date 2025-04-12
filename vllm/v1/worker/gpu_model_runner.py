@@ -1020,7 +1020,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_scheduled_tokens)
         else:
             # Eager mode.
-            num_input_tokens = num_scheduled_tokens
+            # Pad tokens to multiple of tensor_parallel_size when
+            # enabled collective fusion for SP
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            if self.vllm_config.compilation_config.pass_config. \
+                enable_sequence_parallelism and tp_size > 1:
+                import math
+                num_input_tokens = math.ceil(
+                    num_scheduled_tokens / tp_size) * tp_size
+            else:
+                num_input_tokens = num_scheduled_tokens
         attn_metadata.num_input_tokens = num_input_tokens
 
         if self.is_multimodal_model:
