@@ -110,6 +110,30 @@ If you run out of CPU RAM, try the following options:
 - (Multi-modal models only) you can set the size of multi-modal input cache using `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
 - (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable (default 4 GiB).
 
+#### Disable unused modalities
+
+You can disable unused modalities (except for text) by setting its limit to zero.
+
+For example, if your application only accepts image input, there is no need to allocate any memory for videos.
+
+```python
+from vllm import LLM
+
+# Accept images but not videos
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          limit_mm_per_prompt={"video": 0})
+```
+
+You can even run a multi-modal model for text-only inference:
+
+```python
+from vllm import LLM
+
+# Don't accept images. Just text.
+llm = LLM(model="google/gemma-3-27b-it",
+          limit_mm_per_prompt={"image": 0})
+```
+
 ### Performance optimization and tuning
 
 You can potentially improve the performance of vLLM by finetuning various options.

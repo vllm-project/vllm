@@ -611,7 +611,7 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-def run_llama4(questions: list[str], modality: str):
+def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
@@ -1081,6 +1081,11 @@ def main(args):
     questions = mm_input["questions"]
 
     req_data = model_example_map[model](questions, modality)
+
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
     llm = LLM(**engine_args)
