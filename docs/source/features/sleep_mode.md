@@ -1,21 +1,23 @@
 # Sleep Mode
 
-Sleep mode is a feature in vLLM that allows you to temporarily offload model weights from GPU memory to CPU memory, freeing up valuable GPU resources when the model is not in use. This is particularly useful in production environments where you want to optimize resource utilization.
+Sleep mode is a feature in vLLM that allows you to temporarily free up GPU resources when the model is not in use. This is particularly useful in production environments where you want to optimize resource utilization.
 
 ## Overview
 
-When a model is put to sleep:
-- Model weights are offloaded from GPU memory to CPU memory
-- GPU resources are freed up for other tasks
-- The model remains loaded but in an inactive state
-- API endpoints that don't require model weights continue to function normally
+vLLM provides two levels of sleep mode:
+
+- **Level 1** (default): Model weights are backed up in CPU memory, and KV cache is discarded. This is useful when you plan to wake up and run the same model again. Requires sufficient CPU memory to store model weights.
+
+- **Level 2**: Both model weights and KV cache are discarded. This reduces CPU memory pressure and is useful when you plan to load a different model after waking up.
+
+During sleep mode, endpoints that don't require model weights continue to function normally.
 
 ## API Endpoints
 
 vLLM provides several endpoints to control the sleep mode:
 
-- `POST /sleep` - Put the model to sleep, offloading weights from GPU memory
-- `POST /wake_up` - Wake up the model, restoring weights to GPU memory
+- `POST /sleep` - Put the model to sleep (accepts optional `level` parameter)
+- `POST /wake_up` - Wake up the model
 - `GET /is_sleeping` - Check if the model is currently in sleep mode
 
 ### Protected Endpoints
@@ -37,14 +39,14 @@ Other endpoints like `/tokenize`, `/detokenize`, and `/v1/models` continue to wo
 
 ### Putting a Model to Sleep
 
+Default (Level 1):
 ```bash
 curl -X POST http://localhost:8000/sleep
 ```
 
-You can specify a sleep level (default is 1):
-
+Specifying a sleep level:
 ```bash
-curl -X POST http://localhost:8000/sleep?level=1
+curl -X POST http://localhost:8000/sleep?level=2
 ```
 
 ### Waking Up a Model
@@ -83,5 +85,5 @@ Clients can catch this error and automatically wake up the model before retrying
 ## Limitations
 
 - Sleep mode is only supported on CUDA devices
-- The first request after waking up a model may have higher latency as weights are restored to GPU memory
+- The first request after waking up a model may have higher latency as the model is reloaded
 - Sleep mode state is global for the server - all models managed by the server are either asleep or awake 
