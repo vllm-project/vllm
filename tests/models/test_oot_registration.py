@@ -90,6 +90,7 @@ def test_oot_registration_multimodal(
                   max_model_len=4096,
                   enforce_eager=True,
                   limit_mm_per_prompt={"image": 1})
+
         first_token = llm.get_tokenizer().decode(0)
         outputs = llm.generate(prompts, sampling_params)
 

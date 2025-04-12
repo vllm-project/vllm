@@ -265,8 +265,10 @@ class MultiModalRegistry:
 
             return profiler.get_mm_max_tokens(
                 seq_len,
-                {modality: 1
-                 for modality in mm_limits},
+                {
+                    modality: 1
+                    for modality, limit in mm_limits.items() if limit > 0
+                },
             )
 
         return {
