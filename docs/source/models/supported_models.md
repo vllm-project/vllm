@@ -303,6 +303,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `THUDM/glm-4-9b-chat-hf`, etc.
   * ✅︎
   * ✅︎
+- * `Glm4ForCausalLM`
+  * GLM-4-0414
+  * `THUDM/GLM-4-32B-Chat-0414`, etc.
+  * ✅︎
+  * ✅︎
 - * `GPT2LMHeadModel`
   * GPT-2
   * `gpt2`, `gpt2-xl`, etc.
@@ -987,6 +992,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * Skywork-R1V-38B
   * T + I
   * `Skywork/Skywork-R1V-38B`
+  *
+  * ✅︎
+  * ✅︎
+- * `SmolVLMForConditionalGeneration`
+  * SmolVLM2
+  * T + I
+  * `SmolVLM2-2.2B-Instruct`
   *
   * ✅︎
   * ✅︎
