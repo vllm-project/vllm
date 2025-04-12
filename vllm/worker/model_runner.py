@@ -4,6 +4,7 @@ import dataclasses
 import gc
 import inspect
 import itertools
+import os
 import time
 import weakref
 from contextlib import contextmanager
@@ -58,6 +59,8 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+
+from vllm.model_executor.layers.update_input import UpdateInputTokens
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -473,6 +476,15 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 self.sliding_window + self.block_size - 1) // self.block_size
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
+            
+        self.zero_overhead = os.environ.get('VLLM_ZERO_OVERHEAD') == '1'
+        self.last_sample_tensor = None
+        self.last_sample_ids = None
+        self.req_ids = []
+
+    def SetLastSamperData(self, last_sample_ids, last_sample_tensor):
+        self.last_sample_tensor = last_sample_tensor
+        self.last_sample_ids = last_sample_ids
 
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
@@ -897,6 +909,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
                                                self.runner.device,
                                                self.runner.pin_memory)
+        if self.zero_overhead and self.last_sample_tensor is not None:
+            input_ids = async_tensor_h2d(self.req_ids, torch.long,
+                                               self.runner.device,
+                                               self.runner.pin_memory)
+            last_ids = async_tensor_h2d(self.last_sample_ids.tolist(), torch.long,
+                                               self.runner.device,
+                                               self.runner.pin_memory)
+            UpdateInputTokens(input_tokens_tensor, input_ids, self.last_sample_tensor, last_ids)
 
         token_types_tensor = async_tensor_h2d(token_types, torch.long,
                                                self.runner.device,
@@ -1198,7 +1218,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
+        last_outputs_ids: torch.Tensor = None,
+        last_output_sample: torch.Tensor = None,
     ) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -1224,7 +1246,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                            str(e)) from e
 
         self.builder.reset_cached_inter_data()
-
+        self.builder.SetLastSamperData(last_outputs_ids, last_output_sample)
         return self.builder.build()  # type: ignore
 
     @contextmanager
@@ -1647,6 +1669,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None,
+        last_outputs_ids: torch.Tensor = None,
+        last_output_sample: torch.Tensor = None,
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1662,7 +1686,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         If cuda graph is required, this API automatically pads inputs.
         """
         model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list, finished_requests_ids)
+            seq_group_metadata_list, finished_requests_ids, last_outputs_ids, last_output_sample)
         if get_pp_group().is_last_rank:
             # Sampling metadata is only required for the final pp group
             generators = self.get_generators(finished_requests_ids)
