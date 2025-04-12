@@ -183,8 +183,8 @@ class MultiprocExecutor(Executor):
 
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(
-                        "Worker failed with error %s, please check the"
-                        " stack trace above for the root cause", result)
+                        f"Worker failed with error '{result}', please check the"
+                        " stack trace above for the root cause")
 
                 responses[w.rank] = result
 
