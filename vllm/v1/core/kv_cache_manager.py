@@ -9,7 +9,8 @@ from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
-from vllm.v1.core.specialized_kv_cache_manager import get_specialized_kv_cache_manager
+from vllm.v1.core.specialized_kv_cache_manager \
+    import get_specialized_kv_cache_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -203,7 +204,8 @@ class KVCacheManager:
         # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
-        removed_blocks = self.specialized_kv_cache_manager.remove_skipped_blocks(
+        removed_blocks = self.specialized_kv_cache_manager \
+            .remove_skipped_blocks(
             req_blocks, request.num_computed_tokens)
         self.block_pool.free_blocks(removed_blocks)
 
