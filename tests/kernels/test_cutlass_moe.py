@@ -187,8 +187,8 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
 
     kwargs = {
         'a': moe_tensors.a,
-        'w1': moe_tensors.w1_q.transpose(1, 2),
-        'w2': moe_tensors.w2_q.transpose(1, 2),
+        'w1': moe_tensors.w1_q.transpose(1, 2),  # type: ignore[union-attr]
+        'w2': moe_tensors.w2_q.transpose(1, 2),  # type: ignore[union-attr]
         'topk_weights': topk_weights,
         'topk_ids': topk_ids,
         'ab_strides1': moe_tensors.ab_strides1,
@@ -206,7 +206,8 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
         return cutlass_moe(**kwargs)
 
     assert num_local_experts is not None
-    return run_with_expert_maps(num_experts, num_local_experts, **kwargs)
+    return run_with_expert_maps(num_experts, num_local_experts,
+                                **kwargs)  # type: ignore[arg-type]
 
 
 def run_16_bit(moe_tensors: MOETensors,
