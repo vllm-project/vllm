@@ -206,8 +206,10 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
         return cutlass_moe(**kwargs)
 
     assert num_local_experts is not None
-    return run_with_expert_maps(num_experts, num_local_experts,
-                                **kwargs)  # type: ignore[arg-type]
+    return run_with_expert_maps(
+        num_experts,
+        num_local_experts,  # type: ignore[arg-type]
+        **kwargs)
 
 
 def run_16_bit(moe_tensors: MOETensors,
