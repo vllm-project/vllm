@@ -30,3 +30,10 @@ def check_embeddings_close(
                     f"\n{name_1}:\t{embeddings_1[:16]!r}")
 
         assert sim >= 1 - tol, fail_msg
+
+
+def matryoshka_fy(tensor, dimensions):
+    tensor = torch.tensor(tensor)
+    tensor = tensor[..., :dimensions]
+    tensor = F.normalize(tensor, p=2, dim=1)
+    return tensor
