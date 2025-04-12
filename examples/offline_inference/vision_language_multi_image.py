@@ -695,13 +695,6 @@ def run_chat(model: str, question: str, image_urls: list[str],
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
     llm = LLM(**engine_args)
 
-    # To maintain code compatibility in this script, we add LoRA here.
-    # You can also add LoRA using:
-    # llm.generate(prompts, lora_request=lora_request,...)
-    if req_data.lora_requests:
-        for lora_request in req_data.lora_requests:
-            llm.llm_engine.add_lora(lora_request=lora_request)
-
     sampling_params = SamplingParams(temperature=0.0,
                                      max_tokens=256,
                                      stop_token_ids=req_data.stop_token_ids)
