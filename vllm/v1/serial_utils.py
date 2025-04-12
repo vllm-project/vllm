@@ -22,7 +22,6 @@ CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
 CUSTOM_TYPE_RAW_VIEW = 3
 
-
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
 
