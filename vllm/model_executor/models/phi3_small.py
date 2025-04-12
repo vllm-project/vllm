@@ -25,7 +25,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsPP, SupportsV0Only
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -354,7 +354,7 @@ class Phi3SmallModel(nn.Module):
         return hidden_states
 
 
-class Phi3SmallForCausalLM(nn.Module, SupportsPP):
+class Phi3SmallForCausalLM(nn.Module, SupportsPP, SupportsV0Only):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
