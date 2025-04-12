@@ -583,6 +583,15 @@ class ModelConfig:
                     if getattr(user_config, k) is None:
                         setattr(user_config, k, v)
 
+            if self.is_matryoshka:
+                if user_config.normalize is None:
+                    user_config.normalize = True
+                elif not user_config.normalize:
+                    raise ValueError(
+                        "`normalize` must be enabled (set to True) "
+                        "for models that are compatible with "
+                        "Matryoshka Representation.")
+
             return user_config
 
         return None

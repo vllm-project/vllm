@@ -921,6 +921,11 @@ class LLM:
         if pooling_params is None:
             # Use default pooling params.
             pooling_params = PoolingParams()
+        elif isinstance(pooling_params, PoolingParams):
+            pooling_params.verify(self.llm_engine.model_config)
+        else:
+            for pooling_param in pooling_params:
+                pooling_param.verify(self.llm_engine.model_config)
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,
@@ -939,6 +944,8 @@ class LLM:
         /,
         *,
         use_tqdm: bool = True,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[EmbeddingRequestOutput]:
@@ -953,6 +960,8 @@ class LLM:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See :class:`~vllm.inputs.PromptType`
                 for more details about the format of each prompts.
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
@@ -968,6 +977,7 @@ class LLM:
 
         items = self.encode(prompts,
                             use_tqdm=use_tqdm,
+                            pooling_params=pooling_params,
                             lora_request=lora_request,
                             prompt_adapter_request=prompt_adapter_request)
 
