@@ -154,7 +154,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SpecializedManager]] = {
 }
 
 
-def get_specialized_manager(kv_cache_spec: KVCacheSpec,
+def get_specialized_kv_cache_manager(kv_cache_spec: KVCacheSpec,
                             block_pool: BlockPool) -> SpecializedManager:
     manager_class = spec_manager_map[type(kv_cache_spec)]
     manager = manager_class(kv_cache_spec, block_pool)
