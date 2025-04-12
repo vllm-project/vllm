@@ -4,6 +4,7 @@ import os
 import pickle
 import signal
 import sys
+import threading
 import time
 import traceback
 import weakref
@@ -47,6 +48,7 @@ class MultiprocExecutor(Executor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
+        self.shutdown_event = threading.Event()
         self.failure_callback: Optional[Callable] = None
 
         self.world_size = self.parallel_config.world_size
@@ -176,7 +178,7 @@ class MultiprocExecutor(Executor):
                 dequeue_timeout = timeout - (time.monotonic() - start_time
                                              ) if timeout is not None else None
                 status, result = w.worker_response_mq.dequeue(
-                    timeout=dequeue_timeout)
+                    timeout=dequeue_timeout, cancel=self.shutdown_event)
 
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(
@@ -221,6 +223,7 @@ class MultiprocExecutor(Executor):
         """Properly shut down the executor and its workers"""
         if not getattr(self, 'shutting_down', False):
             self.shutting_down = True
+            self.shutdown_event.set()
             for w in self.workers:
                 w.worker_response_mq = None
             self._ensure_worker_termination([w.proc for w in self.workers])
