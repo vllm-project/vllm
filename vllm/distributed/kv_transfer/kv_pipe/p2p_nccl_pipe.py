@@ -39,13 +39,19 @@ class P2pNcclPipe:
             raise ValueError("Port cannot be 0")
         self._hostname = hostname
         self._port = port
+
         self.zmq_address = f"{self._hostname}:{self._port}"
         self.http_address = (
             f"{self._hostname}:"
             f"{self.config.kv_connector_extra_config['http_port']}")
-        self.proxy_address = (
-            f"{self.config.kv_connector_extra_config['proxy_ip']}:"
-            f"{self.config.kv_connector_extra_config['proxy_port']}")
+
+        proxy_ip = self.config.get_from_extra_config("proxy_ip", "")
+        proxy_port = self.config.get_from_extra_config("proxy_port", "")
+        if proxy_ip == "" or proxy_port == "":
+            self.proxy_address = ""
+        else:
+            self.proxy_address = proxy_ip + ":" + proxy_port
+
         self.context = zmq.Context()
         self.router_socket = self.context.socket(zmq.ROUTER)
         self.router_socket.bind(f"tcp://{self.zmq_address}")
@@ -74,7 +80,8 @@ class P2pNcclPipe:
                                              daemon=True)
         self._send_thread.start()
 
-        if port_offset == 0:
+        self._ping_thread = None
+        if port_offset == 0 and self.proxy_address != "":
             self._ping_thread = threading.Thread(target=self._ping,
                                                  daemon=True)
             self._ping_thread.start()
@@ -344,4 +351,5 @@ class P2pNcclPipe:
 
     def close(self) -> None:
         self._listener_thread.join()
-        self._ping_thread.join()
+        if self._ping_thread is not None:
+            self._ping_thread.join()
