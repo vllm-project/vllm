@@ -8,7 +8,7 @@ import re
 import threading
 from dataclasses import MISSING, dataclass, fields
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
-                    Tuple, Type, Union, cast, get_args, get_origin)
+                    Tuple, Type, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
 
@@ -52,8 +52,10 @@ DEVICE_OPTIONS = [
     "hpu",
 ]
 
+T = TypeVar("T")
 
-def optional_arg(val: str, type: type[Any]) -> Optional[Any]:
+
+def optional_arg(val: str, type: T) -> Optional[T]:
     if val == "" or val == "None":
         return None
     try:
