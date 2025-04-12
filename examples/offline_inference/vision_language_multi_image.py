@@ -687,6 +687,11 @@ def run_chat(model: str, question: str, image_urls: list[str],
              seed: Optional[int]):
     req_data = model_example_map[model](question, image_urls)
 
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
+
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
     llm = LLM(**engine_args)
 
