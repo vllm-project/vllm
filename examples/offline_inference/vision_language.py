@@ -1081,16 +1081,11 @@ def main(args):
     questions = mm_input["questions"]
 
     req_data = model_example_map[model](questions, modality)
-
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
-    llm = LLM(**engine_args)
-
-    # To maintain code compatibility in this script, we add LoRA here.
-    # You can also add LoRA using:
-    # llm.generate(prompts, lora_request=lora_request,...)
     if req_data.lora_requests:
-        for lora_request in req_data.lora_requests:
-            llm.llm_engine.add_lora(lora_request=lora_request)
+        assert req_data.engine_args.enable_lora
+    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+
+    llm = LLM(**engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.
     prompts = req_data.prompts if args.use_different_prompt_per_request else [
