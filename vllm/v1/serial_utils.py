@@ -20,6 +20,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalFieldElem,
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
+CUSTOM_TYPE_RAW_VIEW = 3
+
 
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
@@ -101,14 +103,16 @@ class MsgpackEncoder:
         self, obj: np.ndarray
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
+        arr_data = obj.data if obj.data.c_contiguous else obj.tobytes()
         if not obj.shape or obj.nbytes < self.size_threshold:
-            # Encode small arrays and scalars inline.
-            data = obj.data
+            # Encode small arrays and scalars inline. Using this extension type
+            # ensures we can avoid copying when decoding.
+            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr_data)
         else:
-            # Otherwise encode index of backing buffer.
-            obj = np.ascontiguousarray(obj)
+            # Otherwise encode index of backing buffer to avoid copy.
             data = len(self.aux_buffers)
-            self.aux_buffers.append(obj.data)
+            self.aux_buffers.append(arr_data)
+
         # We serialize the ndarray as a tuple of native types.
         # The data is either inlined if small, or an index into a list of
         # backing buffers that we've stashed in `aux_buffers`.
@@ -188,6 +192,8 @@ class MsgpackDecoder:
         return [self._decode_nested_tensors(x) for x in obj]
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
+        if code == CUSTOM_TYPE_RAW_VIEW:
+            return data
         if code == CUSTOM_TYPE_PICKLE:
             return pickle.loads(data)
         if code == CUSTOM_TYPE_CLOUDPICKLE:
