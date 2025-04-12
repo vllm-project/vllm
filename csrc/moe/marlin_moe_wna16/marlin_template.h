@@ -632,67 +632,6 @@ __global__ void Marlin(
     read_moe_block_data(block_id);
   };
 
-  // (expert parallelism only) write zero to output
-  // if the target blocks is invalid (expert_id == -1)
-  auto write_zero_to_invalid_block_output = [&]() {
-    int num_tiles_write_zero =
-        div_ceil(n_tiles * num_invalid_blocks, gridDim.x);
-
-    int ntile_id = (num_tiles_write_zero * blockIdx.x) % n_tiles;
-    int remaining_ntiles_in_block = n_tiles - ntile_id;
-    int remaining_ntiles_global =
-        min(num_tiles_write_zero,
-            n_tiles * num_invalid_blocks - num_tiles_write_zero * blockIdx.x);
-    int block_id_write = -1;
-
-    while (remaining_ntiles_global > 0) {
-      int skip_count = block_id_write == -1
-                           ? (num_tiles_write_zero * blockIdx.x) / n_tiles
-                           : 0;
-      block_id_write++;
-      for (int i = block_id_write; i < num_tokens_past_padded / moe_block_size;
-           i++) {
-        if (expert_ids_ptr[i] == -1) {
-          if (skip_count == 0) {
-            block_id_write = i;
-            break;
-          }
-          skip_count--;
-        };
-      }
-
-      if (remaining_ntiles_global >= n_tiles) {
-        remaining_ntiles_in_block = n_tiles;
-      } else {
-        remaining_ntiles_in_block = remaining_ntiles_global;
-      }
-      read_moe_block_data(block_id_write);
-
-      int global_stride_n = n_tiles * 16 * thread_n_blocks / 8;
-      int stride_n = remaining_ntiles_in_block * 16 * thread_n_blocks / 8;
-      int off_stride_n = ntile_id * 16 * thread_n_blocks / 8;
-
-      int num_int4s = moe_block_size * stride_n;
-      int num_int4s_per_thread = div_ceil(num_int4s, threads);
-
-      for (int index = threadIdx.x; index < num_int4s; index += threads) {
-        int row = index / stride_n;
-        if (row < block_num_valid_tokens) {
-          int64_t sorted_row = sh_block_sorted_ids[row];
-          int col = index % stride_n;
-          int64_t true_index =
-              sorted_row * global_stride_n + off_stride_n + col;
-          C[true_index] = {0, 0, 0, 0};
-        }
-      }
-
-      ntile_id = 0;
-      remaining_ntiles_global -= remaining_ntiles_in_block;
-    }
-  };
-
-  if (num_invalid_blocks > 0) write_zero_to_invalid_block_output();
-
   // Compute all information about the current slice which is required for
   // synchronization.
   auto init_slice = [&](bool first_init = false) {

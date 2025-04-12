@@ -307,8 +307,9 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
 
     torch.ops._C.silu_and_mul(intermediate_cache2,
                               intermediate_cache1.view(-1, 2 * N))
-    
-    intermediate_cache3.zero_()
+
+    if expert_map is not None:
+        intermediate_cache3.zero_()
 
     intermediate_cache3 = ops.moe_wna16_marlin_gemm(
         intermediate_cache2,
