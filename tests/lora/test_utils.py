@@ -9,7 +9,7 @@ from torch import nn
 
 from vllm.lora.utils import (get_adapter_absolute_path,
                              parse_fine_tuned_lora_name, replace_submodule)
-from vllm.utils import LRUCache
+from vllm.utils import CacheInfo, LRUCache
 
 
 def test_parse_fine_tuned_lora_name_valid():
@@ -95,6 +95,8 @@ class TestLRUCache(LRUCache):
 
 def test_lru_cache():
     cache = TestLRUCache(3)
+    assert cache.stat() == CacheInfo(hits=0, total=0)
+    assert cache.stat(delta=True) == CacheInfo(hits=0, total=0)
 
     cache.put(1, 1)
     assert len(cache) == 1
@@ -113,7 +115,10 @@ def test_lru_cache():
     assert len(cache) == 3
     assert set(cache.cache) == {2, 3, 4}
     assert cache._remove_counter == 1
+
     assert cache.get(2) == 2
+    assert cache.stat() == CacheInfo(hits=1, total=1)
+    assert cache.stat(delta=True) == CacheInfo(hits=1, total=1)
 
     cache.put(5, 5)
     assert set(cache.cache) == {2, 4, 5}
@@ -133,6 +138,8 @@ def test_lru_cache():
     assert len(cache) == 2
     assert set(cache.cache) == {2, 4}
     assert cache._remove_counter == 3
+    assert cache.stat() == CacheInfo(hits=1, total=2)
+    assert cache.stat(delta=True) == CacheInfo(hits=0, total=1)
 
     cache.put(6, 6)
     assert len(cache) == 3
@@ -149,6 +156,8 @@ def test_lru_cache():
     cache.clear()
     assert len(cache) == 0
     assert cache._remove_counter == 6
+    assert cache.stat() == CacheInfo(hits=0, total=0)
+    assert cache.stat(delta=True) == CacheInfo(hits=0, total=0)
 
     cache._remove_counter = 0
 
