@@ -18,6 +18,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
 
+from .utils_block import native_w8a8_block_matmul
+
 dg_available = False
 try:
     import deep_gemm
@@ -75,61 +77,6 @@ def native_per_token_group_quant_fp8(x,
     return x_q, x_s
 
 
-def native_w8a8_block_fp8_matmul(A,
-                                 B,
-                                 As,
-                                 Bs,
-                                 block_size,
-                                 output_dtype=torch.float16):
-    """Matrix multiplication with block-wise quantization using native torch."""
-    A = A.to(torch.float32)
-    B = B.to(torch.float32)
-    assert A.shape[-1] == B.shape[-1]
-    assert B.ndim == 2 and B.is_contiguous() and Bs.ndim == 2
-    assert len(block_size) == 2
-    block_n, block_k = block_size[0], block_size[1]
-    assert (A.shape[-1] + block_k - 1) // block_k == As.shape[-1]
-    assert A.shape[:-1] == As.shape[:-1]
-
-    M = A.numel() // A.shape[-1]
-    N, K = B.shape
-    origin_C_shape = A.shape[:-1] + (N, )
-    A = A.reshape(M, A.shape[-1])
-    As = As.reshape(M, As.shape[-1])
-    n_tiles = (N + block_n - 1) // block_n
-    k_tiles = (K + block_k - 1) // block_k
-    assert n_tiles == Bs.shape[0]
-    assert k_tiles == Bs.shape[1]
-
-    C_shape = (M, N)
-    C = torch.zeros(C_shape, dtype=torch.float32, device=A.device)
-
-    A_tiles = [
-        A[:, i * block_k:min((i + 1) * block_k, K)] for i in range(k_tiles)
-    ]
-    B_tiles = [[
-        B[
-            j * block_n:min((j + 1) * block_n, N),
-            i * block_k:min((i + 1) * block_k, K),
-        ] for i in range(k_tiles)
-    ] for j in range(n_tiles)]
-    C_tiles = [
-        C[:, j * block_n:min((j + 1) * block_n, N)] for j in range(n_tiles)
-    ]
-    As_tiles = [As[:, i:i + 1] for i in range(k_tiles)]
-
-    for i in range(k_tiles):
-        for j in range(n_tiles):
-            a = A_tiles[i]
-            b = B_tiles[j][i]
-            c = C_tiles[j]
-            s = As_tiles[i] * Bs[j][i]
-            c[:, :] += torch.matmul(a, b.t()) * s
-
-    C = C.reshape(origin_C_shape).to(output_dtype)
-    return C
-
-
 def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
     """Fused moe with block-wise quantization using native torch."""
     B, D = a.shape
@@ -146,22 +93,22 @@ def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
     for i in range(w1.shape[0]):
         mask = topk_ids == i
         if mask.sum():
-            inter_out = native_w8a8_block_fp8_matmul(a_q[mask],
-                                                     w1[i],
-                                                     a_s[mask],
-                                                     w1_s[i],
-                                                     block_shape,
-                                                     output_dtype=a.dtype)
+            inter_out = native_w8a8_block_matmul(a_q[mask],
+                                                 w1[i],
+                                                 a_s[mask],
+                                                 w1_s[i],
+                                                 block_shape,
+                                                 output_dtype=a.dtype)
             act_out = SiluAndMul().forward_native(inter_out)
             act_out_q, act_out_s = native_per_token_group_quant_fp8(
                 act_out, block_k)
             act_out = act_out.to(torch.float32)
-            out[mask] = native_w8a8_block_fp8_matmul(act_out_q,
-                                                     w2[i],
-                                                     act_out_s,
-                                                     w2_s[i],
-                                                     block_shape,
-                                                     output_dtype=a.dtype)
+            out[mask] = native_w8a8_block_matmul(act_out_q,
+                                                 w2[i],
+                                                 act_out_s,
+                                                 w2_s[i],
+                                                 block_shape,
+                                                 output_dtype=a.dtype)
     return (out.view(B, -1, w2.shape[1]) *
             topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
 
@@ -215,8 +162,8 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     As = torch.rand(M, k_tiles, dtype=torch.float32) * factor_for_scale
     Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
 
-    ref_out = native_w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size,
-                                           out_dtype)
+    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size,
+                                       out_dtype)
     out = w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
 
     rel_diff = (torch.mean(
@@ -238,8 +185,6 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     factor_for_scale = 1e-2
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max, fp8_min = fp8_info.max, fp8_info.min
-
-    vllm_config = VllmConfig()
 
     a = torch.randn((M, K), dtype=dtype) / 10
 
@@ -266,6 +211,7 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     score = torch.randn((M, E), dtype=dtype)
 
     # Set the context to avoid lots of warning spam.
+    vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
         out = fused_moe(
             a,
@@ -334,8 +280,8 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     As = As_fp8.to(torch.float32)
     Bs = Bs_fp8.to(torch.float32)
 
-    ref_out = native_w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size,
-                                           out_dtype)
+    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size,
+                                       out_dtype)
 
     # Transpose earlier so that the testing will not trigger transposing kernels
     As_fp8 = deep_gemm.get_col_major_tma_aligned_tensor(As_fp8)
