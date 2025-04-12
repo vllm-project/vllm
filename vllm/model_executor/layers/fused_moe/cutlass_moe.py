@@ -22,6 +22,7 @@ def cutlass_moe(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-quantized Mixture of Experts (MoE) layer
@@ -115,6 +116,14 @@ def cutlass_moe(
     topk = topk_ids.size(1)
     out_dtype = a.dtype
 
+    per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+        a2_scale.numel() != 1 if a2_scale is not None else False)
+    if apply_router_weight_on_input:
+        assert topk == 1, \
+            "apply_router_weight_on_input is only implemented for topk=1"
+        # TODO: this only works for topK=1, will need to update for topK>1
+        a = a * topk_weights.to(out_dtype)
+
     if is_quantized:
         per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
             a2_scale.numel() != 1 if a2_scale is not None else False)
@@ -164,6 +173,8 @@ def cutlass_moe(
     ops.cutlass_moe_mm(c2, intermediate, w2, a2_scale, w2_scale,
                        expert_offsets[:-1], problem_sizes2, ab_strides2,
                        ab_strides2, c_strides2)
-
-    return (c2[c_map].view(m, topk, k) *
-            topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)
+    # Gather tokens
+    c2 = c2[c_map].view(m, topk, k)
+    if not apply_router_weight_on_input:
+        c2 = c2 * topk_weights.view(m, topk, 1).to(out_dtype)
+    return c2.sum(dim=1)
