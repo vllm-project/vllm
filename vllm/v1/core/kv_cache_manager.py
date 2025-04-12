@@ -40,6 +40,7 @@ class KVCacheManager:
         self.enable_caching = enable_caching
         self.caching_hash_fn = sha256 if caching_hash_algo == "sha256" else hash
         self.log_stats = log_stats
+        # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
         # blocks for each request. For example, when a request reaches the end
