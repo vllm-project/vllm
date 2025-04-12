@@ -14,7 +14,7 @@ from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import set_forward_context, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -417,6 +417,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
+            self.input_batch.num_dropped_token_offsets_cpu[req_index] = \
+                sum(req_data.num_dropped_token_offsets)
+            self.input_batch.should_compress[req_index] = \
+                req_data.should_compress
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
             # Add new_token_ids to token_ids_cpu.
@@ -515,6 +519,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
+
+        ## TODO: update slot mapping and pass should_compress to flash attention
+        print(self.input_batch.num_dropped_token_offsets_cpu[:5], self.input_batch.should_compress[:5])
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1064,13 +1071,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(attn_metadata, self.vllm_config, num_reqs=self.input_batch.num_reqs):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+            forward_context = get_forward_context()
+            print("???????", forward_context.req_idx_to_num_dropped_token_offset)
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             return hidden_states

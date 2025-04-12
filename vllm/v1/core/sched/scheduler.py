@@ -10,6 +10,7 @@ from typing import Optional, Union
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -469,6 +470,9 @@ class Scheduler(SchedulerInterface):
             req_data.new_token_ids = new_token_ids
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
+            req_data.num_dropped_token_offsets = \
+                request.num_dropped_token_offsets
+            req_data.should_compress = request.should_compress
         else:
             req_data = CachedRequestData.from_request(request,
                                                       resumed_from_preemption,
@@ -573,6 +577,8 @@ class Scheduler(SchedulerInterface):
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
+        ## forward_context = get_forward_context()
+        ## print("666666", forward_context.req_idx_to_num_dropped_token_offset)
         for request in self.running:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
@@ -583,6 +589,10 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
+            ## TODO: consume from global var
+            num_dropped_token_offset = -1
+            if num_dropped_token_offset != 0:
+                request.num_dropped_token_offsets.append(num_dropped_token_offset)
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
@@ -628,6 +638,10 @@ class Scheduler(SchedulerInterface):
             # to return empty token ids for the request.
             for num_new, output_token_id in enumerate(new_token_ids, 1):
                 request.append_output_token_ids(output_token_id)
+                ## TODO: we only compress in case of \n token
+                ## Figure out a way to identify \n as per token id
+                # request.should_compress = output_token_id == 50118
+                request.should_compress = True
 
                 # Check for stop and update request state.
                 # This must be called before we make the EngineCoreOutput.

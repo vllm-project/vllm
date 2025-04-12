@@ -520,6 +520,9 @@ class FlashAttentionImpl(AttentionImpl):
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
             )
+            ## TODO: if should compress, do it and dump to GPU
+            ## pass num_dropped_token_offsets to scheduler.update_from_output in EngineCore::step
+            ## plan to use ugly global var
             return output
 
         assert not use_local_attn, (
