@@ -295,3 +295,8 @@ class EngineClient(ABC):
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
+
+    @abstractmethod
+    async def set_vllmcache_metric(self) -> None:
+        """Set the vllmcache metric for the engine"""
+        ...

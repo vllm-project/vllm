@@ -92,6 +92,7 @@ from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address, set_ulimit)
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -1068,7 +1069,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
-
+        if isinstance(engine_client, AsyncLLM):
+            await engine_client.set_vllmcache_metric()
         model_config = await engine_client.get_model_config()
         await init_app_state(engine_client, model_config, app.state, args)
 
