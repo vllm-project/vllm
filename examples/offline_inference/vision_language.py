@@ -1081,6 +1081,7 @@ def main(args):
     questions = mm_input["questions"]
 
     req_data = model_example_map[model](questions, modality)
+    
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
 
     llm = LLM(**engine_args)
