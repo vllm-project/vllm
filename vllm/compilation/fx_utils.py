@@ -14,6 +14,10 @@ def is_func(node: fx.Node, target) -> bool:
     return node.op == "call_function" and node.target == target
 
 
+def is_auto_func(node: fx.Node, op: OpOverload) -> bool:
+    return is_func(node, auto_functionalized) and node.args[0] == op
+
+
 # Returns the first specified node with the given op (if it exists)
 def find_specified_fn_maybe(nodes: Iterable[fx.Node],
                             op: OpOverload) -> Optional[fx.Node]:
@@ -60,3 +64,9 @@ def find_getitem(node: fx.Node, idx: int) -> fx.Node:
     ret = find_getitem_maybe(node, idx)
     assert ret is not None, f"Could not find getitem {idx} in node {node}"
     return ret
+
+
+# Asserts that the node only has one user and returns it
+def get_only_user(node: fx.Node) -> fx.Node:
+    assert len(node.users) == 1
+    return next(iter(node.users))

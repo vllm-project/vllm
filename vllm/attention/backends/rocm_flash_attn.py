@@ -593,6 +593,15 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                                   head_dim).reshape(tokens, n_kv_heads * n_rep,
                                                     head_dim))
 
+    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
+                                     per_token: bool):
+        if self.use_triton_flash_attn:
+            return dtype == current_platform.fp8_dtype(
+            ) and static and not per_token
+
+        # Only supported in the Triton backend
+        return False
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -791,6 +800,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         attn_masks[0][None]
                         if attn_masks is not None else None,
                         full_scales,
+                        out_scale,
                     )
                 elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:
