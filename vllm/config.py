@@ -1783,7 +1783,8 @@ class SchedulerConfig:
 
     max_model_len: int = None  # type: ignore
     """Maximum length of a sequence (including prompt and generated text). This
-    is usually set in ModelConfig and should not be set here."""
+    is primarily set in `ModelConfig` and that value should be manually
+    duplicated here."""
 
     max_num_partial_prefills: int = 1
     """For chunked prefill, the maximum number of sequences that can be
