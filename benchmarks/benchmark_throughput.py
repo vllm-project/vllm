@@ -599,10 +599,12 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Number of prefix tokens to be used in RandomDataset "
-        "and SonnetDataset. For RandomDataset, it is the number of "
-        "fixed prefix tokens before the random context. For SonnetDataset, "
-        "it is the number of prefix tokens in the prompt.",
-    )
+        "and SonnetDataset. For RandomDataset, the total input "
+        "length is the sum of `prefix-len` and a random context length "
+        "sampled from [input_len * (1 - range_ratio), "
+        "input_len * (1 + range_ratio)]. For SonnetDataset, "
+        "prefix_len controls how much of the input is fixed versus random, "
+        "but the total input length remains approximately input_len tokens.")
     # random dataset
     parser.add_argument(
         "--random-range-ratio",
