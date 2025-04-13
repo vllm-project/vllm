@@ -516,7 +516,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
             from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
                 triton_attention)
-            self.attn_func = triton_attention
+            self.triton_attn_func = triton_attention
             logger.debug("Using Triton FA in ROCmBackend")
             if self.sliding_window != (-1, -1):
                 logger.warning("ROCm Triton FA does not currently support "
@@ -532,7 +532,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             else:
                 try:
                     from flash_attn import flash_attn_varlen_func  # noqa: F401
-                    self.attn_func = flash_attn_varlen_func
+                    self.fa_attn_func = flash_attn_varlen_func
                     logger.debug("Using CK FA in ROCmBackend")
                 except ModuleNotFoundError:
                     self.use_naive_attn = True
@@ -543,7 +543,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         "ROCm Naive FlashAttention does not support "
                         "attention logits soft capping.")
 
-                self.attn_func = _sdpa_attention
+                self.sdpa_attn_func = _sdpa_attention
                 logger.debug("Using naive (SDPA) attention in ROCmBackend")
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -706,7 +706,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             query.dtype,
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
-                    out, _ = self.attn_func(
+                    self.triton_attn_func(
                         query,
                         key,
                         value,
@@ -735,7 +735,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     key = key.movedim(0, key.dim() - 2)
                     value = value.movedim(0, value.dim() - 2)
                     # sdpa math backend attention
-                    out = self.attn_func(
+                    self.sdpa_attn_func(
                         query,
                         key,
                         value,
@@ -748,7 +748,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         attn_masks,
                     )
                 else:
-                    out = self.attn_func(
+                    # upstream FA does not support an output arg, copy
+                    output[:num_prefill_tokens] = self.fa_attn_func(
                         q=query,
                         k=key,
                         v=value,
@@ -763,9 +764,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         alibi_slopes=self.alibi_slopes,
                         softcap=self.logits_soft_cap,
                     )
-
-                # common code for prefill
-                assert output[:num_prefill_tokens].shape == out.shape
 
             else:
                 # prefix-enabled attention -
