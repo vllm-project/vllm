@@ -597,18 +597,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prefix-len",
         type=int,
-        default=0,
-        help="Number of fixed prefix tokens before the random "
-        "context in a request (default: 0).",
+        default=None,
+        help="Number of prefix tokens to be used in RandomDataset "
+        "and SonnetDataset.",
     )
     # random dataset
     parser.add_argument(
         "--random-range-ratio",
         type=float,
-        default=0.0,
+        default=None,
         help="Range ratio for sampling input/output length, "
-        "used only for RandomDataset. Must be in the range [0, 1) to define "
-        "a symmetric sampling range "
+        "used only for RandomDataset. Must be in the range [0, 1) to "
+        "define a symmetric sampling range "
         "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
 
