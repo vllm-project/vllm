@@ -856,7 +856,8 @@ def build_app(args: Namespace) -> FastAPI:
                             "error": {
                                 "message": (
                                     "Model is currently in sleep mode. "
-                                    "Please wake it up first with a POST request to /wake_up"
+                                    "Please wake it up first with a POST "
+                                    "request to /wake_up"
                                 ),
                                 "type": "ModelSleepingError",
                                 "code": 503
