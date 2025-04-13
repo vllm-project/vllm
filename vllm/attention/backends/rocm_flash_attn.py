@@ -750,7 +750,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         q=query,
                         k=key,
                         v=value,
-                        out=output[:num_prefill_tokens],
                         cu_seqlens_q=query_seq_start_loc,
                         cu_seqlens_k=key_seq_start_loc,
                         max_seqlen_q=prefill_meta.max_prefill_seq_len,
