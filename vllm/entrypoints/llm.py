@@ -8,7 +8,7 @@ from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 
 import cloudpickle
 import torch.nn as nn
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -117,6 +117,9 @@ class LLM:
         disable_custom_all_reduce: See :class:`~vllm.config.ParallelConfig`
         disable_async_output_proc: Disable async output processing.
             This may result in lower performance.
+        hf_token: The token to use as HTTP bearer authorization for remote files
+            . If `True`, will use the token generated when running 
+            `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
@@ -177,6 +180,7 @@ class LLM:
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
+        hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
@@ -232,6 +236,7 @@ class LLM:
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
+            hf_token=hf_token,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
@@ -530,6 +535,16 @@ class LLM:
             return get_beam_search_score(x.tokens, x.cum_logprob,
                                          tokenizer.eos_token_id,
                                          length_penalty)
+
+        # TODO - fix handling of multimodal data for beam search; we pass it
+        # through in the async version on the abstract EngineClient, but not
+        # here.
+        if any("multi_modal_data" in prompt
+               and prompt["multi_modal_data"] is not None
+               for prompt in prompts):
+            logger.warning(
+                "Multimodal data appears to have been provided, but is not"
+                " currently being passed through in LLM.beam_search()!")
 
         tokenizer = self.get_tokenizer()
         # generate 2 * beam_width candidates at each step
@@ -906,6 +921,11 @@ class LLM:
         if pooling_params is None:
             # Use default pooling params.
             pooling_params = PoolingParams()
+        elif isinstance(pooling_params, PoolingParams):
+            pooling_params.verify(self.llm_engine.model_config)
+        else:
+            for pooling_param in pooling_params:
+                pooling_param.verify(self.llm_engine.model_config)
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,
@@ -924,6 +944,8 @@ class LLM:
         /,
         *,
         use_tqdm: bool = True,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[EmbeddingRequestOutput]:
@@ -938,6 +960,8 @@ class LLM:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See :class:`~vllm.inputs.PromptType`
                 for more details about the format of each prompts.
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
@@ -953,6 +977,7 @@ class LLM:
 
         items = self.encode(prompts,
                             use_tqdm=use_tqdm,
+                            pooling_params=pooling_params,
                             lora_request=lora_request,
                             prompt_adapter_request=prompt_adapter_request)
 

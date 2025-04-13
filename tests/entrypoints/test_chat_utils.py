@@ -25,11 +25,13 @@ EXAMPLES_DIR = VLLM_PATH / "examples"
 
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 ULTRAVOX_MODEL_ID = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
+QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN2VL_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 QWEN25VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
 HERMES_MODEL_ID = "NousResearch/Hermes-3-Llama-3.1-8B"
+MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 
 
 @pytest.fixture(scope="function")
@@ -74,6 +76,30 @@ def mllama_model_config():
 def mllama_tokenizer():
     return TokenizerGroup(
         MLLAMA_MODEL_ID,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+
+
+@pytest.fixture(scope="function")
+def mistral_model_config():
+    return ModelConfig(MISTRAL_MODEL_ID,
+                       task="generate",
+                       tokenizer=MISTRAL_MODEL_ID,
+                       tokenizer_mode="auto",
+                       trust_remote_code=True,
+                       dtype="auto",
+                       seed=0,
+                       limit_mm_per_prompt={
+                           "image": 2,
+                       })
+
+
+@pytest.fixture(scope="module")
+def mistral_tokenizer():
+    return TokenizerGroup(
+        tokenizer_id=MISTRAL_MODEL_ID,
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
@@ -129,6 +155,66 @@ def test_parse_chat_messages_single_image(
         "content": "<|image_1|>\nWhat's in the image?"
     }]
     _assert_mm_data_is_image_input(mm_data, 1)
+
+
+def test_parse_chat_messages_empty_system(
+    mistral_model_config,
+    mistral_tokenizer,
+):
+    # Test string format
+    conversation, _ = parse_chat_messages(
+        [{
+            "role": "system",
+            "content": ""
+        }, {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Who are you?"
+            }]
+        }],
+        mistral_model_config,
+        mistral_tokenizer,
+        content_format="string",
+    )
+    assert conversation == [{
+        "role": "system",
+        "content": ""
+    }, {
+        "role": "user",
+        "content": "Who are you?"
+    }]
+
+    # Test openai format
+    conversation, _ = parse_chat_messages(
+        [{
+            "role": "system",
+            "content": ""
+        }, {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Who are you?"
+            }]
+        }],
+        mistral_model_config,
+        mistral_tokenizer,
+        content_format="openai",
+    )
+    assert conversation == [{
+        "role": "system",
+        "content": [{
+            "type": "text",
+            "text": ""
+        }]
+    }, {
+        "role":
+        "user",
+        "content": [{
+            "type": "text",
+            "text": "Who are you?"
+        }]
+    }]
 
 
 @pytest.mark.asyncio
@@ -671,7 +757,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     # Build a config for the model
     model_config = ModelConfig(model,
                                task="generate",
-                               tokenizer=MLLAMA_MODEL_ID,
+                               tokenizer=model,
                                tokenizer_mode="auto",
                                trust_remote_code=True,
                                dtype="auto",
@@ -682,7 +768,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
 
     # Build the tokenizer group and grab the underlying tokenizer
     tokenizer_group = TokenizerGroup(
-        MLLAMA_MODEL_ID,
+        model,
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
@@ -756,6 +842,8 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
     assert isinstance(chat_template, str)
 
 
+# NOTE: Qwen2-Audio default chat template is specially defined inside
+# processor class instead of using `tokenizer_config.json`
 # yapf: disable
 @pytest.mark.parametrize(
     ("model", "expected_format"),
@@ -763,6 +851,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
      (QWEN2VL_MODEL_ID, "openai"),
      (QWEN25VL_MODEL_ID, "openai"),
      (ULTRAVOX_MODEL_ID, "string"),
+     (QWEN2AUDIO_MODEL_ID, "openai"),
      (MLLAMA_MODEL_ID, "openai"),
      (LLAMA_GUARD_MODEL_ID, "openai")],
 )
@@ -815,10 +904,13 @@ def test_resolve_content_format_hf_defined(model, expected_format):
      ("template_chatglm2.jinja", "string"),
      ("template_chatml.jinja", "string"),
      ("template_deepseek_vl2.jinja", "string"),
+     ("template_dse_qwen2_vl.jinja", "openai"),
      ("template_falcon_180b.jinja", "string"),
      ("template_falcon.jinja", "string"),
+     ("template_florence2.jinja", "string"),
      ("template_inkbot.jinja", "string"),
      ("template_llava.jinja", "string"),
+     ("template_teleflm.jinja", "string"),
      ("template_vlm2vec.jinja", "openai"),
      ("tool_chat_template_granite_20b_fc.jinja", "string"),
      ("tool_chat_template_hermes.jinja", "string"),
