@@ -871,7 +871,7 @@ def _sdpa_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     output: torch.Tensor,
-    seq_lens: List[int],
+    seq_lens: torch.Tensor,
     num_tokens: int,
     num_heads: int,
     head_size: int,
