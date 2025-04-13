@@ -4,19 +4,16 @@ Sleep mode is a feature in vLLM that allows you to temporarily free up GPU resou
 
 ## Overview
 
-vLLM provides two levels of sleep mode:
-
-- **Level 1** (default): Model weights are backed up in CPU memory, and KV cache is discarded. This is useful when you plan to wake up and run the same model again. Requires sufficient CPU memory to store model weights.
-
-- **Level 2**: Both model weights and KV cache are discarded. This reduces CPU memory pressure and is useful when you plan to load a different model after waking up.
-
-During sleep mode, endpoints that don't require model weights continue to function normally.
+When a model is put to sleep:
+- GPU resources are freed up for other tasks
+- The model remains in an inactive state but can be reactivated
+- API endpoints that don't require model weights continue to function normally
 
 ## API Endpoints
 
 vLLM provides several endpoints to control the sleep mode:
 
-- `POST /sleep` - Put the model to sleep (accepts optional `level` parameter)
+- `POST /sleep` - Put the model to sleep
 - `POST /wake_up` - Wake up the model
 - `GET /is_sleeping` - Check if the model is currently in sleep mode
 
@@ -39,14 +36,8 @@ Other endpoints like `/tokenize`, `/detokenize`, and `/v1/models` continue to wo
 
 ### Putting a Model to Sleep
 
-Default (Level 1):
 ```bash
 curl -X POST http://localhost:8000/sleep
-```
-
-Specifying a sleep level:
-```bash
-curl -X POST http://localhost:8000/sleep?level=2
 ```
 
 ### Waking Up a Model

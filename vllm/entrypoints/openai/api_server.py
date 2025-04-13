@@ -844,10 +844,10 @@ def build_app(args: Namespace) -> FastAPI:
     async def check_sleep_status_middleware(request: Request, call_next):
         # Only check sleep status for endpoints that access model weights
         url_path = request.url.path
-        if app.root_path and url_path.startswith(app.root_path):
-            url_path = url_path[len(app.root_path):]
+        if app.root_path:
+            url_path = url_path.removeprefix(app.root_path)
             
-        if url_path in model_access_endpoints and request.method == "POST":
+        if url_path in model_access_endpoints:
             try:
                 is_sleeping = await engine_client(request).is_sleeping()
                 if is_sleeping:
