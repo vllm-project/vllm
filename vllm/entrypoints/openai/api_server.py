@@ -854,7 +854,10 @@ def build_app(args: Namespace) -> FastAPI:
                     return JSONResponse(
                         content={
                             "error": {
-                                "message": "Model is currently in sleep mode. Please wake it up first with a POST request to /wake_up",
+                                "message": (
+                                    "Model is currently in sleep mode. "
+                                    "Please wake it up first with a POST request to /wake_up"
+                                ),
                                 "type": "ModelSleepingError",
                                 "code": 503
                             }
@@ -863,7 +866,7 @@ def build_app(args: Namespace) -> FastAPI:
                     )
             except Exception as e:
                 # Log the error but don't prevent the request from proceeding
-                logger.warning(f"Error checking sleep status: {e}")
+                logger.warning("Error checking sleep status: %s", e)
         
         return await call_next(request)
 
