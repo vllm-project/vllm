@@ -31,7 +31,7 @@ class MsgpackEncoder:
     Note that unlike vanilla `msgspec` Encoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
 
-    By default, arrays below 256MB are serialized inline.
+    By default, arrays below 256B are serialized inline.
     Larger will get sent via dedicated messages. 
     Note that this is a per-tensor limit.
 
@@ -39,7 +39,7 @@ class MsgpackEncoder:
     See: https://github.com/vllm-project/vllm/issues/16185
     """
 
-    def __init__(self, size_threshold=256 * 1024 * 1024):
+    def __init__(self, size_threshold=256):
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
         # This is used as a local stash of buffers that we can then access from
         # our custom `msgspec` hook, `enc_hook`. We don't have a way to
@@ -102,7 +102,12 @@ class MsgpackEncoder:
         self, obj: np.ndarray
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
-        arr_data = obj.data if obj.data.c_contiguous else obj.tobytes()
+        # Either copy the memoryview directly or flatten the array to bytes.
+        # Sending memoryviews is theoretically faster, but in this particular
+        # case, it triggers some unnecessary copies anyway.
+        # With this, the tensors can still be zero-copy read.
+        arr_data = obj.data.tobytes() if obj.data.c_contiguous \
+            else obj.tobytes()
         if not obj.shape or obj.nbytes < self.size_threshold:
             # Encode small arrays and scalars inline. Using this extension type
             # ensures we can avoid copying when decoding.
@@ -165,8 +170,8 @@ class MsgpackDecoder:
         dtype, shape, data = arr
         # Copy from inline representation, otherwise Torch is unhappy since
         # the returned memory is non-writeable.
-        buffer = self.aux_buffers[data] if isinstance(
-            data, int) else bytearray(data).copy()
+        buffer = self.aux_buffers[data] if isinstance(data, int) \
+            else bytearray(data)
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
 
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:

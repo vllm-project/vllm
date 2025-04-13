@@ -105,18 +105,17 @@ def test_multimodal_kwargs():
     # pack mm kwargs into a mock request so that it can be decoded properly
     req = MyRequest(mm=[MultiModalKwargs(d)])
 
-    encoder = MsgpackEncoder(size_threshold=16 * 1024)
+    encoder = MsgpackEncoder()
     decoder = MsgpackDecoder(MyRequest)
 
     encoded = encoder.encode(req)
 
-    # Only "foo" is larger than threshold
-    assert len(encoded) == 2
+    assert len(encoded) == 6
 
     total_len = sum(len(x) for x in encoded)
 
-    # expected total encoding length, should be 24541, +-20 for minor changes
-    assert total_len >= 24521 and total_len <= 24561
+    # expected total encoding length, should be 44536, +-20 for minor changes
+    assert total_len >= 44516 and total_len <= 44556
     decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
     assert all(nested_equal(d[k], decoded[k]) for k in d)
 
@@ -150,13 +149,12 @@ def test_multimodal_items_by_modality():
 
     encoded = encoder.encode(req)
 
-    # All messages are 'small', i.e. below 256MB default
-    assert len(encoded) == 1
+    assert len(encoded) == 8
 
     total_len = sum([len(x) for x in encoded])
 
-    # expected total encoding length, should be 14287, +-20 for minor changes
-    assert total_len >= 14267 and total_len <= 14307
+    # expected total encoding length, should be 14255, +-20 for minor changes
+    assert total_len >= 14235 and total_len <= 14275
     decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
 
     # check all modalities were recovered and do some basic sanity checks
