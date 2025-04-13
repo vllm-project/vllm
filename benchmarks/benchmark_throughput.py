@@ -599,7 +599,9 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Number of prefix tokens to be used in RandomDataset "
-        "and SonnetDataset.",
+        "and SonnetDataset. For RandomDataset, it is the number of "
+        "fixed prefix tokens before the random context. For SonnetDataset, "
+        "it is the number of prefix tokens in the prompt.",
     )
     # random dataset
     parser.add_argument(
