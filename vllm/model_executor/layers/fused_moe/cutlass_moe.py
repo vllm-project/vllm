@@ -155,7 +155,7 @@ def cutlass_moe(
     a_map = torch.zeros((local_topk_ids.numel()),
                         dtype=torch.int32,
                         device=device)
-    c_map = torch.zeros((local_topk_ids.numel()),
+    c_map = torch.empty((local_topk_ids.numel()),
                         dtype=torch.int32,
                         device=device)
 
