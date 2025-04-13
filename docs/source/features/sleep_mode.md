@@ -53,6 +53,7 @@ curl -X GET http://localhost:8000/is_sleeping
 ```
 
 Response:
+
 ```json
 {"is_sleeping": true}
 ```
@@ -77,4 +78,4 @@ Clients can catch this error and automatically wake up the model before retrying
 
 - Sleep mode is only supported on CUDA devices
 - The first request after waking up a model may have higher latency as the model is reloaded
-- Sleep mode state is global for the server - all models managed by the server are either asleep or awake 
+- Sleep mode state is global for the server - all models managed by the server are either asleep or awake

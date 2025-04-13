@@ -40,10 +40,8 @@ def test_sleep_mode():
             "prompt": "Hello, world",
             "max_tokens": 5
         }
-        response = requests.post(
-            remote_server.url_for("v1/completions"),
-            json=completion_payload
-        )
+        response = requests.post(remote_server.url_for("v1/completions"),
+                                 json=completion_payload)
         assert response.status_code == 503
         error_data = response.json()
         assert "error" in error_data
@@ -53,13 +51,14 @@ def test_sleep_mode():
         # Test chat completions endpoint
         chat_payload = {
             "model": MODEL_NAME,
-            "messages": [{"role": "user", "content": "Hello"}],
+            "messages": [{
+                "role": "user",
+                "content": "Hello"
+            }],
             "max_tokens": 5
         }
-        response = requests.post(
-            remote_server.url_for("v1/chat/completions"),
-            json=chat_payload
-        )
+        response = requests.post(remote_server.url_for("v1/chat/completions"),
+                                 json=chat_payload)
         assert response.status_code == 503
         error_data = response.json()
         assert "error" in error_data
@@ -82,10 +81,8 @@ def test_sleep_mode():
         assert response.json().get("is_sleeping") is False
 
         # Verify completions endpoint works after waking up
-        response = requests.post(
-            remote_server.url_for("v1/completions"),
-            json=completion_payload
-        )
+        response = requests.post(remote_server.url_for("v1/completions"),
+                                 json=completion_payload)
         assert response.status_code == 200
 
         # test wake up with tags

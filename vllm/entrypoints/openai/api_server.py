@@ -827,17 +827,9 @@ def build_app(args: Namespace) -> FastAPI:
 
     # Endpoints that directly access model weights and need sleep status check
     model_access_endpoints = [
-        "/v1/chat/completions",
-        "/v1/completions",
-        "/v1/embeddings",
-        "/pooling",
-        "/score", 
-        "/v1/score",
-        "/rerank", 
-        "/v1/rerank", 
-        "/v2/rerank",
-        "/v1/audio/transcriptions",
-        "/invocations"
+        "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
+        "/pooling", "/score", "/v1/score", "/rerank", "/v1/rerank",
+        "/v2/rerank", "/v1/audio/transcriptions", "/invocations"
     ]
 
     @app.middleware("http")
@@ -846,29 +838,27 @@ def build_app(args: Namespace) -> FastAPI:
         url_path = request.url.path
         if app.root_path:
             url_path = url_path.removeprefix(app.root_path)
-            
+
         if url_path in model_access_endpoints:
             try:
                 is_sleeping = await engine_client(request).is_sleeping()
                 if is_sleeping:
-                    return JSONResponse(
-                        content={
-                            "error": {
-                                "message": (
-                                    "Model is currently in sleep mode. "
-                                    "Please wake it up first with a POST "
-                                    "request to /wake_up"
-                                ),
-                                "type": "ModelSleepingError",
-                                "code": 503
-                            }
-                        },
-                        status_code=503
-                    )
+                    return JSONResponse(content={
+                        "error": {
+                            "message": ("Model is currently in sleep mode. "
+                                        "Please wake it up first with a POST "
+                                        "request to /wake_up"),
+                            "type":
+                            "ModelSleepingError",
+                            "code":
+                            503
+                        }
+                    },
+                                        status_code=503)
             except Exception as e:
                 # Log the error but don't prevent the request from proceeding
                 logger.warning("Error checking sleep status: %s", e)
-        
+
         return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
