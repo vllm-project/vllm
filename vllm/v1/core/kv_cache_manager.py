@@ -277,8 +277,9 @@ class KVCacheManager:
         if self.enable_caching:
             self.block_pool.touch(new_computed_blocks)
         else:
-            assert not new_computed_blocks, "Computed blocks should "\
-                "be empty when prefix caching is disabled"
+            assert not new_computed_blocks, (
+                "Computed blocks should be empty when "
+                "prefix caching is disabled")
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
