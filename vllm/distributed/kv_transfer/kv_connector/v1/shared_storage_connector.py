@@ -260,14 +260,14 @@ class SharedStorageConnector(KVConnectorBase_V1):
         return num_tokens_to_check - num_computed_tokens
 
     def update_state_after_alloc(self, request: "Request",
-                                 num_allocated_blocks: int):
+                                 num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
 
         If blocks were allocated, add to _requests_need_load,
         such that we load the KVs in the next forward pass.
         """
-        if num_allocated_blocks > 0:
+        if num_external_tokens > 0:
             self._requests_need_load.append(request.request_id)
 
     def build_connector_meta(

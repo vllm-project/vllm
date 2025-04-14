@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -34,6 +35,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 class KVConnectorRole(enum.Enum):
@@ -52,6 +55,9 @@ class KVConnectorMetadata:
 class KVConnectorBase_V1(ABC):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+        logger.warning(
+            "Initializing KVConnectorBase_V1. This API is experimental and "
+            "subject to change in the future as we iterate the design.")
         self._connector_metadata = KVConnectorMetadata()
         self._vllm_config = vllm_config
         self._role = role
@@ -182,7 +188,7 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def update_state_after_alloc(self, request: "Request",
-                                 num_allocated_blocks: int):
+                                 num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
         """

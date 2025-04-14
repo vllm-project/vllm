@@ -317,20 +317,18 @@ class Scheduler(SchedulerInterface):
                     self.kv_cache_manager.get_computed_blocks(request)
 
                 # Get externally-cached tokens if using a KVConnector.
+                num_external_tokens = 0
                 if self.connector is not None:
-                    computed_blocks, num_computed_tokens = \
-                        self.kv_cache_manager.alloc_and_append_external_blocks(
-                            request=request,
-                            computed_blocks=computed_blocks,
-                            num_computed_tokens=num_computed_tokens,
-                            kv_connector=self.connector,
-                        )
+                    num_external_tokens = (
+                        self.connector.get_num_new_matched_tokens(
+                            request, num_computed_tokens))
 
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
-                num_new_tokens = request.num_tokens - num_computed_tokens
+                num_new_tokens = (request.num_tokens - num_computed_tokens -
+                                  num_external_tokens)
                 if (0 < self.scheduler_config.long_prefill_token_threshold <
                         num_new_tokens):
                     num_new_tokens = (
@@ -352,10 +350,20 @@ class Scheduler(SchedulerInterface):
                     new_encoder_budget = encoder_budget
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_blocks)
+                    request=request,
+                    num_tokens=num_new_tokens,
+                    new_computed_blocks=computed_blocks,
+                    num_external_tokens=num_external_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
+
+                # KVConnector: update internal state after allocation.
+                # This information is used to determine if a load is
+                # needed for this request.
+                if self.connector is not None:
+                    self.connector.update_state_after_alloc(
+                        request, num_external_tokens)
 
                 self.waiting.popleft()
                 if request.use_structured_output:
