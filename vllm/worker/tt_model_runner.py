@@ -118,11 +118,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         self.trace_mode = trace_mode  # whether to use ttnn tracing for model execution
         override_tt_config = model_config.override_tt_config
-        if override_tt_config is not None and "sample_on_device_decode" in override_tt_config:
-            self.sample_on_device_decode = override_tt_config["sample_on_device_decode"]
+        if override_tt_config is not None and "sample_on_device_mode" in override_tt_config:
+            self.sample_on_device_mode = override_tt_config["sample_on_device_mode"]
+            assert self.sample_on_device_mode in ["all", "decode_only"], f"Invalid sample_on_device_mode: {self.sample_on_device_mode}"
         else:
-            self.sample_on_device_decode = False  # whether to sample on device for decode
-        logger.info(f"TTModelRunner: trace_mode={self.trace_mode}, sample_on_device_decode={self.sample_on_device_decode}")
+            self.sample_on_device_mode = None  # whether to sample on device
+        logger.info(f"TTModelRunner: trace_mode={self.trace_mode}, sample_on_device_mode={self.sample_on_device_mode}")
 
         self.cached_step_outputs: List[torch.Tensor] = []  # Only used for multi-step execution
         
@@ -470,8 +471,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             execute_model_kwargs["prompt_lens"] = model_input.prompt_lens
         else:
             execute_model_kwargs["start_pos"] = model_input.input_positions
-            if self.sample_on_device_decode:
-                execute_model_kwargs["sampling_params"] = model_input.tt_sampling_params
+        if self.sample_on_device_mode == "all" or (self.sample_on_device_mode == "decode_only" and is_decode):
+            execute_model_kwargs["sampling_params"] = model_input.tt_sampling_params
         if model_input.cross_block_tables is not None:
             execute_model_kwargs["cross_page_table"] = model_input.cross_block_tables
         
@@ -480,7 +481,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             
             if self.model_config.is_encoder_decoder_model:
                 # Save encoder-decoder data for use in subsequent decode steps (may need to be updated for future models)
-                logits, cross_attention_masks, full_text_row_masked_out_mask = outputs
+                tt_out, cross_attention_masks, full_text_row_masked_out_mask = outputs
                 if self.cached_enc_dec_data is None:
                     self.cached_enc_dec_data = {}
                 for i, seq_id in enumerate(model_input.seq_groups):
@@ -488,7 +489,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                         "full_text_row_masked_out_mask": full_text_row_masked_out_mask[i]}
                     self.cached_enc_dec_data[seq_id] = enc_dec_data
             else:
-                logits = outputs  # [batch_size, seq_len, vocab_size]
+                tt_out = outputs  # [batch_size, seq_len, vocab_size]
         else:
             if self.model_config.is_encoder_decoder_model:
                 # Use encoder-decoder data from prefill step
@@ -505,17 +506,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             if async_out_proc_per_trace:
                 # trigger output processor on host while device is executing next step
                 self._send_prev_step_async_out(model_input, step_idx)
-            tt_out = self.model.read_decode_output(tt_out, model_input.unpadded_batch_size, is_tokens=self.sample_on_device_decode)
-            if not self.sample_on_device_decode:
-                logits = tt_out
-            else:
-                next_token_ids = tt_out
+            tt_out = self.model.read_decode_output(tt_out, model_input.unpadded_batch_size, is_tokens=(self.sample_on_device_mode is not None))
 
         # Note: for other devices, vLLM applies vllm.model_executor.layers.logits_processor::LogitsProcessor::_apply_logits_processors on logits, we don't use this
         # Note: for other devices, vLLM applies vllm.model_executor.layers.sampler::Sampler for sampling tokens, we don't use this
-        if not is_decode or not self.sample_on_device_decode:
-            next_logits = logits[:model_input.unpadded_batch_size, -1, :]  # unpadded batch, vocab of last token
+        if not self.sample_on_device_mode or (self.sample_on_device_mode == "decode_only" and not is_decode):
+            next_logits = tt_out[:model_input.unpadded_batch_size, -1, :]  # unpadded batch, vocab of last token
             next_token_ids = self._sample_tokens(next_logits, model_input.tt_sampling_params)
+        else:
+            next_token_ids = tt_out
         
         return next_token_ids
 

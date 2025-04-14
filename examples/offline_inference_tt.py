@@ -131,14 +131,14 @@ def run_inference(
     disable_async_output_proc=False,
     multi_modal=False,
     test_increasing_seq_lens=False,
-    sample_on_device_decode=False,
+    sample_on_device_mode=None,
     dispatch_core_axis=None,
 ):
     check_tt_model_supported(model)
     
     override_tt_config = {}
-    if sample_on_device_decode:
-        override_tt_config["sample_on_device_decode"] = True
+    if sample_on_device_mode:
+        override_tt_config["sample_on_device_mode"] = sample_on_device_mode
     if dispatch_core_axis:
         override_tt_config["dispatch_core_axis"] = dispatch_core_axis.lower()
     
@@ -310,7 +310,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_scheduler_steps", type=int, default=10, help="Number of scheduler steps")
     parser.add_argument("--multi_modal", action="store_true", help="Run multi-modal inference with Llama3.2-11b")
     parser.add_argument("--test_increasing_seq_lens", action="store_true", help="Test generations of small to large sequences")
-    parser.add_argument("--sample_on_device_decode", action="store_true", help="Enable sampling on device during decode")
+    parser.add_argument("--sample_on_device_mode", type=str, choices=["all", "decode_only"], default=None, help="Enable sampling on device (during prefill and decode, or only during decode)")
     parser.add_argument("--dispatch_core_axis", type=str, choices=["row", "col", None], default=None, help="Dispatch core axis [row, col]")
     args = parser.parse_args()
 
@@ -328,6 +328,6 @@ if __name__ == "__main__":
         disable_async_output_proc=args.disable_async_output_proc,
         multi_modal=args.multi_modal,
         test_increasing_seq_lens=args.test_increasing_seq_lens,
-        sample_on_device_decode=args.sample_on_device_decode,
+        sample_on_device_mode=args.sample_on_device_mode,
         dispatch_core_axis=args.dispatch_core_axis,
     )
