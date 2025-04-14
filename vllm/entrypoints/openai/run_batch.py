@@ -396,7 +396,7 @@ async def main(args):
             response_futures.append(
                 run_request(embed_handler_fn, request, tracker))
             tracker.submitted()
-        elif "/score" in request.url:
+        elif request.url.endswith("/score"):
             score_handler_fn = (None if openai_serving_scores is None else
                                 openai_serving_scores.create_score)
             if score_handler_fn is None:
@@ -410,7 +410,7 @@ async def main(args):
             response_futures.append(
                 run_request(score_handler_fn, request, tracker))
             tracker.submitted()
-        elif "/rerank" in request.url:
+        elif request.url.endswith("/rerank"):
             score_handler_fn = (None if openai_serving_scores is None else
                                 openai_serving_scores.do_rerank)
             if score_handler_fn is None:
