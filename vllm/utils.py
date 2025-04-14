@@ -256,7 +256,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         self._total = 0
         self._last_info = CacheInfo(hits=0, total=0)
 
-    def __getitem__(self, key: _K, *, update_info: bool = True):
+    def __getitem__(self, key: _K, update_info: bool = True) -> _V:
         value = super().__getitem__(key)
 
         if update_info:
