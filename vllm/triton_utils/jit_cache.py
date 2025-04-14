@@ -106,8 +106,8 @@ class PreparedKernel:
         self.dev_max_shared = driver.active.utils.get_device_properties(
             self.device)["max_shared_mem"]
         if self.kernel.metadata.shared > self.dev_max_shared:
-            raise OutOfResources(self.kernel.metadata.shared, self.dev_max_shared,
-                                 "shared memory")
+            raise OutOfResources(self.kernel.metadata.shared,
+                                 self.dev_max_shared, "shared memory")
         self.module, self.function, self.n_regs, self.n_spills = (
             driver.active.utils.load_binary(
                 self.kernel.name,
