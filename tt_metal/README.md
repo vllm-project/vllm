@@ -104,7 +104,7 @@ VLLM_RPC_TIMEOUT=100000 MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dis
 
 **Note**: By default, the server will run with Llama-3.1-70B-Instruct. To run with other models, set `MESH_DEVICE` and `--model` as described in [Running the offline inference example](#running-the-offline-inference-example).
 
-**Note**: Custom TT options can be set using `--override_tt_config`, e.g. `--override_tt_config '{"sample_on_device_decode": true}'`, however these shouldn't be used unless the model supports them (most currently do not).
+**Note**: Custom TT options can be set using `--override_tt_config`, e.g. `--override_tt_config '{"sample_on_device_mode": "all"}'`, however these shouldn't be used unless the model supports them (most currently do not).
 
 To send a request to the server:
 ```sh

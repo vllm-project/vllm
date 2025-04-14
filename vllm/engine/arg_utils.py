@@ -924,7 +924,7 @@ class EngineArgs:
             type=json.loads,
             default=None,
             help="Override or set TT device configuration. "
-            "e.g. '{\"sample_on_device_decode\": true}'")
+            "e.g. '{\"sample_on_device_mode\": \"all\"}'")
         parser.add_argument(
             '--override-pooler-config',
             type=PoolerConfig.from_json,
