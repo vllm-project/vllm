@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import dataclasses
 import gc
 import importlib
 import inspect
@@ -12,7 +13,6 @@ import signal
 import socket
 import tempfile
 import uuid
-import dataclasses
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
