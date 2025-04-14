@@ -56,7 +56,7 @@ from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaDummyInputsBuilder, LlavaLikeConfig,
-                    LlavaMultiModalProjector, init_vision_tower_for_llava)
+                    LlavaMultiModalProjector, init_vision_tower_for_llava, LlavaMultiModalProcessor)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
@@ -680,7 +680,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
     """The MiniMaxVL01 model which consists of a vision backbone and a language model.""",
     MINIMAX_VL_01_START_DOCSTRING,
 )
-@MULTIMODAL_REGISTRY.register_processor(MiniMaxVL01MultiModalProcessor, 
+@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor, 
                                         info=MiniMaxVL01ProcessingInfo, 
                                         dummy_inputs=MiniMaxVL01DummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMultiModal, SupportsPP):
