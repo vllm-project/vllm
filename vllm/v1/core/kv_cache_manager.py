@@ -383,7 +383,11 @@ class KVCacheManager:
                 <= self.max_num_blocks_per_req - num_existing_blocks)
 
         # Return the new blocks.
-        return self.block_pool.get_new_blocks(num_incr_blocks)
+        new_blocks = self.block_pool.get_new_blocks(num_incr_blocks)
+
+        # TODO(rob): need to hash the blocks here.
+
+        return new_blocks
 
     def _get_num_incremental_new_blocks(
         self,
