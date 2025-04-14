@@ -56,7 +56,7 @@ def run_florence2():
 def run_mllama():
     engine_args = EngineArgs(
         model="meta-llama/Llama-3.2-11B-Vision-Instruct",
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": 1},
         dtype="half",
@@ -132,6 +132,11 @@ def main(args):
         raise ValueError(f"Model type {model} is not supported.")
 
     req_data = model_example_map[model]()
+
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
     llm = LLM(**engine_args)

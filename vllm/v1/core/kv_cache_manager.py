@@ -7,9 +7,9 @@ from typing import Optional
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.hybrid_allocator import HybridMemoryAllocator
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
-from vllm.v1.core.hybrid_allocator import HybridMemoryAllocator
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -142,8 +142,7 @@ class KVCacheManager:
         else:
             last_block_hash = None
 
-        computed_blocks = self.allocator.find_longest_cache_hit(
-            block_hashes)
+        computed_blocks = self.allocator.find_longest_cache_hit(block_hashes)
         self.prefix_cache_stats.queries += len(block_hashes)
         self.prefix_cache_stats.hits += len(computed_blocks)
 
@@ -164,6 +163,7 @@ class KVCacheManager:
         request: Request,
         num_tokens: int,
         new_computed_blocks: Optional[list[dict[int, KVCacheBlock]]] = None,
+        num_lookahead_tokens: int = 0,
     ) -> Optional[list[dict[int, KVCacheBlock]]]:
         """Add slots for a request with new tokens to append.
 
@@ -173,6 +173,9 @@ class KVCacheManager:
                 not include the tokens that have already been computed.
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
+            num_lookahead_tokens: The number of speculative tokens to allocate.
+                This is used by spec decode proposers with kv-cache such 
+                as eagle.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -210,8 +213,9 @@ class KVCacheManager:
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                len(new_computed_blocks) * self.block_size)
-        num_required_blocks = cdiv(num_computed_tokens + num_tokens,
-                                   self.block_size)
+        num_required_blocks = cdiv(
+            num_computed_tokens + num_tokens + num_lookahead_tokens,
+            self.block_size)
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
 
@@ -245,8 +249,11 @@ class KVCacheManager:
         else:
             # Get new blocks from the free block pool considering
             # preallocated blocks.
+            num_preallocate_blocks = max(
+                0, self.num_preallocate_blocks -
+                num_lookahead_tokens // self.block_size)
             num_new_blocks = min(
-                num_new_blocks + self.num_preallocate_blocks,
+                num_new_blocks + num_preallocate_blocks,
                 self.block_pool.get_num_free_blocks(),
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape
