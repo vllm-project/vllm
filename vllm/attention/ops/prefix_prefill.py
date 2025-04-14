@@ -17,10 +17,9 @@ NUM_WARPS = 4 if current_platform.is_rocm() else 8
 IS_TURING = current_platform.get_device_capability() == (7, 5)
 
 
-# Autotune is great idea but not yet performant nor stable. With Autotune, first
-# run is slower than others. Probably because graph capture doesn't run kernel,
-# probably by some other reason. So want to leave "template" of what could be
-# autotuned in this kernel to get even better perf.
+# Here's an example autotuner config for this kernel. This config does provide
+# a performance improvement, but dramatically increases first call latency in
+# triton 3.2. Because of this tradeoff, it's currently commented out.
 # @triton.autotune(
 #     configs=[
 #         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
