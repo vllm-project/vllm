@@ -34,7 +34,7 @@ class ReqMeta:
     @staticmethod
     def from_request(request: "Request", block_size: int,
                      is_store: bool) -> "ReqMeta":
-        valid_num_tokens = align_to_block_size(request.num_prompt_tokens,
+        valid_num_tokens = align_to_block_size(len(request.prompt_token_ids),
                                                block_size)
         token_ids = torch.tensor(request.prompt_token_ids)[:valid_num_tokens]
         block_ids = torch.tensor(request.block_ids)
