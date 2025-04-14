@@ -1605,6 +1605,10 @@ class TranscriptionRequest(OpenAIBaseModel):
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
 
+    # Additional sampling parameters.
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    min_p: Optional[float] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     """The seed to use for sampling."""
 
@@ -1640,6 +1644,15 @@ class TranscriptionRequest(OpenAIBaseModel):
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+        if (top_p := self.top_p) is None:
+            top_p = default_sampling_params.get(
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+        if (top_k := self.top_k) is None:
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"])
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
 
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get(
@@ -1649,6 +1662,9 @@ class TranscriptionRequest(OpenAIBaseModel):
         return SamplingParams.from_optional(temperature=temperature,
                                             max_tokens=max_tokens,
                                             seed=self.seed,
+                                            top_p=top_p,
+                                            top_k=top_k,
+                                            min_p=min_p,
                                             frequency_penalty=self.frequency_penalty,
                                             repetition_penalty=repetition_penalty,
                                             presence_penalty=self.presence_penalty,

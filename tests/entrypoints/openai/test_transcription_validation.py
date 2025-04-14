@@ -211,6 +211,9 @@ async def test_sampling_params(mary_had_lamb):
             temperature=0.8,
             extra_body=dict(seed=42,
                             repetition_penalty=1.9,
+                            top_k=12,
+                            top_p=0.4,
+                            min_p=0.5,
                             frequency_penalty=1.8,
                             presence_penalty=2.0))
 
