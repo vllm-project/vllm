@@ -112,14 +112,19 @@ def test_quantize_to_fp4(
 
     m, n = shape
 
-    x = torch.randn((m, n), dtype=dtype)
+    # x = torch.randn((m, n), dtype=dtype)
+    x = torch.arange(m, device="cuda", dtype=dtype).unsqueeze(1).expand(m, n)*0.1
     tensor_amax = torch.abs(x).max().to(torch.float32)
     global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / tensor_amax
+    print(f"{x=}, {tensor_amax}")
     out_ref, scale_ref = ref_nvfp4_quant(x, global_scale)
 
     out, out_scale = ops.scaled_fp4_quant(x, global_scale)
+    print(out)
+    print(out_scale)
     scale_ans = recover_swizzled_scales(out_scale, m, n)
     out_ans = cast_from_fp4(out, m, n)
+
 
     torch.testing.assert_close(out_ans, out_ref)
     torch.testing.assert_close(scale_ans, scale_ref)
