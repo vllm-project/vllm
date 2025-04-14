@@ -514,6 +514,10 @@ class MiniMaxVL01MultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        # 获取图像数量
+        pixel_values = hf_inputs.get("pixel_values", torch.empty(0))
+        num_images = len(pixel_values) if isinstance(pixel_values, (list, tuple)) else 1
+        
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             image_sizes=MultiModalFieldConfig.batched("image"),
@@ -536,6 +540,13 @@ class MiniMaxVL01MultiModalProcessor(
             default_height = default_width = vision_config.image_size
             image_sizes = torch.as_tensor([[default_height, default_width]
                                            for _ in range(batch_size)])
+
+        # 确保图像数量一致
+        if len(patch_embeddings) != len(image_sizes):
+            raise ValueError(
+                f"Number of patch embeddings ({len(patch_embeddings)}) does not match "
+                f"number of image sizes ({len(image_sizes)})"
+            )
 
         return [
             self._merge_image_patch_embeddings(image_sizes[i],
