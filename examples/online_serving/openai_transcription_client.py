@@ -27,6 +27,7 @@ def sync_openai():
             language="en",
             response_format="json",
             temperature=0.0,
+            # Additional sampling params not provided by OpenAI API.
             extra_body=dict(
                 seed=4419,
                 repetition_penalty=1.3,
