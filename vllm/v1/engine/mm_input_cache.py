@@ -51,6 +51,13 @@ class MirroredProcessingCache:
         full_mm_inputs = list[Optional[MultiModalKwargs]]()
         for mm_input, mm_hash in zip(mm_inputs, mm_hashes):
             if mm_hash in self.mm_cache:
+                # Client and Server must be exactly the same (see description
+                # in the top of this file).
+                # `in` in above statement don't update access time by design.
+                # But server side make a direct access and update access time.
+                # Have to make a dummy access to update access time to keep
+                # LRU order of caches consistent.
+                _ = self.mm_cache[mm_hash]
                 mm_input = None
             else:
                 self.mm_cache[mm_hash] = mm_input
