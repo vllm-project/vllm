@@ -688,6 +688,11 @@ TASK_HANDLERS: dict[str, dict[str, tuple]] = {
 
 if envs.VLLM_SERVER_DEV_MODE:
 
+    @router.get("/server_info")
+    async def show_server_info(raw_request: Request):
+        server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
+        return JSONResponse(content=server_info)
+
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
         """
@@ -728,11 +733,6 @@ if envs.VLLM_SERVER_DEV_MODE:
         logger.info("check whether the engine is sleeping")
         is_sleeping = await engine_client(raw_request).is_sleeping()
         return JSONResponse(content={"is_sleeping": is_sleeping})
-
-    @router.get("/server_info")
-    async def show_server_info(raw_request: Request):
-        server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
-        return JSONResponse(content=server_info)
 
 
 @router.post("/invocations", dependencies=[Depends(validate_json_request)])

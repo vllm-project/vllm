@@ -378,11 +378,11 @@ class MQLLMEngineClient(EngineClient):
     async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
-    async def get_decoding_config(self) -> DecodingConfig:
-        return self.decoding_config
-
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
+
+    async def get_decoding_config(self) -> DecodingConfig:
+        return self.decoding_config
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
