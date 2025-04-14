@@ -4,6 +4,7 @@ import dataclasses
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
+import os
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
 from vllm.multimodal import MultiModalPlaceholderMap
@@ -12,6 +13,7 @@ try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+    from flashinfer import gen_single_decode_with_kv_cache
 
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -22,6 +24,8 @@ except ImportError:
         CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
         BatchPrefillWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
+
+FLASHINFER_KV_CACHE_LAYOUT: str = os.getenv("FLASHINFER_KV_CACHE_LAYOUT", "NHD").upper()
 
 import torch
 
@@ -76,6 +80,13 @@ class FlashInferBackend(AttentionBackend):
         head_size: int,
     ) -> Tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_kv_cache_stride_order() -> Tuple[int, ...]:
+        cache_layout = FLASHINFER_KV_CACHE_LAYOUT
+        assert(cache_layout in ("NHD", "HND"))
+        stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2, 4)
+        return stride_order
 
     @staticmethod
     def swap_blocks(
@@ -185,6 +196,7 @@ class FlashInferState(AttentionState):
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
         self.vllm_config = get_current_vllm_config()
+        self._kv_cache_layout = None
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -194,10 +206,15 @@ class FlashInferState(AttentionState):
                 device=self.runner.device)
         return self._workspace_buffer
 
+    def get_kv_cache_layout(self):
+        if self._kv_cache_layout is None:
+            self._kv_cache_layout = FLASHINFER_KV_CACHE_LAYOUT
+        return self._kv_cache_layout
+
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), "NHD")
+                self._get_workspace_buffer(), self.get_kv_cache_layout())
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self):
@@ -210,7 +227,7 @@ class FlashInferState(AttentionState):
                 num_qo_heads // num_kv_heads > 4)
             self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
-                "NHD",
+                self.get_kv_cache_layout(),
                 use_tensor_cores=use_tensor_cores)
         return self._decode_wrapper
 
@@ -271,7 +288,8 @@ class FlashInferState(AttentionState):
         self._graph_decode_wrapper = \
             CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
             self._graph_decode_workspace_buffer, _indptr_buffer,
-            self._graph_indices_buffer, _last_page_len_buffer, "NHD",
+            self._graph_indices_buffer, _last_page_len_buffer,
+            self.get_kv_cache_layout(),
             use_tensor_cores)
         if self.runner.kv_cache_dtype.startswith("fp8"):
             kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
@@ -997,6 +1015,7 @@ class FlashInferImpl(AttentionImpl):
 
         prefill_output: Optional[torch.Tensor] = None
         decode_output: Optional[torch.Tensor] = None
+        stride_order = FlashInferBackend.get_kv_cache_stride_order()
         if prefill_meta := attn_metadata.prefill_metadata:
             # We will use flash attention for prefill
             # when kv_cache is not provided.
@@ -1025,10 +1044,10 @@ class FlashInferImpl(AttentionImpl):
                 assert prefill_meta.prefill_wrapper._logits_soft_cap == (
                     logits_soft_cap or 0.0)
                 assert prefill_meta.prefill_wrapper._sm_scale == softmax_scale
-
+                
                 prefill_output = prefill_meta.prefill_wrapper.run(
                     query,
-                    kv_cache,
+                    kv_cache.permute(*stride_order),
                     k_scale=layer._k_scale_float,
                     v_scale=layer._v_scale_float,
                 )
@@ -1043,11 +1062,11 @@ class FlashInferImpl(AttentionImpl):
 
             decode_output = decode_meta.decode_wrapper.run(
                 decode_query,
-                kv_cache,
+                kv_cache.permute(*stride_order),
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
             )
-
+           
         if prefill_output is None and decode_output is not None:
             # Decode only batch.
             output, num_tokens = decode_output, num_decode_tokens
