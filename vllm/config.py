@@ -17,7 +17,7 @@ from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
-                    Optional, Protocol, Union)
+                    Optional, Protocol, TypeVar, Union)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -45,6 +45,7 @@ from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
     from ray.util.placement_group import PlacementGroup
 
     from vllm.executor.executor_base import ExecutorBase
@@ -53,8 +54,11 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+
+    Config = TypeVar("Config", bound=DataclassInstance)
 else:
     QuantizationConfig = None
+    Config = TypeVar("Config")
 
 logger = init_logger(__name__)
 
@@ -159,7 +163,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     return out
 
 
-def config(cls: type[Any]) -> type[Any]:
+def config(cls: type[Config]) -> type[Config]:
     """
     A decorator that ensures all fields in a dataclass have default values
     and that each field has a docstring.
@@ -578,6 +582,15 @@ class ModelConfig:
                 for k, v in base_config.items():
                     if getattr(user_config, k) is None:
                         setattr(user_config, k, v)
+
+            if self.is_matryoshka:
+                if user_config.normalize is None:
+                    user_config.normalize = True
+                elif not user_config.normalize:
+                    raise ValueError(
+                        "`normalize` must be enabled (set to True) "
+                        "for models that are compatible with "
+                        "Matryoshka Representation.")
 
             return user_config
 
@@ -1431,44 +1444,47 @@ class LoadFormat(str, enum.Enum):
     FASTSAFETENSORS = "fastsafetensors"
 
 
+@config
 @dataclass
 class LoadConfig:
-    """
-        download_dir: Directory to download and load the weights, default to the
-            default cache directory of huggingface.
-        load_format: The format of the model weights to load:
-            "auto" will try to load the weights in the safetensors format and
-                fall back to the pytorch bin format if safetensors format is
-                not available.
-            "pt" will load the weights in the pytorch bin format.
-            "safetensors" will load the weights in the safetensors format.
-            "npcache" will load the weights in pytorch format and store
-                a numpy cache to speed up the loading.
-            "dummy" will initialize the weights with random values, which is
-                mainly for profiling.
-            "tensorizer" will use CoreWeave's tensorizer library for
-                fast weight loading.
-            "bitsandbytes" will load nf4 type weights.
-            "sharded_state" will load weights from pre-sharded checkpoint files,
-                supporting efficient loading of tensor-parallel models.
-            "gguf" will load weights from GGUF format files.
-            "mistral" will load weights from consolidated safetensors files used
-                by Mistral models.
-            "runai_streamer" will load weights from RunAI streamer format files.
-        model_loader_extra_config: The extra config for the model loader.
-        ignore_patterns: The list of patterns to ignore when loading the model.
-            Default to "original/**/*" to avoid repeated loading of llama's
-            checkpoints.
-        use_tqdm_on_load: Whether to enable tqdm for showing progress bar during
-            loading. Default to True
-    """
+    """Configuration for loading the model weights."""
 
-    load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    load_format: Union[str, LoadFormat,
+                       "BaseModelLoader"] = LoadFormat.AUTO.value
+    """The format of the model weights to load:\n
+    - "auto" will try to load the weights in the safetensors format and fall
+    back to the pytorch bin format if safetensors format is not available.\n
+    - "pt" will load the weights in the pytorch bin format.\n
+    - "safetensors" will load the weights in the safetensors format.\n
+    - "npcache" will load the weights in pytorch format and store a numpy cache
+    to speed up the loading.\n
+    - "dummy" will initialize the weights with random values, which is mainly
+    for profiling.\n
+    - "tensorizer" will use CoreWeave's tensorizer library for fast weight
+    loading. See the Tensorize vLLM Model script in the Examples section for
+    more information.\n
+    - "runai_streamer" will load the Safetensors weights using Run:ai Model
+    Streamer.\n
+    - "bitsandbytes" will load the weights using bitsandbytes quantization.\n
+    - "sharded_state" will load weights from pre-sharded checkpoint files,
+    supporting efficient loading of tensor-parallel models.\n
+    - "gguf" will load weights from GGUF format files (details specified in
+    https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n
+    - "mistral" will load weights from consolidated safetensors files used by
+    Mistral models."""
     download_dir: Optional[str] = None
-    model_loader_extra_config: Optional[Union[str, dict]] = field(
-        default_factory=dict)
+    """Directory to download and load the weights, default to the default
+    cache directory of Hugging Face."""
+    model_loader_extra_config: Optional[Union[str, dict]] = None
+    """Extra config for model loader. This will be passed to the model loader
+    corresponding to the chosen load_format. This should be a JSON string that
+    will be parsed into a dictionary."""
     ignore_patterns: Optional[Union[list[str], str]] = None
+    """The list of patterns to ignore when loading the model. Default to
+    "original/**/*" to avoid repeated loading of llama's checkpoints."""
     use_tqdm_on_load: bool = True
+    """Whether to enable tqdm for showing progress bar when loading model
+    weights."""
 
     def compute_hash(self) -> str:
         """
@@ -1504,6 +1520,9 @@ class LoadConfig:
                 self.ignore_patterns)
         else:
             self.ignore_patterns = ["original/**/*"]
+
+
+DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 
 
 @config
@@ -1547,7 +1566,7 @@ class ParallelConfig:
     placement_group: Optional["PlacementGroup"] = None
     """ray distributed model workers placement group."""
 
-    distributed_executor_backend: Optional[Union[str,
+    distributed_executor_backend: Optional[Union[DistributedExecutorBackend,
                                                  type["ExecutorBase"]]] = None
     """Backend to use for distributed model
     workers, either "ray" or "mp" (multiprocessing). If the product
@@ -1671,7 +1690,7 @@ class ParallelConfig:
             # current node and we aren't in a ray placement group.
 
             from vllm.executor import ray_utils
-            backend = "mp"
+            backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_neuron():
                 # neuron uses single process to control multiple devices
@@ -1739,92 +1758,124 @@ class ParallelConfig:
             "worker_extension_cls must be a string (qualified class name).")
 
 
+SchedulerPolicy = Literal["fcfs", "priority"]
+
+
+@config
 @dataclass
 class SchedulerConfig:
     """Scheduler configuration."""
 
-    runner_type: str = "generate"  # The runner type to launch for the model.
+    runner_type: RunnerType = "generate"
+    """The runner type to launch for the model."""
 
-    # Maximum number of tokens to be processed in a single iteration.
-    max_num_batched_tokens: int = field(default=None)  # type: ignore
+    max_num_batched_tokens: int = None  # type: ignore
+    """Maximum number of tokens to be processed in a single iteration.
+    
+    This config has no static default. If left unspecified by the user, it will
+    be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    # Maximum number of sequences to be processed in a single iteration.
-    max_num_seqs: int = 128
+    max_num_seqs: int = None  # type: ignore
+    """Maximum number of sequences to be processed in a single iteration.
+    
+    This config has no static default. If left unspecified by the user, it will
+    be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    # Maximum length of a sequence (including prompt and generated text).
-    max_model_len: int = 8192
+    max_model_len: int = None  # type: ignore
+    """Maximum length of a sequence (including prompt and generated text). This
+    is primarily set in `ModelConfig` and that value should be manually
+    duplicated here."""
 
-    # Maximum number of sequences that can be partially prefilled concurrently
     max_num_partial_prefills: int = 1
+    """For chunked prefill, the maximum number of sequences that can be
+    partially prefilled concurrently."""
 
-    # Maximum number of "very long prompt" sequences that can be prefilled
-    # concurrently (long is defined by long_prefill_threshold)
     max_long_partial_prefills: int = 1
+    """For chunked prefill, the maximum number of prompts longer than
+    long_prefill_token_threshold that will be prefilled concurrently. Setting
+    this less than max_num_partial_prefills will allow shorter prompts to jump
+    the queue in front of longer prompts in some cases, improving latency."""
 
-    # calculate context length that determines which sequences are
-    # considered "long"
     long_prefill_token_threshold: int = 0
+    """For chunked prefill, a request is considered long if the prompt is
+    longer than this number of tokens."""
 
-    # The number of slots to allocate per sequence per
-    # step, beyond the known token ids. This is used in speculative
-    # decoding to store KV activations of tokens which may or may not be
-    # accepted.
     num_lookahead_slots: int = 0
+    """The number of slots to allocate per sequence per
+    step, beyond the known token ids. This is used in speculative
+    decoding to store KV activations of tokens which may or may not be
+    accepted.
 
-    # Apply a delay (of delay factor multiplied by previous
-    # prompt latency) before scheduling next prompt.
+    NOTE: This will be replaced by speculative config in the future; it is
+    present to enable correctness tests until then."""
+
     delay_factor: float = 0.0
+    """Apply a delay (of delay factor multiplied by previous
+    prompt latency) before scheduling next prompt."""
 
-    # If True, prefill requests can be chunked based
-    # on the remaining max_num_batched_tokens.
-    enable_chunked_prefill: bool = False
+    enable_chunked_prefill: bool = None  # type: ignore
+    """If True, prefill requests can be chunked based
+    on the remaining max_num_batched_tokens."""
 
     is_multimodal_model: bool = False
+    """True if the model is multimodal."""
 
-    # NOTE: The following multimodal encoder budget will be initialized to
-    # max_num_batched_tokens and overridden in case max multimodal embedding
-    # size is larger.
-    # TODO (ywang96): Make these configurable.
-    # Multimodal encoder compute budget, only used in V1
-    max_num_encoder_input_tokens: int = field(default=None)  # type: ignore
+    # TODO (ywang96): Make this configurable.
+    max_num_encoder_input_tokens: int = field(init=False)
+    """Multimodal encoder compute budget, only used in V1.
+    
+    NOTE: This is not currently configurable. It will be overridden by
+    max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    # Multimodal encoder cache size, only used in V1
-    encoder_cache_size: int = field(default=None)  # type: ignore
+    # TODO (ywang96): Make this configurable.
+    encoder_cache_size: int = field(init=False)
+    """Multimodal encoder cache size, only used in V1.
 
-    # Whether to perform preemption by swapping or
-    # recomputation. If not specified, we determine the mode as follows:
-    # We use recomputation by default since it incurs lower overhead than
-    # swapping. However, when the sequence group has multiple sequences
-    # (e.g., beam search), recomputation is not currently supported. In
-    # such a case, we use swapping instead.
+    NOTE: This is not currently configurable. It will be overridden by
+    max_num_batched_tokens in case max multimodal embedding size is larger."""
+
     preemption_mode: Optional[str] = None
+    """Whether to perform preemption by swapping or
+    recomputation. If not specified, we determine the mode as follows:
+    We use recomputation by default since it incurs lower overhead than
+    swapping. However, when the sequence group has multiple sequences
+    (e.g., beam search), recomputation is not currently supported. In
+    such a case, we use swapping instead."""
 
     num_scheduler_steps: int = 1
+    """Maximum number of forward steps per scheduler call."""
 
-    multi_step_stream_outputs: bool = False
+    multi_step_stream_outputs: bool = True
+    """If False, then multi-step will stream outputs at the end of all steps"""
 
-    # Private API. If used, scheduler sends delta data to
-    # workers instead of an entire data. It should be enabled only
-    # when SPMD worker architecture is enabled. I.e.,
-    # VLLM_USE_RAY_SPMD_WORKER=1
     send_delta_data: bool = False
+    """Private API. If used, scheduler sends delta data to
+    workers instead of an entire data. It should be enabled only
+    when SPMD worker architecture is enabled. I.e.,
+    VLLM_USE_RAY_SPMD_WORKER=1"""
 
-    # The scheduling policy to use. "fcfs" (default) or "priority".
-    policy: str = "fcfs"
+    policy: SchedulerPolicy = "fcfs"
+    """The scheduling policy to use:\n
+    - "fcfs" means first come first served, i.e. requests are handled in order
+    of arrival.\n
+    - "priority" means requests are handled based on given priority (lower
+    value means earlier handling) and time of arrival deciding any ties)."""
 
     chunked_prefill_enabled: bool = field(init=False)
+    """True if chunked prefill is enabled."""
 
-    # If set to true and chunked prefill is enabled, we do not want to
-    # partially schedule a multimodal item. Only used in V1
-    # This ensures that if a request has a mixed prompt
-    # (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
-    # some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
-    # it will be scheduled as TTTT in one step and IIIIIIIIII in the next.
     disable_chunked_mm_input: bool = False
+    """If set to true and chunked prefill is enabled, we do not want to
+    partially schedule a multimodal item. Only used in V1
+    This ensures that if a request has a mixed prompt
+    (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
+    some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
+    it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
 
-    # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
-    # or "mod.custom_class".
     scheduler_cls: Union[str, type[object]] = "vllm.core.scheduler.Scheduler"
+    """The scheduler class to use. "vllm.core.scheduler.Scheduler" is the
+    default scheduler. Can be a class directly or the path to a class of form
+    "mod.custom_class"."""
 
     def compute_hash(self) -> str:
         """
@@ -1846,6 +1897,18 @@ class SchedulerConfig:
         return hash_str
 
     def __post_init__(self) -> None:
+        if self.max_model_len is None:
+            self.max_model_len = 8192
+            logger.warning(
+                "max_model_len was is not set. Defaulting to arbitrary value "
+                "of %d.", self.max_model_len)
+
+        if self.max_num_seqs is None:
+            self.max_num_seqs = 128
+            logger.warning(
+                "max_num_seqs was is not set. Defaulting to arbitrary value "
+                "of %d.", self.max_num_seqs)
+
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 if self.num_scheduler_steps > 1:
@@ -2573,6 +2636,11 @@ class LoRAConfig:
             logger.warning("LoRA with chunked prefill is still experimental "
                            "and may be unstable.")
 
+    def verify_lora_support(self):
+        if self.long_lora_scaling_factors is not None and envs.VLLM_USE_V1:
+            raise ValueError(
+                "V1 LoRA does not support long LoRA, please use V0.")
+
 
 @dataclass
 class PromptAdapterConfig:
@@ -2646,14 +2714,20 @@ class MultiModalConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
+    def get_default_limit_per_prompt(self) -> int:
+        """
+        Return the default number of input items allowed per prompt
+        for any modality if not specified by the user.
+        """
+        return 999 if envs.VLLM_USE_V1 else 1
+
     def get_limit_per_prompt(self, modality: str) -> int:
         """
         Get the maximum number of input items allowed per prompt
         for the given modality.
-
-        If not set by the user, this defaults to `1`.
         """
-        return self.limit_per_prompt.get(modality, 1)
+        default = self.get_default_limit_per_prompt()
+        return self.limit_per_prompt.get(modality, default)
 
     # TODO: Add configs to init vision tower or not.
 
@@ -3672,6 +3746,7 @@ class VllmConfig:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+            self.lora_config.verify_lora_support()
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
@@ -3874,7 +3949,9 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     try:
         _current_vllm_config = vllm_config
         yield
-    finally:
+    except Exception:
+        raise
+    else:
         logger.debug("enabled custom ops: %s",
                      vllm_config.compilation_config.enabled_custom_ops)
         logger.debug("disabled custom ops: %s",
@@ -3892,6 +3969,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
                 " does not support it. Please open an issue on GitHub"
                 " if you want it to be supported.",
                 vllm_config.model_config.model)
+    finally:
         _current_vllm_config = old_vllm_config
 
 
