@@ -2,6 +2,8 @@
 
 import json
 import os
+import site
+import sys
 import tempfile
 from collections import UserList
 from enum import Enum
@@ -17,6 +19,8 @@ from PIL import Image
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
+
+sys.path.insert(0, site.getsitepackages()[0])
 
 from tests.models.utils import (TokensTextLogprobs,
                                 TokensTextLogprobsPromptLogprobs)
