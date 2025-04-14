@@ -1,3 +1,5 @@
+"""PyTorch MiniMaxVL01 model."""
+
 import pytest
 import torch
 from vllm.model_executor.models.modeling_minimax_vl_01 import (
@@ -44,10 +46,8 @@ def test_minimax_vl_01_basic_flow():
         "router_jitter_noise": 0.0,
     }
     
-    text_config = MiniMaxText01Config(**text_config_dict)
-    
     config = HfMiniMaxVL01Config(
-        text_config=text_config_dict,  # 传递字典而不是对象
+        text_config=text_config_dict,  # 使用字典而不是对象
         vision_config=None,  # 使用默认的CLIPVisionConfig
         ignore_index=-100,
         image_token_index=32000,
@@ -144,10 +144,8 @@ def test_minimax_vl_01_processor():
         "router_jitter_noise": 0.0,
     }
     
-    text_config = MiniMaxText01Config(**text_config_dict)
-    
     config = HfMiniMaxVL01Config(
-        text_config=text_config_dict,  # 传递字典而不是对象
+        text_config=text_config_dict,  # 使用字典而不是对象
         vision_config=None,  # 使用默认的CLIPVisionConfig
         ignore_index=-100,
         image_token_index=32000,
