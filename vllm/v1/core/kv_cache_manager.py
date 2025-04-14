@@ -429,7 +429,7 @@ class KVCacheManager:
         num_evictable_computed_blocks = sum(1 for blk in new_computed_blocks
                                             if blk.ref_cnt == 0)
 
-        # Return True if there are enough free blocks.
+        # Return 0 if not enough blocks.
         if (num_new_blocks > self.block_pool.get_num_free_blocks() -
                 num_evictable_computed_blocks):
             return 0
