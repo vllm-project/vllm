@@ -401,6 +401,9 @@ To use the Transcriptions API, please install with extra audio dependencies usin
 Our Transcriptions API supports these extra optional parameters to fine-tune the sampling behavior during transcription:
 
 - **seed** (*Optional[int]*): The seed to use for sampling. Must be between `_LONG_INFO.min` and `_LONG_INFO.max`.
+- **top_p** (*Optional[float]*): Enables nucleus (top-p) sampling, where tokens are selected from the smallest possible set whose cumulative probability exceeds `p` (default: `1.0`).
+- **top_k** (*Optional[int]*): Limits sampling to the `k` most probable tokens at each step. (default: `-1`).
+- **min_p** (*Optional[float]*): Filters out tokens with a probability lower than `min_p`, ensuring a minimum likelihood threshold during sampling (default: `0.0`).
 - **frequency_penalty** (*Optional[float]*): Applies a penalty to tokens based on their frequency, reducing the likelihood of repeating common tokens (default: `0.0`).
 - **repetition_penalty** (*Optional[float]*): Discourages the model from repeating the same tokens by applying a penalty (default: `1.0`).
 - **presence_penalty** (*Optional[float]*): Encourages the introduction of new tokens by applying a penalty to those already present (default: `0.0`).
