@@ -47,7 +47,25 @@ async def generate(request: Request) -> Response:
     The request should be a JSON object with the following fields:
     - prompt: the prompt to use for the generation.
     - stream: whether to stream the results or not.
+    - lora_path: path to the LoRA adapter to use for generation (optional).
     - other fields: the sampling parameters (See `SamplingParams` for details).
+
+    Usage:
+        # Start server without LoRA
+        python -m vllm.entrypoints.api_server --model /path/to/model ...
+
+        # Start server with LoRA
+        python -m vllm.entrypoints.api_server --model /path/to/model --enable-lora --lora-path /path/to/lora ...
+
+    Example request:
+        curl http://localhost:8000/generate \
+          -H "Content-Type: application/json" \
+          -d '{
+                  "prompt": "hello",
+                  "stream": false,
+                  "temperature": 0,
+                  "lora_path": "/path/to/lora"
+              }'
     """
     request_dict = await request.json()
     return await _generate(request_dict, raw_request=request)
