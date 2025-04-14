@@ -479,15 +479,6 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-@router.get("/server_info")
-async def show_server_info():
-    if _global_state is None:
-        server_info = {"vllm_config": "Vllm Config not available"}
-    else:
-        server_info = {"vllm_config": str(_global_state.vllmconfig)}
-    return JSONResponse(content=server_info)
-
-
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)])
 @with_cancellation
@@ -753,6 +744,14 @@ if envs.VLLM_SERVER_DEV_MODE:
         logger.info("check whether the engine is sleeping")
         is_sleeping = await engine_client(raw_request).is_sleeping()
         return JSONResponse(content={"is_sleeping": is_sleeping})
+    
+    @router.get("/server_info")
+    async def show_server_info():
+        if _global_state is None:
+            server_info = {"vllm_config": "Vllm Config not available"}
+        else:
+            server_info = {"vllm_config": str(_global_state.vllmconfig)}
+        return JSONResponse(content=server_info)
 
 
 @router.post("/invocations", dependencies=[Depends(validate_json_request)])
