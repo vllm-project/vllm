@@ -135,6 +135,9 @@ async def test_serving_completion_with_lora_resolver(mock_serving_setup,
     assert called_lora_request.lora_name == lora_model_name
 
     mock_engine.generate.assert_called_once()
+    generate_lora_request = mock_engine.generate.call_args[1]['lora_request']
+    assert isinstance(generate_lora_request, LoRARequest)
+    assert generate_lora_request.lora_name == lora_model_name
 
 
 @pytest.mark.asyncio
