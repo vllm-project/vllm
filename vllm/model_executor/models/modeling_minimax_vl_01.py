@@ -40,6 +40,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from .minimax_text_01 import MiniMaxText01ForCausalLM
 from vllm.transformers_utils.configs import MiniMaxText01Config, MiniMaxVL01Config
 from .llava import LlavaDummyInputsBuilder
+from .llava_next import LlavaNextMultiModalProcessor, LlavaNextProcessingInfo
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 from PIL import Image
@@ -521,6 +522,8 @@ class MiniMaxVL01MultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
     def _process_image_input(
@@ -704,9 +707,9 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
     """The MiniMaxVL01 model which consists of a vision backbone and a language model.""",
     MINIMAX_VL_01_START_DOCSTRING,
 )
-@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor, 
-                                        info=MiniMaxVL01ProcessingInfo, 
-                                        dummy_inputs=MiniMaxVL01DummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor, 
+                                        info=LlavaNextProcessingInfo, 
+                                        dummy_inputs=LlavaDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
