@@ -176,8 +176,6 @@ class KVCacheManager:
 
         Args:
             request: The request to get the computed blocks.
-            num_tokens: The number of tokens to allocate. Note that this does
-                not include the tokens that have already been computed.
             computed_blocks: List of computed blocks from prefix cache.
             num_computed_tokens: Number of computed tokens.
 
