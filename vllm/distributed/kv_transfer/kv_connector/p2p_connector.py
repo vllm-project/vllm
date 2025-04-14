@@ -127,14 +127,15 @@ class P2pConnector(KVConnectorBase):
             ip, port = self.parse_request_id(request_id, True)
             remote_address = ip + ":" + str(port + self.rank)
 
-            self.p2p_nccl_pipe.send_tensor(request_id + "keys", keys,
-                                           remote_address)
-            self.p2p_nccl_pipe.send_tensor(request_id + "values", values,
-                                           remote_address)
-            self.p2p_nccl_pipe.send_tensor(
-                request_id + "hidden",
-                hidden_or_intermediate_states[start_pos:end_pos],
-                remote_address)
+            if self.p2p_nccl_pipe.send_tensor(request_id + "keys", keys,
+                                              remote_address):
+                if self.p2p_nccl_pipe.send_tensor(request_id + "values",
+                                                  values,
+                                                  remote_address):
+                    self.p2p_nccl_pipe.send_tensor(
+                        request_id + "hidden",
+                        hidden_or_intermediate_states[start_pos:end_pos],
+                        remote_address)
 
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
@@ -191,9 +192,11 @@ class P2pConnector(KVConnectorBase):
             start_pos_list.append(start_pos)
 
             request_id = request_ids[idx]
-            keys = self.p2p_nccl_pipe.recv_tensor(request_id + "keys")
-            values = self.p2p_nccl_pipe.recv_tensor(request_id + "values")
-            hidden = self.p2p_nccl_pipe.recv_tensor(request_id + "hidden")
+            ip, port = self.parse_request_id(request_id, False)
+            remote_address = ip + ":" + str(port + self.rank)
+            keys = self.p2p_nccl_pipe.recv_tensor(request_id + "keys", remote_address)
+            values = self.p2p_nccl_pipe.recv_tensor(request_id + "values", remote_address)
+            hidden = self.p2p_nccl_pipe.recv_tensor(request_id + "hidden", remote_address)
 
             num_computed_tokens = current_tokens.shape[0]
             num_computed_tokens_list.append(num_computed_tokens)

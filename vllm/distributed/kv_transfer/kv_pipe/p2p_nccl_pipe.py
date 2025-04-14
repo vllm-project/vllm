@@ -64,7 +64,18 @@ class P2pNcclPipe:
         self.poller = zmq.Poller()
         self.poller.register(self.router_socket, zmq.POLLIN)
 
-        self.send_store: Deque[List[Any]] = deque()  # tensor_id: torch.Tensor
+        # The sending type includes tree mutually exclusive options: PUT, GET, PUT_ASYNC.
+        self.send_type = self.config.get_from_extra_config("send_type", "PUT")
+        if self.send_type == "GET":
+            self.send_store: Dict[str, torch.Tensor] = {}  # tensor_id: torch.Tensor
+        else:
+            # PUT or PUT_ASYNC
+            self.send_store: Deque[List[Any]] = deque()  # tensor_id: torch.Tensor
+            if self.send_type == "PUT_ASYNC":
+                self._send_thread = threading.Thread(target=self._send_async,
+                                                     daemon=True)
+                self._send_thread.start()
+
         self.recv_store: Dict[str,
                               torch.Tensor] = {}  # tensor_id: torch.Tensor
         self.socks: Dict[str, Any] = {}  # remote_address: client socket
@@ -81,10 +92,6 @@ class P2pNcclPipe:
             target=self._listen_for_requests, daemon=True)
         self._listener_thread.start()
 
-        self._send_thread = threading.Thread(target=self._send_async,
-                                             daemon=True)
-        self._send_thread.start()
-
         self._ping_thread = None
         if port_offset == 0 and self.proxy_address != "":
             self._ping_thread = threading.Thread(target=self._ping,
@@ -99,7 +106,7 @@ class P2pNcclPipe:
             sock.connect(f"tcp://{remote_address}")
             self.socks[remote_address] = sock
             if remote_address in self.comms:
-                logger.info("comm exists, remote_address: %s, comms: %s",
+                logger.info("👋comm exists, remote_address: %s, comms: %s",
                             remote_address, self.comms)
                 return sock, self.comms[remote_address]
 
@@ -112,7 +119,7 @@ class P2pNcclPipe:
                 comm: ncclComm_t = self.nccl.ncclCommInitRank(
                     2, unique_id, rank)
                 self.comms[remote_address] = (comm, rank)
-                logger.info("ncclCommInitRank Success, %s 👉 %s, MyRank: %s",
+                logger.info("🤝ncclCommInitRank Success, %s 👉 %s, MyRank: %s",
                             self.zmq_address, remote_address, rank)
 
         return self.socks[remote_address], self.comms[remote_address]
@@ -122,26 +129,44 @@ class P2pNcclPipe:
         tensor_id: str,
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
-    ):
-        # tensor = tensor.clone()
+    ) -> bool:
         if remote_address is None:
             with self.recv_store_cv:
                 self.recv_store[tensor_id] = tensor
                 self.recv_store_cv.notify()
+            return True
         else:
-            self._send_sync(tensor_id, tensor, remote_address)
-            # with self.send_store_cv:
-            #     self.send_store.append([tensor_id, remote_address, tensor])
-            #     self.send_store_cv.notify()
+            if self.send_type == "PUT":
+                return self._send_sync(tensor_id, tensor, remote_address)
+            elif self.send_type == "PUT_ASYNC":
+                with self.send_store_cv:
+                    self.send_store.append([tensor_id, remote_address, tensor])
+                    self.send_store_cv.notify()
+            else: # GET
+                with self.send_store_cv:
+                    tensor_size = tensor.element_size() * tensor.numel()
+                    while self.buffer_size + tensor_size > self.buffer_size_threshold:
+                        oldest_tenser_id = next(iter(self.send_store))
+                        oldest_tenser = self.send_store.pop(oldest_tenser_id)
+                        oldest_tenser_size = oldest_tenser.element_size() * oldest_tenser.numel()
+                        self.buffer_size -= oldest_tenser_size
+                        logger.info("⛔[GET]Send to %s, tensor_id: %s, tensor_size: %d, buffer_size: %d, oldest_tenser_size: %d",
+                                    remote_address, tensor_id, tensor_size, self.buffer_size, oldest_tenser_size)
+
+                    self.send_store[tensor_id] = tensor
+                    self.buffer_size += tensor_size
+                    logger.info("🔵[GET]Send to %s, tensor_id: %s, tensor_size: %d, buffer_size: %d(%.2f%%)",
+                                remote_address, tensor_id, tensor_size,
+                                self.buffer_size, self.buffer_size/self.buffer_size_threshold*100)
+
+        return True
 
     def recv_tensor(
         self,
         tensor_id: str,
         remote_address: typing.Optional[str] = None,
     ) -> torch.Tensor:
-        logger.info("Recv From %s, tensor_id: %s", remote_address, tensor_id)
-
-        if remote_address is None:
+        if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
             start_time = time.time()
             with self.recv_store_cv:
                 if tensor_id not in self.recv_store:
@@ -151,16 +176,19 @@ class P2pNcclPipe:
             if tensor is not None:
                 self.buffer_size -= (tensor.element_size() * tensor.numel())
                 logger.info(
-                    "🚧🚧🚧 Recv From %s, tensor_id: %s, shape: %s, "
+                    "🔵[PUT]Recv From %s, tensor_id: %s, shape: %s, "
                     "duration: %.3fms, size: %.3fGB", remote_address,
                     tensor_id, tensor.shape, duration * 1000,
                     tensor.element_size() * tensor.numel() / 1024**3)
             else:
                 logger.warning(
-                    "🚧🚧🚧 Recv From %s, tensor_id: %s, "
-                    "duration: %.3fms,", remote_address, tensor_id,
-                    duration * 1000)
+                    "🚧[PUT]Recv From %s, tensor_id: %s, duration: %.3fms",
+                    remote_address, tensor_id, duration * 1000)
             return tensor
+
+        # GET
+        if remote_address is None:
+            return None
 
         if remote_address not in self.socks:
             self._create_connect(remote_address)
@@ -173,14 +201,19 @@ class P2pNcclPipe:
 
         message = sock.recv()
         data = msgpack.loads(message)
-        if data["ret"] == 0:
-            tensor = torch.empty(data["shape"],
-                                 dtype=getattr(torch, data["dtype"]),
-                                 device=self.device)
-            self._recv(comm, tensor, rank ^ 1)
-            return tensor
+        if data["ret"] != 0:
+            logger.info("🚧[GET]Recv From %s, tensor_id: %s, ret: %d",
+                        remote_address, tensor_id, data["ret"])
+            return None
 
-        return None
+        tensor = torch.empty(data["shape"],
+                             dtype=getattr(torch, data["dtype"]),
+                             device=self.device)
+        self._recv(comm, tensor, rank ^ 1)
+
+        logger.info("🔵[GET]Recv From %s, tensor_id: %s", remote_address, tensor_id)
+
+        return tensor
 
     def _listen_for_requests(self):
         while True:
@@ -199,7 +232,7 @@ class P2pNcclPipe:
                             2, unique_id, rank)
                         self.comms[remote_address.decode()] = (comm, rank)
                         logger.info(
-                            "ncclCommInitRank Success, %s 👈 %s, MyRank: %s",
+                            "🤝ncclCommInitRank Success, %s 👈 %s, MyRank: %s",
                             self.zmq_address, remote_address.decode(), rank)
                 elif data["cmd"] == "PUT":
                     try:
@@ -214,7 +247,7 @@ class P2pNcclPipe:
                             self.router_socket.send_multipart(
                                 [remote_address, b"2"])
                             logger.warning(
-                                "Recv Tensor, Out Of Threshold, "
+                                "🚧[PUT]Recv Tensor, Out Of Threshold, "
                                 "%s 👈 %s, data: %s", self.zmq_address,
                                 remote_address.decode(), data)
                             continue
@@ -230,7 +263,7 @@ class P2pNcclPipe:
                             self.recv_store[tensor_id] = tensor
                             self.recv_store_cv.notify()
                         logger.info(
-                            "Recv Tensor, %s 👈 %s, rank: %s, data: %s, "
+                            "🔵[PUT]Recv Tensor, %s 👈 %s, rank: %s, data: %s, "
                             "tensor: %s", self.zmq_address,
                             remote_address.decode(), rank, data, tensor.shape)
 
@@ -238,35 +271,41 @@ class P2pNcclPipe:
                         self.router_socket.send_multipart(
                             [remote_address, b"1"])
                         logger.warning(
-                            "Recv Tensor, Out Of Memory, %s 👈 %s, data: %s",
+                            "🚧[PUT]Recv Tensor, Out Of Memory, %s 👈 %s, data: %s",
                             self.zmq_address, remote_address.decode(), data)
 
                 elif data["cmd"] == "GET":
                     tensor_id = data["tensor_id"]
                     with self.send_store_cv:
-                        for item in self.send_store:
-                            _tensor_id, _remote_address, tensor = item
-                            if tensor_id == _tensor_id:
-                                data = {
-                                    "ret":
-                                    0,
-                                    "shape":
-                                    tensor.shape,
-                                    "dtype":
-                                    str(tensor.dtype).replace("torch.", "")
-                                }
-                            else:
-                                data = {"ret": 1}
-                            self.router_socket.send_multipart(
-                                [remote_address,
-                                 msgpack.dumps(data)])
-                            if data["ret"] == 0:
-                                self._send(comm, tensor.to(self.device),
-                                           rank ^ 1)
-                            break
-                else:
+                        tensor = self.send_store.pop(tensor_id, None)
+                        if tensor is not None:
+                            data = {
+                                "ret":
+                                0,
+                                "shape":
+                                tensor.shape,
+                                "dtype":
+                                str(tensor.dtype).replace("torch.", "")
+                            }
+                            # LRU
+                            self.send_store[tensor_id] = tensor
+                        else:
+                            data = {"ret": 1}
+
+                    self.router_socket.send_multipart(
+                        [remote_address,
+                         msgpack.dumps(data)])
+
+                    if data["ret"] == 0:
+                        self._send(comm, tensor.to(self.device),
+                                   rank ^ 1)
+
                     logger.info(
-                        "Unexpected, Received message from %s, data: %s",
+                        "🔵[GET]Send Tensor, %s 👉 %s, rank: %s, data: %s",
+                        self.zmq_address, remote_address.decode(), rank, data)
+                else:
+                    logger.warning(
+                        "🚧Unexpected, Received message from %s, data: %s",
                         remote_address, data)
 
     # Asynchronous sending may cause conflicts between P2P NCCL and
@@ -284,9 +323,9 @@ class P2pNcclPipe:
         tensor_id: str,
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
-    ):
+    ) -> bool:
         if remote_address is None:
-            return
+            return False
         if remote_address not in self.socks:
             self._create_connect(remote_address)
 
@@ -306,21 +345,22 @@ class P2pNcclPipe:
             #     self.send_store.append([tensor_id, remote_address, tensor])
             #     self.send_store_cv.notify()
             logger.warning(
-                "Send Tensor, Peer Out Of Memory/Threshold, %s 👉 %s, "
+                "🚧Send Tensor, Peer Out Of Memory/Threshold, %s 👉 %s, "
                 "MyRank: %s, data: %s, tensor: %s, size: %fGB, response: %s",
                 self.zmq_address, remote_address, rank, data, tensor.shape,
                 tensor.element_size() * tensor.numel() / 1024**3,
                 response.decode())
-            return
+            return False
 
         self._send(comm, tensor.to(self.device), rank ^ 1)
-        logger.info("Send Tensor, %s 👉 %s, MyRank: %s, data: %s, tensor: %s",
+        logger.info("🔵Send Tensor, %s 👉 %s, MyRank: %s, data: %s, tensor: %s",
                     self.zmq_address, remote_address, rank, data, tensor.shape)
+        return True
 
     def _ping(self):
         sock = self.context.socket(zmq.DEALER)
         sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
-        logger.info("ping start, zmq_address: %s", self.zmq_address)
+        logger.debug("ping start, zmq_address: %s", self.zmq_address)
         sock.connect(f"tcp://{self.proxy_address}")
         data = {
             "type": "P" if self.config.is_kv_producer else "D",
@@ -329,7 +369,6 @@ class P2pNcclPipe:
         }
         while True:
             sock.send(msgpack.dumps(data))
-            # logger.info("ping, zmq_address: %s", self.zmq_address)
             time.sleep(3)
 
     def _send(self, comm, tensor: torch.Tensor, dst: int, stream=None):
@@ -358,5 +397,7 @@ class P2pNcclPipe:
 
     def close(self) -> None:
         self._listener_thread.join()
+        if self.send_type == "PUT_ASYNC":
+            self._send_thread.join()
         if self._ping_thread is not None:
             self._ping_thread.join()
