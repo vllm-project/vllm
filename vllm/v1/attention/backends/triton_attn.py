@@ -181,6 +181,11 @@ class TritonAttentionImpl(AttentionImpl):
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
+        #print("query.shape: ", query.shape)
+        #print("query.stride: ", query.stride())
+        #print("output.shape: ", output.shape)
+        #print("output.stride: ", output.stride())
+
         chunked_prefill_paged_decode(
             q=query[:num_actual_tokens],
             k=key_cache,
