@@ -469,13 +469,17 @@ class Scheduler(SchedulerInterface):
             grammar_bitmask=grammar_bitmask,
         )
 
-        # NOTE(Kuntai): this function is designed for multiple purposes:
-        # 1. Plan the KV cache store
-        # 2. Wrap up all the KV cache load / save ops into an opaque object
-        # 3. Clear the internal states of the connector
         if self.connector is not None:
+            # NOTE(Kuntai): this function is designed for multiple purposes:
+            # 1. Plan the KV cache store
+            # 2. Wrap up all the KV cache load / save ops into an opaque object
+            # 3. Clear the internal states of the connector
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
+
+            # KVConnector: once we have allocated the buffer blocks to the
+            # "real" requests (via prefix caching), free the tmp buffer reqs.
+            self.kv_cache_manager.free_buffer_requests()
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
@@ -488,11 +492,6 @@ class Scheduler(SchedulerInterface):
         #    computed tokens will be adjusted in update_from_output.
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             self.requests[req_id].num_computed_tokens += num_scheduled_token
-
-        # KVConnector: once we have allocated the buffer blocks to the
-        # "real" requests (via prefix caching), free the tmp buffer reqs.
-        if self.connector is not None:
-            self.kv_cache_manager.free_buffer_requests()
 
         self.finished_req_ids = set()
         return scheduler_output
