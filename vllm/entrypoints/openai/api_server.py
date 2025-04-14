@@ -3,6 +3,8 @@ import atexit
 import importlib
 import inspect
 import multiprocessing
+# Fix https://avd.aquasec.com/nvd/cve-2022-42919 
+multiprocessing.util.abstract_sockets_supported = False
 import os
 import re
 import signal
