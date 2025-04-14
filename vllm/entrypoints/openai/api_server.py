@@ -481,7 +481,10 @@ async def show_version():
 
 @router.get("/server_info")
 async def show_server_info():
-    server_info = {"vllm_config": str(_global_state.vllmconfig)}
+    if _global_state is None:
+        server_info = {"vllm_config": "Vllm Config not available"}
+    else:
+        server_info = {"vllm_config": str(_global_state.vllmconfig)}
     return JSONResponse(content=server_info)
 
 
