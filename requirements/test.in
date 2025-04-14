@@ -10,6 +10,7 @@ pytest-timeout
 # testing utils
 awscli
 backoff # required for phi4mm test
+blobfile # required for kimi-vl test
 einops # required for MPT, qwen-vl and Mamba
 httpx
 librosa # required for audio tests

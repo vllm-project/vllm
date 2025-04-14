@@ -13,9 +13,11 @@ from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.h2ovl import H2OVLChatConfig
 from vllm.transformers_utils.configs.internvl import InternVLChatConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
+from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
 from vllm.transformers_utils.configs.mllama import MllamaConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
+from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
@@ -40,6 +42,8 @@ __all__ = [
     "ExaoneConfig",
     "MllamaConfig",
     "MLPSpeculatorConfig",
+    "MoonViTConfig",
+    "KimiVLConfig",
     "NemotronConfig",
     "NVLM_D_Config",
     "Olmo2Config",
