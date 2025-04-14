@@ -38,7 +38,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                  strategy: str,
                  num_bits: int,
                  group_size: Optional[int] = None,
-                 zero_points: Optional[bool] = False,
                  symmetric: Optional[bool] = True,
                  actorder: Optional[ActivationOrdering] = None):
 
@@ -59,7 +58,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 f"Supported num_bits = {WNA16_SUPPORTED_TYPES_MAP.keys()}")
 
         self.quant_type = (WNA16_ZP_SUPPORTED_TYPES_MAP[num_bits]
-                           if zero_points else
+                           if not self.symmetric else
                            WNA16_SUPPORTED_TYPES_MAP[num_bits])
 
     @classmethod

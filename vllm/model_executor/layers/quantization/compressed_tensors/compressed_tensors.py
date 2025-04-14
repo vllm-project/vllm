@@ -329,8 +329,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     strategy=weight_quant.strategy,
                     symmetric=weight_quant.symmetric,
                     group_size=weight_quant.group_size,
-                    actorder=weight_quant.actorder,
-                    zero_points=(not weight_quant.symmetric))
+                    actorder=weight_quant.actorder)
 
         if is_activation_quantization_format(self.quant_format):
             if self._is_fp8_w8a8(weight_quant, input_quant):
