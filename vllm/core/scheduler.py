@@ -135,25 +135,12 @@ class PaddingAwareSchedulingBudget(SchedulingBudget):
         return batch_size * max_seq_len
 
     def _hpu_padding_fn(self, batch_size, max_seq_len):
-        from vllm_hpu_extension.bucketing import (HPUBucketingGlobalState,
-                                                  find_bucket)
-        padded_bs = batch_size
-        padded_seq = max_seq_len
-
-        hpu_bucketing_global_state = HPUBucketingGlobalState()
-
-        bs_cfg = hpu_bucketing_global_state.prompt_bs_bucket_cfg
-        if bs_cfg is not None:
-            padded_bs = find_bucket(batch_size, bs_cfg)
-        else:
-            logger.warning(
-                "prompt_bs_bucket_cfg was not set! Using unpadded batch size.")
-        seq_cfg = hpu_bucketing_global_state.prompt_seq_bucket_cfg
-        if seq_cfg is not None:
-            padded_seq = find_bucket(max_seq_len, seq_cfg)
-        else:
-            logger.warning("prompt_seq_bucket_cfg was not set! "
-                           "Using unpadded sequence length.")
+        from vllm_hpu_extension.bucketing.common import get_bucketing_context
+        hpu_bucketing_context = get_bucketing_context().get_instance()
+        padded_bs = hpu_bucketing_context.get_padded_prompt_batch_size(
+            batch_size)
+        padded_seq = hpu_bucketing_context.get_padded_prompt_seq_len(
+            max_seq_len)
         return padded_bs * padded_seq
 
     def _padding_fn_selector(self):

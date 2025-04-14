@@ -225,12 +225,14 @@ jobs:
             if [[ $TARGET_BRANCH =~ $version_regex ]]; then
               synapse_version=${TARGET_BRANCH#v}
               synapse_version=${synapse_version%_*}
+              synapse_build_endpoint="https://dms.habana-labs.com/api/v1.1/guide/info/${synapse_version}/latest?type=docker-pt"
             else
               synapse_version=${RELEASED_SYNAPSE_VERSION#v}
               LOG_REDIRECTION="2>\&1 \| tee"
+              synapse_build_endpoint="https://dms.habana-labs.com/api/v1.1/branch/info/v${synapse_version}"
             fi
-            echo "Using SynapseAI version ${synapse_version}"            
-            synapse_build=$(curl "https://dms.habana-labs.com/api/v1.1/branch/info/v$synapse_version" | jq -r ".release_id")
+            echo "Using SynapseAI version ${synapse_version}"
+            synapse_build=$(curl "${synapse_build_endpoint}" | jq -r ".release_id")
             pt_version=${{ vars.PT_VERSION }}
             BUILD_TAG="Github-vLLM-Fork-${{ github.event.number }}-${{github.run_number}}"
             safe_cmd=${TEST_COMMAND//&/\\&}

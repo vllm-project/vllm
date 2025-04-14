@@ -16,7 +16,6 @@ import numpy as np
 import torch
 import torch.distributed
 import vllm_hpu_extension.environment as environment
-from vllm_hpu_extension.bucketing import HPUBucketingContext
 from vllm_hpu_extension.flags import enabled_flags
 from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 
@@ -46,6 +45,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
+from vllm_hpu_extension.bucketing.common import get_bucketing_context
 
 logger = init_logger(__name__)
 
@@ -676,6 +676,7 @@ class HPUModelRunner:
         self.seen_configs: set = set()
         if self.enable_bucketing:
             logger.info("Bucketing is ON.")
+            HPUBucketingContext = get_bucketing_context()
             self.bucketing_ctx = HPUBucketingContext(
                 self.max_num_seqs, self.max_prefill_batch_size,
                 self.block_size, self.scheduler_config.max_num_batched_tokens,
@@ -2041,7 +2042,6 @@ class HPUModelRunner:
             logger.info("Skipping warmup...")
             return
         max_blocks = kv_caches[0][0].size(0)
-        self.bucketing_ctx.generate_prompt_buckets()
         self.bucketing_ctx.generate_decode_buckets(max_blocks)
 
         if not htorch.utils.internal.is_lazy(
