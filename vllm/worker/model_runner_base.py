@@ -204,12 +204,32 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
+    def _dummy_run(self, max_num_batched_tokens: int) -> None:
+        """
+        Execute the model with dummy data
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None,
+    ) -> T:
+        """
+        Prepare the inputs to ModelRunnerBase.execute_model from an execution
+        request. This method may move data to the worker's local device. It is
+        not allowed to communicate with other workers or devices.
+        """
+        raise NotImplementedError
+
+    def prepare_model_input_align_worker(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None,
+        align_worker: bool = False,
     ) -> T:
         """
         Prepare the inputs to ModelRunnerBase.execute_model from an execution

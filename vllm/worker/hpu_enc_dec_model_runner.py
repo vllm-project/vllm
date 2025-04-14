@@ -377,7 +377,9 @@ class HPUEncoderDecoderModelRunner(
                         kv_caches,
                         is_pt_profiler_run=False,
                         is_lora_profile_run=False,
-                        temperature=0) -> None:
+                        temperature=0,
+                        num_iters=3,
+                        align_worker=False) -> None:
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
         scenario_name = ("warmup_"
                          f"{'prompt' if is_prompt else 'decode'}_"
@@ -385,7 +387,7 @@ class HPUEncoderDecoderModelRunner(
                          f"seq{seq_len}_"
                          f"graphs{'T' if use_graphs else 'F'}")
         self.profiler.start('internal', scenario_name)
-        times = 3 if use_graphs or is_pt_profiler_run else 1
+        times = num_iters if use_graphs or is_pt_profiler_run else 1
         if is_prompt:
             seqs = [
                 self.create_dummy_seq_group_metadata(i, seq_len, is_prompt)

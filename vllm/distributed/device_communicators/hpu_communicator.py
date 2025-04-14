@@ -35,16 +35,22 @@ class HpuCommunicator:
             dim += x.dim()
         input_size = x.size()
         # Allocate output tensor.
-        output_tensor = torch.empty((world_size, ) + input_size,
+        if dim == 0:
+            output_size = list(input_size)
+            output_size[0] *= world_size
+        else:
+            output_size = (world_size, ) + input_size
+        output_tensor = torch.empty(output_size,
                                     dtype=x.dtype,
                                     device=x.device)
         # All-gather.
         htorch.core.mark_step()
         dist.all_gather_into_tensor(output_tensor, x, group=self.group)
         # Reshape
-        output_tensor = output_tensor.movedim(0, dim)
-        output_tensor = output_tensor.reshape(input_size[:dim] +
-                                              (world_size *
-                                               input_size[dim], ) +
-                                              input_size[dim + 1:])
+        if dim != 0:
+            output_tensor = output_tensor.movedim(0, dim)
+            output_tensor = output_tensor.reshape(input_size[:dim] +
+                                                  (world_size *
+                                                  input_size[dim], ) +
+                                                  input_size[dim + 1:])
         return output_tensor

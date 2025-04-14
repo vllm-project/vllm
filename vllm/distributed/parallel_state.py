@@ -901,6 +901,13 @@ get_tensor_model_parallel_group = get_tp_group
 
 _PP: Optional[GroupCoordinator] = None
 
+_DP: Optional[GroupCoordinator] = None
+
+
+def get_dp_group() -> GroupCoordinator:
+    assert _DP is not None, ("data parallel group is not initialized")
+    return _DP
+
 
 def get_pp_group() -> GroupCoordinator:
     assert _PP is not None, (
@@ -962,6 +969,21 @@ def init_distributed_environment(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
         distributed_init_method, backend)
+    from vllm.config import get_current_vllm_config
+    config = get_current_vllm_config()
+    if config is not None and config.parallel_config.data_parallel_size > 1:
+        parallel_config = config.parallel_config
+        # adjust to take into account data parallelism
+        # offset the rank by the data parallel rank
+        rank = parallel_config.data_parallel_rank * world_size + rank
+        # adjust the world size to take into account data parallelism
+        world_size = parallel_config.world_size_across_dp
+        ip = parallel_config.data_parallel_master_ip
+        port = parallel_config.get_next_dp_init_port()
+        distributed_init_method = f"tcp://{ip}:{port}"  # noqa
+        logger.info(
+            "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
+            world_size, rank, distributed_init_method)
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
@@ -1021,20 +1043,28 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
+    rank = torch.distributed.get_rank()
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
+    data_parallel_size = 1
+    from vllm.config import get_current_vllm_config
+    config = get_current_vllm_config()
+    if config is not None:
+        data_parallel_size = config.parallel_config.data_parallel_size
+
+    # the layout order is: DP x PP x TP
+    # to get group_ranks for each dimension, transpose that dimension to the
+    # last dimension, then reshape to 2D, then unbind the last dimension
+    all_ranks = torch.arange(world_size).reshape(
+        data_parallel_size, pipeline_model_parallel_size,
+        tensor_model_parallel_size)  # noqa
+
     # Build the tensor model-parallel groups.
-    num_tensor_model_parallel_groups: int = (world_size //
-                                             tensor_model_parallel_size)
     global _TP
     assert _TP is None, ("tensor model parallel group is already initialized")
-    group_ranks = []
-    for i in range(num_tensor_model_parallel_groups):
-        ranks = list(
-            range(i * tensor_model_parallel_size,
-                  (i + 1) * tensor_model_parallel_size))
-        group_ranks.append(ranks)
+    group_ranks = all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
 
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(group_ranks,
@@ -1044,21 +1074,34 @@ def initialize_model_parallel(
                                     group_name="tp")
 
     # Build the pipeline model-parallel groups.
-    num_pipeline_model_parallel_groups: int = (world_size //
-                                               pipeline_model_parallel_size)
     global _PP
     assert _PP is None, (
         "pipeline model parallel group is already initialized")
-    group_ranks = []
-    for i in range(num_pipeline_model_parallel_groups):
-        ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
-        group_ranks.append(ranks)
+    group_ranks = all_ranks.transpose(1, 2).reshape(
+        -1, pipeline_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
     # pipeline parallel does not need custom allreduce
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
                                     use_custom_allreduce=False,
                                     group_name="pp")
+
+    global _DP
+    assert _DP is None, ("data parallel group is already initialized")
+    group_ranks = all_ranks.transpose(0,
+                                      2).reshape(-1,
+                                                 data_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _DP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="dp")
+
+    logger.info(
+        "rank %s in world size %s is assigned as "
+        "DP rank %s, PP rank %s, TP rank %s", rank, world_size,
+        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group)
 
 
 def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
@@ -1163,6 +1206,11 @@ def destroy_model_parallel():
     if _PP:
         _PP.destroy()
     _PP = None
+
+    global _DP
+    if _DP:
+        _DP.destroy()
+    _DP = None
 
 
 def destroy_distributed_environment():

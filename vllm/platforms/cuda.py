@@ -111,6 +111,7 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
+        compilation_config = vllm_config.compilation_config
 
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
@@ -142,6 +143,14 @@ class CudaPlatformBase(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
+
+        if (parallel_config.data_parallel_size > 1
+                and compilation_config.use_cudagraph):
+            logger.info(
+                "Data Parallel: Forcing enforce eager to be True since DP is "
+                "currently not supported with CUDA Graphs.")
+            vllm_config.model_config.enforce_eager = True
+            compilation_config.use_cudagraph = False
 
     @classmethod
     def get_current_memory_usage(cls,

@@ -239,6 +239,7 @@ class AriaTextMoELayer(nn.Module):
         self,
         config: AriaTextConfig,
         quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
@@ -254,6 +255,7 @@ class AriaTextMoELayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             reduce_results=True,
+            prefix=f"{prefix}.experts",
         )
         self.shared_experts = LlamaMLP(
             config.hidden_size,
@@ -301,7 +303,9 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
     ) -> None:
         super().__init__(config, cache_config, quant_config, prefix)
-        self.mlp = AriaTextMoELayer(config, quant_config=quant_config)
+        self.mlp = AriaTextMoELayer(config,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.mlp")
 
 
 class AriaTextModel(LlamaModel):

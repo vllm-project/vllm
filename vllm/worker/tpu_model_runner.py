@@ -163,7 +163,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     def get_model(self) -> nn.Module:
         return self.model.model
 
-    def _dummy_run(
+    def dummy_run(
         self,
         batch_size: int,
         seq_len: int,
@@ -288,10 +288,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         for batch_size in [1]:
             seq_len = 16
             while seq_len <= self.model_config.max_model_len:
-                self._dummy_run(batch_size,
-                                seq_len,
-                                kv_caches,
-                                exec_mode=ExecutionMode.PREFILL)
+                self.dummy_run(batch_size,
+                               seq_len,
+                               kv_caches,
+                               exec_mode=ExecutionMode.PREFILL)
                 xm.wait_device_ops()
                 logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
                 num_tokens = batch_size * seq_len
@@ -310,10 +310,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             for batch_size in [1]:
                 seq_len = 16
                 while seq_len <= self.model_config.max_model_len:
-                    self._dummy_run(batch_size,
-                                    seq_len,
-                                    kv_caches,
-                                    exec_mode=ExecutionMode.PREFIX_PREFILL)
+                    self.dummy_run(batch_size,
+                                   seq_len,
+                                   kv_caches,
+                                   exec_mode=ExecutionMode.PREFIX_PREFILL)
                     xm.wait_device_ops()
                     logger.info("batch_size: %d, seq_len: %d", batch_size,
                                 seq_len)
@@ -331,10 +331,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         seq_len = 1
         batch_size = 8  # Must be in sync with _get_padded_batch_size()
         while True:
-            self._dummy_run(batch_size,
-                            seq_len,
-                            kv_caches,
-                            exec_mode=ExecutionMode.DECODE)
+            self.dummy_run(batch_size,
+                           seq_len,
+                           kv_caches,
+                           exec_mode=ExecutionMode.DECODE)
             xm.wait_device_ops()
             logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
 

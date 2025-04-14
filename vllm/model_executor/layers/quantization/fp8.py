@@ -731,11 +731,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Re-initialize w13_scale because we directly quantize
             # merged w13 weights and generate a single scaling factor.
             layer.w13_weight_scale = torch.nn.Parameter(torch.ones(
-                layer.num_experts,
+                layer.local_num_experts,
                 dtype=torch.float32,
                 device=w13_weight.device),
                                                         requires_grad=False)
-            for expert in range(layer.num_experts):
+            for expert in range(layer.local_num_experts):
                 w13_weight[expert, :, :], layer.w13_weight_scale[
                     expert] = ops.scaled_fp8_quant(
                         layer.w13_weight.data[expert, :, :])
@@ -810,7 +810,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.num_experts):
+            for expert_id in range(layer.local_num_experts):
                 start = 0
                 for shard_id in range(2):
                     dq_weight = per_tensor_dequantize(
@@ -836,6 +836,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
@@ -878,6 +880,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             inplace=True,
             use_fp8_w8a8=True,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             w1_scale=(layer.w13_weight_scale_inv
                       if self.block_quant else layer.w13_weight_scale),
             w2_scale=(layer.w2_weight_scale_inv
@@ -903,7 +907,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         ep_rank=0,
     ):
         batch_size, seq_len, hidden_dim = x.shape
-        num_experts = layer.num_experts
+        num_experts = layer.local_num_experts
         n_expert_slice = num_experts // self.moe_n_slice
         # num_experts = layer.w13_weight.shape[0]
         # n_expert_slice = layer.w13_weight.shape[0] // self.moe_n_slice

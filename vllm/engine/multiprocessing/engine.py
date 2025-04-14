@@ -30,6 +30,7 @@ from vllm.usage.usage_lib import UsageContext
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 10000
+POLLING_TIMEOUT_MS_PD_DP = 1000
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
@@ -186,12 +187,20 @@ class MQLLMEngine:
         while True:
             if not self.engine.has_unfinished_requests():
                 # Poll until there is work to do.
-                while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                    # When there's no work, check on engine health and send
-                    # health status back to client
-                    self._health_check()
-                    self.engine.do_log_stats()
-                    logger.debug("Waiting for new requests in engine loop.")
+                if self.engine.vllm_config.kv_transfer_config is not None and self.engine.need_to_sync_across_dp:
+                    if self.input_socket.poll(timeout=POLLING_TIMEOUT_MS_PD_DP) == 0:
+                        # When there's no work, check on engine health and send
+                        # health status back to client
+                        self._health_check()
+                        self.engine.do_log_stats()
+                        logger.debug("Waiting for new requests in engine loop.")
+                else:
+                    while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                        # When there's no work, check on engine health and send
+                        # health status back to client
+                        self._health_check()
+                        self.engine.do_log_stats()
+                        logger.debug("Waiting for new requests in engine loop.")
 
             # Handle any input from the client.
             self.handle_new_input()

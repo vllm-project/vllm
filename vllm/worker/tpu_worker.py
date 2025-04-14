@@ -112,7 +112,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                      for _ in range(num_layers)]
         bind_kv_cache(self.compilation_config.static_forward_context,
                       [kv_caches])
-        self.model_runner._dummy_run(
+        self.model_runner.dummy_run(
             batch_size=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
             kv_caches=kv_caches,

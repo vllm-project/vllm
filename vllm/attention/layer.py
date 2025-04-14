@@ -331,7 +331,7 @@ def unified_attention(
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    self = forward_context.attn_layers[layer_name]
+    self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
@@ -363,7 +363,7 @@ def unified_attention_with_output(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    self = forward_context.attn_layers[layer_name]
+    self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(self,
                       query,
