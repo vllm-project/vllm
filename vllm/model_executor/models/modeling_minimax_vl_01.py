@@ -56,6 +56,7 @@ from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaDummyInputsBuilder, LlavaLikeConfig,
+                    LlavaImageInputs, PixtralHFImagePixelInputs, LlavaImagePixelInputs,LlavaImageEmbeddingInputs,
                     LlavaMultiModalProjector, init_vision_tower_for_llava, LlavaMultiModalProcessor)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
@@ -1216,3 +1217,69 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[LlavaImageInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+
+        if pixel_values is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+
+            if self.config.vision_config.model_type == "pixtral":
+                embed_is_patch = kwargs.pop("embed_is_patch")
+                if not isinstance(embed_is_patch, (torch.Tensor, list)):
+                    raise ValueError("Incorrect type of embed_is_patch. "
+                                     f"Got type: {type(embed_is_patch)}")
+
+                embed_is_patch = flatten_bn(embed_is_patch)
+
+                return PixtralHFImagePixelInputs(
+                    type="pixel_values_pixtral",
+                    pixel_values=flatten_bn(pixel_values),
+                    embed_is_patch=embed_is_patch,
+                )
+
+            return LlavaImagePixelInputs(
+                type="pixel_values",
+                pixel_values=self._validate_pixel_values(
+                    flatten_bn(pixel_values, concat=True)),
+            )
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+
+            if self.config.vision_config.model_type == "pixtral":
+                raise ValueError("Pixtral-HF does not support image_embeds.")
+
+            return LlavaImageEmbeddingInputs(
+                type="image_embeds",
+                data=flatten_bn(image_embeds, concat=True),
+            )
+
+        raise AssertionError("This line should be unreachable.")
+    
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+
+        # Validate the multimodal input keyword arguments
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+
+        # Run multimodal inputs through encoder and projector
+        vision_embeddings = self._process_image_input(image_input)
+        return vision_embeddings
+
+    def _call_hf_processor(self, prompt, mm_data, mm_kwargs):
+        logger.info(f"处理输入数据: prompt={prompt}, mm_data={mm_data}, mm_kwargs={mm_kwargs}")
+        result = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        logger.info(f"处理结果: {result}")
+        return result
