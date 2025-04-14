@@ -9,7 +9,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.model_loader.utils import get_architecture_class_name
 from vllm.platforms import current_platform
 
-SUPPORTTED_MODEL_ARCHS = [
+SUPPORTED_MODEL_ARCHS = [
     "MixtralForCausalLM", "DeepseekForCausalLM", "DeepseekV2ForCausalLM",
     "DeepseekV3ForCausalLM"
 ]
@@ -22,7 +22,7 @@ def is_rocm_aiter_moe_enabled() -> bool:
     return current_platform.is_rocm() \
         and envs.VLLM_ROCM_USE_AITER_MOE \
         and envs.VLLM_ROCM_USE_AITER \
-        and model_cls_name in SUPPORTTED_MODEL_ARCHS
+        and model_cls_name in SUPPORTED_MODEL_ARCHS
 
 
 @cache
