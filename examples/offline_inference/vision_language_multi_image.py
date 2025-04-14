@@ -689,15 +689,13 @@ def run_chat(model: str, question: str, image_urls: list[str],
              seed: Optional[int]):
     req_data = model_example_map[model](question, image_urls)
 
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
+
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
     llm = LLM(**engine_args)
-
-    # To maintain code compatibility in this script, we add LoRA here.
-    # You can also add LoRA using:
-    # llm.generate(prompts, lora_request=lora_request,...)
-    if req_data.lora_requests:
-        for lora_request in req_data.lora_requests:
-            llm.llm_engine.add_lora(lora_request=lora_request)
 
     sampling_params = SamplingParams(temperature=0.0,
                                      max_tokens=256,
