@@ -225,6 +225,9 @@ class KVCacheManager:
                 not include the tokens that have already been computed.
             new_computed_blocks: A list of new computed blocks just hitting
                 the prefix caching.
+            num_lookahead_tokens: The number of speculative tokens to allocate.
+                This is used by spec decode proposers with kv-cache such 
+                as eagle.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -264,9 +267,10 @@ class KVCacheManager:
                                len(new_computed_blocks) * self.block_size)
 
         # Get the number of incremental blocks to allocate.
-        num_incr_blocks = self._get_num_incremental_new_blocks(
-            num_tokens, req_blocks, num_computed_tokens, new_computed_blocks)
-        if num_incr_blocks <= 0:
+        num_new_blocks = self._get_num_new_blocks(num_tokens, req_blocks,
+                                                  num_computed_tokens,
+                                                  new_computed_blocks)
+        if num_new_blocks <= 0:
             return None
 
         # Touch the computed blocks to make sure they won't be evicted.
@@ -282,7 +286,7 @@ class KVCacheManager:
 
         # Start to handle new blocks
 
-        if num_incr_blocks <= 0:
+        if num_new_blocks <= 0:
             # No new block is needed.
             new_blocks = []
         else:
@@ -291,18 +295,18 @@ class KVCacheManager:
             num_preallocate_blocks = max(
                 0, self.num_preallocate_blocks -
                 num_lookahead_tokens // self.block_size)
-            num_incr_blocks = min(
-                num_incr_blocks + num_preallocate_blocks,
+            num_new_blocks = min(
+                num_new_blocks + num_preallocate_blocks,
                 self.block_pool.get_num_free_blocks(),
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape
                 # [..., max_num_blocks_per_req].
                 self.max_num_blocks_per_req - len(req_blocks),
             )
-            assert num_incr_blocks > 0
+            assert num_new_blocks > 0
 
             # Concatenate the computed block IDs and the new block IDs.
-            new_blocks = self.block_pool.get_new_blocks(num_incr_blocks)
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
 
         if not self.enable_caching:
@@ -369,27 +373,29 @@ class KVCacheManager:
                                len(computed_blocks) * self.block_size)
 
         # Get the number of incremental blocks to allocate.
-        num_incr_blocks = self._get_num_incremental_new_blocks(
-            num_tokens, req_blocks, num_computed_tokens, computed_blocks)
-        if num_incr_blocks <= 0:
+        num_new_blocks = self._get_num_new_blocks(num_tokens, req_blocks,
+                                                  num_computed_tokens,
+                                                  computed_blocks)
+        if num_new_blocks <= 0:
             # TODO(rob): handle case with not enough external KVs in FUP.
             raise NotImplementedError(
                 "TODO: handle preemption with external KV cache")
             return []
 
-        assert num_incr_blocks <= self.block_pool.get_num_free_blocks()
+        assert num_new_blocks <= self.block_pool.get_num_free_blocks()
         num_existing_blocks = len(req_blocks) + len(computed_blocks)
-        assert (num_incr_blocks
+        assert (num_new_blocks
                 <= self.max_num_blocks_per_req - num_existing_blocks)
 
         # Return the new blocks.
-        new_blocks = self.block_pool.get_new_blocks(num_incr_blocks)
+        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
 
-        # TODO(rob): need to hash the blocks here.
+        # TODO(rob): need to hash the blocks here. The current impl
+        # is broken without this.
 
         return new_blocks
 
-    def _get_num_incremental_new_blocks(
+    def _get_num_new_blocks(
         self,
         num_tokens: int,
         req_blocks: list[KVCacheBlock],
@@ -397,7 +403,7 @@ class KVCacheManager:
         new_computed_blocks: list[KVCacheBlock],
     ) -> int:
         """
-        Get number of incremental blocks to allocate for the request.
+        Get number of new blocks to allocate for the request.
 
         Args:
             num_tokens: The number of tokens to allocate. Note that this does
