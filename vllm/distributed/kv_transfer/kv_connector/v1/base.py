@@ -4,6 +4,20 @@ KVConnectorBase_V1 Class for Distributed KV Cache & Hidden State
 communication in vLLM v1
 
 The class provides the following primitives:
+    Scheduler-side: runs in the scheduler, binds metadata, which
+    is used by the worker-side to load/save KV cache.
+        get_num_new_matched_tokens() - get number of new tokens 
+            that exist in the remote KV cache
+        update_state_after_alloc() - update KVConnector state after
+            temporary buffer alloc by the CacheManager.
+
+    Worker-side: runs in each worker, loads/saves KV cache to/from
+    the Connector based on the metadata.
+        start_load_kv() - starts loading all KVs (maybe async)
+        wait_for_layer_load() - blocks until layer i load is done
+
+        save_kv_layer() - starts saving KV for layer i (maybe async)
+        wait_for_save() - blocks until all saves are done
 """
 
 import enum
