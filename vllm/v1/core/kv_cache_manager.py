@@ -417,8 +417,8 @@ class KVCacheManager:
         kv_connector: "KVConnectorBase_V1",
     ) -> tuple[list["KVCacheBlock"], int]:
 
-        # Check for cache hit.
-        need_to_allocate = kv_connector.get_num_matched_tokens(
+        # Check for cache hit beyond the num_computed_tokens.
+        need_to_allocate = kv_connector.get_num_new_matched_tokens(
             request, num_computed_tokens)
         num_allocated_blocks = 0
 

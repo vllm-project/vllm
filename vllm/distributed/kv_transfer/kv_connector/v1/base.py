@@ -146,13 +146,14 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
     @abstractmethod
-    def get_num_matched_tokens(
+    def get_num_new_matched_tokens(
         self,
         request: "Request",
         num_computed_tokens: int,
     ) -> int:
         """
-        Check for external KV cache hit.
+        Get number of new tokens that can be loaded from the
+        external KV cache beyond the num_computed_tokens.
         
         Args:
             request (Request): the request object.

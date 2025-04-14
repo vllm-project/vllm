@@ -31,13 +31,10 @@ class ReqMeta:
     # Is store or load
     is_store: bool
 
-    ## Blocks allocated by the scheduler (no-longer needed)
-    #block_ids: torch.Tensor
-
     @staticmethod
     def from_request(request: "Request", block_size: int,
                      is_store: bool) -> "ReqMeta":
-        valid_num_tokens = align_to_block_size(len(request.prompt_token_ids),
+        valid_num_tokens = align_to_block_size(request.num_prompt_tokens,
                                                block_size)
         token_ids = torch.tensor(request.prompt_token_ids)[:valid_num_tokens]
         block_ids = torch.tensor(request.block_ids)
@@ -224,16 +221,23 @@ class SharedStorageConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         return
 
-    def get_num_matched_tokens(
+    def get_num_new_matched_tokens(
         self,
         request: "Request",
         num_computed_tokens: int,
     ) -> int:
         """
-        Check for external KV cache hit.
+        Get number of new tokens that can be loaded from the
+        external KV cache beyond the num_computed_tokens.
         
-        Returns the number of tokens that can be loaded from the 
-        external KV cache beyond what is already computed.
+        Args:
+            request (Request): the request object.
+            num_computed_tokens (int): the number of locally
+                computed tokens for this request
+
+        Returns:
+            the number of tokens that can be loaded from the 
+            external KV cache beyond what is already computed.
         """
 
         # NOTE: in this debug implementation, we assume that the prompt is
