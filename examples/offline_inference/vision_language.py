@@ -793,6 +793,8 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         enable_lora=True,
         max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 16},
     )
 
     return ModelRequestData(

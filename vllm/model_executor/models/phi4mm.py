@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict, Union
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import (BatchFeature, PretrainedConfig,
+from transformers import (BatchFeature, PretrainedConfig, ProcessorMixin,
                           SequenceFeatureExtractor, SiglipVisionConfig)
 
 from vllm.config import VllmConfig
@@ -48,7 +48,6 @@ _AUDIO_MAX_SOUNDFILE_SIZE = 241_000
 SIGLIP_NAME = "siglip-so400m-patch14-448"
 VISION_ENCODER_TO_PROCESSING_CONFIG = {
     'siglip-so400m-patch14-448': {
-        'dynamic_hd': 16,
         'vit_image_size': 448,
         'vit_patch_size': 14,
         'token_compression_factor': 2,
@@ -470,6 +469,17 @@ def cat_with_pad(tensors, dim, padding_value=0):
 
 class Phi4MMProcessingInfo(BaseProcessingInfo):
 
+    def get_hf_processor(
+        self,
+        *,
+        dynamic_hd: Optional[int] = None,
+        **kwargs: object,
+    ) -> ProcessorMixin:
+        if dynamic_hd is not None:
+            kwargs["dynamic_hd"] = dynamic_hd
+
+        return self.ctx.get_hf_processor(**kwargs)
+
     @property
     def image_tokens(self) -> list[str]:
         return [f"<|image_{i+1}|>" for i in range(100)]
@@ -478,9 +488,13 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
     def audio_tokens(self) -> list[str]:
         return [f"<|audio_{i+1}|>" for i in range(100)]
 
-    @property
-    def dynamic_hd(self) -> int:
-        image_processor = self.get_hf_processor().image_processor
+    def get_dynamic_hd(
+        self,
+        processor: Optional[ProcessorMixin] = None,
+    ) -> int:
+        if processor is None:
+            processor = self.get_hf_processor()
+        image_processor = processor.image_processor
         return image_processor.dynamic_hd
 
     def get_feature_extractor(self) -> SequenceFeatureExtractor:
@@ -632,6 +646,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
+        processor: Optional[ProcessorMixin] = None,
     ) -> int:
         hf_config = self.get_hf_config()
         vision_encoder_name = hf_config.img_processor
@@ -643,7 +658,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         vit_patch_size = prepro_config['vit_patch_size']
         token_compression_factor = prepro_config['token_compression_factor']
 
-        dynamic_hd_size = self.dynamic_hd
+        dynamic_hd_size = self.get_dynamic_hd(processor=processor)
 
         image_num_tokens = self._compute_num_image_tokens(
             image_width,
@@ -656,7 +671,10 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
         return image_num_tokens
 
-    def get_image_size_with_most_features(self) -> ImageSize:
+    def get_image_size_with_most_features(
+        self,
+        processor: Optional[ProcessorMixin] = None,
+    ) -> ImageSize:
         hf_config = self.get_hf_config()
         vision_encoder_name = hf_config.img_processor
         if vision_encoder_name is None:
@@ -665,7 +683,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
             vision_encoder_name]
         vit_image_size = prepro_config['vit_image_size']
 
-        max_side = vit_image_size * self.dynamic_hd
+        max_side = vit_image_size * self.get_dynamic_hd(processor=processor)
         return ImageSize(height=max_side, width=vit_image_size)
 
     def get_audio_num_frames(self, audio_len: int, sr: float) -> int:
@@ -825,6 +843,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
         feature_extractor = self.info.get_feature_extractor()
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         def get_image_replacement_phi4mm(item_idx: int):
             images = mm_items.get_items(
@@ -837,6 +856,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
+                    processor=hf_processor,
                 )
 
             image_tokens = [_IMAGE_PLACEHOLDER_TOKEN_ID] * num_image_tokens

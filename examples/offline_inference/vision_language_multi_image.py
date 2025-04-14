@@ -470,6 +470,8 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
         limit_mm_per_prompt={"image": len(image_urls)},
         enable_lora=True,
         max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 4},
     )
 
     placeholders = "".join(f"<|image_{i}|>"
