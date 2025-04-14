@@ -72,7 +72,7 @@ class Scheduler(SchedulerInterface):
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
-        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+        assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -326,7 +326,7 @@ class Scheduler(SchedulerInterface):
                 # we must call kv_cache_manager.free_buffer_requests() below.
                 if self.connector is not None:
                     computed_blocks, num_computed_tokens = \
-                        self.kv_cache_manager.alloc_and_get_external_blocks(
+                        self.kv_cache_manager.alloc_and_append_external_blocks(
                             request, computed_blocks,
                             num_computed_tokens, self.connector)
 

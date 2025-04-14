@@ -409,7 +409,7 @@ class KVCacheManager:
         """
         self._free_block_hashes_by_request_id(request.request_id)
 
-    def alloc_and_get_external_blocks(
+    def alloc_and_append_external_blocks(
         self,
         request: "Request",
         computed_blocks: list["KVCacheBlock"],
@@ -449,19 +449,20 @@ class KVCacheManager:
             allocated_blocks = allocated_blocks[:num_expected_blocks]
 
             # Back-off one block if the external KV is for all tokens
-            if (len(allocated_blocks) + len(computed_blocks)) \
-                    * self.block_size >= len(request.prompt_token_ids):
+            if ((len(allocated_blocks) + len(computed_blocks)) *
+                    self.block_size >= request.num_prompt_tokens):
                 allocated_blocks = allocated_blocks[:-1]
 
-            computed_blocks = computed_blocks + (allocated_blocks or [])
+            if allocated_blocks:
+                computed_blocks = computed_blocks + allocated_blocks
             num_allocated_blocks = len(allocated_blocks)
 
         # Update internal state. In case of:
         # * SharedStorageConnector: add req_id to _requests_need_load
         #   so that we know to load this requests KVs later.
         kv_connector.update_state_after_alloc(request, num_allocated_blocks)
-        num_computed_blocks = len(computed_blocks) * self.block_size
-        return computed_blocks, num_computed_blocks
+        num_computed_tokens = len(computed_blocks) * self.block_size
+        return computed_blocks, num_computed_tokens
 
     def free_buffer_requests(self) -> None:
         """Free buffer requests for the KV connector."""
