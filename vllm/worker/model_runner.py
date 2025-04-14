@@ -549,12 +549,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             tokens = [0] * (seq_len - context_len)
             prompt_embeds = seq_data.get_token_embeddings(
             )[context_len:seq_len]
-            # # prompt_embeds = seq_data.prompt_embeds
-            # prompt_embeds = seq_data.prompt_embeds[context_len:seq_len]
-            # # if len(prompt_embeds) == 0:
-            # #     # Sometimes the prompt_embeds can be fully processed, so the
-            # #     # seq_data.prompt_embeds[context_len:seq_len] can be empty.
-            # #     prompt_embeds = None
 
         token_types = seq_group_metadata.token_type_ids
 
