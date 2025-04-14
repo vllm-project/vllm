@@ -119,10 +119,9 @@ class MultiprocExecutor(Executor):
                     timeout=dequeue_timeout)
 
                 if status != WorkerProc.ResponseStatus.SUCCESS:
-                    if isinstance(result, Exception):
-                        raise result
-                    else:
-                        raise RuntimeError("Worker failed")
+                    raise RuntimeError(
+                        "Worker failed with error %s, please check the"
+                        " stack trace above for the root cause", result)
 
                 responses[w.rank] = result
 
@@ -327,7 +326,7 @@ class WorkerProc:
             logger.debug("Worker interrupted.")
 
         except Exception:
-            # worker_busy_loop sends exceptions exceptons to Executor
+            # worker_busy_loop sends exceptions to Executor
             # for shutdown, but if there is an error in startup or an
             # error with IPC itself, we need to alert the parent.
             psutil.Process().parent().send_signal(signal.SIGUSR1)
@@ -378,9 +377,11 @@ class WorkerProc:
                 # Notes have been introduced in python 3.11
                 if hasattr(e, "add_note"):
                     e.add_note(traceback.format_exc())
-                self.worker_response_mq.enqueue(
-                    (WorkerProc.ResponseStatus.FAILURE, e))
                 logger.exception("WorkerProc hit an exception: %s", exc_info=e)
+                # exception might not be serializable, so we convert it to
+                # string, only for logging purpose.
+                self.worker_response_mq.enqueue(
+                    (WorkerProc.ResponseStatus.FAILURE, str(e)))
                 continue
 
             self.worker_response_mq.enqueue(
