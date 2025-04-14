@@ -832,6 +832,22 @@ def build_app(args: Namespace) -> FastAPI:
         "/v2/rerank", "/v1/audio/transcriptions", "/invocations"
     ]
 
+    # Simple sleep status check that doesn't affect metrics
+    def get_sleep_status(app_state) -> bool:
+        """Check if model is in sleep mode without going through engine client metrics.
+        
+        This function accesses the sleep flag directly instead of using engine_client.is_sleeping()
+        to prevent triggering metrics collection.
+        """
+        try:
+            # Directly access the model_executor's is_sleeping attribute
+            # This bypasses the metric-collecting engine client methods
+            return app_state.engine_client.engine.model_executor.is_sleeping
+        except Exception as e:
+            logger.warning(f"Error in direct sleep status check: {e}")
+            # Default to not sleeping if we can't check
+            return False
+
     @app.middleware("http")
     async def check_sleep_status_middleware(request: Request, call_next):
         # Only check sleep status for endpoints that access model weights
@@ -841,7 +857,8 @@ def build_app(args: Namespace) -> FastAPI:
 
         if url_path in model_access_endpoints:
             try:
-                is_sleeping = await engine_client(request).is_sleeping()
+                # Use the direct check instead of engine_client().is_sleeping()
+                is_sleeping = get_sleep_status(request.app.state)
                 if is_sleeping:
                     return JSONResponse(content={
                         "error": {
