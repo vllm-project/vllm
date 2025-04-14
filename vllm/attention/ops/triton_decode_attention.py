@@ -39,8 +39,8 @@ is_hip_ = current_platform.is_rocm()
 
 logger = logging.getLogger(__name__)
 
-# Remove this warning when triton>=3.2.0. This issue will not affect performance
-# and accuracy.
+# Only print the following warnings when triton version < 3.2.0.
+# The issue won't affect performance or accuracy.
 if triton.__version__ < '3.2.0':
     logger.warning(
         "The following error message 'operation scheduled before its operands' "
