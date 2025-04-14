@@ -22,6 +22,16 @@ QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg",
     "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/2/26/Ultramarine_Flycatcher_%28Ficedula_superciliaris%29_Naggar%2C_Himachal_Pradesh%2C_2013_%28cropped%29.JPG",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg/2560px-Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/d/d4/Starfish%2C_Caswell_Bay_-_geograph.org.uk_-_409413.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/6/69/Grapevinesnail_01.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0b/Texas_invasive_Musk_Thistle_1.jpg/1920px-Texas_invasive_Musk_Thistle_1.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7a/Huskiesatrest.jpg/2880px-Huskiesatrest.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg/1920px-Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/3/30/George_the_amazing_guinea_pig.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1f/Oryctolagus_cuniculus_Rcdo.jpg/1920px-Oryctolagus_cuniculus_Rcdo.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/9/98/Horse-and-pony.jpg",
 ]
 
 
@@ -57,6 +67,41 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "CohereForAI/aya-vision-8b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            *placeholders,
+            {
+                "type": "text",
+                "text": question
+            },
+        ],
+    }]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
         image_data=[fetch_image(url) for url in image_urls],
     )
 
@@ -182,6 +227,33 @@ def load_idefics3(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+
+    # The configuration below has been confirmed to launch on a single L40 GPU.
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=16,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={
+            "max_image_size": {
+                "longest_edge": 384
+            },
+        },
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    prompt = f"<|im_start|>User:{placeholders}\n{question}<end_of_utterance>\nAssistant:"  # noqa: E501
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL2-2B"
 
@@ -218,14 +290,72 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=131072,
+        tensor_parallel_size=8,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            *placeholders,
+            {
+                "type": "text",
+                "text": question
+            },
+        ],
+    }]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_mistral3(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+    # Adjust this as necessary to fit in GPU
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        tensor_parallel_size=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "[IMG]" * len(image_urls)
+    prompt = f"<s>[INST]{question}\n{placeholders}[/INST]"
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_mllama(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 
     # The configuration below has been confirmed to launch on a single L40 GPU.
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
-        max_num_seqs=16,
+        max_model_len=8192,
+        max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
@@ -504,11 +634,14 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
 model_example_map = {
     "aria": load_aria,
+    "aya_vision": load_aya_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
     "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
+    "llama4": load_llama4,
+    "mistral3": load_mistral3,
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
     "phi3_v": load_phi3v,
@@ -517,6 +650,7 @@ model_example_map = {
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
     "qwen2_5_vl": load_qwen2_5_vl,
+    "smolvlm": load_smolvlm,
 }
 
 
@@ -527,15 +661,8 @@ def run_generate(model, question: str, image_urls: list[str],
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
     llm = LLM(**engine_args)
 
-    # To maintain code compatibility in this script, we add LoRA here.
-    # You can also add LoRA using:
-    # llm.generate(prompts, lora_request=lora_request,...)
-    if req_data.lora_requests:
-        for lora_request in req_data.lora_requests:
-            llm.llm_engine.add_lora(lora_request=lora_request)
-
     sampling_params = SamplingParams(temperature=0.0,
-                                     max_tokens=128,
+                                     max_tokens=256,
                                      stop_token_ids=req_data.stop_token_ids)
 
     outputs = llm.generate(
@@ -545,29 +672,31 @@ def run_generate(model, question: str, image_urls: list[str],
                 "image": req_data.image_data
             },
         },
-        sampling_params=sampling_params)
+        sampling_params=sampling_params,
+        lora_request=req_data.lora_requests,
+    )
 
+    print("-" * 50)
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+        print("-" * 50)
 
 
 def run_chat(model: str, question: str, image_urls: list[str],
              seed: Optional[int]):
     req_data = model_example_map[model](question, image_urls)
 
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
+
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
     llm = LLM(**engine_args)
 
-    # To maintain code compatibility in this script, we add LoRA here.
-    # You can also add LoRA using:
-    # llm.generate(prompts, lora_request=lora_request,...)
-    if req_data.lora_requests:
-        for lora_request in req_data.lora_requests:
-            llm.llm_engine.add_lora(lora_request=lora_request)
-
     sampling_params = SamplingParams(temperature=0.0,
-                                     max_tokens=128,
+                                     max_tokens=256,
                                      stop_token_ids=req_data.stop_token_ids)
     outputs = llm.chat(
         [{
@@ -588,11 +717,14 @@ def run_chat(model: str, question: str, image_urls: list[str],
         }],
         sampling_params=sampling_params,
         chat_template=req_data.chat_template,
+        lora_request=req_data.lora_requests,
     )
 
+    print("-" * 50)
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+        print("-" * 50)
 
 
 def main(args: Namespace):
@@ -600,10 +732,12 @@ def main(args: Namespace):
     method = args.method
     seed = args.seed
 
+    image_urls = IMAGE_URLS[:args.num_images]
+
     if method == "generate":
-        run_generate(model, QUESTION, IMAGE_URLS, seed)
+        run_generate(model, QUESTION, image_urls, seed)
     elif method == "chat":
-        run_chat(model, QUESTION, IMAGE_URLS, seed)
+        run_chat(model, QUESTION, image_urls, seed)
     else:
         raise ValueError(f"Invalid method: {method}")
 
@@ -628,6 +762,12 @@ if __name__ == "__main__":
                         type=int,
                         default=None,
                         help="Set the seed when initializing `vllm.LLM`.")
+    parser.add_argument(
+        "--num-images",
+        "-n",
+        choices=list(range(1, 13)),  # 12 is the max number of images
+        default=2,
+        help="Number of images to use for the demo.")
 
     args = parser.parse_args()
     main(args)

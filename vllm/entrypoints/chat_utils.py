@@ -35,7 +35,7 @@ from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -452,8 +452,6 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         self._model_config = model_config
         self._tokenizer = tokenizer
-        self._allowed_items = (model_config.multimodal_config.limit_per_prompt
-                               if model_config.multimodal_config else {})
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
 
@@ -464,6 +462,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     @property
     def allowed_local_media_path(self):
         return self._model_config.allowed_local_media_path
+
+    @property
+    def mm_registry(self):
+        return MULTIMODAL_REGISTRY
 
     @staticmethod
     @cache
@@ -487,7 +489,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|endoftext10|>"  # 200010 (see vocab.json in hf model)
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
-            if model_type in ("blip-2", "fuyu", "paligemma", "pixtral"):
+            if model_type in ("blip-2", "florence2", "fuyu", "paligemma",
+                              "pixtral", "mistral3"):
                 # These models do not use image tokens in the prompt
                 return None
             if model_type == "qwen":
@@ -495,17 +498,16 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "deepseek_vl_v2", "internvl_chat",
-                              "skywork_chat", "NVLM_D", "h2ovl_chat"):
+            if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
+                              "internvl_chat", "skywork_chat", "NVLM_D",
+                              "h2ovl_chat", "idefics3", "smolvlm"):
                 return "<image>"
-            if model_type == "mllama":
+            if model_type in ("mllama", "llama4"):
                 return "<|image|>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "molmo":
                 return ""
-            if model_type == "idefics3":
-                return "<image>"
             if model_type == "aria":
                 return "<|fim_prefix|><|img|><|fim_suffix|>"
             if model_type == "gemma3":
@@ -540,12 +542,29 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
-        allowed_count = self._allowed_items.get(modality, 1)
+        mm_registry = self.mm_registry
+        model_config = self.model_config
+
+        input_modality = modality.replace("_embeds", "")
+
+        if mm_registry.has_processor(model_config):
+            mm_processor = mm_registry.create_processor(model_config)
+            allowed_counts = mm_processor.info.get_allowed_mm_limits()
+            allowed_count = allowed_counts.get(input_modality, 0)
+        else:
+            mm_config = model_config.multimodal_config
+            if mm_config is None:
+                msg = "This model does not support multi-modal inputs"
+                raise ValueError(msg)
+
+            allowed_count = mm_config.get_limit_per_prompt(input_modality)
+
         current_count = len(self._items_by_modality[modality]) + 1
         if current_count > allowed_count:
             raise ValueError(
                 f"At most {allowed_count} {modality}(s) may be provided in "
-                "one request.")
+                "one request. You can set `--limit-mm-per-prompt` to "
+                "increase this limit if the model supports it.")
 
         self._items_by_modality[modality].append(item)
 
@@ -872,19 +891,19 @@ MM_PARSER_MAP: dict[
     Callable[[ChatCompletionContentPartParam], _ContentPart],
 ] = {
     "text":
-    lambda part: _TextParser(part).get("text", ""),
+    lambda part: _TextParser(part).get("text", None),
     "image_url":
-    lambda part: _ImageParser(part).get("image_url", {}).get("url", ""),
+    lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
-    lambda part: _ImageEmbedsParser(part).get("image_embeds", {}),
+    lambda part: _ImageEmbedsParser(part).get("image_embeds", None),
     "audio_url":
-    lambda part: _AudioParser(part).get("audio_url", {}).get("url", ""),
+    lambda part: _AudioParser(part).get("audio_url", {}).get("url", None),
     "input_audio":
-    lambda part: _InputAudioParser(part).get("input_audio", {}),
+    lambda part: _InputAudioParser(part).get("input_audio", None),
     "refusal":
-    lambda part: _RefusalParser(part).get("refusal", ""),
+    lambda part: _RefusalParser(part).get("refusal", None),
     "video_url":
-    lambda part: _VideoParser(part).get("video_url", {}).get("url", ""),
+    lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
 }
 
 
@@ -1003,11 +1022,11 @@ def _parse_chat_message_content_part(
     part_type, content = _parse_chat_message_content_mm_part(part)
 
     # if part_type is text/refusal/image_url/audio_url/video_url/input_audio but
-    # content is empty, log a warning and skip
-    if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
+    # content is None, log a warning and skip
+    if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and content is None:
         logger.warning(
-            "Skipping multimodal part (type: '%s') "
-            "with empty / unparsable content.", part_type)
+            "Skipping multimodal part '%s' (type: '%s') "
+            "with empty / unparsable content.", part, part_type)
         return None
 
     if part_type in ("text", "refusal"):
@@ -1193,8 +1212,15 @@ def apply_mistral_chat_template(
         **kwargs,
     )
 
-    return tokenizer.apply_chat_template(
-        messages=messages,
-        tools=tools,
-        **kwargs,
-    )
+    try:
+        return tokenizer.apply_chat_template(
+            messages=messages,
+            tools=tools,
+            **kwargs,
+        )
+    # mistral-common uses assert statements to stop processing of input
+    # if input does not comply with the expected format.
+    # We convert those assertion errors to ValueErrors so they can be
+    # are properly caught in the preprocessing_input step
+    except AssertionError as e:
+        raise ValueError from e

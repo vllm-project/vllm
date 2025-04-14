@@ -24,7 +24,7 @@ vLLM also supports model implementations that are available in Transformers. Thi
 
 To check if the modeling backend is Transformers, you can simply do this:
 
-```python 
+```python
 from vllm import LLM
 llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
@@ -55,7 +55,7 @@ If your model is neither supported natively by vLLM or Transformers, you can sti
 Simply set `trust_remote_code=True` and vLLM will run any model on the Model Hub that is compatible with Transformers.
 Provided that the model writer implements their model in a compatible way, this means that you can run new models before they are officially supported in Transformers or vLLM!
 
-```python 
+```python
 from vllm import LLM
 llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of your model
 llm.apply_model(lambda model: print(model.__class__))
@@ -160,6 +160,35 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+#### Using a proxy
+
+Here are some tips for loading/downloading models from Hugging Face using a proxy:
+
+- Set the proxy globally for your session (or set it in the profile file):
+
+```shell
+export http_proxy=http://your.proxy.server:port
+export https_proxy=http://your.proxy.server:port
+```
+
+- Set the proxy for just the current command:
+
+```shell
+https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
+
+# or use vllm cmd directly
+https_proxy=http://your.proxy.server:port  vllm serve <model_name> --disable-log-requests
+```
+
+- Set the proxy in Python interpreter:
+
+```python
+import os
+
+os.environ['http_proxy'] = 'http://your.proxy.server:port'
+os.environ['https_proxy'] = 'http://your.proxy.server:port'
+```
+
 ### ModelScope
 
 To use models from [ModelScope](https://www.modelscope.cn) instead of Hugging Face Hub, set an environment variable:
@@ -218,6 +247,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc.
   * ✅︎
   * ✅︎
+- * `BambaForCausalLM`
+  * Bamba
+  * `ibm-ai-platform/Bamba-9B-fp8`, `ibm-ai-platform/Bamba-9B`
+  *
+  *
 - * `BloomForCausalLM`
   * BLOOM, BLOOMZ, BLOOMChat
   * `bigscience/bloom`, `bigscience/bloomz`, etc.
@@ -228,9 +262,9 @@ See [this page](#generative-models) for more information on how to use generativ
   * `facebook/bart-base`, `facebook/bart-large-cnn`, etc.
   *
   *
-- * `ChatGLMModel`
+- * `ChatGLMModel`, `ChatGLMForConditionalGeneration`
   * ChatGLM
-  * `THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.
+  * `THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, `ShieldLM-6B-chatglm3`, etc.
   * ✅︎
   * ✅︎
 - * `CohereForCausalLM`, `Cohere2ForCausalLM`
@@ -296,6 +330,11 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `GlmForCausalLM`
   * GLM-4
   * `THUDM/glm-4-9b-chat-hf`, etc.
+  * ✅︎
+  * ✅︎
+- * `Glm4ForCausalLM`
+  * GLM-4-0414
+  * `THUDM/GLM-4-32B-Chat-0414`, etc.
   * ✅︎
   * ✅︎
 - * `GPT2LMHeadModel`
@@ -473,6 +512,16 @@ See [this page](#generative-models) for more information on how to use generativ
   * `Qwen/Qwen1.5-MoE-A2.7B`, `Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc.
   *
   * ✅︎
+- * `Qwen3ForCausalLM`
+  * Qwen3
+  * `Qwen/Qwen3-8B`, etc.
+  * ✅︎
+  * ✅︎
+- * `Qwen3MoeForCausalLM`
+  * Qwen3MoE
+  * `Qwen/Qwen3-MoE-15B-A2B`, etc.
+  * ✅︎
+  * ✅︎
 - * `StableLmForCausalLM`
   * StableLM
   * `stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc.
@@ -502,6 +551,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * XVERSE
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
   * ✅︎
+  * ✅︎
+- * `MiniMaxText01ForCausalLM`
+  * MiniMax-Text
+  * `MiniMaxAI/MiniMax-Text-01`, etc.
+  *
   * ✅︎
 - * `Zamba2ForCausalLM`
   * Zamba2
@@ -566,7 +620,7 @@ you should explicitly specify the task type to ensure that the model is used in 
   *
 - * `XLMRobertaModel`
   * XLM-RoBERTa-based
-  * `intfloat/multilingual-e5-large`, etc.
+  * `intfloat/multilingual-e5-large`, `jinaai/jina-reranker-v2-base-multilingual`, etc.
   *
   *
 :::
@@ -705,7 +759,7 @@ On the other hand, modalities separated by `/` are mutually exclusive.
 See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the model.
 
 :::{important}
-To enable multiple multi-modal items per text prompt, you have to set `limit_mm_per_prompt` (offline inference)
+**To enable multiple multi-modal items per text prompt in vLLM V0**, you have to set `limit_mm_per_prompt` (offline inference)
 or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
 
 Offline inference:
@@ -722,6 +776,8 @@ Online serving:
 ```bash
 vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
 ```
+
+**This is no longer required if you are using vLLM V1.**
 
 :::
 
@@ -750,6 +806,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * Aria
   * T + I<sup>+</sup>
   * `rhymes-ai/Aria`
+  *
+  * ✅︎
+  * ✅︎
+- * `AyaVisionForConditionalGeneration`
+  * Aya Vision
+  * T + I<sup>+</sup>
+  * `CohereForAI/aya-vision-8b`, `CohereForAI/aya-vision-32b`, etc.
   *
   * ✅︎
   * ✅︎
@@ -817,9 +880,16 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
 - * `InternVLChatModel`
-  * InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
+  * InternVL 3.0, InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
-  * `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
+  * `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
+  *
+  * ✅︎
+  * ✅︎
+- * `Llama4ForConditionalGeneration`
+  * Llama 4
+  * T + I<sup>+</sup>
+  * `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc.
   *
   * ✅︎
   * ✅︎
@@ -863,6 +933,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * T + I<sup>E+</sup> + V<sup>E+</sup>
   * `openbmb/MiniCPM-V-2` (see note), `openbmb/MiniCPM-Llama3-V-2_5`, `openbmb/MiniCPM-V-2_6`, etc.
   * ✅︎
+  * ✅︎
+  * ✅︎
+- * `Mistral3ForConditionalGeneration`
+  * Mistral3
+  * T + I<sup>+</sup>
+  * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
+  *
   * ✅︎
   * ✅︎
 - * `MllamaForConditionalGeneration`
@@ -949,6 +1026,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `SmolVLMForConditionalGeneration`
+  * SmolVLM2
+  * T + I
+  * `SmolVLM2-2.2B-Instruct`
+  *
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
@@ -965,9 +1049,6 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{important}
-To use Gemma3 series models, you have to install Hugging Face Transformers library from source via
-`pip install git+https://github.com/huggingface/transformers`.
-
 Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
 You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": True}'`.
 :::
@@ -1104,5 +1185,5 @@ We have the following levels of testing for models:
 
 1. **Strict Consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. Please refer to [models tests](https://github.com/vllm-project/vllm/blob/main/tests/models) for the models that have passed this test.
 2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
-3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](gh-dir:tests) and [examples](gh-dir:main/examples) for the models that have passed this test.
+3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](gh-dir:tests) and [examples](gh-dir:examples) for the models that have passed this test.
 4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
