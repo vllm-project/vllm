@@ -64,13 +64,16 @@ class P2pNcclPipe:
         self.poller = zmq.Poller()
         self.poller.register(self.router_socket, zmq.POLLIN)
 
-        # The sending type includes tree mutually exclusive options: PUT, GET, PUT_ASYNC.
+        # The sending type includes tree mutually exclusive options:
+        # PUT, GET, PUT_ASYNC.
         self.send_type = self.config.get_from_extra_config("send_type", "PUT")
         if self.send_type == "GET":
-            self.send_store: Dict[str, torch.Tensor] = {}  # tensor_id: torch.Tensor
+            self.send_store: Dict[str,
+                                  torch.Tensor] = {}  # tensor_id: torch.Tensor
         else:
             # PUT or PUT_ASYNC
-            self.send_store: Deque[List[Any]] = deque()  # tensor_id: torch.Tensor
+            self.send_store: Deque[
+                List[Any]] = deque()  # tensor_id: torch.Tensor
             if self.send_type == "PUT_ASYNC":
                 self._send_thread = threading.Thread(target=self._send_async,
                                                      daemon=True)
@@ -142,22 +145,29 @@ class P2pNcclPipe:
                 with self.send_store_cv:
                     self.send_store.append([tensor_id, remote_address, tensor])
                     self.send_store_cv.notify()
-            else: # GET
+            else:  # GET
                 with self.send_store_cv:
                     tensor_size = tensor.element_size() * tensor.numel()
-                    while self.buffer_size + tensor_size > self.buffer_size_threshold:
+                    while (self.buffer_size + tensor_size
+                           > self.buffer_size_threshold):
                         oldest_tenser_id = next(iter(self.send_store))
                         oldest_tenser = self.send_store.pop(oldest_tenser_id)
-                        oldest_tenser_size = oldest_tenser.element_size() * oldest_tenser.numel()
+                        oldest_tenser_size = oldest_tenser.element_size(
+                        ) * oldest_tenser.numel()
                         self.buffer_size -= oldest_tenser_size
-                        logger.info("⛔[GET]Send to %s, tensor_id: %s, tensor_size: %d, buffer_size: %d, oldest_tenser_size: %d",
-                                    remote_address, tensor_id, tensor_size, self.buffer_size, oldest_tenser_size)
+                        logger.info(
+                            "⛔[GET]Send to %s, tensor_id: %s, tensor_size: %d,"
+                            "buffer_size: %d, oldest_tenser_size: %d",
+                            remote_address, tensor_id, tensor_size,
+                            self.buffer_size, oldest_tenser_size)
 
                     self.send_store[tensor_id] = tensor
                     self.buffer_size += tensor_size
-                    logger.info("🔵[GET]Send to %s, tensor_id: %s, tensor_size: %d, buffer_size: %d(%.2f%%)",
-                                remote_address, tensor_id, tensor_size,
-                                self.buffer_size, self.buffer_size/self.buffer_size_threshold*100)
+                    logger.info(
+                        "🔵[GET]Send to %s, tensor_id: %s, tensor_size: %d,"
+                        "buffer_size: %d(%.2f%%)", remote_address, tensor_id,
+                        tensor_size, self.buffer_size,
+                        self.buffer_size / self.buffer_size_threshold * 100)
 
         return True
 
@@ -211,7 +221,8 @@ class P2pNcclPipe:
                              device=self.device)
         self._recv(comm, tensor, rank ^ 1)
 
-        logger.info("🔵[GET]Recv From %s, tensor_id: %s", remote_address, tensor_id)
+        logger.info("🔵[GET]Recv From %s, tensor_id: %s", remote_address,
+                    tensor_id)
 
         return tensor
 
@@ -271,8 +282,9 @@ class P2pNcclPipe:
                         self.router_socket.send_multipart(
                             [remote_address, b"1"])
                         logger.warning(
-                            "🚧[PUT]Recv Tensor, Out Of Memory, %s 👈 %s, data: %s",
-                            self.zmq_address, remote_address.decode(), data)
+                            "🚧[PUT]Recv Tensor, Out Of Memory,%s 👈 %s, "
+                            "data: %s", self.zmq_address,
+                            remote_address.decode(), data)
 
                 elif data["cmd"] == "GET":
                     tensor_id = data["tensor_id"]
@@ -280,10 +292,8 @@ class P2pNcclPipe:
                         tensor = self.send_store.pop(tensor_id, None)
                         if tensor is not None:
                             data = {
-                                "ret":
-                                0,
-                                "shape":
-                                tensor.shape,
+                                "ret": 0,
+                                "shape": tensor.shape,
                                 "dtype":
                                 str(tensor.dtype).replace("torch.", "")
                             }
@@ -293,12 +303,10 @@ class P2pNcclPipe:
                             data = {"ret": 1}
 
                     self.router_socket.send_multipart(
-                        [remote_address,
-                         msgpack.dumps(data)])
+                        [remote_address, msgpack.dumps(data)])
 
                     if data["ret"] == 0:
-                        self._send(comm, tensor.to(self.device),
-                                   rank ^ 1)
+                        self._send(comm, tensor.to(self.device), rank ^ 1)
 
                     logger.info(
                         "🔵[GET]Send Tensor, %s 👉 %s, rank: %s, data: %s",
