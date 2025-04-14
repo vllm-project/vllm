@@ -298,7 +298,7 @@ def chunked_prefill_paged_decode(
     #print("max_seqlen_q: ", max_seqlen_q)
     #print("seqused_k: ", seqused_k)
 
-    BLOCK_M = 32
+    BLOCK_M = 16
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     '''

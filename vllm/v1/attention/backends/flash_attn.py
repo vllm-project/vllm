@@ -295,7 +295,7 @@ class FlashAttentionMetadataBuilder:
         query_block_start_loc_cpu = torch.zeros_like(query_start_loc_cpu)
         for i in range(num_reqs):
             this_q_len = query_start_loc_cpu[i+1]-query_start_loc_cpu[i]
-            query_block_start_loc_cpu[i+1] = query_block_start_loc_cpu[i] + triton.cdiv(this_q_len, 8)
+            query_block_start_loc_cpu[i+1] = query_block_start_loc_cpu[i] + triton.cdiv(this_q_len, 4)
         total_num_q_blocks = query_block_start_loc_cpu[num_reqs]
 
         query_block_start_loc = query_block_start_loc_cpu.to(self.runner.device,
