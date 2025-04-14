@@ -137,7 +137,7 @@ class PreparedKernel:
             grid_0 = grid[0]
             grid_1 = grid[1] if grid_size > 1 else 1
             grid_2 = grid[2] if grid_size > 2 else 1
-                
+
         stream = driver.active.get_current_stream(self.device)
 
         return self.run(
@@ -226,8 +226,14 @@ class JitCache(KernelInterface):
                 raise RuntimeError(
                     f"[{__print_name__}] ERROR: assume_const must only contain"
                     "parameters NOT marked as tl.constexpr.")
-            update_only_arg_names = [arg_n for arg_n in non_const_arg_names if arg_n not in self.assume_const]
-            assume_const_vals_dict = {arg_n: kwargs[arg_n] for arg_n in non_const_arg_names if arg_n in self.assume_const}
+            update_only_arg_names = [
+                arg_n for arg_n in non_const_arg_names
+                if arg_n not in self.assume_const
+            ]
+            assume_const_vals_dict = {
+                arg_n: kwargs[arg_n]
+                for arg_n in non_const_arg_names if arg_n in self.assume_const
+            }
         else:
             update_only_arg_names = non_const_arg_names
             assume_const_vals_dict = {}
