@@ -14,6 +14,7 @@ from transformers import LlavaNextProcessor
 
 from .utils import AutoWeightsLoader, embed_multimodal, init_vllm_registered_model, maybe_prefix
 from vllm.config import VllmConfig
+import re
 from transformers import (
     BatchFeature,
 )
