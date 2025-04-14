@@ -39,6 +39,8 @@ bitsandbytes==0.45.3
     # via -r requirements/test.in
 black==24.10.0
     # via datamodel-code-generator
+blobfile==3.0.0
+    # via -r requirements/test.in
 boto3==1.35.57
     # via tensorizer
 botocore==1.35.57
@@ -127,6 +129,7 @@ fastsafetensors==0.1.10
     # via -r requirements/test.in
 filelock==3.16.1
     # via
+    #   blobfile
     #   datasets
     #   huggingface-hub
     #   ray
@@ -227,7 +230,9 @@ llvmlite==0.44.0
 lm-eval==0.4.8
     # via -r requirements/test.in
 lxml==5.3.0
-    # via sacrebleu
+    # via
+    #   blobfile
+    #   sacrebleu
 markdown-it-py==3.0.0
     # via rich
 markupsafe==3.0.2
@@ -426,6 +431,8 @@ pybind11==2.13.6
     # via lm-eval
 pycparser==2.22
     # via cffi
+pycryptodomex==3.22.0
+    # via blobfile
 pydantic==2.9.2
     # via
     #   datamodel-code-generator
@@ -689,6 +696,7 @@ tzdata==2024.2
     # via pandas
 urllib3==2.2.3
     # via
+    #   blobfile
     #   botocore
     #   requests
     #   responses
