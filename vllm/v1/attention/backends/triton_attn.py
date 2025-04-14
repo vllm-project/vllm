@@ -178,6 +178,8 @@ class TritonAttentionImpl(AttentionImpl):
             max_seqlen_q = attn_metadata.max_query_len
             max_seqlen_k = attn_metadata.max_seq_len
             block_table = attn_metadata.block_table
+            cu_seqlens_q_block = attn_metadata.query_block_start_loc
+            total_num_q_blocks = attn_metadata.total_num_q_blocks
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
@@ -204,6 +206,8 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale=layer._q_scale.expand(descale_shape),
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
+            total_num_q_blocks=total_num_q_blocks,
+            cu_seqlens_q_block=cu_seqlens_q_block,
         )
 
 

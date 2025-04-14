@@ -9,6 +9,7 @@
 import torch
 import triton
 import triton.language as tl
+import triton_dejavu
 
 from vllm import _custom_ops as ops
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
@@ -25,6 +26,10 @@ import time
 t_prefix = 0.0
 t_paged = 0.0
 
+@triton_dejavu.jitcache(
+    check_keys=["USE_ALIBI_SLOPES", "SLIDING_WINDOW"],
+    cache_launch_grid=False,
+)
 @triton.jit
 def kernel_paged_attention_2d(
         output_ptr,  # [num_tokens, num_query_heads, head_size]
@@ -60,14 +65,27 @@ def kernel_paged_attention_2d(
         stride_v_cache_3: tl.int64,  # int
         query_start_len_ptr,  # [num_seqs+1]
         BLOCK_Q: tl.constexpr, # int
-        num_seqs: tl.int64,
-        max_seqlen_q : tl.int64
+        num_seqs: tl.int32,
+        q_block_start_idx_ptr,
 ):
 
-    max_num_q_blocks = cdiv_fn(max_seqlen_q, BLOCK_Q)
-    seq_idx = tl.program_id(0) % num_seqs
-    q_block_idx = tl.program_id(0) // num_seqs
+    q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
+
+    left: tl.int32 = 0
+    right = num_seqs
+    while left < right:
+        mid = (left + right) // 2
+        mid_val = tl.load(q_block_start_idx_ptr + mid)
+        if mid_val <= q_block_global_idx:
+            left = mid + 1
+        else:
+            right = mid
+
+    seq_idx = left - 1
+    q_block_start_idx = tl.load(q_block_start_idx_ptr + seq_idx)
+
+    q_block_local_idx = q_block_global_idx - q_block_start_idx
 
     #print("seq_idx: %d, q_block_idx: %d, kv_head_idx: %d" % (seq_idx, q_block_idx, kv_head_idx))
 
@@ -81,7 +99,7 @@ def kernel_paged_attention_2d(
 
     #print("q_block_idx*BLOCK_Q: %d, cur_batch_query_len: %d" % (q_block_idx*BLOCK_Q, cur_batch_query_len))
 
-    if q_block_idx*BLOCK_Q >= cur_batch_query_len:
+    if q_block_local_idx*BLOCK_Q >= cur_batch_query_len:
         return
 
     offs_m = tl.arange(0, BLOCK_Q * num_queries_per_kv)
@@ -90,7 +108,7 @@ def kernel_paged_attention_2d(
     #print("offs_m: ", offs_m)
     #print("offs_d: ", offs_d)
 
-    query_pos = q_block_idx * BLOCK_Q + offs_m // num_queries_per_kv
+    query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
 
     query_offset_0 = cur_batch_in_all_start_index + query_pos
     query_offset_1 = kv_head_idx * num_queries_per_kv + offs_m % num_queries_per_kv
@@ -248,7 +266,9 @@ def chunked_prefill_paged_decode(
     q_descale,
     k_descale,
     v_descale,
-    alibi_slopes=None
+    total_num_q_blocks,
+    cu_seqlens_q_block,
+    alibi_slopes=None,
 ):
 
     use_alibi_slopes = alibi_slopes is not None
@@ -278,13 +298,33 @@ def chunked_prefill_paged_decode(
     #print("max_seqlen_q: ", max_seqlen_q)
     #print("seqused_k: ", seqused_k)
 
-    #t0 = time.time()
-
-    BLOCK_M = 128
+    BLOCK_M = 32
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
-    max_num_query_blocks = triton.cdiv(max_seqlen_q, BLOCK_Q)
-    num_query_blocks = num_seqs * max_num_query_blocks
+    '''
+    t0 = time.time()
+    torch.cuda.synchronize()
+
+    q_block_start_idx = torch.empty(size=(num_seqs+1,), device=q.device, dtype=torch.int32)
+    q_block_start_idx[0] = 0
+    for i in range(num_seqs):
+        this_q_len = cu_seqlens_q[i+1]-cu_seqlens_q[i]
+        this_n_q_blocks = triton.cdiv(this_q_len, BLOCK_Q)
+        q_block_start_idx[i+1] = q_block_start_idx[i] + this_n_q_blocks
+
+    tot_num_q_blocks = q_block_start_idx[num_seqs]
+
+    q_block_seq_idx = torch.empty(size=(tot_num_q_blocks,), device=q.device, dtype=torch.int32)
+    for i in range(num_seqs):
+        start_idx, stop_idx = q_block_start_idx[i], q_block_start_idx[i+1]
+        q_block_seq_idx[start_idx:stop_idx] = i
+
+    torch.cuda.synchronize()
+    global t_prefix
+    t_prefix += time.time()-t0
+    '''
+
+    #t0 = time.time()
 
     #print("num_queries_per_kv: ", num_queries_per_kv)
     #print("BLOCK_Q:            ", BLOCK_Q)
@@ -293,7 +333,7 @@ def chunked_prefill_paged_decode(
     #print("max_num_query_blocks: ", max_num_query_blocks)
 
     kernel_paged_attention_2d[(
-        num_query_blocks,
+        total_num_q_blocks,
         num_kv_heads,
     )](
         output_ptr=out,
@@ -330,7 +370,7 @@ def chunked_prefill_paged_decode(
         query_start_len_ptr=cu_seqlens_q,
         BLOCK_Q=BLOCK_Q,
         num_seqs=num_seqs,
-        max_seqlen_q=max_seqlen_q,
+        q_block_start_idx_ptr=cu_seqlens_q_block,
     )
 
     #torch.cuda.synchronize()
