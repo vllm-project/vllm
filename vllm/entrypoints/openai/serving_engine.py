@@ -451,8 +451,11 @@ class OpenAIServing:
 
         engine_prompt = TokensPrompt(
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
-        # for issue #16554
-        mm_data = await mm_data_future
+        try:
+            mm_data = await mm_data_future
+        except Exception as e:
+            logger.warning("Failed to parse multi-modal data: %s", str(e))
+            mm_data = None
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
         if request.mm_processor_kwargs is not None:

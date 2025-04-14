@@ -610,10 +610,17 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
         if not self._items_by_modality:
             return None
         mm_inputs = {}
-        items_by_modality = {
-                modality: await asyncio.gather(*items)
-                for modality, items in self._items_by_modality.items()
+        try:
+            items_by_modality = {
+            modality: await asyncio.gather(*items)
+            for modality, items in self._items_by_modality.items()
             }
+        except Exception as e:
+            for tasks in self._items_by_modality.values():
+                for t in tasks:
+                    if isinstance(t, asyncio.Future) and not t.done():
+                        t.cancel()
+            raise e
 
         if "image" in items_by_modality and "image_embeds" in items_by_modality:
             raise ValueError(
