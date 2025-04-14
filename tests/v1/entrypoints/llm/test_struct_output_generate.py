@@ -125,17 +125,9 @@ def test_structured_output(
             print(generated_text)
             assert generated_text is not None
 
-            # Parse to verify it is valid JSON
+            # Parse to verify it is a valid JSON object
             parsed_json = json.loads(generated_text)
-            allowed_types: tuple[type, ...] = (dict, )
-            if guided_decoding_backend.startswith("xgrammar"):
-                # TODO - we are currently too permissive with xgrammar and
-                # allow # any valid json (typically comes back as a list or
-                # object).  We can fix this by specifying a jsonschema of
-                # {"type": "object"}, # but we need this fix in a release
-                # first: https://github.com/mlc-ai/xgrammar/pull/264
-                allowed_types = (dict, list)
-            assert isinstance(parsed_json, allowed_types)
+            assert isinstance(parsed_json, dict)
 
     #
     # Test 3: test a jsonschema incompatible with xgrammar
@@ -317,6 +309,45 @@ def test_structured_output(
     outputs = llm.generate(
         prompts="Generate a JSON with the brand, model and car_type of"
         "the most iconic car from the 90's",
+        sampling_params=sampling_params,
+        use_tqdm=True)
+
+    assert outputs is not None
+
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json, schema=json_schema)
+
+    #
+    # Test 10: Generate structured with minLength and maxLength
+    #
+    min_length = 50
+    max_length = 50
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "description": {
+                "type": "string",
+                "maxLength": max_length,
+                "minLength": min_length
+            }
+        },
+        "required": ["description"]
+    }
+
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        max_tokens=1000,
+        guided_decoding=GuidedDecodingParams(json=json_schema))
+    outputs = llm.generate(
+        prompts="Generate a description of a frog using 50 characters.",
         sampling_params=sampling_params,
         use_tqdm=True)
 

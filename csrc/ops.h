@@ -52,6 +52,15 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
+#ifndef USE_ROCM
+void merge_attn_states(torch::Tensor& output,
+                       std::optional<torch::Tensor> output_lse,
+                       const torch::Tensor& prefix_output,
+                       const torch::Tensor& prefix_lse,
+                       const torch::Tensor& suffix_output,
+                       const torch::Tensor& suffix_lse);
+#endif
+
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
 
@@ -145,7 +154,8 @@ torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 #endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
-                              int64_t n);
+                              int64_t n,
+                              std::optional<at::ScalarType> const& dtype);
 
 torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
                                   int64_t type, int64_t row);

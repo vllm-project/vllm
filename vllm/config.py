@@ -4,21 +4,22 @@ import ast
 import copy
 import enum
 import hashlib
-import importlib.metadata
+import inspect
 import json
 import sys
+import textwrap
 import warnings
 from collections import Counter
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
+                         replace)
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
-                    Optional, Protocol, Union)
+                    Optional, Protocol, TypeVar, Union)
 
 import torch
-from packaging.version import Version
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
@@ -29,7 +30,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import CpuArchEnum
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.sampling_params import GuidedDecodingParams
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
@@ -40,10 +41,11 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, get_open_port, random_uuid,
-                        resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, is_torch_equal_or_newer,
+                        random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
     from ray.util.placement_group import PlacementGroup
 
     from vllm.executor.executor_base import ExecutorBase
@@ -52,8 +54,11 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+
+    Config = TypeVar("Config", bound=DataclassInstance)
 else:
     QuantizationConfig = None
+    Config = TypeVar("Config")
 
 logger = init_logger(__name__)
 
@@ -104,6 +109,77 @@ class ModelImpl(str, enum.Enum):
     AUTO = "auto"
     VLLM = "vllm"
     TRANSFORMERS = "transformers"
+
+
+def get_attr_docs(cls: type[Any]) -> dict[str, str]:
+    """
+    Get any docstrings placed after attribute assignments in a class body.
+
+    https://davidism.com/mit-license/
+    """
+
+    def pairwise(iterable):
+        """
+        Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
+        
+        Can be removed when Python 3.9 support is dropped.
+        """
+        iterator = iter(iterable)
+        a = next(iterator, None)
+
+        for b in iterator:
+            yield a, b
+            a = b
+
+    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+
+    if not isinstance(cls_node, ast.ClassDef):
+        raise TypeError("Given object was not a class.")
+
+    out = {}
+
+    # Consider each pair of nodes.
+    for a, b in pairwise(cls_node.body):
+        # Must be an assignment then a constant string.
+        if (not isinstance(a, (ast.Assign, ast.AnnAssign))
+                or not isinstance(b, ast.Expr)
+                or not isinstance(b.value, ast.Constant)
+                or not isinstance(b.value.value, str)):
+            continue
+
+        doc = inspect.cleandoc(b.value.value)
+
+        # An assignment can have multiple targets (a = b = v), but an
+        # annotated assignment only has one target.
+        targets = a.targets if isinstance(a, ast.Assign) else [a.target]
+
+        for target in targets:
+            # Must be assigning to a plain name.
+            if not isinstance(target, ast.Name):
+                continue
+
+            out[target.id] = doc
+
+    return out
+
+
+def config(cls: type[Config]) -> type[Config]:
+    """
+    A decorator that ensures all fields in a dataclass have default values
+    and that each field has a docstring.
+    """
+    if not is_dataclass(cls):
+        raise TypeError("The decorated class must be a dataclass.")
+    attr_docs = get_attr_docs(cls)
+    for f in fields(cls):
+        if f.init and f.default is MISSING and f.default_factory is MISSING:
+            raise ValueError(
+                f"Field '{f.name}' in {cls.__name__} must have a default value."
+            )
+        if f.name not in attr_docs:
+            raise ValueError(
+                f"Field '{f.name}' in {cls.__name__} must have a docstring.")
+    return cls
 
 
 class ModelConfig:
@@ -173,6 +249,9 @@ class ModelConfig:
             Defaults to True.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
+        hf_token: The token to use as HTTP bearer authorization for remote files
+            . If `True`, will use the token generated when running 
+            `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
@@ -256,6 +335,7 @@ class ModelConfig:
         limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
         use_async_output_proc: bool = True,
         config_format: ConfigFormat = ConfigFormat.AUTO,
+        hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         disable_mm_preprocessor_cache: bool = False,
@@ -354,9 +434,11 @@ class ModelConfig:
         self.hf_config = hf_config
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.attention_chunk_size = getattr(self.hf_text_config,
+                                            "attention_chunk_size", None)
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
-            self.model, revision)
+            self.model, hf_token=hf_token, revision=revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
@@ -500,6 +582,15 @@ class ModelConfig:
                 for k, v in base_config.items():
                     if getattr(user_config, k) is None:
                         setattr(user_config, k, v)
+
+            if self.is_matryoshka:
+                if user_config.normalize is None:
+                    user_config.normalize = True
+                elif not user_config.normalize:
+                    raise ValueError(
+                        "`normalize` must be enabled (set to True) "
+                        "for models that are compatible with "
+                        "Matryoshka Representation.")
 
             return user_config
 
@@ -684,6 +775,13 @@ class ModelConfig:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
+        ROCM_UNSUPPORTED_MODELS = ['mllama']
+        if (self.hf_config.model_type in ROCM_UNSUPPORTED_MODELS
+                and not self.enforce_eager and current_platform.is_rocm()):
+            logger.warning(
+                "CUDA graph is not supported for %s on ROCm yet, fallback "
+                "to the eager mode.", self.hf_config.model_type)
+            self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
         """
@@ -761,6 +859,12 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
+
+        if parallel_config.distributed_executor_backend == "external_launcher":
+            assert self.seed is not None, (
+                "Seed must be set when using external launcher backend to "
+                "make sure sampling results are the same across workers.")
+
         total_num_attention_heads = getattr(self.hf_text_config,
                                             "num_attention_heads", 0)
         tensor_parallel_size = parallel_config.tensor_parallel_size
@@ -1111,6 +1215,11 @@ class ModelConfig:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_v1_compatible(architectures)
 
+    @property
+    def is_matryoshka(self) -> bool:
+        return (hasattr(self.hf_config, "matryoshka_dimensions")
+                or getattr(self.hf_config, "is_matryoshka", False))
+
 
 class CacheConfig:
     """Configuration for the KV cache.
@@ -1335,44 +1444,47 @@ class LoadFormat(str, enum.Enum):
     FASTSAFETENSORS = "fastsafetensors"
 
 
+@config
 @dataclass
 class LoadConfig:
-    """
-        download_dir: Directory to download and load the weights, default to the
-            default cache directory of huggingface.
-        load_format: The format of the model weights to load:
-            "auto" will try to load the weights in the safetensors format and
-                fall back to the pytorch bin format if safetensors format is
-                not available.
-            "pt" will load the weights in the pytorch bin format.
-            "safetensors" will load the weights in the safetensors format.
-            "npcache" will load the weights in pytorch format and store
-                a numpy cache to speed up the loading.
-            "dummy" will initialize the weights with random values, which is
-                mainly for profiling.
-            "tensorizer" will use CoreWeave's tensorizer library for
-                fast weight loading.
-            "bitsandbytes" will load nf4 type weights.
-            "sharded_state" will load weights from pre-sharded checkpoint files,
-                supporting efficient loading of tensor-parallel models.
-            "gguf" will load weights from GGUF format files.
-            "mistral" will load weights from consolidated safetensors files used
-                by Mistral models.
-            "runai_streamer" will load weights from RunAI streamer format files.
-        model_loader_extra_config: The extra config for the model loader.
-        ignore_patterns: The list of patterns to ignore when loading the model.
-            Default to "original/**/*" to avoid repeated loading of llama's
-            checkpoints.
-        use_tqdm_on_load: Whether to enable tqdm for showing progress bar during
-            loading. Default to True
-    """
+    """Configuration for loading the model weights."""
 
-    load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    load_format: Union[str, LoadFormat,
+                       "BaseModelLoader"] = LoadFormat.AUTO.value
+    """The format of the model weights to load:\n
+    - "auto" will try to load the weights in the safetensors format and fall
+    back to the pytorch bin format if safetensors format is not available.\n
+    - "pt" will load the weights in the pytorch bin format.\n
+    - "safetensors" will load the weights in the safetensors format.\n
+    - "npcache" will load the weights in pytorch format and store a numpy cache
+    to speed up the loading.\n
+    - "dummy" will initialize the weights with random values, which is mainly
+    for profiling.\n
+    - "tensorizer" will use CoreWeave's tensorizer library for fast weight
+    loading. See the Tensorize vLLM Model script in the Examples section for
+    more information.\n
+    - "runai_streamer" will load the Safetensors weights using Run:ai Model
+    Streamer.\n
+    - "bitsandbytes" will load the weights using bitsandbytes quantization.\n
+    - "sharded_state" will load weights from pre-sharded checkpoint files,
+    supporting efficient loading of tensor-parallel models.\n
+    - "gguf" will load weights from GGUF format files (details specified in
+    https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n
+    - "mistral" will load weights from consolidated safetensors files used by
+    Mistral models."""
     download_dir: Optional[str] = None
-    model_loader_extra_config: Optional[Union[str, dict]] = field(
-        default_factory=dict)
+    """Directory to download and load the weights, default to the default
+    cache directory of Hugging Face."""
+    model_loader_extra_config: Optional[Union[str, dict]] = None
+    """Extra config for model loader. This will be passed to the model loader
+    corresponding to the chosen load_format. This should be a JSON string that
+    will be parsed into a dictionary."""
     ignore_patterns: Optional[Union[list[str], str]] = None
+    """The list of patterns to ignore when loading the model. Default to
+    "original/**/*" to avoid repeated loading of llama's checkpoints."""
     use_tqdm_on_load: bool = True
+    """Whether to enable tqdm for showing progress bar when loading model
+    weights."""
 
     def compute_hash(self) -> str:
         """
@@ -1410,61 +1522,77 @@ class LoadConfig:
             self.ignore_patterns = ["original/**/*"]
 
 
+@config
 @dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
-    pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
-    tensor_parallel_size: int = 1  # Number of tensor parallel groups.
-    data_parallel_size: int = 1  # Number of data parallel groups.
-    data_parallel_rank: int = 0  # Rank of the data parallel group.
-    # Local rank of the data parallel group, defaults to global rank.
+    pipeline_parallel_size: int = 1
+    """Number of pipeline parallel groups."""
+    tensor_parallel_size: int = 1
+    """Number of tensor parallel groups."""
+    data_parallel_size: int = 1
+    """Number of data parallel groups. MoE layers will be sharded according to
+    the product of the tensor parallel size and data parallel size."""
+    data_parallel_rank: int = 0
+    """Rank of the data parallel group."""
     data_parallel_rank_local: Optional[int] = None
-    # IP of the data parallel master.
+    """Local rank of the data parallel group, defaults to global rank."""
     data_parallel_master_ip: str = "127.0.0.1"
-    data_parallel_master_port: int = 29500  # Port of the data parallel master.
-    enable_expert_parallel: bool = False  # Use EP instead of TP for MoE layers.
+    """IP of the data parallel master."""
+    data_parallel_master_port: int = 29500
+    """Port of the data parallel master."""
+    enable_expert_parallel: bool = False
+    """Use expert parallelism instead of tensor parallelism for MoE layers."""
 
-    # Maximum number of multiple batches
-    # when load model sequentially. To avoid RAM OOM when using tensor
-    # parallel and large models.
     max_parallel_loading_workers: Optional[int] = None
+    """Maximum number of parallal loading workers when loading model
+    sequentially in multiple batches. To avoid RAM OOM when using tensor
+    parallel and large models."""
 
-    # Disable the custom all-reduce kernel and fall back to NCCL.
     disable_custom_all_reduce: bool = False
+    """Disable the custom all-reduce kernel and fall back to NCCL."""
 
-    # Config for the tokenizer pool. If None, will use synchronous tokenization.
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
+    """Config for the tokenizer pool. If None, will use synchronous
+    tokenization."""
 
-    # Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     ray_workers_use_nsight: bool = False
+    """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
-    # ray distributed model workers placement group.
     placement_group: Optional["PlacementGroup"] = None
+    """ray distributed model workers placement group."""
 
-    # Backend to use for distributed model
-    # workers, either "ray" or "mp" (multiprocessing). If the product
-    # of pipeline_parallel_size and tensor_parallel_size is less than
-    # or equal to the number of GPUs available, "mp" will be used to
-    # keep processing on a single host. Otherwise, this will default
-    # to "ray" if Ray is installed and fail otherwise. Note that tpu
-    # and hpu only support Ray for distributed inference.
     distributed_executor_backend: Optional[Union[str,
                                                  type["ExecutorBase"]]] = None
+    """Backend to use for distributed model
+    workers, either "ray" or "mp" (multiprocessing). If the product
+    of pipeline_parallel_size and tensor_parallel_size is less than
+    or equal to the number of GPUs available, "mp" will be used to
+    keep processing on a single host. Otherwise, this will default
+    to "ray" if Ray is installed and fail otherwise. Note that tpu
+    and hpu only support Ray for distributed inference."""
 
-    # the full name of the worker class to use. If "auto", the worker class
-    # will be determined based on the platform.
     worker_cls: str = "auto"
+    """The full name of the worker class to use. If "auto", the worker class
+    will be determined based on the platform."""
     sd_worker_cls: str = "auto"
+    """The full name of the worker class to use for speculative decofing. 
+    If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
+    """The full name of the worker extension class to use. The worker extension
+    class is dynamically inherited by the worker class. This is used to inject
+    new attributes and methods to the worker class for use in collective_rpc
+    calls."""
 
-    # world_size is TPxPP, it affects the number of workers we create.
     world_size: int = field(init=False)
-    # world_size_across_dp is TPxPPxDP, it is the size of the world
-    # including data parallelism.
+    """world_size is TPxPP, it affects the number of workers we create."""
     world_size_across_dp: int = field(init=False)
+    """world_size_across_dp is TPxPPxDP, it is the size of the world
+    including data parallelism."""
 
     rank: int = 0
+    """Global rank in distributed setup."""
 
     def get_next_dp_init_port(self) -> int:
         """
@@ -1613,13 +1741,12 @@ class ParallelConfig:
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
-        device_capability = current_platform.get_device_capability()
-        if (current_platform.is_rocm() and device_capability is not None
-                and device_capability < (9, 4)):
+
+        if not current_platform.use_custom_allreduce():
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
-                "supported on AMD GPUs older than MI300X.")
+                "supported on current platform.")
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
@@ -1702,6 +1829,14 @@ class SchedulerConfig:
     policy: str = "fcfs"
 
     chunked_prefill_enabled: bool = field(init=False)
+
+    # If set to true and chunked prefill is enabled, we do not want to
+    # partially schedule a multimodal item. Only used in V1
+    # This ensures that if a request has a mixed prompt
+    # (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
+    # some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
+    # it will be scheduled as TTTT in one step and IIIIIIIIII in the next.
+    disable_chunked_mm_input: bool = False
 
     # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
     # or "mod.custom_class".
@@ -1869,7 +2004,10 @@ class DeviceConfig:
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
             if not self.device_type:
-                raise RuntimeError("Failed to infer device type")
+                raise RuntimeError(
+                    "Failed to infer device type, please set "
+                    "the environment variable `VLLM_LOGGING_LEVEL=DEBUG` "
+                    "to turn on verbose logging to help debug the issue.")
         else:
             # Device type is assigned explicitly
             self.device_type = device
@@ -2434,9 +2572,9 @@ class LoRAConfig:
                 f"max_loras ({self.max_loras})")
 
     def verify_with_cache_config(self, cache_config: CacheConfig):
-        # TODO LoRA supports CPU offload.
-        if cache_config.cpu_offload_gb > 0:
-            raise ValueError("CPU offload is not supported with LoRA yet.")
+        if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:
+            raise ValueError(
+                "V0 LoRA does not support CPU offload, please use V1.")
 
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):
@@ -2450,6 +2588,11 @@ class LoRAConfig:
         if scheduler_config.chunked_prefill_enabled:
             logger.warning("LoRA with chunked prefill is still experimental "
                            "and may be unstable.")
+
+    def verify_lora_support(self):
+        if self.long_lora_scaling_factors is not None and envs.VLLM_USE_V1:
+            raise ValueError(
+                "V1 LoRA does not support long LoRA, please use V0.")
 
 
 @dataclass
@@ -2524,14 +2667,20 @@ class MultiModalConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
+    def get_default_limit_per_prompt(self) -> int:
+        """
+        Return the default number of input items allowed per prompt
+        for any modality if not specified by the user.
+        """
+        return 999 if envs.VLLM_USE_V1 else 1
+
     def get_limit_per_prompt(self, modality: str) -> int:
         """
         Get the maximum number of input items allowed per prompt
         for the given modality.
-
-        If not set by the user, this defaults to `1`.
         """
-        return self.limit_per_prompt.get(modality, 1)
+        default = self.get_default_limit_per_prompt()
+        return self.limit_per_prompt.get(modality, default)
 
     # TODO: Add configs to init vision tower or not.
 
@@ -2854,7 +3003,7 @@ class DecodingConfig:
 
     # Which guided decoding algo to use.
     # 'outlines' / 'lm-format-enforcer' / 'xgrammar'
-    guided_decoding_backend: str = 'xgrammar'
+    guided_decoding_backend: str = "auto" if envs.VLLM_USE_V1 else "xgrammar"
 
     reasoning_backend: Optional[str] = None
 
@@ -2879,7 +3028,7 @@ class DecodingConfig:
 
     def __post_init__(self):
         v0_valid_guided_backends = [
-            'outlines', 'lm-format-enforcer', 'xgrammar'
+            'outlines', 'lm-format-enforcer', 'xgrammar', 'auto'
         ]
         v1_valid_guided_backends = ['xgrammar', 'guidance', 'auto']
 
@@ -3251,7 +3400,7 @@ class CompilationConfig(BaseModel):
         #    and it is not yet a priority. RFC here:
         #    https://github.com/vllm-project/vllm/issues/14703
 
-        if Version(importlib.metadata.version('torch')) >= Version("2.6"):
+        if is_torch_equal_or_newer("2.6"):
             KEY = 'enable_auto_functionalized_v2'
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False
@@ -3550,6 +3699,7 @@ class VllmConfig:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+            self.lora_config.verify_lora_support()
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
@@ -3752,7 +3902,9 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     try:
         _current_vllm_config = vllm_config
         yield
-    finally:
+    except Exception:
+        raise
+    else:
         logger.debug("enabled custom ops: %s",
                      vllm_config.compilation_config.enabled_custom_ops)
         logger.debug("disabled custom ops: %s",
@@ -3770,6 +3922,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
                 " does not support it. Please open an issue on GitHub"
                 " if you want it to be supported.",
                 vllm_config.model_config.model)
+    finally:
         _current_vllm_config = old_vllm_config
 
 

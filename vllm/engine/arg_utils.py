@@ -3,10 +3,11 @@
 import argparse
 import dataclasses
 import json
+import re
 import threading
-from dataclasses import dataclass
+from dataclasses import MISSING, dataclass, fields
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
-                    Tuple, Type, Union, cast, get_args)
+                    Tuple, Type, Union, cast, get_args, get_origin)
 
 import torch
 
@@ -18,7 +19,7 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          ModelConfig, ModelImpl, ObservabilityConfig,
                          ParallelConfig, PoolerConfig, PromptAdapterConfig,
                          SchedulerConfig, SpeculativeConfig, TaskOption,
-                         TokenizerPoolConfig, VllmConfig)
+                         TokenizerPoolConfig, VllmConfig, get_attr_docs)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -100,8 +101,8 @@ class EngineArgs:
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
     allowed_local_media_path: str = ""
-    download_dir: Optional[str] = None
-    load_format: str = 'auto'
+    download_dir: Optional[str] = LoadConfig.download_dir
+    load_format: str = LoadConfig.load_format
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
@@ -110,14 +111,15 @@ class EngineArgs:
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
-    distributed_executor_backend: Optional[Union[str,
-                                                 Type[ExecutorBase]]] = None
+    distributed_executor_backend: Optional[Union[
+        str, Type[ExecutorBase]]] = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
-    pipeline_parallel_size: int = 1
-    tensor_parallel_size: int = 1
-    data_parallel_size: int = 1
-    enable_expert_parallel: bool = False
-    max_parallel_loading_workers: Optional[int] = None
+    pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
+    tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    data_parallel_size: int = ParallelConfig.data_parallel_size
+    enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    max_parallel_loading_workers: Optional[
+        int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
     prefix_caching_hash_algo: str = "builtin"
@@ -138,12 +140,13 @@ class EngineArgs:
     code_revision: Optional[str] = None
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
+    hf_token: Optional[Union[bool, str]] = None
     hf_overrides: Optional[HfOverrides] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
-    disable_custom_all_reduce: bool = False
+    disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     tokenizer_pool_size: int = 0
     # Note: Specifying a tokenizer pool by passing a class
     # is intended for expert use only. The API may change without
@@ -168,17 +171,20 @@ class EngineArgs:
     device: str = 'auto'
     num_scheduler_steps: int = 1
     multi_step_stream_outputs: bool = True
-    ray_workers_use_nsight: bool = False
+    ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
-    model_loader_extra_config: Optional[dict] = None
-    ignore_patterns: Optional[Union[str, List[str]]] = None
+    model_loader_extra_config: Optional[
+        dict] = LoadConfig.model_loader_extra_config
+    ignore_patterns: Optional[Union[str,
+                                    List[str]]] = LoadConfig.ignore_patterns
     preemption_mode: Optional[str] = None
 
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: Optional[bool] = None
+    disable_chunked_mm_input: bool = False
 
-    guided_decoding_backend: str = 'xgrammar'
+    guided_decoding_backend: str = DecodingConfig.guided_decoding_backend
     logits_processor_pattern: Optional[str] = None
 
     speculative_config: Optional[Dict[str, Any]] = None
@@ -194,8 +200,8 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
-    worker_cls: str = "auto"
-    worker_extension_cls: str = ""
+    worker_cls: str = ParallelConfig.worker_cls
+    worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
@@ -209,7 +215,7 @@ class EngineArgs:
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = None
-    use_tqdm_on_load: bool = True
+    use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -229,6 +235,39 @@ class EngineArgs:
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
+
+        def is_type_in_union(cls: type[Any], type: type[Any]) -> bool:
+            """Check if the class is a type in a union type."""
+            return get_origin(cls) is Union and type in get_args(cls)
+
+        def is_optional(cls: type[Any]) -> bool:
+            """Check if the class is an optional type."""
+            return is_type_in_union(cls, type(None))
+
+        def get_kwargs(cls: type[Any]) -> Dict[str, Any]:
+            cls_docs = get_attr_docs(cls)
+            kwargs = {}
+            for field in fields(cls):
+                name = field.name
+                # One of these will always be present
+                default = (field.default_factory
+                           if field.default is MISSING else field.default)
+                kwargs[name] = {"default": default, "help": cls_docs[name]}
+                # When using action="store_true"
+                # add_argument doesn't accept type
+                if field.type is bool:
+                    continue
+                # Handle optional fields
+                if is_optional(field.type):
+                    kwargs[name]["type"] = nullable_str
+                    continue
+                # Handle str in union fields
+                if is_type_in_union(field.type, str):
+                    kwargs[name]["type"] = str
+                    continue
+                kwargs[name]["type"] = field.type
+            return kwargs
+
         # Model arguments
         parser.add_argument(
             '--model',
@@ -304,38 +343,23 @@ class EngineArgs:
             "from directories specified by the server file system. "
             "This is a security risk. "
             "Should only be enabled in trusted environments.")
-        parser.add_argument('--download-dir',
-                            type=nullable_str,
-                            default=EngineArgs.download_dir,
-                            help='Directory to download and load the weights.')
-        parser.add_argument(
-            '--load-format',
-            type=str,
-            default=EngineArgs.load_format,
-            choices=[f.value for f in LoadFormat],
-            help='The format of the model weights to load.\n\n'
-            '* "auto" will try to load the weights in the safetensors format '
-            'and fall back to the pytorch bin format if safetensors format '
-            'is not available.\n'
-            '* "pt" will load the weights in the pytorch bin format.\n'
-            '* "safetensors" will load the weights in the safetensors format.\n'
-            '* "npcache" will load the weights in pytorch format and store '
-            'a numpy cache to speed up the loading.\n'
-            '* "dummy" will initialize the weights with random values, '
-            'which is mainly for profiling.\n'
-            '* "tensorizer" will load the weights using tensorizer from '
-            'CoreWeave. See the Tensorize vLLM Model script in the Examples '
-            'section for more information.\n'
-            '* "runai_streamer" will load the Safetensors weights using Run:ai'
-            'Model Streamer.\n'
-            '* "bitsandbytes" will load the weights using bitsandbytes '
-            'quantization.\n'
-            '* "sharded_state" will load weights from pre-sharded checkpoint '
-            'files, supporting efficient loading of tensor-parallel models\n'
-            '* "gguf" will load weights from GGUF format files (details '
-            'specified in https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n'
-            '* "mistral" will load weights from consolidated safetensors files '
-            'used by Mistral models.\n')
+        # Model loading arguments
+        load_kwargs = get_kwargs(LoadConfig)
+        load_group = parser.add_argument_group(
+            title="LoadConfig",
+            description=LoadConfig.__doc__,
+        )
+        load_group.add_argument('--load-format',
+                                choices=[f.value for f in LoadFormat],
+                                **load_kwargs["load_format"])
+        load_group.add_argument('--download-dir',
+                                **load_kwargs["download_dir"])
+        load_group.add_argument('--model-loader-extra-config',
+                                **load_kwargs["model_loader_extra_config"])
+        load_group.add_argument('--use-tqdm-on-load',
+                                action=argparse.BooleanOptionalAction,
+                                **load_kwargs["use_tqdm_on_load"])
+
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -367,20 +391,24 @@ class EngineArgs:
             'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
             'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
         parser.add_argument('--max-model-len',
-                            type=int,
+                            type=human_readable_int,
                             default=EngineArgs.max_model_len,
                             help='Model context length. If unspecified, will '
-                            'be automatically derived from the model config.')
+                            'be automatically derived from the model config. '
+                            'Supports k/m/g/K/M/G in human-readable format.\n'
+                            'Examples:\n'
+                            '- 1k → 1000\n'
+                            '- 1K → 1024\n')
         parser.add_argument(
             '--guided-decoding-backend',
             type=str,
-            default='xgrammar',
+            default=DecodingConfig.guided_decoding_backend,
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
             'https://github.com/mlc-ai/xgrammar and '
             'https://github.com/guidance-ai/llguidance.'
             'Valid backend values are "xgrammar", "guidance", and "auto". '
-            'With "auto", we will make opinionated choices based on request'
+            'With "auto", we will make opinionated choices based on request '
             'contents and what the backend libraries currently support, so '
             'the behavior is subject to change in each release.')
         parser.add_argument(
@@ -404,52 +432,37 @@ class EngineArgs:
             '* "transformers" will use the Transformers model '
             'implementation.\n')
         # Parallel arguments
-        parser.add_argument(
+        parallel_kwargs = get_kwargs(ParallelConfig)
+        parallel_group = parser.add_argument_group(
+            title="ParallelConfig",
+            description=ParallelConfig.__doc__,
+        )
+        parallel_group.add_argument(
             '--distributed-executor-backend',
             choices=['ray', 'mp', 'uni', 'external_launcher'],
-            default=EngineArgs.distributed_executor_backend,
-            help='Backend to use for distributed model '
-            'workers, either "ray" or "mp" (multiprocessing). If the product '
-            'of pipeline_parallel_size and tensor_parallel_size is less than '
-            'or equal to the number of GPUs available, "mp" will be used to '
-            'keep processing on a single host. Otherwise, this will default '
-            'to "ray" if Ray is installed and fail otherwise. Note that tpu '
-            'only supports Ray for distributed inference.')
-
-        parser.add_argument('--pipeline-parallel-size',
-                            '-pp',
-                            type=int,
-                            default=EngineArgs.pipeline_parallel_size,
-                            help='Number of pipeline stages.')
-        parser.add_argument('--tensor-parallel-size',
-                            '-tp',
-                            type=int,
-                            default=EngineArgs.tensor_parallel_size,
-                            help='Number of tensor parallel replicas.')
-        parser.add_argument('--data-parallel-size',
-                            '-dp',
-                            type=int,
-                            default=EngineArgs.data_parallel_size,
-                            help='Number of data parallel replicas. '
-                            'MoE layers will be sharded according to the '
-                            'product of the tensor-parallel-size and '
-                            'data-parallel-size.')
-        parser.add_argument(
+            **parallel_kwargs["distributed_executor_backend"])
+        parallel_group.add_argument(
+            '--pipeline-parallel-size', '-pp',
+            **parallel_kwargs["pipeline_parallel_size"])
+        parallel_group.add_argument('--tensor-parallel-size', '-tp',
+                                    **parallel_kwargs["tensor_parallel_size"])
+        parallel_group.add_argument('--data-parallel-size', '-dp',
+                                    **parallel_kwargs["data_parallel_size"])
+        parallel_group.add_argument(
             '--enable-expert-parallel',
             action='store_true',
-            help='Use expert parallelism instead of tensor parallelism '
-            'for MoE layers.')
-        parser.add_argument(
+            **parallel_kwargs["enable_expert_parallel"])
+        parallel_group.add_argument(
             '--max-parallel-loading-workers',
-            type=int,
-            default=EngineArgs.max_parallel_loading_workers,
-            help='Load model sequentially in multiple batches, '
-            'to avoid RAM OOM when using tensor '
-            'parallel and large models.')
-        parser.add_argument(
+            **parallel_kwargs["max_parallel_loading_workers"])
+        parallel_group.add_argument(
             '--ray-workers-use-nsight',
             action='store_true',
-            help='If specified, use nsight to profile Ray workers.')
+            **parallel_kwargs["ray_workers_use_nsight"])
+        parallel_group.add_argument(
+            '--disable-custom-all-reduce',
+            action='store_true',
+            **parallel_kwargs["disable_custom_all_reduce"])
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
@@ -602,6 +615,16 @@ class EngineArgs:
                             help='RoPE theta. Use with `rope_scaling`. In '
                             'some cases, changing the RoPE theta improves the '
                             'performance of the scaled model.')
+        parser.add_argument(
+            '--hf-token',
+            type=str,
+            nargs='?',
+            const=True,
+            default=None,
+            help='The token to use as HTTP bearer authorization'
+            ' for remote files. If `True`, will use the token '
+            'generated when running `huggingface-cli login` '
+            '(stored in `~/.huggingface`).')
         parser.add_argument('--hf-overrides',
                             type=json.loads,
                             default=EngineArgs.hf_overrides,
@@ -622,10 +645,6 @@ class EngineArgs:
                             'Additionally for encoder-decoder models, if the '
                             'sequence length of the encoder input is larger '
                             'than this, we fall back to the eager mode.')
-        parser.add_argument('--disable-custom-all-reduce',
-                            action='store_true',
-                            default=EngineArgs.disable_custom_all_reduce,
-                            help='See ParallelConfig.')
         parser.add_argument('--tokenizer-pool-size',
                             type=int,
                             default=EngineArgs.tokenizer_pool_size,
@@ -652,13 +671,13 @@ class EngineArgs:
             type=nullable_kvs,
             default=EngineArgs.limit_mm_per_prompt,
             # The default value is given in
-            # MultiModalConfig.get_limit_per_prompt
+            # MultiModalConfig.get_default_limit_per_prompt
             help=('For each multimodal plugin, limit how many '
                   'input instances to allow for each prompt. '
                   'Expects a comma-separated list of items, '
                   'e.g.: `image=16,video=2` allows a maximum of 16 '
-                  'images and 2 videos per prompt. Defaults to 1 for '
-                  'each modality.'))
+                  'images and 2 videos per prompt. Defaults to '
+                  '1 (V0) or 999 (V1) for each modality.'))
         parser.add_argument(
             '--mm-processor-kwargs',
             default=None,
@@ -746,14 +765,6 @@ class EngineArgs:
                             default=1,
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
-        parser.add_argument(
-            '--use-tqdm-on-load',
-            dest='use_tqdm_on_load',
-            action=argparse.BooleanOptionalAction,
-            default=EngineArgs.use_tqdm_on_load,
-            help='Whether to enable/disable progress bar '
-            'when loading model weights.',
-        )
 
         parser.add_argument(
             '--multi-step-stream-outputs',
@@ -782,15 +793,6 @@ class EngineArgs:
                             default=None,
                             help='The configurations for speculative decoding.'
                             ' Should be a JSON string.')
-
-        parser.add_argument('--model-loader-extra-config',
-                            type=nullable_str,
-                            default=EngineArgs.model_loader_extra_config,
-                            help='Extra config for model loader. '
-                            'This will be passed to the model loader '
-                            'corresponding to the chosen load_format. '
-                            'This should be a JSON string that will be '
-                            'parsed into a dictionary.')
         parser.add_argument(
             '--ignore-patterns',
             action="append",
@@ -1001,6 +1003,20 @@ class EngineArgs:
             "Note that even if this is set to False, cascade attention will be "
             "only used when the heuristic tells that it's beneficial.")
 
+        parser.add_argument(
+            "--disable-chunked-mm-input",
+            action=StoreBoolean,
+            default=EngineArgs.disable_chunked_mm_input,
+            nargs="?",
+            const="True",
+            help="Disable multimodal input chunking attention for V1. "
+            "If set to true and chunked prefill is enabled, we do not want to"
+            " partially schedule a multimodal item. This ensures that if a "
+            "request has a mixed prompt (like text tokens TTTT followed by "
+            "image tokens IIIIIIIIII) where only some image tokens can be "
+            "scheduled (like TTTTIIIII, leaving IIIII), it will be scheduled "
+            "as TTTT in one step and IIIIIIIIII in the next.")
+
         return parser
 
     @classmethod
@@ -1038,6 +1054,7 @@ class EngineArgs:
             code_revision=self.code_revision,
             rope_scaling=self.rope_scaling,
             rope_theta=self.rope_theta,
+            hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
@@ -1244,6 +1261,7 @@ class EngineArgs:
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
@@ -1274,6 +1292,10 @@ class EngineArgs:
                 self.model_loader_extra_config = {}
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
+
+        # bitsandbytes pre-quantized model need a specific model loader
+        if model_config.quantization == "bitsandbytes":
+            self.quantization = self.load_format = "bitsandbytes"
 
         load_config = self.create_load_config()
 
@@ -1521,8 +1543,9 @@ class EngineArgs:
         # PP is supported on V1 with Ray distributed executor,
         # but off for MP distributed executor for now.
         if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend == "mp"
-                and _warn_or_fallback("PP (MP distributed executor)")):
+                and self.distributed_executor_backend != "ray"):
+            name = "Pipeline Parallelism without Ray distributed executor"
+            _raise_or_fallback(feature_name=name, recommend_to_remove=False)
             return False
 
         # ngram is supported on V1, but off by default for now.
@@ -1649,12 +1672,14 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
             }
+            default_max_num_seqs = 1024
         else:
             # TODO(woosuk): Tune the default values for other hardware.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 8192,
                 UsageContext.OPENAI_API_SERVER: 2048,
             }
+            default_max_num_seqs = 256
 
         use_context_value = usage_context.value if usage_context else None
         if (self.max_num_batched_tokens is None
@@ -1665,7 +1690,6 @@ class EngineArgs:
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
 
-        default_max_num_seqs = 1024
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs
 
@@ -1720,6 +1744,47 @@ def _warn_or_fallback(feature_name: str) -> bool:
             "Falling back to V0 Engine.", feature_name)
         should_exit = True
     return should_exit
+
+
+def human_readable_int(value):
+    """Parse human-readable integers like '1k', '2M', etc.
+    Including decimal values with decimal multipliers.
+    
+    Examples:
+    - '1k' -> 1,000
+    - '1K' -> 1,024
+    - '25.6k' -> 25,600
+    """
+    value = value.strip()
+    match = re.fullmatch(r'(\d+(?:\.\d+)?)([kKmMgGtT])', value)
+    if match:
+        decimal_multiplier = {
+            'k': 10**3,
+            'm': 10**6,
+            'g': 10**9,
+        }
+        binary_multiplier = {
+            'K': 2**10,
+            'M': 2**20,
+            'G': 2**30,
+        }
+
+        number, suffix = match.groups()
+        if suffix in decimal_multiplier:
+            mult = decimal_multiplier[suffix]
+            return int(float(number) * mult)
+        elif suffix in binary_multiplier:
+            mult = binary_multiplier[suffix]
+            # Do not allow decimals with binary multipliers
+            try:
+                return int(number) * mult
+            except ValueError as e:
+                raise argparse.ArgumentTypeError("Decimals are not allowed " \
+                f"with binary suffixes like {suffix}. Did you mean to use " \
+                f"{number}{suffix.lower()} instead?") from e
+
+    # Regular plain number.
+    return int(value)
 
 
 # These functions are used by sphinx to build the documentation
