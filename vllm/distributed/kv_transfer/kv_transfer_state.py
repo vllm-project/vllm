@@ -2,7 +2,7 @@
 from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
-from vllm.distributed.kv_transfer import KVConnectorBaseType
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,

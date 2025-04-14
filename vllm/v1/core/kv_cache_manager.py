@@ -259,8 +259,8 @@ class KVCacheManager:
             req_blocks, request.num_computed_tokens)
         self.block_pool.free_blocks(removed_blocks)
 
-        # The number of computed tokens is the number of computed tokens
-        # plus the new prefix caching hits.
+        # The number of computed tokens is the number of computed tokens plus
+        # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                len(new_computed_blocks) * self.block_size)
 

@@ -4,7 +4,7 @@ import importlib
 from typing import TYPE_CHECKING, Callable, Dict, Type
 
 import vllm.envs as envs
-from vllm.distributed.kv_transfer import KVConnectorBaseType
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
