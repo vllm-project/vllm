@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from contextlib import ExitStack
 from typing import Optional
 
 import pytest
@@ -85,10 +86,11 @@ async def test_load(monkeypatch: pytest.MonkeyPatch,
     # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
     # so that in the future when we switch, we don't have to change all the
     # tests.
-    with monkeypatch.context() as m:
+    with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
         engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
         NUM_EXPECTED_TOKENS = 10
@@ -127,10 +129,11 @@ async def test_abort(monkeypatch: pytest.MonkeyPatch,
                      output_kind: RequestOutputKind,
                      engine_args: AsyncEngineArgs, prompt: PromptType):
 
-    with monkeypatch.context() as m:
+    with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
         engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
         NUM_EXPECTED_TOKENS = 100
@@ -192,10 +195,11 @@ async def test_abort(monkeypatch: pytest.MonkeyPatch,
 async def test_finished_flag(monkeypatch: pytest.MonkeyPatch, n: int,
                              engine_args: AsyncEngineArgs, prompt: PromptType):
 
-    with monkeypatch.context() as m:
+    with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
         engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
 
         sampling_params = SamplingParams(max_tokens=100,
                                          output_kind=RequestOutputKind.DELTA,
