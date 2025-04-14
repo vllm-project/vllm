@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from typing import List
 
 import pytest
 import ray
@@ -15,6 +14,15 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This module tests V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
 
 MODELS = [
     "distilbert/distilgpt2",
@@ -133,7 +141,7 @@ def test_metric_counter_generation_tokens_multi_step(
     "served_model_name",
     [None, [], ["ModelName0"], ["ModelName0", "ModelName1", "ModelName2"]])
 def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
-                                   served_model_name: List[str]) -> None:
+                                   served_model_name: list[str]) -> None:
     with vllm_runner(model,
                      dtype=dtype,
                      disable_log_stats=False,
@@ -240,8 +248,10 @@ def test_metric_spec_decode(
             dtype=dtype,
             disable_log_stats=False,
             gpu_memory_utilization=0.4,
-            speculative_model=model,
-            num_speculative_tokens=k,
+            speculative_config={
+                "model": model,
+                "num_speculative_tokens": k,
+            },
     ) as vllm_model:
 
         # Force log interval to be 0 to catch all metrics.
@@ -292,8 +302,10 @@ def test_metric_spec_decode_interval(
         dtype=dtype,
         disable_log_stats=False,
         gpu_memory_utilization=0.4,
-        speculative_model=model,
-        num_speculative_tokens=k,
+        speculative_config={
+            "model": model,
+            "num_speculative_tokens": k,
+        },
         enforce_eager=True,
     )
 

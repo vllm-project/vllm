@@ -14,20 +14,19 @@ from einops import rearrange, repeat
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, ProcessingCache,
-                                        PromptReplacement, PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
                                                           MlpProjectorConfig,
@@ -37,12 +36,10 @@ from vllm.transformers_utils.processors.deepseek_vl2 import (
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils import is_list_of
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-
-logger = init_logger(__name__)
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
@@ -171,74 +168,37 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
                                 image_width=x[1], image_height=x[0]))
         return ImageSize(width=width, height=height)
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        num_images = mm_counts.get("image", 0)
-        max_image_size = self.get_image_size_with_most_features()
-        max_image_tokens = self.get_num_image_tokens(
-            image_height=max_image_size.height,
-            image_width=max_image_size.width,
-            cropping=num_images <= 2)
-
-        return {"image": max_image_tokens}
-
 
 class DeepseekVL2DummyInputsBuilder(
         BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
-        hf_processor = self.info.get_hf_processor()
-        image_token: str = hf_processor.image_token
 
         max_image_size = self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=max_image_size.width,
                                    height=max_image_size.height,
                                    num_images=num_images)
         }
 
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
-
 
 class DeepseekVL2MultiModalProcessor(
         BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]):
-
-    def __init__(
-            self,
-            info: DeepseekVL2ProcessingInfo,
-            dummy_inputs: "BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo]",
-            *,
-            cache: Optional[ProcessingCache] = None,
-            enable_sanity_checks: bool = True) -> None:
-        super().__init__(
-            info,
-            dummy_inputs,
-            cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
-        )
-
-        mm_limit = self.info.ctx.model_config.multimodal_config.limit_per_prompt
-        if self.cache is not None and mm_limit["image"] > 2:
-            # The processor output depends on the number of images passed,
-            # making it incompatible with processing cache which is supposed
-            # to be invariant of how many images are passed per prompt
-            self.cache = None
-            logger.warning_once(
-                f"{type(self).__name__} does not support processing cache with "
-                "image limit larger than 2.")
 
     def _call_hf_processor(
         self,
@@ -315,6 +275,31 @@ class DeepseekVL2MultiModalProcessor(
                 replacement=get_replacement_deepseek_vl2,
             )
         ]
+
+    def _cached_apply_hf_processor(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
+        # The processor logic is different for len(images) <= 2 vs > 2
+        # Since the processing cache assumes that the processor output is
+        # invariant of how many images are passed per prompt, we only
+        # perform caching for the most common case
+        if mm_data_items.get_count("image", strict=False) > 2:
+            # This code path corresponds to the cache being disabled
+            return self._apply_hf_processor_main(
+                prompt=prompt,
+                mm_items=mm_data_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                enable_hf_prompt_update=True,
+            )
+
+        return super()._cached_apply_hf_processor(
+            prompt=prompt,
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -480,7 +465,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                     flatten_bn(images_spatial_crop, concat=True)))
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, torch.Tensor):
+            if not isinstance(image_embeds, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
 
@@ -511,7 +496,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         _, hw, n_dim = images_embeds.shape
         h = w = int(hw**0.5)
 
-        # 根据self.tile_tag & self.global_view_pos填充image token sequence
+        # fill image token based on self.tile_tag & self.global_view_pos
         tile_index = 0
         vision_embeddings = []
         for jdx in range(images_spatial_crop.size(0)):
@@ -606,7 +591,11 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self._pixel_values_to_embedding(
             pixel_values=pixel_values, images_spatial_crop=images_spatial_crop)
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> torch.Tensor:
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -616,7 +605,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional, Type
+from typing import Optional
 
 import pytest
 from PIL import Image
@@ -51,8 +51,8 @@ def hf_to_vllm_output(hf_output: tuple[list[int], str,
 
 
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
     inputs: list[list[ExplicitEncoderDecoderPrompt]],
     model: str,
     *,
@@ -114,7 +114,7 @@ def run_test(
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner: Type[HfRunner], vllm_runner: Type[VllmRunner],
+def test_models(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
                 image_assets: _ImageAssets, model: str,
                 size_factors: list[int], dtype: str, max_tokens: int,
                 num_logprobs: int) -> None:

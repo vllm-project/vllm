@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Optional
 
 import torch
 # Required to register custom ops.
@@ -10,9 +10,9 @@ import torch_xla.experimental.custom_kernel  # noqa: F401
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.logger import init_logger
 
-NUM_QUERIES_PER_BLOCK = 16
-NUM_KV_PAGES_PER_BLOCK = 128
+logger = init_logger(__name__)
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -22,15 +22,15 @@ class PallasAttentionBackend(AttentionBackend):
         return "PALLAS_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["PallasAttentionBackendImpl"]:
+    def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
         return PallasAttentionBackendImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["PallasMetadata"]:
+    def get_metadata_cls() -> type["PallasMetadata"]:
         return PallasMetadata
 
     @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
+    def get_state_cls() -> type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -39,8 +39,8 @@ class PallasAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
-        return (num_kv_heads, num_blocks, block_size, head_size)
+    ) -> tuple[int, ...]:
+        return (num_blocks, block_size, num_kv_heads * 2, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -77,13 +77,18 @@ class PallasAttentionBackendImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in Pallas is not supported yet, it will fall back "
+                "to global attention for long context.")
         if blocksparse_params is not None:
             raise ValueError("Paged attention Pallas kernel does "
                              "not support block-sparse attention.")
@@ -91,6 +96,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        self.sliding_window = sliding_window
+        self.logits_soft_cap = logits_soft_cap
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -98,15 +105,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Head size must be a multiple of 128.")
         if alibi_slopes is not None:
             raise NotImplementedError("Alibi slopes is not supported.")
-        if sliding_window is not None:
-            raise NotImplementedError("Sliding window is not supported.")
         if kv_cache_dtype != "auto":
             raise NotImplementedError("FP8 KV cache dtype is not supported.")
         if blocksparse_params is not None:
             raise NotImplementedError("Blocksparse is not supported.")
-        if logits_soft_cap is not None:
-            raise NotImplementedError(
-                "Attention logits soft-capping is not supported.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
@@ -114,13 +116,17 @@ class PallasAttentionBackendImpl(AttentionImpl):
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
 
+        tpu_version = torch_xla.tpu.version()
+        if tpu_version < 4:
+            raise NotImplementedError("TPU version must be 4 or higher.")
+
     def forward(
         self,
         layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor, torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: PallasMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -130,14 +136,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = ([num_kv_heads, num_blocks, block_size, head_size], 
-                        [num_kv_heads, num_blocks, block_size, head_size])
+            kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
         # For determine_available_memory case.
-        if kv_cache[0].numel() == 0:
+        if kv_cache.numel() == 0:
             if output is None:
                 output = torch.ones_like(query)
             return output
@@ -145,26 +150,28 @@ class PallasAttentionBackendImpl(AttentionImpl):
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         num_tokens, hidden_size = query.shape
         query = query.view(num_tokens, self.num_heads, self.head_size)
-        key = key.view(num_tokens, self.num_kv_heads, self.head_size)
-        value = value.view(num_tokens, self.num_kv_heads, self.head_size)
 
-        key_cache, value_cache = kv_cache
-        if kv_cache[0].numel() > 0:
+        if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
-            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
+            write_to_kv_cache(key, value, kv_cache, slot_mapping)
 
-        query = query * self.scale
         output = torch.ops.xla.ragged_paged_attention(
             query,
-            key_cache,
-            value_cache,
+            kv_cache,
             attn_metadata.context_lens,
             attn_metadata.block_tables,
             attn_metadata.query_start_loc,
             attn_metadata.num_seqs,
-            num_kv_pages_per_block=NUM_KV_PAGES_PER_BLOCK,
-            num_queries_per_block=NUM_QUERIES_PER_BLOCK,
-            use_kernel=False,
+            # By default, the system utilizes optimized block size and
+            # vmem_limit_bytes parameters from the kernel repository. However,
+            # these can be manually adjusted for debugging if necessary.
+            num_kv_pages_per_block=None,
+            num_queries_per_block=None,
+            vmem_limit_bytes=None,
+            use_kernel=True,
+            sm_scale=self.scale,
+            sliding_window=self.sliding_window,
+            soft_cap=self.logits_soft_cap,
         )
 
         return output.reshape(num_tokens, hidden_size)
@@ -173,25 +180,27 @@ class PallasAttentionBackendImpl(AttentionImpl):
 def write_to_kv_cache(
     key: torch.Tensor,
     value: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
+    kv_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
     """ Write the key and values to the KV cache.
 
     Args:
-        key: shape = [num_tokens, num_kv_heads, head_size]
-        value: shape = [num_tokens, num_kv_heads, head_size]
-        k_cache = [num_kv_heads, num_blocks, block_size, head_size]
-        v_cache = [num_kv_heads, num_blocks, block_size, head_size]
+        key: shape = [num_tokens, num_kv_heads * head_size]
+        value: shape = [num_tokens, num_kv_heads *  head_size]
+        kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
 
     """
-    torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
-    torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
+    _, _, num_combined_kv_heads, head_size = kv_cache.shape
+    num_kv_heads = num_combined_kv_heads // 2
 
-    key = key.flatten(0, 1)
-    value = value.flatten(0, 1)
-    key_cache = key_cache.flatten(0, 2)
-    value_cache = value_cache.flatten(0, 2)
-    key_cache.index_copy_(0, slot_mapping, key)
-    value_cache.index_copy_(0, slot_mapping, value)
+    key = key.view(-1, num_kv_heads, head_size)
+    value = value.view(-1, num_kv_heads, head_size)
+
+    kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
+                                                  head_size)
+
+    torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
+
+    kv_cache = kv_cache.flatten(0, 1)
+    kv_cache.index_copy_(0, slot_mapping, kv)

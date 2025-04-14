@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-from compressed_tensors.quantization import FP8_DTYPE
 
 import vllm.envs as envs
 import vllm.plugins
@@ -13,9 +12,12 @@ from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    CUTLASS_FP8_SUPPORTED, apply_fp8_linear, maybe_create_device_identity)
+    CUTLASS_FP8_SUPPORTED, Fp8LinearOp, maybe_create_device_identity)
+from vllm.platforms import current_platform
 
 from .backend import TestBackend
+
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class TestModel(torch.nn.Module):
@@ -34,26 +36,25 @@ class TestModel(torch.nn.Module):
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
             for _ in range(2)
         ]
+        self.fp8_linear = Fp8LinearOp(
+            cutlass_fp8_supported=cutlass_fp8_enabled,
+            use_per_token_if_dynamic=True)
 
     def forward(self, x):
         resid = torch.sqrt(x)
         y = self.norm[0](x)
 
-        x2 = apply_fp8_linear(y,
-                              self.w[0],
-                              self.wscale[0],
-                              self.scale[0],
-                              use_per_token_if_dynamic=True,
-                              cutlass_fp8_supported=self.cutlass_fp8_enabled)
+        x2 = self.fp8_linear.apply(y,
+                                   self.w[0],
+                                   self.wscale[0],
+                                   input_scale=self.scale[0])
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = apply_fp8_linear(y2,
-                              self.w[1],
-                              self.wscale[1],
-                              self.scale[1],
-                              use_per_token_if_dynamic=True,
-                              cutlass_fp8_supported=self.cutlass_fp8_enabled)
+        x3 = self.fp8_linear.apply(y2,
+                                   self.w[1],
+                                   self.wscale[1],
+                                   input_scale=self.scale[1])
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
@@ -65,8 +66,8 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("static", [True, False])
 @pytest.mark.parametrize("cutlass_fp8_enabled",
                          [True, False] if CUTLASS_FP8_SUPPORTED else [False])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
-                    reason="Only test on CUDA")
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
+                    reason="Only test on CUDA and ROCm")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
                               cutlass_fp8_enabled):
     torch.set_default_device("cuda")

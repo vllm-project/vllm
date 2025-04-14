@@ -11,6 +11,7 @@ import requests
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+from ...models.embedding.utils import check_embeddings_close
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -86,7 +87,7 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
-    # test List[str]
+    # test list[str]
     input_texts = [
         "The cat sat on the mat.", "A feline was resting on a rug.",
         "Stars twinkle brightly in the night sky."
@@ -106,7 +107,7 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
     assert embeddings.usage.prompt_tokens == 33
     assert embeddings.usage.total_tokens == 33
 
-    # test List[List[int]]
+    # test list[list[int]]
     input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
                     [25, 32, 64, 77]]
     embedding_response = await client.embeddings.create(
@@ -190,30 +191,35 @@ async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
     responses_float = await client.embeddings.create(input=input_texts,
                                                      model=model_name,
                                                      encoding_format="float")
+    float_data = [d.embedding for d in responses_float.data]
 
     responses_base64 = await client.embeddings.create(input=input_texts,
                                                       model=model_name,
                                                       encoding_format="base64")
-
-    decoded_responses_base64_data = []
+    base64_data = []
     for data in responses_base64.data:
-        decoded_responses_base64_data.append(
+        base64_data.append(
             np.frombuffer(base64.b64decode(data.embedding),
                           dtype="float32").tolist())
 
-    assert responses_float.data[0].embedding == decoded_responses_base64_data[
-        0]
-    assert responses_float.data[1].embedding == decoded_responses_base64_data[
-        1]
+    check_embeddings_close(
+        embeddings_0_lst=float_data,
+        embeddings_1_lst=base64_data,
+        name_0="float",
+        name_1="base64",
+    )
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(input=input_texts,
                                                        model=model_name)
+    default_data = [d.embedding for d in responses_default.data]
 
-    assert responses_float.data[0].embedding == responses_default.data[
-        0].embedding
-    assert responses_float.data[1].embedding == responses_default.data[
-        1].embedding
+    check_embeddings_close(
+        embeddings_0_lst=float_data,
+        embeddings_1_lst=default_data,
+        name_0="float",
+        name_1="default",
+    )
 
 
 @pytest.mark.asyncio

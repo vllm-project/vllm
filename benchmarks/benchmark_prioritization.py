@@ -5,7 +5,7 @@ import dataclasses
 import json
 import random
 import time
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -23,7 +23,7 @@ def sample_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int],
-) -> List[Tuple[str, int, int]]:
+) -> list[tuple[str, int, int, int]]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
 
@@ -40,7 +40,7 @@ def sample_requests(
     random.shuffle(dataset)
 
     # Filter out sequences that are too long or too short
-    filtered_dataset: List[Tuple[str, int, int]] = []
+    filtered_dataset: list[tuple[str, int, int]] = []
     for i in range(len(dataset)):
         if len(filtered_dataset) == num_requests:
             break
@@ -68,9 +68,10 @@ def sample_requests(
 
 
 def run_vllm(
-    requests: List[Tuple[str, int, int]],
+    requests: list[tuple[str, int, int]],
     n: int,
     engine_args: EngineArgs,
+    disable_detokenize: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
@@ -95,6 +96,7 @@ def run_vllm(
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=output_len,
+                detokenize=not disable_detokenize,
             ))
 
     start = time.perf_counter()
@@ -121,7 +123,8 @@ def main(args: argparse.Namespace):
 
     if args.backend == "vllm":
         elapsed_time = run_vllm(requests, args.n,
-                                EngineArgs.from_cli_args(args))
+                                EngineArgs.from_cli_args(args),
+                                args.disable_detokenize)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
     total_num_tokens = sum(prompt_len + output_len
@@ -174,6 +177,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help='Path to save the throughput results in JSON format.')
+    parser.add_argument(
+        '--disable-detokenize',
+        action='store_true',
+        help=("Do not detokenize responses (i.e. do not include "
+              "detokenization time in the latency measurement)"),
+    )
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()

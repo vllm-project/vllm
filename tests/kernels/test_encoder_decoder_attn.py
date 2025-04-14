@@ -22,6 +22,16 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.platforms import current_platform
 
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    Encoder-decoder is only supported on V0, so set 
+    VLLM_USE_V1=0 for all tests in the module.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 # List of support backends for encoder/decoder models
 LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
 HEAD_SIZES = [64, 256]
@@ -243,7 +253,7 @@ def _decoder_attn_setup(
     test_pt: TestPoint,
     test_rsrcs: TestResources,
     block_base_addr: int = 0,
-) -> Tuple[QKVInputs, PhaseTestParameters, PhaseTestParameters, int]:
+) -> tuple[QKVInputs, PhaseTestParameters, PhaseTestParameters, int]:
     '''
     Set up test vectors & data structures for self-attention test.
 
@@ -421,7 +431,7 @@ def _enc_dec_cross_attn_setup_reuses_query(
     test_pt: TestPoint,
     test_rsrcs: TestResources,
     block_base_addr: int = 0,
-) -> Tuple[PhaseTestParameters, PhaseTestParameters]:
+) -> tuple[PhaseTestParameters, PhaseTestParameters]:
     '''
     Set up test vectors & data structures for cross-attention test.
 

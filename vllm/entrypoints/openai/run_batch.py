@@ -2,16 +2,17 @@
 
 import asyncio
 import tempfile
+from collections.abc import Awaitable
 from http import HTTPStatus
 from io import StringIO
-from typing import Awaitable, Callable, List, Optional
+from typing import Callable, Optional
 
 import aiohttp
 import torch
 from prometheus_client import start_http_server
 from tqdm import tqdm
 
-from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
+from vllm.engine.arg_utils import AsyncEngineArgs, optional_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger, logger
 # yapf: disable
@@ -60,7 +61,7 @@ def parse_args():
         "to the output URL.",
     )
     parser.add_argument("--response-role",
-                        type=nullable_str,
+                        type=optional_str,
                         default="assistant",
                         help="The role name to return if "
                         "`request.add_generation_prompt=True`.")
@@ -143,7 +144,7 @@ async def read_file(path_or_url: str) -> str:
 
 
 async def write_local_file(output_path: str,
-                           batch_outputs: List[BatchRequestOutput]) -> None:
+                           batch_outputs: list[BatchRequestOutput]) -> None:
     """
     Write the responses to a local file.
     output_path: The path to write the responses to.
@@ -204,7 +205,7 @@ async def upload_data(output_url: str, data_or_file: str,
                                 f"Error message: {str(e)}.") from e
 
 
-async def write_file(path_or_url: str, batch_outputs: List[BatchRequestOutput],
+async def write_file(path_or_url: str, batch_outputs: list[BatchRequestOutput],
                      output_tmp_dir: str) -> None:
     """
     Write batch_outputs to a file or upload to a URL.
@@ -353,7 +354,7 @@ async def main(args):
     logger.info("Reading batch from %s...", args.input_file)
 
     # Submit all requests in the file to the engine "concurrently".
-    response_futures: List[Awaitable[BatchRequestOutput]] = []
+    response_futures: list[Awaitable[BatchRequestOutput]] = []
     for request_json in (await read_file(args.input_file)).strip().split("\n"):
         # Skip empty lines.
         request_json = request_json.strip()

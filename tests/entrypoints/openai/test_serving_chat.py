@@ -38,6 +38,7 @@ class MockModelConfig:
     diff_sampling_param: Optional[dict] = None
     allowed_local_media_path: str = ""
     encoder_config = None
+    generation_config: str = "auto"
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}

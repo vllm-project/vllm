@@ -39,7 +39,7 @@ jobs:
             const script = require('.github/workflows/scripts/create_release.js')
             await script(github, context, core)
 
-  # NOTE(simon): No longer build wheel using Github Actions. See buildkite's release workflow. 
+  # NOTE(simon): No longer build wheel using GitHub Actions. See buildkite's release workflow. 
   # wheel:
   #   name: Build Wheel
   #   runs-on: ${{ matrix.os }}
@@ -50,7 +50,7 @@ jobs:
   #     matrix:
   #         os: ['ubuntu-20.04']
   #         python-version: ['3.9', '3.10', '3.11', '3.12']
-  #         pytorch-version: ['2.4.0']  # Must be the most recent version that meets requirements-cuda.txt.
+  #         pytorch-version: ['2.4.0']  # Must be the most recent version that meets requirements/cuda.txt.
   #         cuda-version: ['11.8', '12.1']
 
   #   steps:

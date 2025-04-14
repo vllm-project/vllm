@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Iterable, Optional, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -59,7 +60,7 @@ class MyGemma2Embedding(nn.Module):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         weights = self.hf_to_vllm_mapper.apply(weights)
         weights = ((name, data) for name, data in weights

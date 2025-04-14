@@ -5,7 +5,7 @@ with LMCache.
 We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
 and launch an additional LMCache server.
 KV cache is transferred in the following manner: 
-VLLM prefill node -> LMCache server -> VLLM decode node.
+vLLM prefill node -> LMCache server -> vLLM decode node.
 
 Note that `pip install lmcache` is needed to run this example.
 Learn more about LMCache in https://github.com/LMCache/LMCache.
@@ -37,6 +37,10 @@ os.environ["LMCACHE_REMOTE_URL"] = f"lm://localhost:{port}"
 # Set the serializer/deserializer between vllm and LMCache server
 # `naive` indicates using raw bytes of the tensor without any compression
 os.environ["LMCACHE_REMOTE_SERDE"] = "naive"
+
+prompts = [
+    "Hello, how are you?" * 1000,
+]
 
 
 def run_prefill(prefill_done, prompts):
@@ -106,12 +110,7 @@ def run_lmcache_server(port):
     return server_proc
 
 
-if __name__ == "__main__":
-
-    prompts = [
-        "Hello, how are you?" * 1000,
-    ]
-
+def main():
     prefill_done = Event()
     prefill_process = Process(target=run_prefill, args=(prefill_done, prompts))
     decode_process = Process(target=run_decode, args=(prefill_done, prompts))
@@ -128,3 +127,7 @@ if __name__ == "__main__":
     prefill_process.terminate()
     lmcache_server_process.terminate()
     lmcache_server_process.wait()
+
+
+if __name__ == "__main__":
+    main()
