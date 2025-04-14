@@ -830,22 +830,22 @@ class ASRDataset(HuggingFaceDataset):
     +----------------+----------------------------------------+--------------------------+-----------------------------+
     | Dataset        | Domain                                 | Speaking Style           | hf-subset                   |
     +----------------+----------------------------------------+--------------------------+-----------------------------+
-    | LibriSpeech    | Audiobook                              | Narrated                 | release1, release2, release3|
+    | TED-LIUM       | TED talks                              | Oratory                  | release1, release2, release3|
     |                |                                        |                          | release3-speaker-adaptation |
     | VoxPopuli      | European Parliament                    | Oratory                  | en, de, it, fr,  ...        |
-    | TED-LIUM       | TED talks                              | Oratory                  | "LIUM/tedlium"              |
-    | GigaSpeech     | Audiobook, podcast, YouTube            | Narrated, spontaneous    |                             |
-    | SPGISpeech     | Financial meetings                     | Oratory, spontaneous     |                             |
-    | Earnings-22    | Financial meetings                     | Oratory, spontaneous     | "NeuML/earnings22"          |
+    | LibriSpeech    | Audiobook                              | Narrated                 | "LIUM/tedlium"              |
+    | GigaSpeech     | Audiobook, podcast, YouTube            | Narrated, spontaneous    | xs, s, m, l, xl, dev, test  |
+    | SPGISpeech     | Financial meetings                     | Oratory, spontaneous     | S, M, L, dev, test          |
     | AMI            | Meetings                               | Spontaneous              | ihm, sdm                    |
     +----------------+----------------------------------------+--------------------------+-----------------------------+
 
     """ # noqa: E501
     SUPPORTED_DATASET_PATHS = {
         "openslr/librispeech_asr", "facebook/voxpopuli", "LIUM/tedlium",
-        "edinburghcstr/ami"
+        "edinburghcstr/ami", "speechcolab/gigaspeech", "kensho/spgispeech"
     }
 
+    DEFAULT_OUTPUT_LEN = 128
     # TODO Whisper-specific. Abstract interface when more models are supported.
     TRANSCRIPTION_PREAMBLE = "<|startoftranscript|><|en|><|transcribe|>"\
                               "<|notimestamps|>"
@@ -859,6 +859,8 @@ class ASRDataset(HuggingFaceDataset):
         **kwargs,
     ) -> list:
         import librosa
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
         prompt_len = len(tokenizer(prompt).input_ids)
         sampled_requests = []
@@ -866,7 +868,7 @@ class ASRDataset(HuggingFaceDataset):
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
-            output_len = len(tokenizer._normalize(item['text']))
+            # output_len = len(tokenizer._normalize(item['text']))
             audio = item["audio"]
             y, sr = audio["array"], audio["sampling_rate"]
             duration_s = librosa.get_duration(y=y, sr=sr)
