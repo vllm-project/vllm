@@ -20,7 +20,13 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-sys.path.insert(0, site.getsitepackages()[0])
+try:
+    # First, try import vllm from the local path or from the
+    # installed editable vllm package.
+    import vllm  # noqa: F401
+except ImportError:
+    # If that fails, try to import vllm from the installed package.
+    sys.path.insert(0, site.getsitepackages()[0])
 
 from tests.models.utils import (TokensTextLogprobs,
                                 TokensTextLogprobsPromptLogprobs)
