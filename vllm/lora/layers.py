@@ -261,10 +261,17 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 full_lora_a_embeddings.shape[1],
                 -1,
             )
-        self.punica_wrapper.add_lora_embedding(full_output,
-                                               full_lora_a_embeddings,
-                                               self.lora_b_stacked,
-                                               add_input=True)
+
+        lora_output: Optional[
+            torch.Tensor] = self.punica_wrapper.add_lora_embedding(
+                full_output,
+                full_lora_a_embeddings,
+                self.lora_b_stacked,
+                add_input=True)
+
+        if not current_platform.can_update_inplace():
+            full_output = lora_output
+
         return full_output.view_as(full_output_org)
 
     @classmethod
@@ -410,10 +417,13 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        self.punica_wrapper.add_lora_linear(output, x, self.lora_a_stacked,
-                                            self.lora_b_stacked,
-                                            self.lora_bias_stacked, 1.0,
-                                            self.output_slices)
+        lora_output: Optional[
+            torch.Tensor] = self.punica_wrapper.add_lora_linear(
+                output, x, self.lora_a_stacked, self.lora_b_stacked,
+                self.lora_bias_stacked, 1.0, self.output_slices)
+        if not current_platform.can_update_inplace():
+            output = lora_output
+
         return output
 
     @property
@@ -1133,15 +1143,23 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         torch.matmul(self.embeddings_tensors,
                      hidden_states.T,
                      out=lora_logits[:-1])
-        lora_logits[-1] = float("-inf")
+
+        neg_inf, pos_inf = current_platform.get_infinity_values(
+            lora_logits.dtype)
+
+        lora_logits[-1] = neg_inf
         lora_logits = lora_logits.mT
         indices_padded = self.punica_wrapper.sampler_indices_padded
+
+        if current_platform.is_tpu():
+            indices_padded = indices_padded[:logits.size(0)]
+
         lora_logits = (lora_logits.reshape(
             lora_logits.shape[0] * lora_logits.shape[1],
             lora_logits.shape[2],
-        ).index_select(0, indices_padded).nan_to_num_(nan=float("-inf"),
-                                                      posinf=float("inf"),
-                                                      neginf=float("-inf")))
+        ).index_select(0, indices_padded).nan_to_num_(nan=neg_inf,
+                                                      posinf=pos_inf,
+                                                      neginf=neg_inf))
 
         # HPU needs special handling to prune out dummy samples.
         if current_platform.is_hpu():
@@ -1151,10 +1169,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits
 
-        # LogitsProcessorWithLoRA always using bgmv
-        self.punica_wrapper.add_lora_logits(logits, hidden_states,
-                                            self.lora_a_stacked,
-                                            self.lora_b_stacked, 1.0)
+        lora_output: Optional[
+            torch.Tensor] = self.punica_wrapper.add_lora_logits(
+                logits, hidden_states, self.lora_a_stacked,
+                self.lora_b_stacked, 1.0)
+
+        if not current_platform.can_update_inplace():
+            logits = lora_output
 
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.base_layer.vocab_size]

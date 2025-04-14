@@ -19,6 +19,8 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.ops.xla_ops import LORA_RANK_BLOCK_SIZE
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -36,6 +38,7 @@ from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
@@ -53,7 +56,7 @@ INVALID_TOKEN_ID = -1
 MIN_NUM_SEQS = 8
 
 
-class TPUModelRunner:
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -182,6 +185,18 @@ class TPUModelRunner:
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
+
+        if self.lora_config is not None:
+            # This makes us pad at initialisation time so we can avoid padding
+            # at runtime, which introduces long stalls
+            self.lora_config.max_lora_rank = _get_padded_lora_rank(
+                self.lora_config.max_lora_rank, self.lora_config.max_loras)
+
+        if self.lora_config is not None:
+            # This makes us pad at initialisation time so we can avoid padding
+            # at runtime, which introduces long stalls
+            self.lora_config.max_lora_rank = _get_padded_lora_rank(
+                self.lora_config.max_lora_rank, self.lora_config.max_loras)
 
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
@@ -504,6 +519,17 @@ class TPUModelRunner:
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
+
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
         return attn_metadata, logits_indices, padded_num_reqs
 
     def _scatter_placeholders(
@@ -791,6 +817,14 @@ class TPUModelRunner:
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
+        if self.lora_config is not None:
+            model = self.load_lora_model(model, self.model_config,
+                                         self.scheduler_config,
+                                         self.lora_config, self.device)
+            punica_wrapper = self.lora_manager._adapter_manager.punica_wrapper
+            if not self.enforce_eager:
+                punica_wrapper.mark_compiled()
+
         # Sync all pending XLA execution during model initialization and weight
         # loading.
         xm.mark_step()
@@ -840,6 +874,8 @@ class TPUModelRunner:
             num_seqs=num_seqs,
         )
 
+        xm.mark_step()  # Capture tensors created when setting up
+
         if self.is_multimodal_model:
             torch._dynamo.mark_dynamic(inputs_embeds, 0)
         else:
@@ -847,11 +883,21 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        with set_forward_context(attn_metadata, self.vllm_config, 0):
+        with self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                np.array([num_tokens], dtype=np.int32)), set_forward_context(
+                    attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
                              positions=position_ids,
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
+
+    def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping,
+                          lora_requests) -> None:
+        xm.mark_step()  # Captures input updates
+        super()._set_active_loras(prompt_lora_mapping, token_lora_mapping,
+                                  lora_requests)
+        xm.mark_step()  # Captures metadata updates
 
     def _precompile_backbone(self) -> None:
         logger.info("Compiling the model with different input shapes.")
@@ -909,7 +955,10 @@ class TPUModelRunner:
                         generate_params_if_all_greedy,
                     ))
                 sampling_metadata.all_greedy = all_greedy
-                self.sample_from_hidden(dummy_hidden, sampling_metadata)
+                with self.maybe_dummy_run_with_lora(
+                        self.lora_config, np.array([num_reqs],
+                                                   dtype=np.int32)):
+                    self.sample_from_hidden(dummy_hidden, sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -1003,6 +1052,43 @@ class TPUModelRunner:
     def get_input_embeddings(self, *args, **kwargs):
         return self.model.get_input_embeddings(*args, **kwargs)
 
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        success = super().add_lora(lora_request)
+        if not success:
+            return False
+
+        # Only compile when we see a new LoRA adapter
+        logger.info("Compiling LoRA adapter %s", lora_request.path)
+        start = time.perf_counter()
+        xm.mark_step()
+
+        for n in range(self.lora_config.max_loras):
+            logger.info("  --lora_index %d", n)
+            # Create n dummy LoRAs as padding
+            lora_requests: set[LoRARequest] = {
+                LoRARequest(lora_name=f"warmup_{lora_id}",
+                            lora_int_id=lora_id,
+                            lora_path="/not/a/real/path")
+                for lora_id in range(1, n + 1)
+            }
+            with self.lora_manager.dummy_lora_cache():
+                # Add the dummy LoRAs here so _set_active_loras doesn't try to
+                # load from disk.
+                for lr in lora_requests:
+                    self.lora_manager.add_dummy_lora(
+                        lr, rank=self.LORA_WARMUP_RANK)
+
+            lora_requests.add(lora_request)
+
+            self.lora_manager._apply_adapters(lora_requests)
+            self.lora_manager.remove_all_adapters()
+
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in in %.2f [secs].", end - start)
+
+        return True
+
 
 def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
     logger.info("Preparing request paddings:")
@@ -1026,11 +1112,11 @@ def _get_token_paddings(min_token_size: int, max_token_size: int,
                         padding_gap: int) -> list[int]:
     """Generate a list of padding size, starting from min_token_size, 
     ending with a number that can cover max_token_size
-    
+
     If padding_gap == 0 then:
         increase 2X each time (exponential)
     else:
-        first increase the size to twice, 
+        first increase the size to twice,
         then increase the padding size by padding_gap.
     """
     # assert min_token_size is power of 2
@@ -1068,3 +1154,25 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
+
+
+def _get_padded_lora_rank(max_lora_rank: int, max_num_loras: int) -> int:
+    max_num_loras += 1
+
+    # If we have enough LoRAs to use laning without padding
+    if max_lora_rank * max_num_loras >= LORA_RANK_BLOCK_SIZE:
+        return max_lora_rank
+
+    return 1 << (LORA_RANK_BLOCK_SIZE // max_num_loras).bit_length()
+
+
+def _create_dummy_scheduled_tokens(total_tokens: int,
+                                   num_prompts: int) -> np.ndarray:
+    assert num_prompts <= total_tokens, "Expected num_prompts < total_tokens"
+    base_tokens = total_tokens // num_prompts
+    leftover_tokens = total_tokens % num_prompts
+
+    tokens = np.full((num_prompts, ), base_tokens, dtype=np.int32)
+    tokens[-1] += leftover_tokens
+
+    return tokens

@@ -16,6 +16,7 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               QKVParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     pass
@@ -57,15 +58,25 @@ def _mcp_apply(x, bias, layer: ColumnParallelLinearWithLoRA):
         device=x.device,
     )
 
-    layer.punica_wrapper.add_shrink(buffers, x, layer.lora_a_stacked, 1.0)
+    shrunk_buffers: Optional[torch.Tensor] = layer.punica_wrapper.add_shrink(
+        buffers, x, layer.lora_a_stacked, 1.0)
+
+    if not current_platform.can_update_inplace():
+        buffers = shrunk_buffers
+
     buffers = tensor_model_parallel_all_gather(buffers)
-    layer.punica_wrapper.add_expand(output,
-                                    buffers,
-                                    layer.lora_b_stacked,
-                                    layer.lora_bias_stacked,
-                                    layer.output_slices,
-                                    offset_start=0,
-                                    add_input=True)
+
+    lora_output: Optional[torch.Tensor] = layer.punica_wrapper.add_expand(
+        output,
+        buffers,
+        layer.lora_b_stacked,
+        layer.lora_bias_stacked,
+        layer.output_slices,
+        offset_start=0,
+        add_input=True)
+
+    if not current_platform.can_update_inplace():
+        output = lora_output
 
     output = output.view(*out_orig_shape)
     # now have column partitioned and packed output
@@ -292,7 +303,11 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             device=x.device,
         )
 
-        self.punica_wrapper.add_shrink(buffer, x, self.lora_a_stacked, 1.0)
+        shrunk_buffer: Optional[torch.Tensor] = self.punica_wrapper.add_shrink(
+            buffer, x, self.lora_a_stacked, 1.0)
+        if not current_platform.can_update_inplace():
+            buffer = shrunk_buffer
+
         buffer = tensor_model_parallel_all_reduce(buffer)
 
         # following S-LoRA, allows the fusing of all_gather and all_reduce
@@ -304,7 +319,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # NOTE offset are based on the rank.
         shard_size = self.lora_b_stacked[0].shape[2]
         offset_start = self.tp_rank * shard_size
-        self.punica_wrapper.add_expand(
+        lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_expand(
             output,
             buffer,
             self.lora_b_stacked,
@@ -313,6 +328,10 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             offset_start=offset_start,
             add_input=True,
         )
+
+        if not current_platform.can_update_inplace():
+            output = lora_output
+
         output = output.view(*out_orig_shape)
         return output
 
