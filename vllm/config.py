@@ -182,6 +182,15 @@ def config(cls: type[Config]) -> type[Config]:
     return cls
 
 
+def get_default(cls: type[Config], field_name: str) -> Any:
+    if not is_dataclass(cls):
+        raise TypeError("The given class is not a dataclass.")
+    field: Field = {f.name: f for f in fields(cls)}.get(field_name)
+    # One of these will always be true for Configs with @config
+    return (field.default_factory
+            if field.default is MISSING else field.default)
+
+
 class ModelConfig:
     """Configuration for the model.
 
@@ -1370,7 +1379,7 @@ class TokenizerPoolConfig:
     pool_type: Union[PoolType, type["BaseTokenizerGroup"]] = "ray"
     """Type of tokenizer pool to use for asynchronous tokenization. Ignored if
     tokenizer_pool_size is 0."""
-    extra_config: Optional[dict] = None
+    extra_config: dict = field(default_factory=dict)
     """Additional config for the pool. The way the config will be used depends
     on the pool type. This should be a JSON string that will be parsed into a
     dictionary. Ignored if tokenizer_pool_size is 0."""

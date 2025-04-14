@@ -24,7 +24,7 @@ from vllm.config import (CacheConfig, CompilationConfig, Config, ConfigFormat,
                          ParallelConfig, PoolerConfig, PoolType,
                          PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
                          SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs)
+                         VllmConfig, get_attr_docs, get_default)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -174,8 +174,8 @@ class EngineArgs:
     # notice.
     tokenizer_pool_type: Union[PoolType, Type["BaseTokenizerGroup"]] = \
         TokenizerPoolConfig.pool_type
-    tokenizer_pool_extra_config: Optional[dict[str, Any]] = \
-        TokenizerPoolConfig.extra_config
+    tokenizer_pool_extra_config: dict[str, Any] = \
+        get_default(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
@@ -291,9 +291,10 @@ class EngineArgs:
             kwargs = {}
             for field in fields(cls):
                 name = field.name
-                # One of these will always be present
-                default = (field.default_factory
-                           if field.default is MISSING else field.default)
+                default = field.default
+                # This will only be True if default is MISSING
+                if field.default_factory is not MISSING:
+                    default = field.default_factory()
                 kwargs[name] = {"default": default, "help": cls_docs[name]}
 
                 # Make note of if the field is optional and get the actual
