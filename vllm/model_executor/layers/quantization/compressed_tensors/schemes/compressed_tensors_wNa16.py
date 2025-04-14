@@ -61,7 +61,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.quant_type = (WNA16_ZP_SUPPORTED_TYPES_MAP[num_bits]
                            if zero_points else
                            WNA16_SUPPORTED_TYPES_MAP[num_bits])
-        self.zero_points = zero_points
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -143,19 +142,22 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         if not partition_scales:
             weight_scale = ChannelQuantScaleParameter(output_dim=0,
                                                       **weight_scale_args)
-            qzeros = PackedColumnParameter(output_dim=0,
-                                           packed_dim=0,
-                                           packed_factor=self.pack_factor,
-                                           **zeros_args)
+
+            if not self.symmetric:
+                qzeros = PackedColumnParameter(output_dim=0,
+                                               packed_dim=0,
+                                               packed_factor=self.pack_factor,
+                                               **zeros_args)
         else:
             weight_scale = GroupQuantScaleParameter(output_dim=0,
                                                     input_dim=1,
                                                     **weight_scale_args)
-            qzeros = PackedvLLMParameter(input_dim=1,
-                                         output_dim=0,
-                                         packed_dim=0,
-                                         packed_factor=self.pack_factor,
-                                         **zeros_args)
+            if not self.symmetric:
+                qzeros = PackedvLLMParameter(input_dim=1,
+                                             output_dim=0,
+                                             packed_dim=0,
+                                             packed_factor=self.pack_factor,
+                                             **zeros_args)
 
         # A 2D array defining the original shape of the weights
         # before packing
@@ -166,7 +168,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
         layer.register_parameter("weight_shape", weight_shape)
-        layer.register_parameter("weight_zero_point", qzeros)
+
+        if not self.symmetric:
+            layer.register_parameter("weight_zero_point", qzeros)
 
         # group index (for activation reordering)
         if self.has_g_idx:
