@@ -106,8 +106,7 @@ curl http://localhost:8000/v1/completions \
 
 ## Dynamically serving LoRA Adapters
 
-In addition to serving LoRA adapters at server startup, the vLLM server supports dynamically configuring LoRA adapters at runtime through dedicated API endpoints and plugins. This feature can be particularly useful when the flexibility
-to change models on-the-fly is needed.
+In addition to serving LoRA adapters at server startup, the vLLM server supports dynamically configuring LoRA adapters at runtime through dedicated API endpoints and plugins. This feature can be particularly useful when the flexibility to change models on-the-fly is needed.
 
 Note: Enabling this feature in production environments is risky as users may participate in model adapter management.
 
