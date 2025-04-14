@@ -92,7 +92,7 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,  # FIXME: implement
+            log_stats=True,  # FIXME: implement
         )
 
         if not multiprocess_mode:
@@ -183,11 +183,20 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
         # Process raw inputs into the request.
-        request = self.processor.process_inputs(request_id, prompt, params,
-                                                arrival_time, lora_request,
-                                                trace_headers,
-                                                prompt_adapter_request,
-                                                priority)
+        num_spec_tokens = 0
+        if self.vllm_config.speculative_config is not None:
+            num_spec_tokens = (
+                self.vllm_config.speculative_config.num_speculative_tokens)
+        request = self.processor.process_inputs(
+            request_id,
+            prompt,
+            params,
+            arrival_time,
+            lora_request,
+            trace_headers,
+            prompt_adapter_request,
+            priority,
+            num_spec_tokens=num_spec_tokens)
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
@@ -223,7 +232,7 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs)
+            outputs.outputs, scheduler_stats=outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)

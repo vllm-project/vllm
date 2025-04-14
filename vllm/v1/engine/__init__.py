@@ -60,6 +60,7 @@ class EngineCoreRequest(
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
+    num_spec_tokens: int
 
 
 class EngineCoreEventType(enum.IntEnum):
