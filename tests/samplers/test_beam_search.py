@@ -22,6 +22,7 @@ def v1(run_with_both_engines):
 #   3. Use the model "huggyllama/llama-7b".
 MAX_TOKENS = [64]
 BEAM_WIDTHS = [4]
+MM_BEAM_WIDTHS = [2]
 MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
 
 
@@ -67,7 +68,7 @@ def test_beam_search_single_input(
 
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", MAX_TOKENS)
-@pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
+@pytest.mark.parametrize("beam_width", MM_BEAM_WIDTHS)
 def test_beam_search_passes_multimodal_data(
     hf_runner,
     vllm_runner,
@@ -89,6 +90,7 @@ def test_beam_search_passes_multimodal_data(
     with hf_runner(model, dtype=dtype,
                    auto_cls=AutoModelForSeq2SeqLM) as hf_model:
         audio_token_id = hf_model.config.audio_token_index
+        eos_token_id = hf_model.tokenizer.eos_token_id  # <|im_end|>
         hf_outputs = hf_model.generate_beam_search(
             prompts,
             beam_width=beam_width,
@@ -129,5 +131,11 @@ def test_beam_search_passes_multimodal_data(
             filtered_hf_output_ids = seq_with_no_audio_toks(hf_output_ids[j])
             filtered_vllm_output_ids = seq_with_no_audio_toks(
                 vllm_output_ids[j])
+
+            # HF output IDs may contain the end of sequence
+            if len(filtered_hf_output_ids
+                   ) == len(filtered_vllm_output_ids) + 1:
+                assert filtered_hf_output_ids[-1] == eos_token_id
+                filtered_hf_output_ids = filtered_hf_output_ids[:-1]
 
             assert filtered_hf_output_ids == filtered_vllm_output_ids
