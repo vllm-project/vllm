@@ -100,25 +100,21 @@ class PreparedKernel:
         more or less redo what CompiledKernel._init_hanles is doing
         (c.f. triton/python/triton/runtime/compiler.py:379)
         """
-        self.run = driver.active.launcher_cls(
-            self.kernel.src, self.kernel.metadata
-        )
+        self.run = driver.active.launcher_cls(self.kernel.src,
+                                              self.kernel.metadata)
         # check once and not again
         self.dev_max_shared = driver.active.utils.get_device_properties(
-            self.device
-        )["max_shared_mem"]
+            self.device)["max_shared_mem"]
         if self.kernel.metadata.shared > self.dev_max_shared:
-            raise OutOfResources(
-                self.metadata.shared, self.dev_max_shared, "shared memory"
-            )
+            raise OutOfResources(self.metadata.shared, self.dev_max_shared,
+                                 "shared memory")
         self.module, self.function, self.n_regs, self.n_spills = (
             driver.active.utils.load_binary(
                 self.kernel.name,
                 self.kernel.kernel,
                 self.kernel.metadata.shared,
                 self.device,
-            )
-        )
+            ))
 
     def __call__(self, *args, **kwargs):
         assert len(args) == 0
@@ -174,10 +170,8 @@ class JitCache(KernelInterface):
         assume_const=None,
     ):
         # we depend on the triton version, right now, 3.0 -- 3.2 are supported
-        assert (
-            int(triton_version.split(".")[0]) == 3
-            and int(triton_version.split(".")[1]) <= 2
-        )
+        assert (int(triton_version.split(".")[0]) == 3
+                and int(triton_version.split(".")[1]) <= 2)
         self.arg_names = arg_names
         self.fn = fn
         self.base_fn = fn
@@ -226,23 +220,19 @@ class JitCache(KernelInterface):
             raise RuntimeError(
                 f"[{__print_name__}] ERROR: check_keys must only contain"
                 "parameters marked as tl.constexpr (non-constants will be "
-                "updated in all cases)."
-            )
+                "updated in all cases).")
         if self.assume_const:
             if any(x in self.assume_const for x in const_arg_names):
                 raise RuntimeError(
                     f"[{__print_name__}] ERROR: assume_const must only contain"
-                    "parameters NOT marked as tl.constexpr."
-                )
+                    "parameters NOT marked as tl.constexpr.")
             update_only_arg_names = [
-                arg_n
-                for arg_n in non_const_arg_names
+                arg_n for arg_n in non_const_arg_names
                 if arg_n not in self.assume_const
             ]
             assume_const_vals_dict = {
                 arg_n: kwargs[arg_n]
-                for arg_n in non_const_arg_names
-                if arg_n in self.assume_const
+                for arg_n in non_const_arg_names if arg_n in self.assume_const
             }
         else:
             update_only_arg_names = non_const_arg_names
@@ -264,9 +254,8 @@ class JitCache(KernelInterface):
 
         device = driver.active.get_current_device()
         stream = driver.active.get_current_stream(device)
-        launch_metadata = kernel.launch_metadata(
-            grid, stream, *non_constexpr_vals
-        )
+        launch_metadata = kernel.launch_metadata(grid, stream,
+                                                 *non_constexpr_vals)
 
         prepared_kernel = PreparedKernel(
             kwargs["grid"],
@@ -302,8 +291,7 @@ class JitCache(KernelInterface):
         if len(args) != 0:
             raise RuntimeError(
                 f"[{__print_name__}] ERROR: The JITCache only supports kwargs,"
-                "len(args) must be 0."
-            )
+                "len(args) must be 0.")
         # assert no config pre-hook
         assert "pre_hook" not in kwargs or kwargs["pre_hook"] is None
 
@@ -315,16 +303,14 @@ class JitCache(KernelInterface):
                     raise RuntimeError(
                         f"[{__print_name__}] type of check_key {key} "
                         f"{type(kwargs[key])} is not one of supported types: "
-                        f"int, bool float."
-                    )
+                        f"int, bool float.")
             prepared_kernel = self._get_prepared_kernel(*args, **kwargs)
             if prepared_kernel.get_key() in self.kernel_cache:
                 logger.debug(
                     "WARNING: Kernel variant already cached, will override "
                     "(cache lock is not locked). "
                     "This could mean that the given check_keys are ambiguous "
-                    "(or the same call was already executed)."
-                )
+                    "(or the same call was already executed).")
             self.kernel_cache[prepared_kernel.get_key()] = prepared_kernel
 
         try:
@@ -344,8 +330,7 @@ class JitCache(KernelInterface):
         if len(args) != 0:
             raise RuntimeError(
                 f"[{__print_name__}] ERROR: The JITCache only supports kwargs, "
-                "len(args) must be 0."
-            )
+                "len(args) must be 0.")
         # assert no config pre-hook
         assert "pre_hook" not in kwargs or kwargs["pre_hook"] is None
 
@@ -353,7 +338,8 @@ class JitCache(KernelInterface):
             kernel_variant = self.kernel_cache[self.cache_index_func(kwargs)]
         except KeyError:
             logger.debug(
-                "Key %s  not in cache, compiling...\n" "Current cache: %s",
+                "Key %s  not in cache, compiling...\n"
+                "Current cache: %s",
                 str(self.cache_index_func(kwargs)),
                 str(list(self.kernel_cache.keys())),
             )
@@ -363,8 +349,7 @@ class JitCache(KernelInterface):
                     raise RuntimeError(
                         f"[{__print_name__}] type of check_key {key} "
                         f"{type(kwargs[key])} is not one of supported types: "
-                        f"int, bool float."
-                    )
+                        f"int, bool float.") from None
             kernel_variant = self._get_prepared_kernel(*args, **kwargs)
             self.kernel_cache[kernel_variant.get_key()] = kernel_variant
 
