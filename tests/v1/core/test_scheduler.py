@@ -66,7 +66,6 @@ def create_scheduler(
         cache_dtype="auto",
         **kwargs_cache,
     )
-    cache_config.num_gpu_blocks = 10000
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
@@ -80,6 +79,7 @@ def create_scheduler(
                              FullAttentionSpec(16, 1, 1, torch.float32, False))
         ],
     )
+    cache_config.num_gpu_blocks = 10000
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,

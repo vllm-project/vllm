@@ -21,7 +21,7 @@ from vllm.sequence import IntermediateTensors
 logger = init_logger(__name__)
 
 
-class KVConnectorAgent:
+class KVTransferAgent:
     """
     A class designated for distributed KV transfer
     
