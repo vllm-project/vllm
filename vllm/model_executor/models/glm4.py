@@ -111,7 +111,6 @@ class Glm4Attention(nn.Module):
             rope_scaling=rope_scaling,
             partial_rotary_factor=partial_rotary_factor,
             is_neox_style=False,
-
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -198,11 +197,11 @@ class Glm4DecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
-
         hidden_states = self.post_self_attn_layernorm(hidden_states)
 
         # Fully Connected
-        hidden_state, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_state, residual = self.post_attention_layernorm(
+            hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_mlp_layernorm(hidden_states)
 
