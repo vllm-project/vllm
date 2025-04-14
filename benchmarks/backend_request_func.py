@@ -438,11 +438,11 @@ async def async_request_openai_chat_completions(
     return output
 
 
-async def async_request_openai_audio_transcription(
+async def async_request_openai_audio(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
-    # Lazy import without PlaceholderModuler to avoid vllm dep.
+    # Lazy import without PlaceholderModule to avoid vllm dep.
     import soundfile
     api_url = request_func_input.api_url
     assert api_url.endswith(
@@ -599,7 +599,7 @@ ASYNC_REQUEST_FUNCS = {
     "deepspeed-mii": async_request_deepspeed_mii,
     "openai": async_request_openai_completions,
     "openai-chat": async_request_openai_chat_completions,
-    "openai-audio": async_request_openai_audio_transcription,
+    "openai-audio": async_request_openai_audio,
     "tensorrt-llm": async_request_trt_llm,
     "scalellm": async_request_openai_completions,
     "sglang": async_request_openai_completions,
