@@ -429,8 +429,9 @@ class OpenAIServing:
 
             if should_parse_tools:
                 if not isinstance(request, ChatCompletionRequest):
-                    msg = "Tool usage is only supported for Chat Completions API"  #noqa: E501
-                    raise NotImplementedError(msg)
+                    raise NotImplementedError(
+                        "Tool usage is only supported for Chat Completions API"
+                    )
 
                 request = tool_parser(
                     tokenizer).adjust_request(  # type: ignore
