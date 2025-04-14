@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import dataclasses
 import gc
 import importlib
 import inspect
@@ -30,7 +31,7 @@ from starlette.routing import Mount
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
@@ -104,6 +105,20 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 _running_tasks: set[asyncio.Task] = set()
 
 
+# Store global states
+@dataclasses.dataclass
+class _GlobalState:
+    vllmconfig: VllmConfig
+
+
+_global_state: Optional[_GlobalState] = None
+
+
+def set_global_state(global_state: _GlobalState):
+    global _global_state
+    _global_state = global_state
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -165,6 +180,7 @@ async def build_async_engine_client_from_engine_args(
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
+    set_global_state(_GlobalState(vllmconfig=vllm_config))
     # V1 AsyncLLM.
     if envs.VLLM_USE_V1:
         if disable_frontend_multiprocessing:
@@ -327,6 +343,7 @@ def mount_metrics(app: FastAPI):
                 "/load",
                 "/ping",
                 "/version",
+                "/server_info",
             ],
             registry=registry,
         ).add().instrument(app).expose(app)
@@ -460,6 +477,15 @@ async def show_available_models(raw_request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
+
+
+@router.get("/server_info")
+async def show_server_info():
+    if _global_state is None:
+        server_info = {"vllm_config": "Vllm Config not available"}
+    else:
+        server_info = {"vllm_config": str(_global_state.vllmconfig)}
+    return JSONResponse(content=server_info)
 
 
 @router.post("/v1/chat/completions",
