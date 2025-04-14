@@ -21,10 +21,10 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerPoolConfig, VllmConfig,
-                         get_attr_docs)
+                         ParallelConfig, PoolerConfig, PoolType,
+                         PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
+                         VllmConfig, get_attr_docs)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -178,12 +178,14 @@ class EngineArgs:
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    tokenizer_pool_size: int = 0
+    tokenizer_pool_size: int = TokenizerPoolConfig.pool_size
     # Note: Specifying a tokenizer pool by passing a class
     # is intended for expert use only. The API may change without
     # notice.
-    tokenizer_pool_type: Union[str, Type["BaseTokenizerGroup"]] = "ray"
-    tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
+    tokenizer_pool_type: Union[PoolType, Type["BaseTokenizerGroup"]] = \
+        TokenizerPoolConfig.pool_type
+    tokenizer_pool_extra_config: Optional[dict[str, Any]] = \
+        TokenizerPoolConfig.extra_config
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
@@ -674,25 +676,19 @@ class EngineArgs:
                             'Additionally for encoder-decoder models, if the '
                             'sequence length of the encoder input is larger '
                             'than this, we fall back to the eager mode.')
-        parser.add_argument('--tokenizer-pool-size',
-                            type=int,
-                            default=EngineArgs.tokenizer_pool_size,
-                            help='Size of tokenizer pool to use for '
-                            'asynchronous tokenization. If 0, will '
-                            'use synchronous tokenization.')
-        parser.add_argument('--tokenizer-pool-type',
-                            type=str,
-                            default=EngineArgs.tokenizer_pool_type,
-                            help='Type of tokenizer pool to use for '
-                            'asynchronous tokenization. Ignored '
-                            'if tokenizer_pool_size is 0.')
-        parser.add_argument('--tokenizer-pool-extra-config',
-                            type=optional_str,
-                            default=EngineArgs.tokenizer_pool_extra_config,
-                            help='Extra config for tokenizer pool. '
-                            'This should be a JSON string that will be '
-                            'parsed into a dictionary. Ignored if '
-                            'tokenizer_pool_size is 0.')
+
+        # Tokenizer arguments
+        tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
+        tokenizer_group = parser.add_argument_group(
+            title="TokenizerPoolConfig",
+            description=TokenizerPoolConfig.__doc__,
+        )
+        tokenizer_group.add_argument('--tokenizer-pool-size',
+                                     **tokenizer_kwargs["pool_size"])
+        tokenizer_group.add_argument('--tokenizer-pool-type',
+                                     **tokenizer_kwargs["pool_type"])
+        tokenizer_group.add_argument('--tokenizer-pool-extra-config',
+                                     **tokenizer_kwargs["extra_config"])
 
         # Multimodal related configs
         parser.add_argument(

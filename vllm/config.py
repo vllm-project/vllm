@@ -1356,20 +1356,24 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. %s", msg)
 
 
+PoolType = Literal["ray"]
+
+
+@config
 @dataclass
 class TokenizerPoolConfig:
-    """Configuration for the tokenizer pool.
+    """Configuration for the tokenizer pool."""
 
-    Args:
-        pool_size: Number of tokenizer workers in the pool.
-        pool_type: Type of the pool.
-        extra_config: Additional config for the pool.
-            The way the config will be used depends on the
-            pool type.
-    """
-    pool_size: int
-    pool_type: Union[str, type["BaseTokenizerGroup"]]
-    extra_config: dict
+    pool_size: int = 0
+    """Number of tokenizer workers in the pool to use for asynchronous
+    tokenization. If 0, will use synchronous tokenization."""
+    pool_type: Union[PoolType, type["BaseTokenizerGroup"]] = "ray"
+    """Type of tokenizer pool to use for asynchronous tokenization. Ignored if
+    tokenizer_pool_size is 0."""
+    extra_config: Optional[dict] = None
+    """Additional config for the pool. The way the config will be used depends
+    on the pool type. This should be a JSON string that will be parsed into a
+    dictionary. Ignored if tokenizer_pool_size is 0."""
 
     def compute_hash(self) -> str:
         """
@@ -1400,7 +1404,7 @@ class TokenizerPoolConfig:
     @classmethod
     def create_config(
         cls, tokenizer_pool_size: int,
-        tokenizer_pool_type: Union[str, type["BaseTokenizerGroup"]],
+        tokenizer_pool_type: Union[PoolType, type["BaseTokenizerGroup"]],
         tokenizer_pool_extra_config: Optional[Union[str, dict]]
     ) -> Optional["TokenizerPoolConfig"]:
         """Create a TokenizerPoolConfig from the given parameters.
