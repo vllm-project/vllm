@@ -40,7 +40,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from .minimax_text_01 import MiniMaxText01ForCausalLM
 from vllm.transformers_utils.configs import MiniMaxText01Config, MiniMaxVL01Config
 from .llava import LlavaDummyInputsBuilder
-from .llava_next import LlavaNextMultiModalProcessor, LlavaNextProcessingInfo
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 from PIL import Image
@@ -395,8 +394,6 @@ LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
 
 class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
     image_grid_pinpoints: Final[list[list[int]]]
-
-
 class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
 
     def get_hf_config(self) -> LlavaNextLikeConfig:
@@ -407,7 +404,7 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
         return {"image": 1}
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
         if hf_processor.patch_size is None:
@@ -525,7 +522,7 @@ class MiniMaxVL01MultiModalProcessor(
             image_sizes=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
-
+        
     def _process_image_input(
         self,
         image_input: LlavaNextImageInputs,
@@ -707,9 +704,9 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
     """The MiniMaxVL01 model which consists of a vision backbone and a language model.""",
     MINIMAX_VL_01_START_DOCSTRING,
 )
-@MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor, 
-                                        info=LlavaNextProcessingInfo, 
-                                        dummy_inputs=LlavaDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor, 
+                                        info=MiniMaxVL01ProcessingInfo, 
+                                        dummy_inputs=MiniMaxVL01DummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
