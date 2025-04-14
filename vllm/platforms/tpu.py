@@ -7,7 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, SamplingType
 
 from .interface import Platform, PlatformEnum, _Backend
 
@@ -120,6 +120,13 @@ class TpuPlatform(Platform):
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")
 
+        if scheduler_config.is_multimodal_model and not \
+            scheduler_config.disable_chunked_mm_input:
+            logger.warning("TPU does not support running Multimodal models"\
+            " without setting `--disable_chunked_mm_input`. " \
+            "Forcing --disable_chunked_mm_input.")
+            scheduler_config.disable_chunked_mm_input = True
+
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on TPU.")
@@ -145,7 +152,10 @@ class TpuPlatform(Platform):
         params: Union[SamplingParams, PoolingParams],
     ) -> None:
         """Raises if this request is unsupported on this platform"""
-        if isinstance(params,
-                      SamplingParams) and params.guided_decoding is not None:
-            raise ValueError("Structured output is not supported on "
-                             f"{cls.device_name}.")
+        if isinstance(params, SamplingParams):
+            if params.guided_decoding is not None:
+                raise ValueError("Structured output is not supported on "
+                                 f"{cls.device_name}.")
+            if params.sampling_type == SamplingType.RANDOM_SEED:
+                raise ValueError(
+                    "Torch XLA does not support per-request seed.")
