@@ -269,8 +269,8 @@ class KVCacheManager:
         num_new_blocks = self._get_num_new_blocks(num_tokens, req_blocks,
                                                   num_computed_tokens,
                                                   new_computed_blocks)
-
-        if num_new_blocks <= 0:
+        if num_new_blocks is None:
+            # Cannot allocate new blocks
             return None
 
         # Touch the computed blocks to make sure they won't be evicted.
@@ -303,7 +303,7 @@ class KVCacheManager:
                 # [..., max_num_blocks_per_req].
                 self.max_num_blocks_per_req - len(req_blocks),
             )
-            assert num_new_blocks > 0
+            assert num_new_blocks is not None and num_new_blocks > 0
 
             # Concatenate the computed block IDs and the new block IDs.
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
@@ -376,11 +376,15 @@ class KVCacheManager:
         num_new_blocks = self._get_num_new_blocks(num_tokens, req_blocks,
                                                   num_computed_tokens,
                                                   computed_blocks)
-        if num_new_blocks <= 0:
+        if num_new_blocks is None:
             # TODO(rob): handle case with not enough external KVs in FUP.
             raise NotImplementedError(
                 "TODO: handle preemption with external KV cache")
             return []
+
+        if num_new_blocks <= 0:
+            # No new block is needed.
+            new_blocks = []
 
         assert num_new_blocks <= self.block_pool.get_num_free_blocks()
         num_existing_blocks = len(req_blocks) + len(computed_blocks)
@@ -401,7 +405,7 @@ class KVCacheManager:
         req_blocks: list[KVCacheBlock],
         num_computed_tokens: int,
         new_computed_blocks: list[KVCacheBlock],
-    ) -> int:
+    ) -> Optional[int]:
         """
         Get number of new blocks to allocate for the request.
 
@@ -413,7 +417,7 @@ class KVCacheManager:
                 including req_blocks and new_computed_blocks.
             new_computed_blocks: List of new computed blocks from prefix cache.
         Returns:
-            If not enough free blocks: return 0
+            If not enough free blocks: returns None.
             Else: return the number of incremental blocks to allocate.
         """
 
@@ -429,10 +433,10 @@ class KVCacheManager:
         num_evictable_computed_blocks = sum(1 for blk in new_computed_blocks
                                             if blk.ref_cnt == 0)
 
-        # Return 0 if not enough blocks.
+        # Return None if not enough blocks for the request.
         if (num_new_blocks > self.block_pool.get_num_free_blocks() -
                 num_evictable_computed_blocks):
-            return 0
+            return None
         return num_new_blocks
 
     def free(self, request: Request) -> None:
