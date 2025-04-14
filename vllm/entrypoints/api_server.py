@@ -86,9 +86,7 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
             lora_int_id=0,
             lora_path=lora_path_req
         )
-
     assert engine is not None
-
     results_generator = engine.generate(prompt, sampling_params, request_id, lora_request=lora_request)
 
     # Streaming case
