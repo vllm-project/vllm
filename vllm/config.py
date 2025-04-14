@@ -2025,9 +2025,19 @@ class SchedulerConfig:
         return self.num_scheduler_steps > 1
 
 
+Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
+
+
+@config
+@dataclass
 class DeviceConfig:
-    device: Optional[torch.device]
-    device_type: str
+    """Configuration for the device to use for vLLM execution."""
+
+    device: Union[Device, torch.device] = "auto"
+    """Device type for vLLM execution."""
+    device_type: str = field(init=False)
+    """Device type from the current platform. This is set in
+    `__post_init__`."""
 
     def compute_hash(self) -> str:
         """
@@ -2049,8 +2059,8 @@ class DeviceConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __init__(self, device: str = "auto") -> None:
-        if device == "auto":
+    def __post_init__(self):
+        if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
@@ -2061,7 +2071,7 @@ class DeviceConfig:
                     "to turn on verbose logging to help debug the issue.")
         else:
             # Device type is assigned explicitly
-            self.device_type = device
+            self.device_type = self.device
 
         # Some device types require processing inputs on CPU
         if self.device_type in ["neuron"]:

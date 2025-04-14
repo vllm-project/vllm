@@ -17,7 +17,7 @@ from typing_extensions import TypeIs
 import vllm.envs as envs
 from vllm import version
 from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
-                         DecodingConfig, DeviceConfig,
+                         DecodingConfig, Device, DeviceConfig,
                          DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, ObservabilityConfig,
@@ -43,16 +43,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 ALLOWED_DETAILED_TRACE_MODULES = ["model", "worker", "all"]
-
-DEVICE_OPTIONS = [
-    "auto",
-    "cuda",
-    "neuron",
-    "cpu",
-    "tpu",
-    "xpu",
-    "hpu",
-]
 
 # object is used to allow for special typing forms
 T = TypeVar("T")
@@ -201,7 +191,7 @@ class EngineArgs:
     long_lora_scaling_factors: Optional[Tuple[float]] = None
     lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
-    device: str = 'auto'
+    device: Device = DeviceConfig.device
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
     multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
@@ -780,11 +770,15 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_prompt_adapter_token,
                             help='Max number of PromptAdapters tokens')
-        parser.add_argument("--device",
-                            type=str,
-                            default=EngineArgs.device,
-                            choices=DEVICE_OPTIONS,
-                            help='Device type for vLLM execution.')
+
+        # Device arguments
+        device_kwargs = get_kwargs(DeviceConfig)
+        device_group = parser.add_argument_group(
+            title="DeviceConfig",
+            description=DeviceConfig.__doc__,
+        )
+        device_group.add_argument("--device", **device_kwargs["device"])
+
         parser.add_argument('--num-scheduler-steps',
                             type=int,
                             default=1,
