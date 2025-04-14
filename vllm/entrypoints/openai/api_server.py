@@ -104,16 +104,20 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: set[asyncio.Task] = set()
 
+
 # Store global states
 @dataclasses.dataclass
 class _GlobalState:
     vllmconfig: VllmConfig
 
+
 _global_state: Optional[_GlobalState] = None
+
 
 def set_global_state(global_state: _GlobalState):
     global _global_state
     _global_state = global_state
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -176,11 +180,7 @@ async def build_async_engine_client_from_engine_args(
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    set_global_state(
-        _GlobalState(
-            vllmconfig=vllm_config
-        )
-    ) 
+    set_global_state(_GlobalState(vllmconfig=vllm_config))
     # V1 AsyncLLM.
     if envs.VLLM_USE_V1:
         if disable_frontend_multiprocessing:
