@@ -29,8 +29,6 @@ void reshape_and_cache_flash(torch::Tensor& key, torch::Tensor& value,
                              torch::Tensor& value_cache,
                              torch::Tensor& slot_mapping,
                              const std::string& kv_cache_dtype,
-			     int64_t block_size,
-			     int64_t page_stride, int64_t head_stride,
                              torch::Tensor& k_scale, torch::Tensor& v_scale);
 
 void concat_and_cache_mla(torch::Tensor& kv_c, torch::Tensor& k_pe,
