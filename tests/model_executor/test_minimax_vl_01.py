@@ -12,7 +12,7 @@ from vllm.multimodal.inputs import MultiModalFieldConfig
 from transformers import BatchFeature
 from vllm.transformers_utils.configs.configuration_minimax_text_01 import MiniMaxText01Config
 from vllm.transformers_utils.configs.configuration_minimax_vl_01 import MiniMaxVL01Config as HfMiniMaxVL01Config
-from vllm.multimodal.processing import ProcessingContext
+from vllm.inputs import InputProcessingContext
 
 def test_minimax_vl_01_basic_flow():
     """测试MiniMaxVL01模型的基本流程"""
@@ -66,7 +66,7 @@ def test_minimax_vl_01_basic_flow():
     model = MiniMaxVL01ForConditionalGeneration(vllm_config=vllm_config)
     
     # 3. 创建处理信息
-    ctx = ProcessingContext()
+    ctx = InputProcessingContext()
     processing_info = MiniMaxVL01ProcessingInfo(ctx)
     
     # 4. 创建虚拟输入构建器
@@ -113,7 +113,7 @@ def test_minimax_vl_01_basic_flow():
 def test_minimax_vl_01_processor():
     """测试MiniMaxVL01处理器的基本功能"""
     # 1. 创建处理信息
-    ctx = ProcessingContext()
+    ctx = InputProcessingContext()
     processing_info = MiniMaxVL01ProcessingInfo(ctx)
     
     # 2. 测试获取配置
