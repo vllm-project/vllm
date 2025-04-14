@@ -9,6 +9,7 @@ change `vllm/entrypoints/openai/api_server.py` instead.
 import asyncio
 import json
 import ssl
+import os
 from argparse import Namespace
 from collections.abc import AsyncGenerator
 from typing import Any, Optional
@@ -25,12 +26,13 @@ from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
-
+from vllm.lora.request import LoRARequest
 logger = init_logger("vllm.entrypoints.api_server")
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
 engine = None
+lora_path = None
 
 
 @app.get("/health")
@@ -56,11 +58,23 @@ async def generate(request: Request) -> Response:
 async def _generate(request_dict: dict, raw_request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     stream = request_dict.pop("stream", False)
+    lora_path_req = request_dict.pop("lora_path", lora_path)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
+    lora_request = None
+    if lora_path_req:
+        lora_request = LoRARequest(
+            lora_name="lora_adaptor",
+            lora_int_id=0,
+            lora_path=lora_path_req
+        )
+
     assert engine is not None
-    results_generator = engine.generate(prompt, sampling_params, request_id)
+    if lora_request:
+        assert engine.vllm_config.lora_config is not None
+
+    results_generator = engine.generate(prompt, sampling_params, request_id, lora_request=lora_request)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -148,6 +162,7 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser()
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=parser.check_port, default=8000)
+    parser.add_argument("--lora-path", type=str, default=None, help="Path to the LoRA adapter")
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
     parser.add_argument("--ssl-ca-certs",
