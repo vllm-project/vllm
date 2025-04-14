@@ -302,55 +302,6 @@ class KVCacheManager:
             request.request_id] = num_full_blocks_after_append
         return new_blocks
 
-    def _cache_blocks(
-        self,
-        request: Request,
-        req_blocks: list[KVCacheBlock],
-        num_computed_tokens: int,
-        num_tokens: int,
-        new_computed_blocks: list[KVCacheBlock],
-    ):
-        """
-        Cache blocks in the Block Pool.
-
-        Args:
-            request: The request to cache the blocks.
-            req_blocks: All blocks in the request.
-            block_hashes: Block hashes of the blocks in the request. Note that
-            this list may be shorter than the blocks list. In this case the
-            missed block hash will be computed in this function.
-            num_cached_blocks: The number of blocks that are already cached.
-            num_full_blocks: The number of blocks that are full and should
-                be cached after this function.
-            block_size: Number of tokens in each block.
-            hash_fn: The hash function to use for block hashes.
-        Returns:
-            If not enough free blocks: returns None.
-            Else: return the number of incremental blocks to allocate.
-        """
-        # Use `new_computed_blocks` for a new request, and `num_cached_block`
-        # for a running request.
-        num_cached_blocks = self.num_cached_block.get(request.request_id,
-                                                      len(new_computed_blocks))
-        # Speculated tokens might be rejected in the future, so we do
-        # not cache any speculated tokens. We only cache blocks with
-        # generated (accepted) tokens.
-        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
-            request.spec_token_ids)) // self.block_size
-
-        self.block_pool.cache_full_blocks(
-            request=request,
-            blocks=req_blocks,
-            block_hashes=self.req_to_block_hashes[request.request_id],
-            num_cached_blocks=num_cached_blocks,
-            num_full_blocks=num_full_blocks_after_append,
-            block_size=self.block_size,
-            hash_fn=self.caching_hash_fn,
-        )
-
-        self.num_cached_block[
-            request.request_id] = num_full_blocks_after_append
-
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         When caching is enabled, we free the blocks in reverse order so that
