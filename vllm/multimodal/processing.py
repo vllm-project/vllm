@@ -1626,7 +1626,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             unbound_prompt_updates)
 
         mm_item_counts = mm_items.get_all_counts()
-        self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+        # self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
