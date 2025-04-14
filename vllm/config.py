@@ -583,6 +583,15 @@ class ModelConfig:
                     if getattr(user_config, k) is None:
                         setattr(user_config, k, v)
 
+            if self.is_matryoshka:
+                if user_config.normalize is None:
+                    user_config.normalize = True
+                elif not user_config.normalize:
+                    raise ValueError(
+                        "`normalize` must be enabled (set to True) "
+                        "for models that are compatible with "
+                        "Matryoshka Representation.")
+
             return user_config
 
         return None
@@ -2658,14 +2667,20 @@ class MultiModalConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
+    def get_default_limit_per_prompt(self) -> int:
+        """
+        Return the default number of input items allowed per prompt
+        for any modality if not specified by the user.
+        """
+        return 999 if envs.VLLM_USE_V1 else 1
+
     def get_limit_per_prompt(self, modality: str) -> int:
         """
         Get the maximum number of input items allowed per prompt
         for the given modality.
-
-        If not set by the user, this defaults to `1`.
         """
-        return self.limit_per_prompt.get(modality, 1)
+        default = self.get_default_limit_per_prompt()
+        return self.limit_per_prompt.get(modality, default)
 
     # TODO: Add configs to init vision tower or not.
 
