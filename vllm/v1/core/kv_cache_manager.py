@@ -201,6 +201,7 @@ class KVCacheManager:
             # Append to the new_computed_blocks.
             if allocated_blocks:
                 computed_blocks = computed_blocks + allocated_blocks
+            assert allocated_blocks is not None
             num_allocated_blocks = len(allocated_blocks)
 
         # Update KVConnector state:
@@ -266,9 +267,12 @@ class KVCacheManager:
                                len(new_computed_blocks) * self.block_size)
 
         # Get the number of incremental blocks to allocate.
-        num_new_blocks = self._get_num_new_blocks(num_tokens, req_blocks,
-                                                  num_computed_tokens,
-                                                  new_computed_blocks)
+        num_new_blocks = self._get_num_new_blocks(
+            num_tokens,
+            req_blocks,
+            num_computed_tokens,
+            new_computed_blocks,
+            num_lookahead_tokens=num_lookahead_tokens)
         if num_new_blocks is None:
             # Cannot allocate new blocks
             return None
@@ -342,8 +346,8 @@ class KVCacheManager:
         request: Request,
         num_tokens: int,
         computed_blocks: Optional[list[KVCacheBlock]] = None,
-    ) -> list[KVCacheBlock]:
-        """Allocate for external blocks and append to new_computed_block:
+    ) -> Optional[list[KVCacheBlock]]:
+        """Allocate for external blocks and append to new_computed_block
 
         Args:
             request: The request to allocate slots.
@@ -363,9 +367,10 @@ class KVCacheManager:
 
         computed_blocks = computed_blocks or []
 
-        # NOTE(rob): this will returns > [] if there is a preemption
-        # TODO(rob): handle case of preemption w/ remote KV as FUP.
+        # NOTE(rob): req_to_blocks[req_id] will have items if the
+        # request is a resumed preemption.
         req_blocks = self.req_to_blocks[request.request_id]
+        # TODO(rob): handle case of preemption w/ remote KV as FUP.
         assert len(req_blocks) == 0
 
         # The number of computed tokens is the number of computed tokens plus
@@ -378,22 +383,20 @@ class KVCacheManager:
                                                   num_computed_tokens,
                                                   computed_blocks)
         if num_new_blocks is None:
-            # TODO(rob): handle case with not enough external KVs in FUP.
-            raise NotImplementedError(
-                "TODO: handle preemption with external KV cache")
-            return []
+            # Cannot allocate new blocks
+            return None
 
         if num_new_blocks <= 0:
             # No new block is needed.
             new_blocks = []
+        else:
+            assert num_new_blocks <= self.block_pool.get_num_free_blocks()
+            num_existing_blocks = len(req_blocks) + len(computed_blocks)
+            assert (num_new_blocks
+                    <= self.max_num_blocks_per_req - num_existing_blocks)
 
-        assert num_new_blocks <= self.block_pool.get_num_free_blocks()
-        num_existing_blocks = len(req_blocks) + len(computed_blocks)
-        assert (num_new_blocks
-                <= self.max_num_blocks_per_req - num_existing_blocks)
-
-        # Return the new blocks.
-        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+            # Get the new blocks.
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
 
         # TODO(rob): need to hash the blocks here. The current impl
         # is broken without this.
@@ -406,6 +409,7 @@ class KVCacheManager:
         req_blocks: list[KVCacheBlock],
         num_computed_tokens: int,
         new_computed_blocks: list[KVCacheBlock],
+        num_lookahead_tokens: int = 0,
     ) -> Optional[int]:
         """
         Get number of new blocks to allocate for the request.
@@ -413,18 +417,22 @@ class KVCacheManager:
         Args:
             num_tokens: The number of tokens to allocate. Note that this does
                 not include the tokens that have already been computed.
-            req_blocks: The blocks corresponding to this request.
+            reqblocks: The blocks corresponding to this request.
             num_computed_tokens: The number of computed tokens for this request,
                 including req_blocks and new_computed_blocks.
             new_computed_blocks: List of new computed blocks from prefix cache.
+            num_lookahead_tokens: The number of speculative tokens to allocate.
+                This is used by spec decode proposers with kv-cache such 
+                as eagle.
         Returns:
             If not enough free blocks: returns None.
             Else: return the number of incremental blocks to allocate.
         """
 
         # Allocate blocks for the tokens beyond the prefix cache hit.
-        num_required_blocks = cdiv(num_computed_tokens + num_tokens,
-                                   self.block_size)
+        num_required_blocks = cdiv(
+            num_computed_tokens + num_tokens + num_lookahead_tokens,
+            self.block_size)
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
 
@@ -439,6 +447,55 @@ class KVCacheManager:
                 num_evictable_computed_blocks):
             return None
         return num_new_blocks
+
+    def _cache_blocks(
+        self,
+        request: Request,
+        req_blocks: list[KVCacheBlock],
+        num_computed_tokens: int,
+        num_tokens: int,
+        new_computed_blocks: list[KVCacheBlock],
+    ):
+        """
+        Cache blocks in the Block Pool.
+
+        Args:
+            request: The request to cache the blocks.
+            req_blocks: All blocks in the request.
+            block_hashes: Block hashes of the blocks in the request. Note that
+            this list may be shorter than the blocks list. In this case the
+            missed block hash will be computed in this function.
+            num_cached_blocks: The number of blocks that are already cached.
+            num_full_blocks: The number of blocks that are full and should
+                be cached after this function.
+            block_size: Number of tokens in each block.
+            hash_fn: The hash function to use for block hashes.
+        Returns:
+            If not enough free blocks: returns None.
+            Else: return the number of incremental blocks to allocate.
+        """
+        # Use `new_computed_blocks` for a new request, and `num_cached_block`
+        # for a running request.
+        num_cached_blocks = self.num_cached_block.get(request.request_id,
+                                                      len(new_computed_blocks))
+        # Speculated tokens might be rejected in the future, so we do
+        # not cache any speculated tokens. We only cache blocks with
+        # generated (accepted) tokens.
+        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
+            request.spec_token_ids)) // self.block_size
+
+        self.block_pool.cache_full_blocks(
+            request=request,
+            blocks=req_blocks,
+            block_hashes=self.req_to_block_hashes[request.request_id],
+            num_cached_blocks=num_cached_blocks,
+            num_full_blocks=num_full_blocks_after_append,
+            block_size=self.block_size,
+            hash_fn=self.caching_hash_fn,
+        )
+
+        self.num_cached_block[
+            request.request_id] = num_full_blocks_after_append
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
