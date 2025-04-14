@@ -63,7 +63,6 @@ class KVConnectorAgent:
             hidden_or_intermediate_states)
 
     def close(self) -> None:
-
         self.connector.close()
 
     def recv_kv_caches_and_hidden_states(
