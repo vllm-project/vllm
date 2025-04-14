@@ -1558,7 +1558,8 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
-    custom_all_reduce_max_size: int = CUSTOM_ALL_REDUCE_DEFAULT_MAX_SIZE
+    custom_all_reduce_max_size: Optional[
+        int] = CUSTOM_ALL_REDUCE_DEFAULT_MAX_SIZE
     """Maximal input buffer size, custom all reduce works with. 
     If the buffer size is larger than this,
     it will fall back to NCCL/RCCL."""

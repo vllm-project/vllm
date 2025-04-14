@@ -178,7 +178,8 @@ class EngineArgs:
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    custom_all_reduce_max_size: int = ParallelConfig.custom_all_reduce_max_size
+    custom_all_reduce_max_size: Optional[
+        int] = ParallelConfig.custom_all_reduce_max_size
     tokenizer_pool_size: int = 0
     # Note: Specifying a tokenizer pool by passing a class
     # is intended for expert use only. The API may change without
