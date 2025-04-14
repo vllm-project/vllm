@@ -192,7 +192,7 @@ class KVCacheManager:
 
         # If cache hit, allocate slots for external KVs.
         if num_tokens_needed > 0:
-            allocated_blocks = self._allocate_slots_for_external(
+            allocated_blocks = self._allocate_slots_for_connector(
                 request=request,
                 num_tokens=num_tokens_needed,
                 computed_blocks=computed_blocks,
@@ -336,7 +336,7 @@ class KVCacheManager:
             request.request_id] = num_full_blocks_after_append
         return new_blocks
 
-    def _allocate_slots_for_external(
+    def _allocate_slots_for_connector(
         self,
         request: Request,
         num_tokens: int,
