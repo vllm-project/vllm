@@ -119,18 +119,32 @@ class StructuredOutputManager:
         # position in the batch. Resize the bitmask down to the size of
         # the batch.
         bitmask_tensor = self._grammar_bitmask
+        # Reset the relevant part of the bitmask before filling
+        if batch_len > 0:
+            bitmask_tensor[:batch_len].fill_(-1)
+
         for req_id, batch_index in structured_output_request_ids.items():
-            request = requests[req_id].structured_output_request
-            assert request is not None and request.grammar is not None
-            if not request.grammar.is_terminated():
-                request.grammar.fill_bitmask(bitmask_tensor, batch_index)
-        if batch_len < self._grammar_bitmask.shape[0]:
-            bitmask_tensor = self._grammar_bitmask[:batch_len]
+            full_request = requests[req_id]
+            so_request = full_request.structured_output_request
+            assert so_request is not None and so_request.grammar is not None
+
+            apply_bitmask = (self.reasoner is None
+                             or full_request.reasoning_ended
+                             or self.reasoner.is_reasoning_end(
+                                 full_request.all_token_ids))
+
+            if apply_bitmask and not so_request.grammar.is_terminated():
+                so_request.grammar.fill_bitmask(bitmask_tensor, batch_index)
+
+        if batch_len < bitmask_tensor.shape[0]:
+            final_bitmask_tensor = bitmask_tensor[:batch_len]
+        else:
+            final_bitmask_tensor = bitmask_tensor
 
         # After finishing with the xgrammar operations, we convert to
         # np.ndarray, because that is much more efficient for serialization
         # and deserialization when sending this to the GPU workers.
-        return bitmask_tensor.numpy()
+        return final_bitmask_tensor.numpy()
 
     def clear_backend(self) -> None:
         if self.backend is not None:

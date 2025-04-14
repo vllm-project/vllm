@@ -16,14 +16,37 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
-PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
-     "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance:disable-any-whitespace",
-     "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar:disable-any-whitespace",
-     "mistral"),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar:disable-any-whitespace", "auto"),
+PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER = [
+    (
+        "mistralai/Ministral-8B-Instruct-2410",
+        "xgrammar:disable-any-whitespace",
+        "auto",
+        None,
+    ),
+    (
+        "mistralai/Ministral-8B-Instruct-2410",
+        "guidance:disable-any-whitespace",
+        "auto",
+        None,
+    ),
+    (
+        "mistralai/Ministral-8B-Instruct-2410",
+        "xgrammar:disable-any-whitespace",
+        "mistral",
+        None,
+    ),
+    (
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        "xgrammar:disable-any-whitespace",
+        "auto",
+        None,
+    ),
+    (
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        "xgrammar:disable-any-whitespace",
+        "auto",
+        "deepseek_r1",
+    ),
     #FIXME: This test is flaky on CI thus disabled
     #("Qwen/Qwen2.5-1.5B-Instruct", "guidance:disable-any-whitespace", "auto"),
 ]
@@ -48,8 +71,9 @@ class CarDescription(BaseModel):
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
-                         PARAMS_MODELS_BACKENDS_TOKENIZER_MODE)
+@pytest.mark.parametrize(
+    "model_name, guided_decoding_backend, tokenizer_mode, reasoning_parser",
+    PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER)
 def test_structured_output(
     monkeypatch: pytest.MonkeyPatch,
     sample_json_schema: dict[str, Any],
@@ -60,6 +84,7 @@ def test_structured_output(
     sample_guided_choice: str,
     guided_decoding_backend: str,
     tokenizer_mode: str,
+    reasoning_parser: str | None,
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
@@ -73,7 +98,9 @@ def test_structured_output(
               enforce_eager=enforce_eager,
               max_model_len=1024,
               guided_decoding_backend=guided_decoding_backend,
-              tokenizer_mode=tokenizer_mode)
+              tokenizer_mode=tokenizer_mode,
+              enable_reasoning=reasoning_parser is not None,
+              reasoning_parser=reasoning_parser)
 
     #
     # Test 1: Generate JSON output based on a provided schema
@@ -367,6 +394,40 @@ def test_structured_output(
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=json_schema)
+
+    #
+    # Test 11: Generate structured output with reasoning step
+    #
+    if reasoning_parser is not None:
+        reasoning_prompt = "Solve the following math problem step-by-step, then provide the final answer as JSON object with a single key 'result'. Problem: What is 5 * 8 + 2?"  # noqa: E501
+        reasoning_schema = {
+            "type": "object",
+            "properties": {
+                "result": {
+                    "type": "integer"
+                }
+            },
+            "required": ["result"]
+        }
+
+        sampling_params = SamplingParams(
+            temperature=0.1,  # Low temp for deterministic reasoning
+            max_tokens=200,
+            guided_decoding=GuidedDecodingParams(json=reasoning_schema))
+        outputs = llm.generate(prompts=[reasoning_prompt],
+                               sampling_params=sampling_params,
+                               use_tqdm=True)
+
+        assert outputs is not None
+        output = outputs[0]
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
 
 @pytest.mark.skip_global_cleanup

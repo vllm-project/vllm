@@ -705,11 +705,20 @@ class Scheduler(SchedulerInterface):
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             if new_token_ids and request.use_structured_output:
-                # NOTE: structured_output_request
-                # should not be None if use_structured_output, we have
-                # check above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids)
+                advance_fsm = False
+                reasoner = self.structured_output_manager.reasoner
+                if reasoner is None or request.reasoning_ended:
+                    advance_fsm = True
+                elif reasoner.is_reasoning_end(request.all_token_ids):
+                    request.reasoning_ended = True
+                    advance_fsm = True
+
+                if advance_fsm:
+                    # NOTE: structured_output_request
+                    # should not be None if use_structured_output, we have
+                    # check above, so safe to ignore type warning
+                    request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                        req_id, new_token_ids)
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
