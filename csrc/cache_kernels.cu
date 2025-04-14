@@ -416,8 +416,8 @@ void reshape_and_cache_flash(
     torch::Tensor&
         value_cache,  // [num_blocks, block_size, num_heads, head_size]
     torch::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
-    const std::string& kv_cache_dtype, int64_t block_size, int64_t page_stride,
-    int64_t head_stride, torch::Tensor& k_scale, torch::Tensor& v_scale) {
+    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
+    torch::Tensor& v_scale) {
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -428,13 +428,16 @@ void reshape_and_cache_flash(
   // before padding.
   // For compatibility with both cases, we use slot_mapping.size(0) as the
   // number of tokens.
-  int num_heads = key.size(1);
   int num_tokens = slot_mapping.size(0);
+  int num_heads = key.size(1);
   int head_size = key.size(2);
+  int block_size = key_cache.size(1);
 
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);
   int block_stride = key_cache.stride(0);
+  int page_stride = key_cache.stride(1);
+  int head_stride = key_cache.stride(2);
   TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
   dim3 grid(num_tokens);

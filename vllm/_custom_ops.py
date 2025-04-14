@@ -1270,17 +1270,12 @@ def reshape_and_cache_flash(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
-    block_size: int,
-    page_stride: int,
-    head_stride: int,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
                                                    value_cache, slot_mapping,
-                                                   kv_cache_dtype, block_size,
-                                                   page_stride, head_stride,
-                                                   k_scale, v_scale)
+                                                   kv_cache_dtype, k_scale, v_scale)
 
 
 def concat_and_cache_mla(
