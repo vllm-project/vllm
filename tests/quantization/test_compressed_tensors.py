@@ -268,9 +268,9 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
      ("nm-testing/tinyllama-oneshot-w8a16-per-channel", "channel", None, 4,
       True, False),
      ("nm-testing/TinyLlama-1.1B-Chat-v1.0-awq-group128-asym256", "group", 128,
-      4, False, False
-      )("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-Channel",
-        "channel", None, 4, False, False)
+      4, False, False),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-Channel",
+      "channel", None, 4, False, False),
      ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
       "group", 128, 4, False, True)],
 )
