@@ -402,6 +402,9 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
         from vllm.transformers_utils.configs.configuration_minimax_vl_01 import MiniMaxVL01Config
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1}
+
     def get_hf_processor(self, **kwargs: object):
         hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor, **kwargs)
         # In case patch_size is omitted from `processor_config.json`
@@ -1072,6 +1075,7 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                 - pixel_values: The pixels in each grid patch for each input image.
                 - image_sizes: The original `(height, width)` for each input image.
         """
+        logger.info(f"input_ids: {input_ids}")
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -1082,7 +1086,7 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
             pixel_values = kwargs.pop("pixel_values", None)
             image_sizes = kwargs.pop("image_sizes", None)
             
-            if pixel_values is not None and input_ids.shape[1] != 1:
+            if pixel_values is not None and len(input_ids.shape) > 1 and input_ids.shape[1] != 1:
                 # 处理图像特征
                 vision_feature_layer = kwargs.pop("vision_feature_layer", self.config.vision_feature_layer)
                 vision_feature_select_strategy = kwargs.pop("vision_feature_select_strategy", self.config.vision_feature_select_strategy)
