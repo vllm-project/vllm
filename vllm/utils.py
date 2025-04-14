@@ -256,7 +256,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         self._total = 0
         self._last_info = CacheInfo(hits=0, total=0)
 
-    def __getitem__(self, key: _K, update_info: bool = True) -> _V:
+    def __getitem__(self, key: _K, *, update_info: bool = True) -> _V:
         value = super().__getitem__(key)
 
         if update_info:
@@ -267,7 +267,8 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
 
     def __delitem__(self, key: _K) -> None:
         run_on_remove = key in self
-        value = self.__getitem__(key, update_info=False)
+        value = self.__getitem__(key,
+                                 update_info=False)  # type: ignore[call-arg]
         super().__delitem__(key)
         if key in self.pinned_items:
             # Todo: add warning to inform that del pinned item
@@ -332,7 +333,8 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
                                     _T]] = None) -> Optional[Union[_V, _T]]:
         value: Optional[Union[_V, _T]]
         if key in self:
-            value = self.__getitem__(key, update_info=False)
+            value = self.__getitem__(
+                key, update_info=False)  # type: ignore[call-arg]
 
             self._hits += 1
         else:
@@ -357,7 +359,8 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         if key not in self:
             return default
 
-        value = self.__getitem__(key, update_info=False)
+        value = self.__getitem__(key,
+                                 update_info=False)  # type: ignore[call-arg]
         self.__delitem__(key)
         return value
 
