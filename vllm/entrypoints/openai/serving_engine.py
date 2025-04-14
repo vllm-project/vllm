@@ -419,8 +419,6 @@ class OpenAIServing:
                 **_chat_template_kwargs,
             )
 
-        mm_data = await mm_data_future
-
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
         # is set, we want to prevent parsing a tool_call hallucinated by the LLM
@@ -453,6 +451,8 @@ class OpenAIServing:
 
         engine_prompt = TokensPrompt(
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
+        # for issue #16554
+        mm_data = await mm_data_future
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
         if request.mm_processor_kwargs is not None:
