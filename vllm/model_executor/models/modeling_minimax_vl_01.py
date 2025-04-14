@@ -521,7 +521,6 @@ class MiniMaxVL01MultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
     def _process_image_input(

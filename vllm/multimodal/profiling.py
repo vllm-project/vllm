@@ -187,6 +187,9 @@ class MultiModalProfiler(Generic[_I]):
             modality: mm_max_tokens_per_item[modality] * mm_counts[modality]
             for modality in placeholders_by_modality
         }
+        print(f"total_placeholders_by_modality = {total_placeholders_by_modality}")
+        print(f"expected_placeholders_by_modality = {expected_placeholders_by_modality}")
+        
         if total_placeholders_by_modality != expected_placeholders_by_modality:
             raise AssertionError(
                 f"The processed dummy data has a total of "
