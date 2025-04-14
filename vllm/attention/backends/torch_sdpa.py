@@ -4,7 +4,6 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
-import numpy as np
 import torch
 from torch.nn.functional import scaled_dot_product_attention
 
@@ -22,9 +21,6 @@ from vllm.attention.ops.ipex_attn import PagedAttention, _use_ipex
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.logger import init_logger
 from vllm.utils import make_tensor_with_pad
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.worker.cpu_model_runner import CPUModelRunner
-from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.worker.cpu_model_runner import ModelInputForCPUBuilder
 
 logger = init_logger(__name__)
@@ -76,59 +72,6 @@ class TorchSDPABackend(AttentionBackend):
         src_to_dists: torch.Tensor,
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
-
-
-class TorchSDPABackendV1:
-    accept_output_buffer: bool = False
-
-    @staticmethod
-    def get_name() -> str:
-        return "TORCH_SDPA"
-
-    @staticmethod
-    def get_impl_cls() -> Type["TorchSDPABackendImpl"]:
-        return TorchSDPABackendImpl
-
-    @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
-        return TorchSDPAMetadata
-
-    @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
-        return CommonAttentionState
-
-    @staticmethod
-    def get_builder_cls() -> Type["TorchSDPAMetadataBuilderV1"]:
-        return TorchSDPAMetadataBuilderV1
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[int, ...]:
-        return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
-                                                 num_kv_heads, head_size)
-
-    @staticmethod
-    def swap_blocks(
-        src_kv_cache: torch.Tensor,
-        dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
-    ) -> None:
-        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: torch.Tensor,
-    ) -> None:
-        PagedAttention.copy_blocks(kv_caches, src_to_dists)
-
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
 
 
 @dataclass
@@ -341,105 +284,6 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
                     None)
         else:
             raise AttributeError(f"Invalid attention type {str(attn_type)}")
-
-
-class TorchSDPAMetadataBuilderV1:
-
-    def __init__(self, runner: CPUModelRunner) -> None:
-        self.runner = runner
-
-        # For reorder
-        self.reorder_prompt_req_index_list = np.empty(self.runner.max_num_reqs,
-                                                      dtype=np.int64)
-        self.reorder_decode_req_index_list = np.empty(self.runner.max_num_reqs,
-                                                      dtype=np.int64)
-        self.num_prompt_req: int = 0
-
-    def reorder_batch(self, input_batch: InputBatch,
-                      scheduler_output: SchedulerOutput) -> bool:
-        prompt_list_idx = 0
-        decode_list_idx = 0
-        for req_index in range(input_batch.num_reqs):
-            if input_batch.num_computed_tokens_cpu[
-                    req_index] < input_batch.num_prompt_tokens[req_index]:
-                # prompt stage
-                self.reorder_prompt_req_index_list[prompt_list_idx] = req_index
-                prompt_list_idx += 1
-            else:
-                # decode stage
-                self.reorder_decode_req_index_list[decode_list_idx] = req_index
-                decode_list_idx += 1
-        assert decode_list_idx + prompt_list_idx == input_batch.num_reqs
-
-        # Update prompt requests number
-        self.num_prompt_req = prompt_list_idx
-
-        reorder_req_num = 0
-        for req_index in range(decode_list_idx):
-            if self.reorder_decode_req_index_list[req_index] < prompt_list_idx:
-                reorder_req_num += 1
-            else:
-                break
-
-        if reorder_req_num == 0:
-            return False
-
-        reorder_prompt_list = (
-            self.reorder_prompt_req_index_list[:prompt_list_idx]
-            [-reorder_req_num:])
-        reorder_decode_list = (
-            self.reorder_decode_req_index_list[:decode_list_idx]
-            [:reorder_req_num])
-        assert reorder_decode_list.size == reorder_prompt_list.size
-
-        for idx in range(reorder_req_num):
-            prompt_req_index = reorder_prompt_list[idx].item()
-            decode_req_index = reorder_decode_list[idx].item()
-            input_batch.swap_states(prompt_req_index, decode_req_index)
-
-        return True
-
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
-        runner = self.runner
-        seq_lens_np = runner.seq_lens_np[:num_reqs]
-        num_prompt_req = self.num_prompt_req
-        max_prefill_seq_len = seq_lens_np[:num_prompt_req].max().item(
-        ) if num_prompt_req > 0 else 0
-        max_decode_seq_len = seq_lens_np[num_prompt_req:num_reqs].max().item(
-        ) if num_prompt_req < num_reqs else 0
-        runner.seq_start_loc_np[0] = 0
-        np.cumsum(seq_lens_np, out=runner.seq_start_loc_np[1:num_reqs + 1])
-        num_prefill_tokens = runner.query_start_loc_np[num_prompt_req].item()
-        num_decode_tokens = runner.query_start_loc_np[num_reqs].item(
-        ) - num_prefill_tokens
-        slot_mapping = runner.slot_mapping_cpu[:num_actual_tokens].long()
-        block_table_tensor = runner.input_batch.block_table.get_device_tensor()
-        attn_metadata = TorchSDPAMetadata(
-            num_prefills=num_prompt_req,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            slot_mapping=slot_mapping,
-            seq_lens_tensor=runner.
-            seq_lens_cpu[num_prompt_req:num_reqs],  # decode
-            max_decode_seq_len=max_decode_seq_len,  # decode
-            block_tables=block_table_tensor[num_prompt_req:num_reqs],  # decode
-            chunked_prefill=True,
-            max_query_len=max_query_len,
-            max_kv_len=max_prefill_seq_len,
-            prefill_query_start_loc=runner.
-            query_start_loc_cpu[:num_prompt_req + 1],  # prefill
-            kv_start_loc=runner.seq_start_loc_cpu[:num_prompt_req +
-                                                  1],  # prefill
-            prefill_block_tables=block_table_tensor[:
-                                                    num_prompt_req],  # prefill
-            query_start_loc=runner.query_start_loc_cpu[:num_reqs +
-                                                       1],  # for logits index
-            multi_modal_placeholder_index_maps=None,
-            enable_kv_scales_calculation=False,
-        )
-
-        return attn_metadata
 
 
 class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
