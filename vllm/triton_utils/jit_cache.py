@@ -70,7 +70,7 @@ class PreparedKernel:
             grid_example
         )  # grid_example is always not callable, so we need both
         self.cache_launch_grid = cache_launch_grid
-        self.concrete_grid = None
+        self.concrete_grid = (None, None, None)
         if cache_launch_grid:
             grid_0 = grid_example[0]
             grid_1 = grid_example[1] if self.grid_size > 1 else 1
@@ -106,7 +106,7 @@ class PreparedKernel:
         self.dev_max_shared = driver.active.utils.get_device_properties(
             self.device)["max_shared_mem"]
         if self.kernel.metadata.shared > self.dev_max_shared:
-            raise OutOfResources(self.metadata.shared, self.dev_max_shared,
+            raise OutOfResources(self.kernel.metadata.shared, self.dev_max_shared,
                                  "shared memory")
         self.module, self.function, self.n_regs, self.n_spills = (
             driver.active.utils.load_binary(
@@ -186,7 +186,7 @@ class JitCache(KernelInterface):
             self.run = self._run_dynamic
         self.check_keys = check_keys
         self.assume_const = assume_const
-        self.kernel_cache = {}
+        self.kernel_cache: dict[str, PreparedKernel] = {}
 
         def calc_cache_index(kwargs):
             cache_key = ""
