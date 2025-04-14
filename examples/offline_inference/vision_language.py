@@ -364,6 +364,29 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Kimi-VL
+def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [
+        "<|im_user|>user<|im_middle|><|media_start|>image<|media_content|>"
+        f"<|media_pad|><|media_end|>{question}<|im_end|>"
+        "<|im_assistant|>assistant<|im_middle|>" for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="moonshotai/Kimi-VL-A3B-Instruct",
+        max_model_len=4096,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        trust_remote_code=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # LLaVA-1.5
 def run_llava(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -966,6 +989,7 @@ model_example_map = {
     "h2ovl_chat": run_h2ovl,
     "idefics3": run_idefics3,
     "internvl_chat": run_internvl,
+    "kimi_vl": run_kimi_vl,
     "llava": run_llava,
     "llava-next": run_llava_next,
     "llava-next-video": run_llava_next_video,
