@@ -21,6 +21,7 @@ class EagleProposer:
         device: torch.device,
     ):
         self.vllm_config = vllm_config
+        self.device = device
         self.num_speculative_tokens = (
             vllm_config.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
@@ -187,12 +188,12 @@ class EagleProposer:
     def load_model(self, target_model: nn.Module) -> None:
         loader = get_model_loader(self.vllm_config.load_config)
         target_layer_num = self.vllm_config.model_config.get_num_layers(
-            self.vllm_config.parallel_config)
+            self.vllm_config.parallel_config
+        ) * self.vllm_config.parallel_config.pipeline_parallel_size
 
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
-        # FIXME(lily): This does not handle with distributed inference.
-        target_device = self.vllm_config.device_config.device
+        target_device = self.device
         # We need to set the vllm_config here to register attention
         # layers in the forward context.
         with set_default_torch_dtype(

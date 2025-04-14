@@ -161,16 +161,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
-            if get_pp_group().is_last_rank:
-                if self.speculative_config.method == "ngram":
-                    self.drafter = NgramProposer(self.vllm_config)
-                elif self.speculative_config.method == "eagle":
-                    self.drafter = EagleProposer(self.vllm_config,
-                                                 self.device)  # type: ignore
-                else:
-                    raise ValueError("Unknown speculative decoding method: "
-                                     f"{self.speculative_config.method}")
-                self.rejection_sampler = RejectionSampler()
+            if self.speculative_config.draft_pipeline_parallel_size == 1:
+                if get_pp_group().is_last_rank:
+                    if self.speculative_config.method == "ngram":
+                        self.drafter = NgramProposer(self.vllm_config)
+                    elif self.speculative_config.method == "eagle":
+                        self.drafter = EagleProposer(
+                            self.vllm_config, self.device)  # type: ignore
+                    else:
+                        raise ValueError(
+                            "Unknown speculative decoding method: "
+                            f"{self.speculative_config.method}")
+                    self.rejection_sampler = RejectionSampler()
+            else:
+                raise ValueError(
+                    "draft_pipeline_parallel_size > 1 is not supported")
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
