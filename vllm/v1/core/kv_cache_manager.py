@@ -429,22 +429,6 @@ class KVCacheManager:
             return 0
         return num_new_blocks
 
-    def _free_by_request_id(self, request_id: str) -> None:
-        """Free the blocks allocated for the request.
-
-        Args:
-            request_id: The request ID to free the blocks.
-        """
-        blocks = self.req_to_blocks.pop(request_id, [])
-        ordered_blocks: Iterable[KVCacheBlock] = blocks
-        if self.enable_caching:
-            # Free blocks in reverse order so that the tail blocks are
-            # freed first.
-            ordered_blocks = reversed(blocks)
-
-        self.block_pool.free_blocks(ordered_blocks)
-        self.num_cached_block.pop(request_id, None)
-
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         When caching is enabled, we free the blocks in reverse order so that
@@ -453,7 +437,15 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
-        self._free_by_request_id(request.request_id)
+        blocks = self.req_to_blocks.pop(request.request_id, [])
+        ordered_blocks: Iterable[KVCacheBlock] = blocks
+        if self.enable_caching:
+            # Free blocks in reverse order so that the tail blocks are
+            # freed first.
+            ordered_blocks = reversed(blocks)
+
+        self.block_pool.free_blocks(ordered_blocks)
+        self.num_cached_block.pop(request.request_id, None)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -517,18 +509,10 @@ class KVCacheManager:
                 break
         return num_common_blocks
 
-    def _free_block_hashes_by_request_id(self, request_id: str) -> None:
-        """Free the block hashes allocated for the request.
-
-        Args:
-            request_id: The request ID to free the block hashes.
-        """
-        self.req_to_block_hashes.pop(request_id, None)
-
     def free_block_hashes(self, request: Request) -> None:
         """Discard the block hashes for the request.
 
         NOTE: Unlike `free`, this method should be called only when the request
         is finished, not when it is preempted.
         """
-        self._free_block_hashes_by_request_id(request.request_id)
+        self.req_to_block_hashes.pop(request.request_id, None)
