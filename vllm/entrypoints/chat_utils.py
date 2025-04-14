@@ -4,7 +4,7 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Iterable
+from collections.abc import Awaitable, Coroutine, Iterable
 from functools import cache, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
@@ -1155,7 +1155,7 @@ def parse_chat_messages_futures(
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
-) -> tuple[list[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
+) -> tuple[list[ConversationMessage], Coroutine[Any, Any, Optional[MultiModalDataDict]]]:  # noqa: E501
     conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
 

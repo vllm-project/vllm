@@ -429,7 +429,7 @@ class OpenAIServing:
 
             if should_parse_tools:
                 if not isinstance(request, ChatCompletionRequest):
-                    msg = "Tool usage is only supported for Chat Completion API"
+                    msg = "Tool usage is only supported for Chat Completions API"  #noqa: E501
                     raise NotImplementedError(msg)
 
                 request = tool_parser(
@@ -454,7 +454,7 @@ class OpenAIServing:
         except Exception as e:
             logger.warning("Failed to parse chat messages: %s", str(e))
             # for issue #16554 consume the future is not done
-            await mm_data_future
+            mm_data_future.close()
             raise ValueError(
                 "Failed to parse chat messages. Pls check the request format."
             ) from e
