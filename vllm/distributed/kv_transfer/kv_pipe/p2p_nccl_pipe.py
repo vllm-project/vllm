@@ -72,7 +72,7 @@ class P2pNcclPipe:
                                   torch.Tensor] = {}  # tensor_id: torch.Tensor
         else:
             # PUT or PUT_ASYNC
-            self.send_store: Deque[
+            self.send_queue: Deque[
                 List[Any]] = deque()  # tensor_id: torch.Tensor
             if self.send_type == "PUT_ASYNC":
                 self._send_thread = threading.Thread(target=self._send_async,
@@ -88,6 +88,7 @@ class P2pNcclPipe:
         self.buffer_size_threshold = self.config.kv_buffer_size
 
         self.send_store_cv = threading.Condition()
+        self.send_queue_cv = threading.Condition()
         self.recv_store_cv = threading.Condition()
         self.comm_cv = threading.Condition()
 
@@ -142,9 +143,9 @@ class P2pNcclPipe:
             if self.send_type == "PUT":
                 return self._send_sync(tensor_id, tensor, remote_address)
             elif self.send_type == "PUT_ASYNC":
-                with self.send_store_cv:
-                    self.send_store.append([tensor_id, remote_address, tensor])
-                    self.send_store_cv.notify()
+                with self.send_queue_cv:
+                    self.send_queue.append([tensor_id, remote_address, tensor])
+                    self.send_queue_cv.notify()
             else:  # GET
                 with self.send_store_cv:
                     tensor_size = tensor.element_size() * tensor.numel()
@@ -320,10 +321,10 @@ class P2pNcclPipe:
     # NCCL used in TP/PP, which can lead to deadlock issues.
     def _send_async(self):
         while True:
-            with self.send_store_cv:
-                while not self.send_store:
-                    self.send_store_cv.wait()
-                tensor_id, remote_address, tensor = self.send_store.popleft()
+            with self.send_queue_cv:
+                while not self.send_queue:
+                    self.send_queue_cv.wait()
+                tensor_id, remote_address, tensor = self.send_queue.popleft()
             self._send_sync(tensor_id, tensor, remote_address)
 
     def _send_sync(
@@ -349,9 +350,9 @@ class P2pNcclPipe:
 
         response = sock.recv()
         if response != b"0":
-            # with self.send_store_cv:
-            #     self.send_store.append([tensor_id, remote_address, tensor])
-            #     self.send_store_cv.notify()
+            # with self.send_queue_cv:
+            #     self.send_queue.append([tensor_id, remote_address, tensor])
+            #     self.send_queue_cv.notify()
             logger.warning(
                 "🚧Send Tensor, Peer Out Of Memory/Threshold, %s 👉 %s, "
                 "MyRank: %s, data: %s, tensor: %s, size: %fGB, response: %s",
