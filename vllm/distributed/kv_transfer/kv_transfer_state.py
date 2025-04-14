@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
@@ -12,10 +12,10 @@ from vllm.distributed.parallel_state import get_world_group
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_KV_CONNECTOR_AGENT: Union[KVConnectorBase, KVConnectorBase_V1, None] = None
+_KV_CONNECTOR_AGENT: Optional[KVConnectorBaseType] = None
 
 
-def get_kv_transfer_group() -> Union[KVConnectorBase, KVConnectorBase_V1]:
+def get_kv_transfer_group() -> KVConnectorBaseType:
     assert _KV_CONNECTOR_AGENT is not None, (
         "disaggregated KV cache transfer parallel group is not initialized")
     return _KV_CONNECTOR_AGENT
@@ -26,8 +26,7 @@ def has_kv_transfer_group() -> bool:
 
 
 def is_v1_kv_transfer_group(
-    connector: Union[KVConnectorBase_V1, KVConnectorBase,
-                     None] = None) -> bool:
+        connector: Optional[KVConnectorBaseType] = None) -> bool:
     """Check if the KV connector is the v1 connector.
     If the argument is None, it will check the global KV connector
 

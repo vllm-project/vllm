@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
-from typing import TYPE_CHECKING, Callable, Dict, Type, Union
+from typing import TYPE_CHECKING, Callable, Dict, Type
 
 import vllm.envs as envs
+from vllm.distributed.kv_transfer import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
@@ -17,8 +18,7 @@ logger = init_logger(__name__)
 
 
 class KVConnectorFactory:
-    _registry: Dict[str, Callable[[], Type[Union[KVConnectorBase,
-                                                 KVConnectorBase_V1]]]] = {}
+    _registry: Dict[str, Callable[[], Type[KVConnectorBaseType]]] = {}
 
     @classmethod
     def register_connector(cls, name: str, module_path: str,
@@ -27,7 +27,7 @@ class KVConnectorFactory:
         if name in cls._registry:
             raise ValueError(f"Connector '{name}' is already registered.")
 
-        def loader() -> Type[Union[KVConnectorBase, KVConnectorBase_V1]]:
+        def loader() -> Type[KVConnectorBaseType]:
             module = importlib.import_module(module_path)
             return getattr(module, class_name)
 
