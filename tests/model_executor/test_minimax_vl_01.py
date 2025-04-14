@@ -17,35 +17,37 @@ from vllm.inputs import InputProcessingContext
 def test_minimax_vl_01_basic_flow():
     """测试MiniMaxVL01模型的基本流程"""
     # 1. 创建配置
-    text_config = MiniMaxText01Config(
-        model_type="minimax_text_01",
-        vocab_size=32000,
-        hidden_size=4096,
-        intermediate_size=14336,
-        num_hidden_layers=32,
-        num_attention_heads=32,
-        num_key_value_heads=8,
-        hidden_act="silu",
-        max_position_embeddings=4096 * 32,
-        initializer_range=0.02,
-        rms_norm_eps=1e-5,
-        use_cache=True,
-        pad_token_id=0,
-        bos_token_id=1,
-        eos_token_id=2,
-        tie_word_embeddings=False,
-        rope_theta=1e6,
-        sliding_window=None,
-        attention_dropout=0.0,
-        num_experts_per_tok=2,
-        num_local_experts=8,
-        output_router_logits=False,
-        router_aux_loss_coef=0.001,
-        router_jitter_noise=0.0,
-    )
+    text_config_dict = {
+        "model_type": "minimax_text_01",
+        "vocab_size": 32000,
+        "hidden_size": 4096,
+        "intermediate_size": 14336,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "hidden_act": "silu",
+        "max_position_embeddings": 4096 * 32,
+        "initializer_range": 0.02,
+        "rms_norm_eps": 1e-5,
+        "use_cache": True,
+        "pad_token_id": 0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "tie_word_embeddings": False,
+        "rope_theta": 1e6,
+        "sliding_window": None,
+        "attention_dropout": 0.0,
+        "num_experts_per_tok": 2,
+        "num_local_experts": 8,
+        "output_router_logits": False,
+        "router_aux_loss_coef": 0.001,
+        "router_jitter_noise": 0.0,
+    }
+    
+    text_config = MiniMaxText01Config(**text_config_dict)
     
     config = HfMiniMaxVL01Config(
-        text_config=text_config,
+        text_config=text_config_dict,  # 传递字典而不是对象
         vision_config=None,  # 使用默认的CLIPVisionConfig
         ignore_index=-100,
         image_token_index=32000,
@@ -115,35 +117,37 @@ def test_minimax_vl_01_basic_flow():
 def test_minimax_vl_01_processor():
     """测试MiniMaxVL01处理器的基本功能"""
     # 1. 创建配置
-    text_config = MiniMaxText01Config(
-        model_type="minimax_text_01",
-        vocab_size=32000,
-        hidden_size=4096,
-        intermediate_size=14336,
-        num_hidden_layers=32,
-        num_attention_heads=32,
-        num_key_value_heads=8,
-        hidden_act="silu",
-        max_position_embeddings=4096 * 32,
-        initializer_range=0.02,
-        rms_norm_eps=1e-5,
-        use_cache=True,
-        pad_token_id=0,
-        bos_token_id=1,
-        eos_token_id=2,
-        tie_word_embeddings=False,
-        rope_theta=1e6,
-        sliding_window=None,
-        attention_dropout=0.0,
-        num_experts_per_tok=2,
-        num_local_experts=8,
-        output_router_logits=False,
-        router_aux_loss_coef=0.001,
-        router_jitter_noise=0.0,
-    )
+    text_config_dict = {
+        "model_type": "minimax_text_01",
+        "vocab_size": 32000,
+        "hidden_size": 4096,
+        "intermediate_size": 14336,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "hidden_act": "silu",
+        "max_position_embeddings": 4096 * 32,
+        "initializer_range": 0.02,
+        "rms_norm_eps": 1e-5,
+        "use_cache": True,
+        "pad_token_id": 0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "tie_word_embeddings": False,
+        "rope_theta": 1e6,
+        "sliding_window": None,
+        "attention_dropout": 0.0,
+        "num_experts_per_tok": 2,
+        "num_local_experts": 8,
+        "output_router_logits": False,
+        "router_aux_loss_coef": 0.001,
+        "router_jitter_noise": 0.0,
+    }
+    
+    text_config = MiniMaxText01Config(**text_config_dict)
     
     config = HfMiniMaxVL01Config(
-        text_config=text_config,
+        text_config=text_config_dict,  # 传递字典而不是对象
         vision_config=None,  # 使用默认的CLIPVisionConfig
         ignore_index=-100,
         image_token_index=32000,
