@@ -299,6 +299,18 @@ def test_get_paddings():
     actual_paddings = _get_token_paddings(min_token_size, max_token_size,
                                           padding_gap)
     assert actual_paddings == expected_paddings
+    # Exponential padding.
+    max_token_size, padding_gap = 1024, 0
+    expected_paddings = [16, 32, 64, 128, 256, 512, 1024]
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
+                                          padding_gap)
+    assert actual_paddings == expected_paddings
+    # Exponential padding with max_token_size not a power of two.
+    max_token_size = 317
+    expected_paddings = [16, 32, 64, 128, 256, 512]
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
+                                          padding_gap)
+    assert actual_paddings == expected_paddings
 
 
 def test_get_padded_token_len():
