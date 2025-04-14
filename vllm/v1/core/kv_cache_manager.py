@@ -178,6 +178,7 @@ class KVCacheManager:
             request: The request to get the computed blocks.
             computed_blocks: List of computed blocks from prefix cache.
             num_computed_tokens: Number of computed tokens.
+            kv_connector: KVCache connector object.
 
         Returns:
             A tuple containing:
