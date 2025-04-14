@@ -178,7 +178,7 @@ async def build_async_engine_client_from_engine_args(
 
     set_global_state(
         _GlobalState(
-            vllmconfig=vllm_config,
+            vllmconfig=vllm_config
         )
     ) 
     # V1 AsyncLLM.
