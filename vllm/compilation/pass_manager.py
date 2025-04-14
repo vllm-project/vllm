@@ -9,9 +9,10 @@ from vllm.logger import init_logger
 
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
-from .inductor_pass import CustomGraphPass, InductorPass
+from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
 from .noop_elimination import NoOpEliminationPass
 from .sequence_parallelism import SequenceParallelismPass
+from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
@@ -32,11 +33,13 @@ class PostGradPassManager(CustomGraphPass):
     """
 
     def __init__(self):
-        self.passes: List[InductorPass] = []
+        self.passes: List[VllmInductorPass] = []
 
     def __call__(self, graph: fx.Graph):
+        shape = get_pass_context().runtime_shape
         for pass_ in self.passes:
-            pass_(graph)
+            if pass_.is_applicable_for_shape(shape):
+                pass_(graph)
 
         # always run fix_functionalization last
         self.fix_functionalization(graph)

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
+from typing import Optional
 
 import torch
 
@@ -49,6 +50,9 @@ class VllmInductorPass(InductorPass):
         self._end_time = time.perf_counter_ns()
         duration_ms = float(self._end_time - self._start_time) / 1.0e6
         logger.debug("%s completed in %.1f ms", self.pass_name, duration_ms)
+
+    def is_applicable_for_shape(self, shape: Optional[int]):
+        return True
 
 
 class PrinterInductorPass(VllmInductorPass):

@@ -12,7 +12,6 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 
-from .inductor_pass import get_pass_context
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -270,13 +269,12 @@ class SequenceParallelismPass(VllmInductorPass):
 
     def record_match(self, match: Match) -> bool:
         self.matches.append(match)
+        return bool(match)
+
+    def specialized_for_shape(self, shape: Optional[int]) -> bool:
         # only do replace for specific shapes
         tp_size = get_tensor_model_parallel_world_size()
-        if get_pass_context().runtime_shape is not None and \
-                get_pass_context().runtime_shape % tp_size == 0:
-            return bool(match)
-        else:
-            return False
+        return shape is not None and shape % tp_size == 0
 
     def __call__(self, graph: fx.Graph):
         self.dump_graph(graph, "before_sequence_parallelism_pass")
@@ -302,6 +300,5 @@ class SequenceParallelismPass(VllmInductorPass):
                 embedding_match_cnt,
                 gemm_ar_rmsnorm_match_cnt,
             )
-
         self.dump_graph(graph, "after_sequence_parallelism_pass")
         self.matches.clear()
