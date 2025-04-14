@@ -72,8 +72,11 @@ def optional_float(val: str) -> Optional[float]:
     return optional_arg(val, float)
 
 
-def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
-    """Parses a string containing comma separate key [str] to value [int]
+def nullable_kvs(val: str) -> Optional[dict[str, int]]:
+    """NOTE: This function is deprecated, args should be passed as JSON
+    strings instead.
+    
+    Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
     Args:
@@ -105,6 +108,17 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
         out_dict[key] = parsed_value
 
     return out_dict
+
+
+def optional_dict(val: str) -> Optional[dict[str, int]]:
+    try:
+        return optional_arg(val, json.loads)
+    except ValueError:
+        logger.warning(
+            "Failed to parse JSON string. Attempting to parse as "
+            "comma-separated key=value pairs. This will be deprecated in a "
+            "future release.")
+        nullable_kvs(val)
 
 
 @dataclass
@@ -324,8 +338,9 @@ class EngineArgs:
                 elif can_be_type(field_type, float):
                     kwargs[name][
                         "type"] = optional_float if optional else float
+                elif can_be_type(field_type, dict):
+                    kwargs[name]["type"] = optional_dict
                 elif (can_be_type(field_type, str)
-                      or can_be_type(field_type, dict)
                       or is_custom_type(field_type)):
                     kwargs[name]["type"] = optional_str if optional else str
                 else:
