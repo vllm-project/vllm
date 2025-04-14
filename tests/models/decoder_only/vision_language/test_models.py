@@ -328,6 +328,7 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         tensor_parallel_size=1,
         vllm_output_post_proc=model_utils.kimiv_vl_vllm_to_hf_output,
+        marks=[large_gpu_mark(min_gb=48)],
     ),
     "llama4": VLMTestInfo(
         models=["meta-llama/Llama-4-Scout-17B-16E-Instruct"],
