@@ -10,6 +10,7 @@ from fastapi import Request
 from pydantic import Field
 from starlette.datastructures import Headers
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 # yapf conflicts with isort for this block
@@ -134,8 +135,8 @@ class OpenAIServing:
                 lora.lora_name for lora in self.models.lora_requests
         ]:
             return None
-        if request.model and (load_result := await self.models.resolve_lora(
-                request.model)):
+        if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING and request.model and (
+                load_result := await self.models.resolve_lora(request.model)):
             if isinstance(load_result, LoRARequest):
                 return None
             if isinstance(load_result, ErrorResponse) and \

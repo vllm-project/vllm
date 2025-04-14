@@ -112,8 +112,10 @@ def mock_serving_setup():
 
 
 @pytest.mark.asyncio
-async def test_serving_completion_with_lora_resolver(mock_serving_setup):
-    """Test completion with a mock LoRA resolver (happy path)"""
+async def test_serving_completion_with_lora_resolver(mock_serving_setup,
+                                                     monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true")
+
     mock_engine, serving_completion = mock_serving_setup
 
     lora_model_name = "test-lora"
@@ -136,8 +138,10 @@ async def test_serving_completion_with_lora_resolver(mock_serving_setup):
 
 
 @pytest.mark.asyncio
-async def test_serving_completion_resolver_not_found(mock_serving_setup):
-    """Test requesting a LoRA that's not found by the resolver"""
+async def test_serving_completion_resolver_not_found(mock_serving_setup,
+                                                     monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true")
+
     mock_engine, serving_completion = mock_serving_setup
 
     non_existent_model = "non-existent-lora-adapter"
@@ -157,8 +161,10 @@ async def test_serving_completion_resolver_not_found(mock_serving_setup):
 
 
 @pytest.mark.asyncio
-async def test_serving_completion_resolver_add_lora_fails(mock_serving_setup):
-    """Test requesting a LoRA that fails during engine.add_lora"""
+async def test_serving_completion_resolver_add_lora_fails(
+        mock_serving_setup, monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true")
+
     mock_engine, serving_completion = mock_serving_setup
 
     invalid_model = "invalid-lora"
@@ -182,3 +188,19 @@ async def test_serving_completion_resolver_add_lora_fails(mock_serving_setup):
     assert isinstance(response, ErrorResponse)
     assert response.code == HTTPStatus.BAD_REQUEST.value
     assert invalid_model in response.message
+
+
+@pytest.mark.asyncio
+async def test_serving_completion_flag_not_set(mock_serving_setup):
+    mock_engine, serving_completion = mock_serving_setup
+
+    lora_model_name = "test-lora"
+    req_found = CompletionRequest(
+        model=lora_model_name,
+        prompt="Generate with LoRA",
+    )
+
+    await serving_completion.create_completion(req_found)
+
+    mock_engine.add_lora.assert_not_called()
+    mock_engine.generate.assert_not_called()
