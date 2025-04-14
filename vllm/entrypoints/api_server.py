@@ -88,8 +88,6 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
         )
 
     assert engine is not None
-    if lora_request:
-        assert engine.vllm_config.lora_config is not None
 
     results_generator = engine.generate(prompt, sampling_params, request_id, lora_request=lora_request)
 
