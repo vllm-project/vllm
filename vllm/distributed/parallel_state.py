@@ -939,16 +939,31 @@ def init_distributed_environment(
             "world group already initialized with a different world size")
 
 
+PPLX_DID_INIT: bool = False
+
 @run_once
 def pplx_init(rank, world_size):
-    print(f"PPLX_INIT {rank} {world_size}")
-    uid = nvshmem_get_unique_id(
-    ) if rank == 0 else nvshmem_alloc_empty_unique_id()
-    uid_gpu = uid.cuda()
-    get_world_group().broadcast(uid_gpu, src=0)
-    print(f"PPLX_INIT UID={uid_gpu}")
-    uid = uid_gpu.to(device='cpu')
-    nvshmem_init(uid, rank, world_size)
+    if world_size > 1:
+        try:
+            global PPLX_DID_INIT
+            print(f"PPLX_INIT {rank} {world_size}")
+            uid = nvshmem_get_unique_id(
+            ) if rank == 0 else nvshmem_alloc_empty_unique_id()
+            uid_gpu = uid.cuda()
+            get_world_group().broadcast(uid_gpu, src=0)
+            print(f"PPLX_INIT UID={uid_gpu}")
+            uid = uid_gpu.to(device='cpu')
+            nvshmem_init(uid, rank, world_size)
+            PPLX_DID_INIT = True
+        except Exception as ex:
+            logger.error("Failed to initialize nvshmem for pplx: %s", ex)
+
+
+@run_once
+def pplx_finalize():
+    global PPLX_DID_INIT
+    if PPLX_DID_INIT:
+        nvshmem_finalize()
 
 
 def initialize_model_parallel(
@@ -1151,7 +1166,7 @@ def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP
 
-    nvshmem_finalize()
+    pplx_finalize()
 
     if _TP:
         _TP.destroy()

@@ -14,7 +14,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import (opcheck, stack_and_dev, torch_moe,
                                  torch_moe_single)
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_moe, fused_experts
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as iterative_moe)
@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.model_executor.layers.activation import SiluAndMul
 
 NUM_EXPERTS = [8, 64]
 EP_SIZE = [1, 4]
@@ -108,6 +109,141 @@ def test_fused_moe(
                                torch_output,
                                atol=2e-2,
                                rtol=0)
+
+
+def batch_by_experts(
+    a: torch.Tensor,
+    topk_ids: torch.Tensor,
+    num_experts: int
+) -> torch.Tensor:
+    #print(topk_ids.shape, topk_ids)
+    assert topk_ids.dim() == 2
+    assert topk_ids.shape[0] == a.shape[0]
+
+    tokens_per_expert = torch.zeros(num_experts, dtype=torch.int, device=a.device)
+    for i in range(topk_ids.shape[0]):
+        for j in range(topk_ids.shape[1]):
+            expert_id = topk_ids[i, j]
+            tokens_per_expert[expert_id] = tokens_per_expert[expert_id] + 1
+
+    #print(f"token_per_expert {tokens_per_expert.max()}")
+    max_num_tokens = tokens_per_expert.max()
+    b_a = torch.zeros((num_experts, max_num_tokens, a.shape[1]),
+                      dtype=a.dtype, device=a.device)
+    #print(f"b_a shape {b_a.shape}")
+
+    #experts_per_token = torch.zeros(a.shape[0], dtype=torch.int, device=a.device)
+
+    for i in range(topk_ids.shape[0]):
+        for j in range(topk_ids.shape[1]):
+            expert_id = topk_ids[i, j]
+            #idx = experts_per_token[i]
+            b_a[expert_id, j:j+1, :] = a[i, :]
+            #experts_per_token[i] = experts_per_token[i] + 1
+
+    return b_a, tokens_per_expert
+
+
+def unbatch_output(b_out, topk_ids, K):
+    num_tokens, topk = topk_ids.shape
+
+    #print(f"b_out = {b_out.shape} M={num_tokens}, K={K}, topk={topk}")
+    num_experts = b_out.shape[0]
+    out = torch.zeros((num_tokens, topk, K), dtype=b_out.dtype, device=b_out.device)
+    expert_counts = torch.zeros(num_experts, dtype=torch.int, device=b_out.device)
+    for token in range(num_tokens):
+        expert_ids = topk_ids[token]
+        #print(f"b_out[0] = {b_out[0].shape}")
+        for i in range(expert_ids.numel()):
+            expert_id = expert_ids[i]
+            idx = expert_counts[expert_id]
+            out[token, i:i+1, :] = b_out[expert_id, idx:idx+1, :]
+            idx = idx + 1
+            expert_counts[expert_id] = idx
+
+    return out
+
+
+def torch_batched_moe(a, w1, w2, tokens_per_expert, topk_weight, topk_ids):
+    assert a.dim() == 3
+    #print(f"A = {a.shape} {a[0, :, :].shape}")
+    num_tokens, topk = topk_ids.shape
+    _, max_num_tokens, K = a.shape
+    num_experts = w1.shape[0]
+    out = torch.zeros((num_experts, max_num_tokens, w2.shape[1]), dtype=a.dtype, device=a.device)
+    for expert in range(num_experts):
+        num = tokens_per_expert[expert]
+        if num > 0:
+            #out[expert, :num, :] = SiluAndMul()(a[expert,:num,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
+            out[expert, :, :] = SiluAndMul()(a[expert,:,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
+
+    out = unbatch_output(out, topk_ids, w2.shape[1])
+
+    return (out * topk_weight.view(num_tokens, -1, 1).to(out.dtype)).sum(dim=1)
+
+
+def torch_moe2(a, w1, w2, topk_weight, topk_ids):
+    M, K = a.shape
+    topk = topk_ids.shape[1]
+    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
+    out = torch.zeros(M * topk, w2.shape[1], dtype=a.dtype, device=a.device)
+    num_experts = w1.shape[0]
+    for i in range(num_experts):
+        mask = (topk_ids == i).view(-1)
+        if mask.sum():
+            out[mask] = SiluAndMul()(
+                a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
+
+    return (out.view(M, -1, w2.shape[1]) *
+            topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
+
+
+@pytest.mark.parametrize("m", [1, 33, 64, 222]) #, 1024 * 128])
+@pytest.mark.parametrize("n", [128, 1024, 2048])
+@pytest.mark.parametrize("k", [128, 511, 1024])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fused_moe_batched_experts(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+):
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    e_map = None
+
+    vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config):
+        topk_weight, topk_ids = fused_topk(a, score, topk, False)
+
+        torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
+
+        b_a, tokens_per_expert = batch_by_experts(a, topk_ids, e)
+
+        if True:
+            triton_output = torch_batched_moe(b_a,
+                                              w1,
+                                              w2,
+                                              tokens_per_expert,
+                                              topk_weight,
+                                              topk_ids)
+        else:
+            triton_output = fused_experts(a, # b_a
+                                          w1,
+                                          w2,
+                                          topk_weight,
+                                          topk_ids,
+                                          global_num_experts=e)
+
+    #torch.testing.assert_close(triton_b_output, torch_b_output, atol=2e-2, rtol=0)
+    torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 
 @pytest.mark.parametrize("m", [1, 32, 222])
