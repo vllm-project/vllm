@@ -262,10 +262,10 @@ class SharedStorageConnector(KVConnectorBase_V1):
     def update_state_after_alloc(self, request: "Request",
                                  num_allocated_blocks: int):
         """
-        Update KVConnector state after temporary buffer alloc.
+        Update KVConnector state after block allocation.
 
-        For SharedStorageConnector, update _request_needs_load
-        if the CacheManager this allocated blocks for us.
+        If blocks were allocated, add to _requests_need_load,
+        such that we load the KVs in the next forward pass.
         """
         if num_allocated_blocks > 0:
             self._requests_need_load.append(request.request_id)

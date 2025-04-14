@@ -317,18 +317,15 @@ class Scheduler(SchedulerInterface):
                 computed_blocks, num_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(request)
 
-                # KVConnector: get blocks externally-cached tokens.
-                # Internally, this allocates a "buffer" req with a prompt
-                # corresponding to externally cached tokens. In alloc_slots
-                # below, we will compute a cache hit and thus skip the
-                # computation for externally cached tokens.
-                # NOTE: since this allocates temporary buffer requests,
-                # we must call kv_cache_manager.free_buffer_requests() below.
+                # Get externally-cached tokens if using a KVConnector.
                 if self.connector is not None:
                     computed_blocks, num_computed_tokens = \
                         self.kv_cache_manager.alloc_and_append_external_blocks(
-                            request, computed_blocks,
-                            num_computed_tokens, self.connector)
+                            request=request,
+                            computed_blocks=computed_blocks,
+                            num_computed_tokens=num_computed_tokens,
+                            kv_connector=self.connector,
+                        )
 
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
@@ -469,17 +466,13 @@ class Scheduler(SchedulerInterface):
             grammar_bitmask=grammar_bitmask,
         )
 
+        # NOTE(Kuntai): this function is designed for multiple purposes:
+        # 1. Plan the KV cache store
+        # 2. Wrap up all the KV cache load / save ops into an opaque object
+        # 3. Clear the internal states of the connector
         if self.connector is not None:
-            # NOTE(Kuntai): this function is designed for multiple purposes:
-            # 1. Plan the KV cache store
-            # 2. Wrap up all the KV cache load / save ops into an opaque object
-            # 3. Clear the internal states of the connector
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
-
-            # KVConnector: once we have allocated the buffer blocks to the
-            # "real" requests (via prefix caching), free the tmp buffer reqs.
-            self.kv_cache_manager.free_buffer_requests()
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
