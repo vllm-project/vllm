@@ -395,10 +395,18 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def _get_dispatch_core_config(self, device_params):
         dispatch_core_type = self._get_dispatch_core_type()
-        dispatch_core_axis = device_params.pop(
-            "dispatch_core_axis",
-            ttnn.DispatchCoreAxis.COL if os.environ["ARCH_NAME"] == "blackhole" else ttnn.DispatchCoreAxis.ROW,
-        )
+
+        override_tt_config = self.model_config.override_tt_config
+        if override_tt_config is not None and "dispatch_core_axis" in override_tt_config:
+            assert override_tt_config["dispatch_core_axis"] in ["row", "col"], \
+                f"Invalid dispatch_core_axis: {override_tt_config['dispatch_core_axis']}. Expected: row, col."
+            dispatch_core_axis = ttnn.DispatchCoreAxis.COL if override_tt_config["dispatch_core_axis"] == "col" else ttnn.DispatchCoreAxis.ROW
+        else:
+            dispatch_core_axis = device_params.pop(
+                "dispatch_core_axis",
+                ttnn.DispatchCoreAxis.COL if os.environ["ARCH_NAME"] == "blackhole" else ttnn.DispatchCoreAxis.ROW,
+            )
+
         dispatch_core_config = ttnn.DispatchCoreConfig(dispatch_core_type, dispatch_core_axis)
         return dispatch_core_config
 
@@ -413,11 +421,11 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         
         if mesh_grid[0] * mesh_grid[1] > num_devices_available:
             assert f"Requested mesh grid shape {mesh_grid} is larger than number of available devices {num_devices_available}"
-        
+
+        device_params = {}
         if self.trace_mode:
-            device_params = {"trace_region_size": 23887872}  # TODO: make this configurable
-        else:
-            device_params = {}
+            device_params["trace_region_size"] = 23887872  # TODO: make this configurable
+
         mesh_device = ttnn.open_mesh_device(
             ttnn.MeshShape(*mesh_grid),
             dispatch_core_config=self._get_dispatch_core_config(device_params),
