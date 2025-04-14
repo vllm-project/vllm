@@ -498,14 +498,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
-        # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens = np.empty(num_reqs, dtype=np.int32)
-        max_num_scheduled_tokens = 0
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens[i] = num_tokens
-            max_num_scheduled_tokens = max(max_num_scheduled_tokens,
-                                           num_tokens)
+        req_ids = self.input_batch.req_ids
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+        max_num_scheduled_tokens = max(tokens)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -1248,9 +1244,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
+                # We need to slice token_ids, positions, and hidden_states
+                # because the eagle head does not use cuda graph and should
+                # not include padding.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
-                target_positions = positions
-                target_hidden_states = hidden_states
+                target_positions = positions[:num_scheduled_tokens]
+                target_hidden_states = hidden_states[:num_scheduled_tokens]
                 target_slot_mapping = attn_metadata.slot_mapping
                 cu_num_tokens = attn_metadata.query_start_loc
             else:
