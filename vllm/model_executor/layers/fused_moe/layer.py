@@ -18,7 +18,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -885,6 +884,7 @@ class FusedMoE(torch.nn.Module):
                                                  cu_tokens_across_dp_cpu)
 
         # Matrix multiply.
+        from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
         if self.num_share_fusion_replicas > 0 and type(self.quant_method) in [
                 Fp8MoEMethod, UnquantizedFusedMoEMethod
         ]:
