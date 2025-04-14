@@ -363,6 +363,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       {stride_tag});
   ops.impl("cutlass_scaled_fp4_mm", torch::kCUDA, &cutlass_scaled_fp4_mm);
 
+  // cutlass nvfp4 block scaled group GEMM
+  ops.def(
+    "cutlass_blockscaled_fp4_group_mm(Tensor! out, Tensor a, Tensor b,"
+    " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
+    " Tensor stride_a, Tensor stride_b,  Tensor stride_c, "
+    " Tensor layout_sfa, Tensor layout_sfb,"
+    " Tensor problem_sizes, Tensor expert_offsets) -> ()",
+      {stride_tag});
+  ops.impl("cutlass_blockscaled_fp4_group_mm", torch::kCUDA,
+     &cutlass_blockscaled_fp4_group_mm);
+
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
   ops.def(

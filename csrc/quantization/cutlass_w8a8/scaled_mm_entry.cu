@@ -223,7 +223,6 @@ void get_cutlass_moe_mm_data(
     const int64_t num_experts, const int64_t n, const int64_t k) {
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
-  printf("Running the cutlass_moe_mm_data function");
   get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
                                  problem_sizes2, input_permutation,
                                  output_permutation, num_experts, n, k);

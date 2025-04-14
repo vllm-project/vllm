@@ -495,12 +495,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND FP4_ARCHS)
     set(SRCS
       "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
-      "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu")
+      "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
+      "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4=1")
+    list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_DEBUG_TRACE_LEVEL=6")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
   else()
     message(STATUS "Not building NVFP4 as no compatible archs were found.")

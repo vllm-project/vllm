@@ -475,8 +475,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_loader=weight_loader)
         layer.register_parameter("w2_weight", w2_weight)
         
-        
-        
         w13_weight_scale = ModelWeightParameter(
             data=torch.empty(
                 num_experts,
@@ -529,8 +527,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         
-        #transpose w2
-        
+        # swizzle blockscales
+                
         return
           
     def apply(

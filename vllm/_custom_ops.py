@@ -745,7 +745,7 @@ def get_cutlass_moe_mm_data(
     - output_permutation: Permutation that must be used to shuffle the output
                           after executing the MMs.
     """
-    torch.ops._C.get_cutlass_moe_mm_data(topk_ids, expert_offsets,
+    return torch.ops._C.get_cutlass_moe_mm_data(topk_ids, expert_offsets,
                                          problem_sizes1, problem_sizes2,
                                          input_permutation, output_permutation,
                                          num_experts, n, k)
@@ -767,10 +767,39 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                      MMs used in the fused MoE operation.
     - a/b/c_strides: The data strides passed to grouped matrix multiplication.
     """
-    torch.ops._C.cutlass_moe_mm(out_tensors, a_tensors, b_tensors, a_scales,
+    return torch.ops._C.cutlass_moe_mm(out_tensors, a_tensors, b_tensors, a_scales,
                                 b_scales, expert_offsets, problem_sizes,
                                 a_strides, b_strides, c_strides)
 
+
+def cutlass_fp4_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor, 
+                b_tensors: torch.Tensor, a_scales: torch.Tensor,
+                b_scales: torch.Tensor, alphas: torch.Tensor,
+                a_strides: torch.Tensor, b_strides: torch.Tensor, 
+                c_strides: torch.Tensor, sfa_layouts: torch.Tensor, 
+                sfb_layouts: torch.Tensor, problem_sizes: torch.Tensor,
+                expert_offsets: torch.Tensor):
+    """
+    An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs 
+    the gemms for each combination based on the specified problem sizes.
+
+    This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
+    - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
+                     input and expert weights.
+    - a/b/c_strides: The data strides passed to grouped matrix multiplication.
+    - a_/b_scales: The blockscales in FP8-E4M3 precision
+    - sfa/b_layouts: The layout metadata for the scaling factors to be computed
+                     by the kernel
+    - expert_offsets: Indices that mark at which token index each expert begins
+                      its computation. The number of tokens computed with
+                      expert E is expert_offsets[E + 1] - expert_offsets[E]
+    - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
+                     MMs used in the fused MoE operation.
+    """
+    return torch.ops._C.cutlass_blockscaled_fp4_group_mm(out_tensors, a_tensors, 
+                                b_tensors, a_scales, b_scales, alphas,
+                                a_strides, b_strides,c_strides, sfa_layouts,
+                                sfb_layouts, problem_sizes, expert_offsets)
 
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
