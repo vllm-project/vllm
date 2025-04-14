@@ -16,7 +16,7 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm import version
-from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
+from vllm.config import (CacheConfig, CompilationConfig, Config, ConfigFormat,
                          DecodingConfig, Device, DeviceConfig,
                          DistributedExecutorBackend, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
@@ -286,7 +286,7 @@ class EngineArgs:
             """Check if the class is a custom type."""
             return cls.__module__ != "builtins"
 
-        def get_kwargs(cls: type[Any]) -> dict[str, Any]:
+        def get_kwargs(cls: type[Config]) -> dict[str, Any]:
             cls_docs = get_attr_docs(cls)
             kwargs = {}
             for field in fields(cls):
