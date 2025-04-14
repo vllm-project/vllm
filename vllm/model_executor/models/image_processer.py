@@ -363,6 +363,13 @@ class ImageProcessor(BaseImageProcessor):
                     input_data_format: Optional[Union[str, ChannelDimension]] = None,
                     **kwargs,
                     ):
+        logger.info(f"ImageProcessor.preprocess 开始处理")
+        logger.info(f"images: {images}")
+        logger.info(f"return_tensors: {return_tensors}")
+        logger.info(f"data_format: {data_format}")
+        logger.info(f"input_data_format: {input_data_format}")
+        logger.info(f"kwargs: {kwargs}")
+        logger.info(f"self.process_image_mode: {self.process_image_mode}")
         if self.process_image_mode == 'resize':
             return self.resize_preprocess(images, return_tensors, data_format, input_data_format, **kwargs)
         elif self.process_image_mode == 'anyres':
