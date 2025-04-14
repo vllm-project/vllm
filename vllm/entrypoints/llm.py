@@ -115,6 +115,8 @@ class LLM:
             sequence length of the encoder input is larger than this, we fall
             back to the eager mode.
         disable_custom_all_reduce: See :class:`~vllm.config.ParallelConfig`
+        custom_all_reduce_max_size: Max input buffer size for custom all reduce.
+            See :class:`~vllm.config.ParallelConfig`
         disable_async_output_proc: Disable async output processing.
             This may result in lower performance.
         hf_token: The token to use as HTTP bearer authorization for remote files
@@ -179,6 +181,7 @@ class LLM:
         enforce_eager: Optional[bool] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
+        custom_all_reduce_max_size: Optional[int] = None,
         disable_async_output_proc: bool = False,
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
@@ -235,6 +238,7 @@ class LLM:
             enforce_eager=enforce_eager,
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
+            custom_all_reduce_max_size=custom_all_reduce_max_size,
             disable_async_output_proc=disable_async_output_proc,
             hf_token=hf_token,
             hf_overrides=hf_overrides,

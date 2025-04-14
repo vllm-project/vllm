@@ -43,11 +43,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.ca_comm: Optional[CustomAllreduce] = None
         if use_custom_allreduce and self.world_size > 1:
+            from vllm.config import get_current_vllm_config
+            config = get_current_vllm_config()
+            custom_all_reduce_max_size = \
+                config.parallel_config.custom_all_reduce_max_size
             # Initialize a custom fast all-reduce implementation.
-            self.ca_comm = CustomAllreduce(
-                group=self.cpu_group,
-                device=self.device,
-            )
+            self.ca_comm = CustomAllreduce(group=self.cpu_group,
+                                           device=self.device,
+                                           max_size=custom_all_reduce_max_size)
 
     def all_reduce(self, input_):
         # always try custom allreduce first,

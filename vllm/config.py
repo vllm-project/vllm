@@ -26,6 +26,8 @@ from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.distributed.device_communicators.custom_all_reduce import (
+    CUSTOM_ALL_REDUCE_DEFAULT_MAX_SIZE)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
@@ -1556,6 +1558,11 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    custom_all_reduce_max_size: int = CUSTOM_ALL_REDUCE_DEFAULT_MAX_SIZE
+    """Maximal input buffer size, custom all reduce works with. 
+    If the buffer size is larger than this,
+    it will fall back to NCCL/RCCL."""
+
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
     """Config for the tokenizer pool. If None, will use synchronous
     tokenization."""
@@ -1719,6 +1726,8 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
 
+        if self.custom_all_reduce_max_size is None:
+            self.custom_all_reduce_max_size = CUSTOM_ALL_REDUCE_DEFAULT_MAX_SIZE
         self._verify_args()
 
     @property
@@ -2489,6 +2498,8 @@ class SpeculativeConfig:
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
             disable_custom_all_reduce,
+            custom_all_reduce_max_size=target_parallel_config.
+            custom_all_reduce_max_size,
             tokenizer_pool_config=target_parallel_config.tokenizer_pool_config,
             ray_workers_use_nsight=target_parallel_config.
             ray_workers_use_nsight,
@@ -3911,6 +3922,7 @@ class VllmConfig:
             f"tensor_parallel_size={self.parallel_config.tensor_parallel_size},"
             f" pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
+            f"custom_all_reduce_max_size={self.parallel_config.custom_all_reduce_max_size}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
