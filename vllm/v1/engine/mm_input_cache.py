@@ -50,7 +50,7 @@ class MirroredProcessingCache:
 
         full_mm_inputs = list[Optional[MultiModalKwargs]]()
         for mm_input, mm_hash in zip(mm_inputs, mm_hashes):
-            if mm_hash in self.mm_cache:
+            if self.mm_cache.get(mm_hash) is not None:
                 mm_input = None
             else:
                 self.mm_cache[mm_hash] = mm_input
@@ -73,7 +73,8 @@ class MirroredProcessingCache:
         full_mm_inputs = list[MultiModalKwargs]()
         for mm_input, mm_hash in zip(mm_inputs, mm_hashes):
             if mm_input is None:
-                mm_input = self.mm_cache[mm_hash]
+                mm_input = self.mm_cache.get(mm_hash)
+                assert mm_input is not None, f"Missing {mm_hash=}"
             else:
                 self.mm_cache[mm_hash] = mm_input
 
