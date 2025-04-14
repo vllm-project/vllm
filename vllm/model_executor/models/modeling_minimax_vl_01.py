@@ -744,9 +744,6 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
         )
         return inputs_embeds
 
-    def get_input_embeddings(self):
-        return self.language_model.get_input_embeddings()
-
     def set_input_embeddings(self, value):
         self.language_model.set_input_embeddings(value)
 
@@ -1130,7 +1127,7 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                     )
                     
                     # 合并文本和图像嵌入
-                    inputs_embeds = self.get_input_embeddings()(input_ids)
+                    inputs_embeds = self.get_input_embeddings(input_ids)
                     inputs_embeds = inputs_embeds.to(image_features.dtype)
                     
                     # 使用掩码替换图像标记
@@ -1144,7 +1141,7 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                     inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
                 else:
                     # 如果没有图像大小信息，直接使用图像特征
-                    inputs_embeds = self.get_input_embeddings()(input_ids)
+                    inputs_embeds = self.get_input_embeddings(input_ids)
                     inputs_embeds = inputs_embeds.to(image_features.dtype)
                     
                     # 使用掩码替换图像标记
@@ -1158,7 +1155,7 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                     inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
             else:
                 # 如果没有图像输入，直接使用文本嵌入
-                inputs_embeds = self.get_input_embeddings()(input_ids)
+                inputs_embeds = self.get_input_embeddings(input_ids)
             
             input_ids = None
 
