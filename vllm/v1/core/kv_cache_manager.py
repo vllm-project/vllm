@@ -222,8 +222,8 @@ class KVCacheManager:
             request: The request to allocate slots.
             num_tokens: The number of tokens to allocate. Note that this does
                 not include the tokens that have already been computed.
-            new_computed_blocks: A list of new computed blocks just hitting
-                the prefix caching.
+            new_computed_blocks: A list of new computed blocks just hitting the
+                prefix caching.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
