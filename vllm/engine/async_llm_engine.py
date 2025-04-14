@@ -1167,13 +1167,13 @@ class AsyncLLMEngine(EngineClient):
                                             exception=asyncio.CancelledError,
                                             verbose=self.log_requests)
 
-    async def get_model_config(self) -> ModelConfig:
-        """Get the model configuration of the vLLM engine."""
-        return self.engine.get_model_config()
-
     async def get_vllm_config(self) -> VllmConfig:
         """Get the vllm configuration of the vLLM engine."""
         return self.engine.get_vllm_config()
+
+    async def get_model_config(self) -> ModelConfig:
+        """Get the model configuration of the vLLM engine."""
+        return self.engine.get_model_config()
 
     async def get_parallel_config(self) -> ParallelConfig:
         """Get the parallel configuration of the vLLM engine."""
