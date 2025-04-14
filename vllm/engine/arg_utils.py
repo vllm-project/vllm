@@ -50,7 +50,8 @@ TypeHint = Union[type[Any], object]
 TypeHintT = Union[type[T], object]
 
 
-def optional_arg(val: str, return_type: type[T]) -> Optional[T]:
+def optional_arg(val: str, return_type: Union[type[T],
+                                              Callable]) -> Optional[T]:
     if val == "" or val == "None":
         return None
     try:
@@ -118,7 +119,7 @@ def optional_dict(val: str) -> Optional[dict[str, int]]:
             "Failed to parse JSON string. Attempting to parse as "
             "comma-separated key=value pairs. This will be deprecated in a "
             "future release.")
-        nullable_kvs(val)
+        return nullable_kvs(val)
 
 
 @dataclass
