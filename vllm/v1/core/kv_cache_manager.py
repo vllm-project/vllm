@@ -442,6 +442,7 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
+        # Default to [] in case a request is freed (aborted) before alloc.
         blocks = self.req_to_blocks.pop(request.request_id, [])
         ordered_blocks: Iterable[KVCacheBlock] = blocks
         if self.enable_caching:
