@@ -80,8 +80,7 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             enable_caching=self.cache_config.enable_prefix_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
-            log_stats=self.log_stats,
-        )
+            log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request

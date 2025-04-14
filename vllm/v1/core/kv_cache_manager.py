@@ -269,6 +269,7 @@ class KVCacheManager:
         num_new_blocks = self._get_num_new_blocks(num_tokens, req_blocks,
                                                   num_computed_tokens,
                                                   new_computed_blocks)
+
         if num_new_blocks <= 0:
             return None
 
