@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
+    from vllm.reasoning import ReasoningParser
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -28,6 +30,7 @@ class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig):
         self.backend: Optional[StructuredOutputBackend] = None
+        self.reasoner: Optional[ReasoningParser] = None
         self.vllm_config = vllm_config
         self._grammar_bitmask: Optional[torch.Tensor] = None
 
@@ -71,6 +74,12 @@ class StructuredOutputManager:
             else:
                 raise ValueError(
                     f"Unsupported structured output backend: {backend_name}")
+
+            if (reasoning_backend :=
+                    self.vllm_config.decoding_config.reasoning_backend
+                ) is not None and self.reasoner is None:
+                self.reasoner = ReasoningParserManager.get_reasoning_parser(
+                    reasoning_backend)(tokenizer=tokenizer)
 
         grammar = self.executor.submit(self._async_create_grammar, request)
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]

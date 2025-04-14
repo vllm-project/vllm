@@ -106,7 +106,7 @@ class ReasoningParserManager:
     reasoning_parsers: dict[str, type] = {}
 
     @classmethod
-    def get_reasoning_parser(cls, name) -> type:
+    def get_reasoning_parser(cls, name: str) -> type[ReasoningParser]:
         """
         Get reasoning parser by name which is registered by `register_module`.
 
