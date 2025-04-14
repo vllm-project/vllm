@@ -57,7 +57,7 @@ class CpuPlatform(Platform):
             return "vllm.attention.backends.cpu_mla.CPUMLABackend"
         logger.info("Using Torch SDPA backend.")
         if use_v1:
-            return "vllm.attention.backends.torch_sdpa.TorchSDPABackendV1"
+            return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
         else:
             return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
 
