@@ -314,7 +314,7 @@ class Processor:
             eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            spec_token_acceptance_counts=[0] * (num_spec_tokens + 1))
+            num_spec_tokens=num_spec_tokens)
 
     def _validate_model_inputs(self,
                                inputs: ProcessorInputs,

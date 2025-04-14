@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -13,20 +13,25 @@ logger = init_logger(__name__)
 class SpecDecodingStats:
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
+    per_request_stats: dict = field(default_factory=dict)
 
     def take(self):
         copied = SpecDecodingStats(self.num_draft_tokens,
-                                   self.num_accepted_tokens)
+                                   self.num_accepted_tokens,
+                                   self.per_request_stats)
         self.reset()
         return copied
 
     def reset(self):
         self.num_draft_tokens = 0
         self.num_accepted_tokens = 0
+        self.per_request_stats = {}
 
-    def observe(self, num_draft_tokens: int, num_accepted_tokens: int):
+    def observe(self, num_draft_tokens: int, num_accepted_tokens: int,
+                request_id: str):
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
+        self.per_request_stats[request_id] = num_accepted_tokens + 1
 
 
 class SpecDecodingMetrics:

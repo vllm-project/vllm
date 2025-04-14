@@ -92,7 +92,7 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,  # FIXME: implement
+            log_stats=True,  # FIXME: implement
         )
 
         if not multiprocess_mode:
@@ -232,7 +232,7 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs)
+            outputs.outputs, scheduler_stats=outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)

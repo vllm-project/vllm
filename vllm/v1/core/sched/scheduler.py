@@ -608,11 +608,8 @@ class Scheduler(SchedulerInterface):
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=len(scheduled_spec_token_ids),
-                    num_accepted_tokens=len(generated_token_ids) - 1)
-
-                for i in range(len(generated_token_ids)):
-                    if request.spec_token_acceptance_counts is not None:
-                        request.spec_token_acceptance_counts[i] += 1
+                    num_accepted_tokens=len(generated_token_ids) - 1,
+                    request_id=req_id)
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
@@ -675,9 +672,7 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events(),
-                        spec_token_acceptance_counts=request.
-                        spec_token_acceptance_counts))
+                        events=request.take_events()))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
@@ -775,11 +770,13 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: Optional[SpecDecodingStats],
         num_draft_tokens: int,
         num_accepted_tokens: int,
+        request_id: str,
     ) -> Optional[SpecDecodingStats]:
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats()
         spec_decoding_stats.observe(num_draft_tokens=num_draft_tokens,
-                                    num_accepted_tokens=num_accepted_tokens)
+                                    num_accepted_tokens=num_accepted_tokens,
+                                    request_id=request_id)
         return spec_decoding_stats

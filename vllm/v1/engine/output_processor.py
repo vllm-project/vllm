@@ -14,7 +14,7 @@ from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
-                                   RequestStateStats)
+                                   RequestStateStats, SchedulerStats)
 
 
 class RequestOutputCollector:
@@ -81,6 +81,7 @@ class RequestState:
         arrival_time: float,
         queue: Optional[RequestOutputCollector],
         log_stats: bool,
+        num_spec_tokens: int = 0,
     ):
         self.request_id = request_id
         self.parent_req = parent_req
@@ -98,6 +99,8 @@ class RequestState:
 
         self.stats = RequestStateStats(
             arrival_time=arrival_time) if log_stats else None
+
+        self.spec_token_acceptance_counts = [0] * (num_spec_tokens + 1)
 
     @classmethod
     def from_new_request(
@@ -133,6 +136,7 @@ class RequestState:
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
+            num_spec_tokens=request.num_spec_tokens,
         )
 
     def make_request_output(
@@ -282,6 +286,7 @@ class OutputProcessor:
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: Optional[float] = None,
         iteration_stats: Optional[IterationStats] = None,
+        scheduler_stats: Optional[SchedulerStats] = None,
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
@@ -320,6 +325,8 @@ class OutputProcessor:
             self._update_stats_from_output(req_state, engine_core_output,
                                            engine_core_timestamp,
                                            iteration_stats)
+            self._update_stats_from_scheduler(req_id, req_state,
+                                              scheduler_stats)
 
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
@@ -342,7 +349,7 @@ class OutputProcessor:
                     new_token_ids,
                     finish_reason,
                     stop_reason,
-                    spec_token_acceptance_counts=engine_core_output.
+                    spec_token_acceptance_counts=req_state.
                     spec_token_acceptance_counts):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
@@ -409,3 +416,13 @@ class OutputProcessor:
         ParentRequest.observe_finished_request(
             req_state.parent_req, iteration_stats,
             req_state.stats.num_generation_tokens)
+
+    def _update_stats_from_scheduler(
+            self, req_id: str, req_state: RequestState,
+            scheduler_stats: Optional[SchedulerStats]):
+        if scheduler_stats is not None and \
+            scheduler_stats.spec_decoding_stats is not None:
+            num_accepted_tokens = scheduler_stats. \
+                spec_decoding_stats.per_request_stats.get(req_id, 0)
+            for i in range(num_accepted_tokens):
+                req_state.spec_token_acceptance_counts[i] += 1
