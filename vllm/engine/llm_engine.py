@@ -918,6 +918,10 @@ class LLMEngine:
         """Gets the model configuration."""
         return self.model_config
 
+    def get_vllm_config(self) -> VllmConfig:
+        """Gets the vllm configuration."""
+        return self.vllm_config
+
     def get_parallel_config(self) -> ParallelConfig:
         """Gets the parallel configuration."""
         return self.parallel_config

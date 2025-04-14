@@ -2,7 +2,6 @@
 
 import asyncio
 import atexit
-import dataclasses
 import gc
 import importlib
 import inspect
@@ -105,20 +104,6 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 _running_tasks: set[asyncio.Task] = set()
 
 
-# Store global states
-@dataclasses.dataclass
-class _GlobalState:
-    vllmconfig: VllmConfig
-
-
-_global_state: Optional[_GlobalState] = None
-
-
-def set_global_state(global_state: _GlobalState):
-    global _global_state
-    _global_state = global_state
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -180,7 +165,6 @@ async def build_async_engine_client_from_engine_args(
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    set_global_state(_GlobalState(vllmconfig=vllm_config))
     # V1 AsyncLLM.
     if envs.VLLM_USE_V1:
         if disable_frontend_multiprocessing:
@@ -744,13 +728,10 @@ if envs.VLLM_SERVER_DEV_MODE:
         logger.info("check whether the engine is sleeping")
         is_sleeping = await engine_client(raw_request).is_sleeping()
         return JSONResponse(content={"is_sleeping": is_sleeping})
-    
+
     @router.get("/server_info")
-    async def show_server_info():
-        if _global_state is None:
-            server_info = {"vllm_config": "Vllm Config not available"}
-        else:
-            server_info = {"vllm_config": str(_global_state.vllmconfig)}
+    async def show_server_info(raw_request: Request):
+        server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
         return JSONResponse(content=server_info)
 
 
@@ -919,7 +900,7 @@ def build_app(args: Namespace) -> FastAPI:
 
 async def init_app_state(
     engine_client: EngineClient,
-    model_config: ModelConfig,
+    vllm_config: VllmConfig,
     state: State,
     args: Namespace,
 ) -> None:
@@ -940,6 +921,8 @@ async def init_app_state(
 
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
+    state.vllm_config = vllm_config
+    model_config = vllm_config.model_config
 
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
@@ -1094,8 +1077,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
 
-        model_config = await engine_client.get_model_config()
-        await init_app_state(engine_client, model_config, app.state, args)
+        vllm_config = await engine_client.get_vllm_config()
+        await init_app_state(engine_client, vllm_config, app.state, args)
 
         def _listen_addr(a: str) -> str:
             if is_valid_ipv6_address(a):

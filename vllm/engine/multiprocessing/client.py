@@ -93,6 +93,7 @@ class MQLLMEngineClient(EngineClient):
         self._errored_with: Optional[BaseException] = None
 
         # Get the configs.
+        self.vllm_config = engine_config
         self.model_config = engine_config.model_config
         self.decoding_config = engine_config.decoding_config
 
@@ -382,6 +383,9 @@ class MQLLMEngineClient(EngineClient):
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
+
+    async def get_vllm_config(self) -> VllmConfig:
+        return self.vllm_config
 
     async def is_tracing_enabled(self) -> bool:
         return self.tracing_flag
