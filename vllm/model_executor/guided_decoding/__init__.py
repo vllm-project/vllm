@@ -59,14 +59,9 @@ def maybe_backend_fallback(
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (
             xgr_installed)
 
-        # xgrammar doesn't support regex, fallback to outlines
-        if guided_params.regex is not None:
-            fallback_or_error(
-                guided_params,
-                "xgrammar does not support regex guided decoding.", "outlines")
         # xgrammar doesn't support some JSON schema features
-        elif (guided_params.json is not None
-              and has_xgrammar_unsupported_json_features(guided_params.json)):
+        if (guided_params.json is not None and
+                has_xgrammar_unsupported_json_features(guided_params.json)):
             fallback_or_error(
                 guided_params,
                 "xgrammar does not support advanced JSON schema features like "
