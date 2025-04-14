@@ -404,7 +404,7 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
         return {"image": 1}
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(ImageProcessor, **kwargs)
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
         if hf_processor.patch_size is None:
@@ -522,140 +522,33 @@ class MiniMaxVL01MultiModalProcessor(
             image_sizes=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
-        
-    def _process_image_input(
-        self,
-        image_input: LlavaNextImageInputs,
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
-        if image_input["type"] == "image_embeds":
-            return [image_input["data"]]
-
-        patch_embeddings = self._process_image_pixels(image_input)
-
-        image_sizes = image_input.get("image_sizes")
-        if image_sizes is None:
-            batch_size = len(image_input["data"])
-            vision_config = self.config.vision_config
-            default_height = default_width = vision_config.image_size
-            image_sizes = torch.as_tensor([[default_height, default_width]
-                                           for _ in range(batch_size)])
-
-        # 确保图像数量一致
-        if len(patch_embeddings) != len(image_sizes):
-            raise ValueError(
-                f"Number of patch embeddings ({len(patch_embeddings)}) does not match "
-                f"number of image sizes ({len(image_sizes)})"
-            )
-
-        return [
-            self._merge_image_patch_embeddings(image_sizes[i],
-                                               patch_features_batch,
-                                               strategy="spatial_unpad")
-            for i, patch_features_batch in enumerate(patch_embeddings)
-        ]
-
-    def _merge_image_patch_embeddings(self, image_size: torch.Tensor,
-                                      patch_embeddings: torch.Tensor, *,
-                                      strategy: str) -> torch.Tensor:
-        """
-        合并图像补丁嵌入向量。
-        
-        Args:
-            image_size: 原始图像尺寸 (高度, 宽度)
-            patch_embeddings: 补丁嵌入向量
-            strategy: 合并策略, 可以是 'flat', 'spatial' 或 'spatial_unpad'
-            
-        Returns:
-            合并后的图像特征
-        """
-        if strategy == "flat":
-            return patch_embeddings.flatten(0, 1)
-
-        if strategy.startswith("spatial"):
-            height = width = self.config.vision_config.image_size \
-                // self.config.vision_config.patch_size
-
-            base_patch_embeds = patch_embeddings[0]
-            if height * width != base_patch_embeds.shape[0]:
-                raise ValueError(
-                    "The number of patches is not consistent with the "
-                    "image size.")
-
-            if patch_embeddings.shape[0] > 1:
-                other_patch_embeds = patch_embeddings[1:]
-
-                # 确保图像尺寸是列表形式
-                if isinstance(image_size, torch.Tensor):
-                    orig_height, orig_width = image_size.tolist()
-                else:
-                    orig_height, orig_width = image_size
-
-                # image_aspect_ratio == "anyres"
-                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-                    (orig_height, orig_width),
-                    self.config.image_grid_pinpoints,
-                    self.config.vision_config.image_size,
-                )
-                num_patches = num_patch_height * num_patch_width
-
-                # 确保不超出补丁数量
-                if other_patch_embeds.shape[0] < num_patches:
-                    raise ValueError(
-                        f"Not enough patches: got {other_patch_embeds.shape[0]}, "
-                        f"need {num_patches}")
-                
-                # 重塑并处理图像补丁
-                other_patch_embeds = other_patch_embeds[:num_patches] \
-                    .view(num_patch_height, num_patch_width, height, width, -1)
-
-                if "unpad" in strategy:
-                    other_patch_embeds = other_patch_embeds \
-                        .permute(4, 0, 2, 1, 3).contiguous() \
-                        .flatten(1, 2).flatten(2, 3)
-                    other_patch_embeds = unpad_image(other_patch_embeds,
-                                                    (orig_height, orig_width))
-                    
-                    # 添加换行特征
-                    if hasattr(self, 'image_newline'):
-                        new_line = self.image_newline
-                    elif hasattr(self.multi_modal_projector, 'image_newline'):
-                        new_line = self.multi_modal_projector.image_newline
-                    else:
-                        shape = other_patch_embeds.shape[-1]
-                        new_line = torch.zeros(shape, device=other_patch_embeds.device)
-                        
-                    other_patch_embeds = torch.cat((
-                        other_patch_embeds,
-                        new_line[:, None, None] \
-                            .expand(*other_patch_embeds.shape[:-1], 1) \
-                            .to(other_patch_embeds.device),
-                    ), dim=-1)
-                    other_patch_embeds = other_patch_embeds \
-                        .flatten(1, 2).transpose(0, 1)
-                else:
-                    other_patch_embeds = other_patch_embeds \
-                        .permute(0, 2, 1, 3, 4).contiguous() \
-                        .flatten(0, 3)
-
-                merged_patch_embeddings = torch.cat(
-                    (base_patch_embeds, other_patch_embeds), dim=0)
-            else:
-                if "unpad" in strategy and hasattr(self, 'image_newline'):
-                    merged_patch_embeddings = torch.cat(
-                        (base_patch_embeds,
-                         self.image_newline[None] \
-                            .to(base_patch_embeds.device)
-                    ), dim=0)
-                else:
-                    merged_patch_embeddings = base_patch_embeds
-
-            return merged_patch_embeddings
-
-        raise ValueError(f"Unexpected patch merge strategy: {strategy}")
     
 _I = TypeVar("_I", bound=MiniMaxVL01ProcessingInfo)
-
 class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images,
+            mm_data=mm_data,
+        )
+    """
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
@@ -699,12 +592,13 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             # 添加一些简单的形状以增加复杂性
             images.append(image)
         return images
+    """
 
 @add_start_docstrings(
     """The MiniMaxVL01 model which consists of a vision backbone and a language model.""",
     MINIMAX_VL_01_START_DOCSTRING,
 )
-@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor, 
+@MULTIMODAL_REGISTRY.register_processor(MiniMaxVL01MultiModalProcessor, 
                                         info=MiniMaxVL01ProcessingInfo, 
                                         dummy_inputs=MiniMaxVL01DummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMultiModal, SupportsPP):
