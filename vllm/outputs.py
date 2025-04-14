@@ -33,6 +33,10 @@ class CompletionOutput:
             to stop, None if the completion finished for some other reason
             including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
+        spec_token_acceptance_counts: A list tracking the total number of 
+        accepted tokens at each speculation step for a request. Its length
+        is num_spec_tokens + 1 since there is always one token generated 
+        by the target model.
     """
 
     index: int

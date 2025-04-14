@@ -192,9 +192,11 @@ class RequestState:
         )
 
     def _new_completion_output(
-            self, token_ids: list[int], finish_reason: Optional[FinishReason],
-            stop_reason: Union[int, str, None],
-            spec_token_acceptance_counts: Optional[list[int]]
+        self,
+        token_ids: list[int],
+        finish_reason: Optional[FinishReason],
+        stop_reason: Union[int, str, None],
+        spec_token_acceptance_counts: Optional[list[int]],
     ) -> CompletionOutput:
 
         finished = finish_reason is not None
