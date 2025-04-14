@@ -10,11 +10,11 @@ Reasoning models return an additional `reasoning_content` field in their outputs
 
 vLLM currently supports the following reasoning models:
 
-| Model Series | Parser Name | Structured Output Support | Tool Calling |
-|--------------|-------------|------------------|-------------|
-| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` | ❌ |
-| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` | ✅ |
-| [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
+| Model Series                                                                                                                          | Parser Name   | Structured Output Support     | Tool Calling |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------------- | ----------------------------- | ------------ |
+| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d)                             | `deepseek_r1` | `guided_json`, `guided_regex` | ❌           |
+| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B)                                                                                        | `deepseek_r1` | `guided_json`, `guided_regex` | ✅           |
+| [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite`     | ❌                            | ❌           |
 
 - IBM Granite 3.2 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
 
@@ -64,22 +64,22 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
 
 ```json
 {
-    "id": "chatcmpl-123",
-    "object": "chat.completion.chunk",
-    "created": 1694268190,
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-    "system_fingerprint": "fp_44709d6fcb",
-    "choices": [
-        {
-            "index": 0,
-            "delta": {
-                "role": "assistant",
-                "reasoning_content": "is",
-            },
-            "logprobs": null,
-            "finish_reason": null
-        }
-    ]
+  "id": "chatcmpl-123",
+  "object": "chat.completion.chunk",
+  "created": 1694268190,
+  "model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+  "system_fingerprint": "fp_44709d6fcb",
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "role": "assistant",
+        "reasoning_content": "is"
+      },
+      "logprobs": null,
+      "finish_reason": null
+    }
+  ]
 }
 ```
 
@@ -139,11 +139,9 @@ Remember to check whether the `reasoning_content` exists in the response before 
 The reasoning content is also available in the structured output. The structured output engine like `xgrammar` will use the reasoning content to generate structured output. It is only supported in v0 engine now.
 
 ```bash
-VLLM_USE_V1=0 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
     --enable-reasoning --reasoning-parser deepseek_r1
 ```
-
-Please note that the `VLLM_USE_V1` environment variable must be set to `0` to use the v0 engine.
 
 ```python
 from openai import OpenAI
