@@ -108,13 +108,14 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
         """
+
         torch.ops.xla.dynamo_set_buffer_donor_(y, True)
         x = x.view(-1, x.shape[-1])
 
         for slice_idx in range(len(lora_a_stacked)):
             lora_s = lora_a_stacked[slice_idx]
             y_s = self.shrink(x, lora_s, scale)
-            y[slice_idx, :, :] = y_s
+            y[slice_idx, :, :] = y_s  # type: ignore[index]
         return y
 
     def add_expand(self,

@@ -146,6 +146,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it",
                                          min_transformers_version="4.50"),
     "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
+    "Glm4ForCausalLM": _HfExamplesInfo(
+        "THUDM/GLM-4-32B-Chat-0414",
+        is_available_online=False,
+        min_transformers_version="4.52.dev0"
+    ),
     "GPT2LMHeadModel": _HfExamplesInfo("gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo("bigcode/starcoder"),
     "GPTJForCausalLM": _HfExamplesInfo("EleutherAI/gpt-j-6b"),
@@ -321,7 +326,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                         extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"}),  # noqa: E501
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
                                         max_transformers_version="4.48",
-                                        transformers_version_reason="Use of private method which no longer exists.",  # noqa: E501
+                                        transformers_version_reason="Incorrectly-detected `tensorflow` import.",  # noqa: E501
                                         extras={"olmo": "allenai/Molmo-7B-O-0924"},  # noqa: E501
                                         trust_remote_code=True),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B",
@@ -330,6 +335,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
     "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
                                         trust_remote_code=True,
+                                        max_transformers_version="4.48",
+                                        transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
                                         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"}),  # noqa: E501
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
@@ -346,8 +353,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct"),  # noqa: E501
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
-                                     trust_remote_code=True,
-                                     max_transformers_version="4.50"),
+                                     trust_remote_code=True),
     # [Encoder-decoder]
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
     # Therefore, we borrow the BartTokenizer from the original Bart model
