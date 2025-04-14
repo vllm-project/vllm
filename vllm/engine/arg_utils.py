@@ -212,7 +212,8 @@ class EngineArgs:
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
-    model_loader_extra_config: dict = LoadConfig.model_loader_extra_config
+    model_loader_extra_config: dict = \
+        get_default(LoadConfig, "model_loader_extra_config")
     ignore_patterns: Optional[Union[str,
                                     List[str]]] = LoadConfig.ignore_patterns
     preemption_mode: Optional[str] = SchedulerConfig.preemption_mode
