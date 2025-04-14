@@ -533,7 +533,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         num_images = mm_counts.get("image", 0)
 
         processor = self.info.get_hf_processor()
-        image_token = processor.image_token
+        image_token = "<image>"
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
