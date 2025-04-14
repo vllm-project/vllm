@@ -1096,11 +1096,28 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     @abstractmethod
     def _get_mm_fields_config(
         self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        """Given the HF-processed data, output the metadata of each field."""
-        raise NotImplementedError
+        """
+        Get the configuration for each multi-modal field.
+        """
+        logger.info(f"BaseMultiModalProcessor._get_mm_fields_config 开始处理")
+        logger.info(f"processed_data keys: {processed_data.keys()}")
+        logger.info(f"mm_kwargs: {mm_kwargs}")
+        
+        result = {}
+        for key, value in processed_data.items():
+            if key in mm_kwargs:
+                logger.info(f"处理字段 {key}")
+                result[key] = MultiModalFieldConfig(
+                    name=key,
+                    shape=value.shape,
+                    dtype=value.dtype,
+                )
+        
+        logger.info(f"返回字段配置: {result}")
+        return result
 
     @abstractmethod
     def _get_prompt_updates(
@@ -1149,8 +1166,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _call_hf_processor(
         self,
         prompt: str,
-        # Not to be confused with `mm_data` in `self.apply`.
-        # This refers to the data to be passed to HF processor.
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
@@ -1158,11 +1173,19 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Call the HF processor on the prompt text and
         associated multi-modal data.
         """
-        return self.info.ctx.call_hf_processor(
+        logger.info(f"BaseMultiModalProcessor._call_hf_processor 开始处理")
+        logger.info(f"prompt: {prompt}")
+        logger.info(f"mm_data keys: {mm_data.keys()}")
+        logger.info(f"mm_kwargs: {mm_kwargs}")
+        
+        result = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
             mm_kwargs,
         )
+        
+        logger.info(f"处理器返回结果 keys: {result.keys()}")
+        return result
 
     def _hf_processor_applies_updates(
         self,

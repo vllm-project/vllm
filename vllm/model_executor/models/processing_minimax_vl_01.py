@@ -2,7 +2,7 @@
 Processor class for MiniMaxVL01.
 """
 
-from typing import List, Union
+from typing import List, Union, Mapping
 
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
@@ -11,9 +11,8 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging
 
 from .image_processer import CustomBatchFeature
-logger = logging.get_logger(__name__)
-
 import os
+import re
 
 LEGACY_PROCESSING = int(os.getenv('LEGACY_PROCESSING', 1))
 
@@ -222,25 +221,6 @@ class MiniMaxVL01Processor(ProcessorMixin):
         )
         if images is not None:
             image_inputs = self.image_processor(images, **output_kwargs["images_kwargs"])
-            # 确保 image_sizes 存在且与 pixel_values 批次大小一致
-            if "image_sizes" not in image_inputs and "pixel_values" in image_inputs:
-                # 如果没有 image_sizes，则根据 pixel_values 生成
-                pixel_values = image_inputs["pixel_values"]
-                image_sizes = []
-                for pixel_value in pixel_values:
-                    height, width = get_image_size(to_numpy_array(pixel_value))
-                    image_sizes.append((height, width))
-                image_inputs["image_sizes"] = image_sizes
-            elif "image_sizes" in image_inputs and "pixel_values" in image_inputs:
-                # 确保 image_sizes 和 pixel_values 的批次大小一致
-                if len(image_inputs["image_sizes"]) != len(image_inputs["pixel_values"]):
-                    # 如果批次大小不一致，重新生成 image_sizes
-                    pixel_values = image_inputs["pixel_values"]
-                    image_sizes = []
-                    for pixel_value in pixel_values:
-                        height, width = get_image_size(to_numpy_array(pixel_value))
-                        image_sizes.append((height, width))
-                    image_inputs["image_sizes"] = image_sizes
         else:
             image_inputs = {}
 

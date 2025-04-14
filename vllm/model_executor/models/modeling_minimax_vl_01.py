@@ -509,18 +509,40 @@ class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
 class MiniMaxVL01MultiModalProcessor(
         BaseLlavaNextMultiModalProcessor[MiniMaxVL01ProcessingInfo]):
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Drops anything between <img>/</img> tags; encoding with the tokenizer
+        # will automatically add the image pads for the context.
+        prompt, num_matched_images = re.subn(
+            r"(Picture \d*: <img>).*?(<\/img>\n)",
+            r"\1\2",
+            prompt,
+        )
+
+        image_data = mm_data.get("images")
+        if image_data is not None:
+            assert isinstance(image_data, list)
+
+            num_images = len(image_data)
+            assert num_matched_images == num_images
+
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        # 获取图像数量
-        pixel_values = hf_inputs.get("pixel_values", torch.empty(0))
-        num_images = len(pixel_values) if isinstance(pixel_values, (list, tuple)) else 1
-        
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -632,12 +654,19 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
+        logger.info(f"MiniMaxVL01DummyInputsBuilder.get_dummy_processor_inputs 开始处理")
+        logger.info(f"seq_len: {seq_len}")
+        logger.info(f"mm_counts: {mm_counts}")
+        
         num_images = mm_counts.get("image", 0)
+        logger.info(f"图像数量: {num_images}")
 
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
+        
+        logger.info(f"目标图像尺寸: {target_width}x{target_height}")
 
         mm_data = {
             "image":
@@ -645,17 +674,23 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                                    height=target_height,
                                    num_images=num_images)
         }
+        
+        logger.info(f"生成的虚拟图像数据: {len(mm_data['image'])} 张图像")
 
         # 注意：image_sizes 不应该作为单独的模态传递，而是作为 image 模态的一部分
         # 在 processor 中会自动处理 image_sizes
 
         prompt_text = image_token * num_images
+        logger.info(f"生成的提示文本: {prompt_text}")
 
-        return ProcessorInputs(
+        result = ProcessorInputs(
             prompt_text=prompt_text,
             mm_data=mm_data,
             hf_processor_mm_kwargs={}
         )
+        
+        logger.info(f"返回的处理器输入: prompt_text={result.prompt_text}, mm_data keys={result.mm_data.keys()}")
+        return result
 
     def _get_dummy_images(
         self,

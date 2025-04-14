@@ -33,6 +33,10 @@ import numpy as np
 import os
 processor_for_vllm = int(os.getenv("PROCESSOR_FOR_VLLM", 0))
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 def select_best_resolution(original_size, possible_resolutions):
     """
     Selects the best resolution from a list of possible resolutions based on the original size.
@@ -334,7 +338,7 @@ class ImageProcessor(BaseImageProcessor):
         size: Optional[Union[int, Tuple[int, int], Dict[str, int]]] = None,
         image_mean: Optional[Union[float, List[float]]] = None,
         image_std: Optional[Union[float, List[float]]] = None,
-        process_image_mode: Optional[str] = 'resize',
+        process_image_mode: Optional[str] = 'anyres',
         patch_size: Optional[int] = 14,
         image_grid_pinpoints: List = None,
         **kwargs,
@@ -553,59 +557,93 @@ class ImageProcessor(BaseImageProcessor):
         return pixel_values
 
     def anyres_for_vllm_preprocess(self, images, return_tensors: Optional[Union[str, TensorType]] = None, data_format: Optional[ChannelDimension] = ChannelDimension.FIRST, input_data_format: Optional[Union[str, ChannelDimension]] = None, do_pad: Optional[bool] = None, **kwargs):
+        logger.info(f"ImageProcessor.anyres_for_vllm_preprocess 开始处理")
+        logger.info(f"图像数量: {len(images)}")
+        logger.info(f"return_tensors: {return_tensors}")
+        logger.info(f"data_format: {data_format}")
+        logger.info(f"input_data_format: {input_data_format}")
+        logger.info(f"do_pad: {do_pad}")
         
         images = make_list_of_images(images)
         new_images = []
         image_sizes = []
 
-        for image in images:
+        for i, image in enumerate(images):
+            logger.info(f"处理第 {i+1} 张图像")
             ori_w, ori_h = image.size
+            logger.info(f"原始图像尺寸: {ori_w}x{ori_h}")
             image_sizes.append([ori_h, ori_w])
             image_patches = self.get_image_patches(
                 image,
                 self.image_grid_pinpoints
             )
+            logger.info(f"图像分块数量: {len(image_patches)}")
+            
             all_images = []
-            for image in image_patches:
-                transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(image)
-                img_array = to_numpy_array(transform_img)
-                img_array = to_channel_dimension_format(img_array, data_format, input_channel_dim=input_data_format)
-                all_images.append(img_array)
-                #new_images.append(img_array)
-            pixel_values = np.array(all_images)
-            new_images.append(pixel_values)
-        
-
-        new_images = self._pad_for_batching(new_images)
-
-        data = {"pixel_values": new_images, "image_sizes": image_sizes}
-        return BatchFeature(data=data, tensor_type=return_tensors)
-
-    
-    def anyres_preprocess(self, images, return_tensors: Optional[Union[str, TensorType]] = None, data_format: Optional[ChannelDimension] = ChannelDimension.FIRST, input_data_format: Optional[Union[str, ChannelDimension]] = None, do_pad: Optional[bool] = None, **kwargs):
-        
-        images = make_list_of_images(images)
-        new_images = []
-        image_sizes = []
-
-        for image in images:
-            ori_w, ori_h = image.size
-            image_sizes.append([ori_h, ori_w])
-            image_patches = self.get_image_patches(
-                image,
-                self.image_grid_pinpoints
-            )
-            all_images = []
-            for patch in image_patches:
+            for j, patch in enumerate(image_patches):
+                logger.info(f"处理第 {j+1} 个图像块")
                 transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(patch)
                 img_array = to_numpy_array(transform_img)
                 img_array = to_channel_dimension_format(img_array, data_format, input_channel_dim=input_data_format)
                 all_images.append(img_array)
+                logger.info(f"图像块 {j+1} 处理完成，形状: {img_array.shape}")
+                
             pixel_values = np.array(all_images)
+            logger.info(f"所有图像块处理完成，形状: {pixel_values.shape}")
             new_images.append(pixel_values)
+        
+        logger.info(f"所有图像处理完成，新图像数量: {len(new_images)}")
+
+        new_images = self._pad_for_batching(new_images)
+        logger.info(f"填充后的图像数量: {len(new_images)}")
+
+        data = {"pixel_values": new_images, "image_sizes": image_sizes}
+        logger.info(f"返回数据 keys: {data.keys()}")
+        return BatchFeature(data=data, tensor_type=return_tensors)
+
+    
+    def anyres_preprocess(self, images, return_tensors: Optional[Union[str, TensorType]] = None, data_format: Optional[ChannelDimension] = ChannelDimension.FIRST, input_data_format: Optional[Union[str, ChannelDimension]] = None, do_pad: Optional[bool] = None, **kwargs):
+        logger.info(f"ImageProcessor.anyres_preprocess 开始处理")
+        logger.info(f"图像数量: {len(images)}")
+        logger.info(f"return_tensors: {return_tensors}")
+        logger.info(f"data_format: {data_format}")
+        logger.info(f"input_data_format: {input_data_format}")
+        logger.info(f"do_pad: {do_pad}")
+        
+        images = make_list_of_images(images)
+        new_images = []
+        image_sizes = []
+
+        for i, image in enumerate(images):
+            logger.info(f"处理第 {i+1} 张图像")
+            ori_w, ori_h = image.size
+            logger.info(f"原始图像尺寸: {ori_w}x{ori_h}")
+            image_sizes.append([ori_h, ori_w])
+            image_patches = self.get_image_patches(
+                image,
+                self.image_grid_pinpoints
+            )
+            logger.info(f"图像分块数量: {len(image_patches)}")
+            
+            all_images = []
+            for j, patch in enumerate(image_patches):
+                logger.info(f"处理第 {j+1} 个图像块")
+                transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(patch)
+                img_array = to_numpy_array(transform_img)
+                img_array = to_channel_dimension_format(img_array, data_format, input_channel_dim=input_data_format)
+                all_images.append(img_array)
+                logger.info(f"图像块 {j+1} 处理完成，形状: {img_array.shape}")
+                
+            pixel_values = np.array(all_images)
+            logger.info(f"所有图像块处理完成，形状: {pixel_values.shape}")
+            new_images.append(pixel_values)
+        
+        logger.info(f"所有图像处理完成，新图像数量: {len(new_images)}")
 
         if do_pad:
             new_images = self._pad_for_batching(new_images)
+            logger.info(f"填充后的图像数量: {len(new_images)}")
 
         data = {"pixel_values": new_images, "image_sizes": image_sizes}
+        logger.info(f"返回数据 keys: {data.keys()}")
         return CustomBatchFeature(data=data, tensor_type=return_tensors)
