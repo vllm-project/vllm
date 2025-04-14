@@ -6,6 +6,8 @@ Note that `pip install cohere` is needed to run this example.
 
 run: vllm serve BAAI/bge-reranker-base
 """
+from typing import Union
+
 import cohere
 from cohere import Client, ClientV2
 
@@ -19,7 +21,7 @@ documents = [
 ]
 
 
-def cohere_rerank(client: Client | ClientV2, model: str, query: str,
+def cohere_rerank(client: Union[Client, ClientV2], model: str, query: str,
                   documents: list[str]) -> dict:
     return client.rerank(model=model, query=query, documents=documents)
 
