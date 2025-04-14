@@ -32,9 +32,8 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, ProcessingCache,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+                                        PromptReplacement, PromptUpdate)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .clip import CLIPVisionModel
@@ -43,7 +42,8 @@ from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import get_vision_encoder_info
+from .vision import (get_vision_encoder_info, scatter_patch_features,
+                     select_patch_features)
 
 
 class LlavaImagePixelInputs(TypedDict):
@@ -65,6 +65,14 @@ class PixtralHFImagePixelInputs(TypedDict):
 
     Note that `height` or `width` may be different per batch and image,
     in which case the data is passed as a list instead of a batched tensor.
+    """
+
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
+    """
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
+    
+    Shape: `(batch_size * num_images, num_embeds)`
     """
 
 
@@ -137,6 +145,13 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {"image": self.get_max_image_tokens()}
+
     def _apply_feature_select_strategy(
         self,
         strategy: str,
@@ -186,30 +201,29 @@ _I = TypeVar("_I", bound=BaseLlavaProcessingInfo)
 
 class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
 
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
-
-        return image_token * num_images
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
-        return {
+        mm_data = {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images,
+            mm_data=mm_data,
+        )
 
 
 class LlavaProcessingInfo(BaseLlavaProcessingInfo):
@@ -329,6 +343,23 @@ class PixtralHFMultiModalProcessor(
                     for p, (h, w) in zip(pixel_values, image_sizes)
                 ]
 
+            hf_config = self.info.get_hf_config()
+            vision_config = hf_config.vision_config
+            assert isinstance(vision_config, PixtralVisionConfig)
+            encoder_info = PixtralHFEncoderInfo(vision_config)
+
+            tile_sizes = [
+                encoder_info.get_patch_grid_size(
+                    image_width=pixel_value.shape[-1],
+                    image_height=pixel_value.shape[-2],
+                ) for pixel_value in processed_outputs["pixel_values"]
+            ]
+            embed_is_patch = [
+                torch.tensor(([True] * ncols + [False]) * nrows)
+                for ncols, nrows in tile_sizes
+            ]
+            processed_outputs["embed_is_patch"] = embed_is_patch
+
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -338,6 +369,7 @@ class PixtralHFMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
+            embed_is_patch=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -372,7 +404,7 @@ class PixtralHFMultiModalProcessor(
             tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
             tokens[-1] = image_end_id
 
-            return PromptUpdateDetails.select_token_id(tokens, image_token_id)
+            return tokens
 
         return [
             PromptReplacement(
@@ -580,9 +612,17 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                                  f"Got type: {type(pixel_values)}")
 
             if self.config.vision_config.model_type == "pixtral":
+                embed_is_patch = kwargs.pop("embed_is_patch")
+                if not isinstance(embed_is_patch, (torch.Tensor, list)):
+                    raise ValueError("Incorrect type of embed_is_patch. "
+                                     f"Got type: {type(embed_is_patch)}")
+
+                embed_is_patch = flatten_bn(embed_is_patch)
+
                 return PixtralHFImagePixelInputs(
                     type="pixel_values_pixtral",
                     pixel_values=flatten_bn(pixel_values),
+                    embed_is_patch=embed_is_patch,
                 )
 
             return LlavaImagePixelInputs(
@@ -668,16 +708,22 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         image_embeds = torch.split(image_embeds, feature_sizes)
         return image_embeds
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
 
-        return self._process_image_input(image_input)
+        image_features = self._process_image_input(image_input)
+
+        if image_input["type"] != "pixel_values_pixtral":
+            # The path is used for pixtral (V0 only) and llava (V0/V1)
+            return image_features
+
+        return scatter_patch_features(
+            image_features,
+            image_input["embed_is_patch"],
+        )
 
     def get_input_embeddings(
         self,
@@ -689,7 +735,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                multimodal_embeddings,
+                select_patch_features(multimodal_embeddings),
                 self.config.image_token_index,
             )
         return inputs_embeds

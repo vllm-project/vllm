@@ -400,15 +400,10 @@ def _merge_multimodal_embeddings(
     
     # 处理多模态嵌入数量与占位符数量不匹配的情况
     if flattened.shape[0] != num_expected_tokens:
-        if flattened.shape[0] > num_expected_tokens:
-            # 如果多模态嵌入数量大于占位符数量，则截断多模态嵌入
-            flattened = flattened[:num_expected_tokens]
-        else:
-            # 如果多模态嵌入数量小于占位符数量，则填充多模态嵌入
-            # 使用最后一个嵌入进行填充
-            last_embedding = flattened[-1].unsqueeze(0)
-            padding = torch.cat([last_embedding] * (num_expected_tokens - flattened.shape[0]))
-            flattened = torch.cat([flattened, padding], dim=0)
+        expr = _embedding_count_expression(multimodal_embeddings)
+        raise ValueError(
+            f"Attempted to assign {expr} = {flattened.shape[0]} "
+            f"multimodal tokens to {num_expected_tokens} placeholders")
     
     inputs_embeds[is_multimodal] = flattened
     return inputs_embeds

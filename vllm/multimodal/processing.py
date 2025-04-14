@@ -1609,7 +1609,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 prompt_ids,
                 mm_item_counts,
             )
-            # self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
             tokenizer = self.info.get_tokenizer()
             prompt = decode_tokens(tokenizer, prompt_ids)
@@ -1623,7 +1623,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_prompt_updates,
                 mm_item_counts,
             )
-            # self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         mm_placeholder_ranges = {
             modality: [item.to_range() for item in placeholders]
