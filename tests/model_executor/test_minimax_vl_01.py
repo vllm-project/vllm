@@ -61,8 +61,7 @@ def test_minimax_vl_01_basic_flow():
     
     vllm_config = VllmConfig(
         model_config=config,
-        quant_config=None,
-        multimodal_config=None
+        quant_config=None
     )
     
     # 2. 创建模型实例
@@ -70,7 +69,7 @@ def test_minimax_vl_01_basic_flow():
     
     # 3. 创建处理信息
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    ctx = InputProcessingContext(model_config=config, tokenizer=tokenizer)
+    ctx = InputProcessingContext(model_config=MiniMaxVL01Config(hf_config=config), tokenizer=tokenizer)
     processing_info = MiniMaxVL01ProcessingInfo(ctx)
     
     # 4. 创建虚拟输入构建器
@@ -159,7 +158,7 @@ def test_minimax_vl_01_processor():
     
     # 2. 创建处理信息
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    ctx = InputProcessingContext(model_config=config, tokenizer=tokenizer)
+    ctx = InputProcessingContext(model_config=MiniMaxVL01Config(hf_config=config), tokenizer=tokenizer)
     processing_info = MiniMaxVL01ProcessingInfo(ctx)
     
     # 3. 测试获取配置
