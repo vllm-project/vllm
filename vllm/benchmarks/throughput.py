@@ -256,24 +256,6 @@ def run_hf(
     return end - start
 
 
-def run_mii(
-    requests: list[SampleRequest],
-    model: str,
-    tensor_parallel_size: int,
-    output_len: int,
-) -> float:
-    from mii import client, serve
-    llm = serve(model, tensor_parallel=tensor_parallel_size)
-    prompts = [request.prompt for request in requests]
-
-    start = time.perf_counter()
-    llm.generate(prompts, max_new_tokens=output_len)
-    end = time.perf_counter()
-    client = client(model)
-    client.terminate_server()
-    return end - start
-
-
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
                                      results: dict[str, Any]) -> None:
     pt_records = convert_to_pytorch_benchmark_format(
@@ -572,9 +554,6 @@ def main(args: argparse.Namespace):
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
                               args.hf_max_batch_size, args.trust_remote_code,
                               args.disable_detokenize)
-    elif args.backend == "mii":
-        elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
-                               args.output_len)
     elif args.backend == "vllm-chat":
         elapsed_time, request_outputs = run_vllm_chat(
             requests, args.n, EngineArgs.from_cli_args(args),

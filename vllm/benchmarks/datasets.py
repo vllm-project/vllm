@@ -70,7 +70,9 @@ class BenchmarkDataset(ABC):
     ) -> None:
         """
         Initialize the BenchmarkDataset with an optional dataset path and random
-        seed.  Args:
+        seed.  
+        
+        Args:
             dataset_path (Optional[str]): Path to the dataset. If None, it
             indicates that a default or random dataset might be used.
             random_seed (int): Seed value for reproducible shuffling or
