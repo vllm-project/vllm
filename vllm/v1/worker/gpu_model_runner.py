@@ -459,6 +459,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.condense(removed_req_indices)
 
         if batch_changed:
+            # Some attention backends (namely MLA) may want to separate
+            # requests based on if the attention computation will be
+            # compute-bound or memory-bound. This gives them a hook to do that.
+            self.attn_metadata_builder.reorder_batch(self.input_batch,
+                                                     scheduler_output)
+
             self.input_batch.refresh_sampling_metadata()
 
     def _prepare_inputs(
@@ -470,14 +476,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-
-        # Some attention backends (namely MLA) may want to separate requests
-        # based on if the attention computation will be compute-bound or
-        # memory-bound. This gives them a hook to do that.
-        modified_batch = self.attn_metadata_builder.reorder_batch(
-            self.input_batch, scheduler_output)
-        if modified_batch:
-            self.input_batch.refresh_sampling_metadata()
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
