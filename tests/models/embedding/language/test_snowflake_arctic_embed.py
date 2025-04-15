@@ -59,10 +59,8 @@ def test_models(
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
 
-        if model_info.is_matryoshka:
-            assert vllm_model.model.llm_engine.model_config.is_matryoshka
-        else:
-            assert not vllm_model.model.llm_engine.model_config.is_matryoshka
+        assert (vllm_model.model.llm_engine.model_config.is_matryoshka ==
+                model_info.is_matryoshka)
 
         vllm_outputs = vllm_model.encode(example_prompts)
 
