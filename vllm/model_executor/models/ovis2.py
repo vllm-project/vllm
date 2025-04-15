@@ -215,22 +215,6 @@ class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
 
             hf_processor = self.info.get_hf_processor()
             return hf_processor.construct_image_placeholders(grid)
-            # # Get the base placeholder tokens
-            # placeholder_tokens = hf_processor.construct_image_placeholders(grid)
-            # image_atom_token_id = hf_processor.get_token_value('image_atom')
-
-            # # Extract the padding token ID from tokenizer
-            # image_padding_token_id = hf_processor.get_token_value('image_pad')
-
-            # # Create a new list with padding tokens inserted
-            # padded_placeholder_tokens = []
-            # for token in placeholder_tokens:
-            #     padded_placeholder_tokens.append(token)
-            #     if token == image_atom_token_id:
-            #         # Add 255 padding tokens after each image atom token
-            #         padded_placeholder_tokens.extend([image_padding_token_id] * 255)
-
-            # return padded_placeholder_tokens
 
         return [
             PromptReplacement(
@@ -299,16 +283,10 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         }
 
         self.visual_indicators_embeds_dict = None
-        # VocabParallelEmbedding( if enabled leads to numerical diff
-        #    self.config.visual_tokenizer_config.vocab_size,
-        #    self.config.hidden_size,
-        #    params_dtype=self.visual_tokenizer.dtype,
-        #    quant_config=quant_config,
-        #    prefix=f"{prefix}.vte"
-        # )
 
+        # TODO(Isotr0py): PP support
         # self.make_empty_intermediate_tensors = (
-        #    self.language_model.make_empty_intermediate_tensors) ?
+        #    self.language_model.make_empty_intermediate_tensors)
 
     def _init_embed_representation(self):
         if not self.visual_indicators_embeds_dict:
@@ -334,121 +312,6 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def sampler(self):
         return self.llm.sampler
 
-    def merge_multimodal(
-            self,
-            text_input_ids: Union[List[torch.Tensor], torch.Tensor],
-            pixel_values: Optional[Union[List[torch.Tensor], torch.Tensor, object]],
-            left_padding: bool = True  # must be true during inference
-    ):  # todo check when different sized  inputs are batched
-        # todo the tokenizer do not uses /n
-        # we need to decompose the pixel_value_tensor
-        # vllm batches it fi it is ccompatible otherwise it will pass it as  list
-        self._init_embed_representation()
-        if pixel_values is not None and not isinstance(pixel_values, list):
-            if pixel_values.dim() == 6:
-                # if is [tensor_batch, 1, num_segments, ch, w, h] we need -> [tensor_batch, num_segments, ch, w, h]
-                pixel_values = pixel_values.squeeze(1)
-                pixel_values = [pixel_value.to(self.config.torch_dtype) for pixel_value in pixel_values]
-            else:
-                pixel_values = [pixel_values]
-
-        # When inference, sample can include only text with `None` pixel_value
-        num_images = [x.shape[0] if x is not None else 0 for x in pixel_values]
-        if sum(num_images) > 0:
-            visual_tokens = self.visual_tokenizer(
-                torch.cat(
-                    [x for x in pixel_values if x is not None],
-                    dim=0).to(self.visual_tokenizer.dtype)
-            )
-
-            visual_embeds = self.vte(visual_tokens)  # 1:1 numeric eq.
-
-
-        else:
-            # just placeholders
-            visual_embeds = [None] * len(num_images)
-
-        input_embeds = []
-
-        for text_input_id, visual_embed in zip(text_input_ids, visual_embeds):
-
-            placeholder_token_mask = torch.zeros_like(text_input_id, dtype=torch.bool)
-            for value in self.extra_token_mapping_for_substitution.values():
-                placeholder_token_mask |= torch.eq(text_input_id, value)
-
-            text_embed = torch.zeros((text_input_id.shape[0], self.llm.model.norm.hidden_size),
-                                     device=text_input_id.device, dtype=self.visual_tokenizer.dtype)
-            text_embed[~placeholder_token_mask] = self.llm.model.embed_tokens(
-                text_input_id[~placeholder_token_mask])  # 1:1
-
-            for key, indicator_id in self.extra_token_mapping.items():
-                if key in self.visual_indicators_embeds_dict:
-                    text_embed[text_input_id == indicator_id] = self.visual_indicators_embeds_dict[key].to(
-                        text_embed.device)
-            # image_atom_positions = torch.where(torch.eq(text_input_id, self.extra_token_mapping['image_atom']))[0].tolist()
-            # if len(image_atom_positions) > 0:
-            # if not is_testing:
-            #    input_embed_parts = []
-            #    prev_image_atom_position = -1
-            #    for index, image_atom_position in enumerate(image_atom_positions):
-            #        input_embed_parts.append(
-            #            text_embed[prev_image_atom_position + 1:image_atom_position, :])
-            #
-            #        input_embed_parts.append(visual_embeds[index])
-            #
-            #        prev_image_atom_position = image_atom_position
-            #    if prev_image_atom_position + 1 < text_input_id.shape[0]:
-            #        input_embed_parts.append(
-            #            text_embed[prev_image_atom_position + 1:, :])
-            #
-            #    input_embed = torch.cat(input_embed_parts, dim=0)
-            # else:
-
-            # here we have already preallocated the multimodal tokens (in the testing phase) se the logic should be different
-            # we should check consider that each atom token should replace 256 text tokens embeddings
-
-            # It just needs this unified verison, since if no  images aare present it should just skip this
-            text_embed[placeholder_token_mask] = visual_embeds.view(-1, text_embed.shape[-1])
-
-            # else:
-            #    input_embed = text_embed
-
-            input_embeds.append(text_embed)
-
-        batch_input_embeds = self.pad_truncate_sequence(input_embeds, batch_first=True, padding_value=0.0,
-                                                        left_padding=left_padding)
-
-        return batch_input_embeds
-
-    def pad_truncate_sequence(self, sequences: List[torch.Tensor], batch_first: bool = True, padding_value: float = 0.0,
-                              left_padding: bool = False) -> torch.Tensor:
-        if not left_padding:
-            pad_sequence = torch.nn.utils.rnn.pad_sequence(sequences, batch_first=batch_first,
-                                                           padding_value=padding_value)
-            return pad_sequence[:, :self.config.multimodal_max_length]
-        else:
-            pad_sequence = torch.nn.utils.rnn.pad_sequence([i.flip(dims=[0]) for i in sequences], batch_first=True,
-                                                           padding_value=padding_value).flip(dims=[1])
-            return pad_sequence[:, -self.config.multimodal_max_length:]
-
-    def get_tensor_formatted(self, input: Union[torch.Tensor, List]) -> List[torch.Tensor]:
-        '''
-        if thhe input is list check if its input arte 1d if so usueeze() them in 0
-        if it is a tensor it needs to be splittend in a list
-        :param input:
-        :return:
-        '''
-        if isinstance(input, list):
-            output_list = []
-            for element in input:
-                if element.dim() == 1:
-                    output_list.append(element.unsqueeze(0))
-                else:
-                    output_list.append(element)
-            return output_list
-        else:
-            return [tensor for tensor in input] if input.dim() > 1 else [input]
-    
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Ovis2ImagePatchInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -467,7 +330,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         raise AssertionError("This line should be unreachable.")
-    
+
     def _process_image_input(
             self, image_input: Ovis2ImagePatchInputs) -> MultiModalEmbeddings:
         self._init_embed_representation()
@@ -479,7 +342,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         visual_embeds = self.vte(visual_tokens)  # 1:1 numeric eq.
 
         return tuple(x.flatten(0, 1) for x in visual_embeds.split(patches_per_image, dim=0))
-    
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)

@@ -1,4 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# yapf: disable
+# ruff: noqa: E501
 # coding=utf-8
+# adapted from https://github.com/AIDC-AI/Ovis/blob/35ab51a1a1e3542fa6db260a1084cefbc8f164bb/ovis/vllm/processing_ovis.py
 # Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -21,7 +26,7 @@ from typing import List, Union
 
 import PIL
 import torch
-from transformers import AutoProcessor, BatchFeature, Qwen2Tokenizer, Qwen2TokenizerFast
+from transformers import AutoProcessor, BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import TextInput, PreTokenizedInput

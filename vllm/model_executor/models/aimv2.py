@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # A modified implementation of the AIMv2 Transformer
 # inserted here also the image tokenizer used by Ovis2
 from typing import Optional, Tuple, Union
@@ -7,75 +9,25 @@ from vllm.attention import Attention, AttentionType
 from vllm.config import VllmConfig, CacheConfig
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear, ColumnParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
-from transformers import PretrainedConfig
-from transformers import PretrainedConfig as AIMv2Config
 from torch import nn
 from torch.nn import functional as F
 from transformers.modeling_outputs import BaseModelOutputWithNoAttention
 from transformers.modeling_utils import PreTrainedModel
 
-import PIL
-import torch
 from torch import softmax
 from torch.nn.functional import gumbel_softmax, pad
-from transformers import AutoImageProcessor
-from vllm.config import QuantizationConfig
-from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.transformers_utils.processor import cached_get_image_processor
+from vllm.transformers_utils.configs.ovis2 import AIMv2Config, Aimv2VisualTokenizerConfig
 
 IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305] # kept for vocab prefixed tokens
 
 
-class BaseVisualTokenizerConfig(PretrainedConfig):
-    def __init__(
-        self,
-        vocab_size=16384,
-        tokenize_function="softmax",
-        tau=1.0,
-        depths=None,
-        drop_cls_token=False,
-        backbone_config: Optional[Union[PretrainedConfig, dict]] = None,
-        hidden_stride: int = 1,
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-        self.vocab_size = vocab_size
-        self.tokenize_function = tokenize_function
-        self.tau = tau
-        if isinstance(depths, str):
-            depths = [int(x) for x in depths.split('|')]
-        self.depths = depths
-        self.backbone_kwargs = {}
-        self.drop_cls_token = drop_cls_token
-        if backbone_config is not None:
-            assert isinstance(backbone_config, (PretrainedConfig, dict)), \
-                f"expect `backbone_config` to be instance of PretrainedConfig or dict, but got {type(backbone_config)} type"
-            if not isinstance(backbone_config, PretrainedConfig):
-                model_type = backbone_config['model_type']
-                backbone_config.pop('model_type')
-                backbone_config = AutoConfig.for_model(model_type, **backbone_config)
-        self.backbone_config = backbone_config
-        self.hidden_stride = hidden_stride
-
-
-class Aimv2VisualTokenizerConfig(BaseVisualTokenizerConfig):
-    model_type = "aimv2_visual_tokenizer"
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if self.drop_cls_token:
-            self.drop_cls_token = False
-        if self.depths:
-            assert len(self.depths) == 1
-            self.backbone_kwargs['num_hidden_layers'] = self.depths[0]
-
-
 class Aimv2VisualTokenizer(torch.nn.Module):
 
-    def __init__(self, config: BaseVisualTokenizerConfig, quant_config: QuantizationConfig, prefix: str = "", **kwargs):
+    def __init__(self, config: Aimv2VisualTokenizerConfig, quant_config: Optional[QuantizationConfig] = None, prefix: str = "", **kwargs):
         super().__init__()
-        self.image_processor = AutoImageProcessor.from_pretrained(kwargs['image_processor_name_or_path'])
+        self.image_processor = cached_get_image_processor(kwargs['image_processor_name_or_path'], trust_remote_code=True)
         self.config = config
         self.image_processor.do_center_crop = False
         self.backbone = AIMv2Model(
@@ -88,6 +40,7 @@ class Aimv2VisualTokenizer(torch.nn.Module):
             ColumnParallelLinear(
                 config.backbone_config.hidden_size * config.hidden_stride * config.hidden_stride, head_dim,
                 bias=False,
+                gather_output=True,
             ),
             torch.nn.LayerNorm(head_dim)
         )
