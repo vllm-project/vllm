@@ -1458,8 +1458,9 @@ def cutlass_mla_decode(q_nope_and_q_pe: torch.Tensor,
     assert B_pt == B_q, f"Batch dims must be same for page_table and q_nope_and_q_pe, but got {B_pt} and {B_q}"
 
     # Current cutlass MLA implementation will pack smaller pages into a 128 page.
-    assert PAGE_NUM % (128 / PAGE_SIZE) == 0, f"PAGE_NUM must be divisible by 128 / PAGE_SIZE, but got {PAGE_NUM} and {128 / PAGE_SIZE}"
-
+    assert PAGE_NUM % (
+        128 / PAGE_SIZE
+    ) == 0, f"PAGE_NUM must be divisible by 128 / PAGE_SIZE, but got {PAGE_NUM} and {128 / PAGE_SIZE}"
 
     # TODO(kaixih@nvidia): support fp8
     assert q_nope_and_q_pe.dtype in (torch.float16, torch.bfloat16), (
