@@ -394,21 +394,26 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
 :::
 
+Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
 <!-- TODO: api enforced limits + uploading audios -->
 
-#### Additional Transcription API Parameters
+#### Extra Parameters
 
-Our Transcriptions API supports these extra optional parameters to fine-tune the sampling behavior during transcription:
+The following [sampling parameters](#sampling-params) are supported.
 
-- **seed** (*Optional[int]*): The seed to use for sampling. Must be between `_LONG_INFO.min` and `_LONG_INFO.max`.
-- **top_p** (*Optional[float]*): Enables nucleus (top-p) sampling, where tokens are selected from the smallest possible set whose cumulative probability exceeds `p` (default: `1.0`).
-- **top_k** (*Optional[int]*): Limits sampling to the `k` most probable tokens at each step. (default: `-1`).
-- **min_p** (*Optional[float]*): Filters out tokens with a probability lower than `min_p`, ensuring a minimum likelihood threshold during sampling (default: `0.0`).
-- **frequency_penalty** (*Optional[float]*): Applies a penalty to tokens based on their frequency, reducing the likelihood of repeating common tokens (default: `0.0`).
-- **repetition_penalty** (*Optional[float]*): Discourages the model from repeating the same tokens by applying a penalty (default: `1.0`).
-- **presence_penalty** (*Optional[float]*): Encourages the introduction of new tokens by applying a penalty to those already present (default: `0.0`).
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-transcription-sampling-params
+:end-before: end-transcription-sampling-params
+:::
 
-Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
+The following extra parameters are supported:
+
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-transcription-extra-params
+:end-before: end-transcription-extra-params
+:::
 
 (tokenizer-api)=
 

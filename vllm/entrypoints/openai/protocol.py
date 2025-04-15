@@ -1577,6 +1577,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     ## TODO (varun) : Support if set to 0, certain thresholds are met !!
+    # doc: begin-transcription-sampling-params
     temperature: float = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
 
@@ -1585,6 +1586,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
     to automatically increase the temperature until certain thresholds are hit.
     """
+    # doc: end-transcription-sampling-params
 
     timestamp_granularities: list[Literal["word", "segment"]] = Field(
         alias="timestamp_granularities[]", default=[])
@@ -1605,10 +1607,20 @@ class TranscriptionRequest(OpenAIBaseModel):
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
 
-    # Additional sampling parameters.
+    # doc: begin-transcription-extra-params
     top_p: Optional[float] = None
+    """Enables nucleus (top-p) sampling, where tokens are selected from the 
+    smallest possible set whose cumulative probability exceeds `p`.
+    """
+
     top_k: Optional[int] = None
+    """Limits sampling to the `k` most probable tokens at each step."""
+
     min_p: Optional[float] = None
+    """Filters out tokens with a probability lower than `min_p`, ensuring a 
+    minimum likelihood threshold during sampling.
+    """
+
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     """The seed to use for sampling."""
 
@@ -1620,6 +1632,7 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     presence_penalty: Optional[float] = 0.0
     """The presence penalty to use for sampling."""
+    # doc: end-transcription-extra-params
 
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
