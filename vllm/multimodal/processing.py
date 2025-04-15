@@ -1034,20 +1034,19 @@ class BaseProcessingInfo:
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        """
-        Get the maximum possible number of tokens per data item
-        for each modality.
+    def get_allowed_mm_limits(self) -> Mapping[str, int]:
+        """Return the maximum allowed number of items for each modality."""
+        supported_mm_limits = self.get_supported_mm_limits()
+        mm_config = self.ctx.get_mm_config()
 
-        The dictionary returned by this method should have the same
-        keys as that returned by :meth:`get_supported_mm_limits`.
-        """
-        raise NotImplementedError
+        allowed_limits = dict[str, int]()
+        for modality, supported_limit in supported_mm_limits.items():
+            user_limit = mm_config.get_limit_per_prompt(modality)
+
+            allowed_limits[modality] = (user_limit if supported_limit is None
+                                        else min(user_limit, supported_limit))
+
+        return allowed_limits
 
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
@@ -1066,12 +1065,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                  *,
                  cache: Optional[ProcessingCache] = None,
                  enable_sanity_checks: bool = True) -> None:
-        if get_repls := getattr(self, "_get_prompt_replacements", None):
-            logger.warning_once("`_get_prompt_replacements` has been renamed "
-                                "to `_get_prompt_updates`. The old name will "
-                                "be removed in an upcoming release.")
-            self._get_prompt_updates = get_repls  # type: ignore[method-assign]
-
         super().__init__()
 
         self.info = info
@@ -1108,14 +1101,24 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before passing them to :meth:`_get_hf_mm_data`.
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
-        mm_config = self.info.ctx.get_mm_config()
+        supported_mm_limits = self.info.get_supported_mm_limits()
+        allowed_mm_limits = self.info.get_allowed_mm_limits()
 
         for modality, items in mm_items.items():
-            limit = mm_config.get_limit_per_prompt(modality)
-            if len(items) > limit:
+            supported_limit = supported_mm_limits.get(modality, 0)
+            allowed_limit = allowed_mm_limits.get(modality, 0)
+            num_items = len(items)
+
+            if supported_limit is not None and num_items > supported_limit:
                 raise ValueError(
-                    f"You set {modality}={limit} (or defaulted to 1) in "
-                    f"`--limit-mm-per-prompt`, but passed {len(items)} "
+                    f"The model only supports at most {supported_limit} "
+                    f"{modality} items, but you passed {num_items} "
+                    f"{modality} items in the same prompt.")
+
+            if num_items > allowed_limit:
+                raise ValueError(
+                    f"You set or defaulted to {modality}={allowed_limit} "
+                    f"in --limit-mm-per-prompt`, but passed {num_items} "
                     f"{modality} items in the same prompt.")
 
         return mm_items
@@ -1289,13 +1292,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         mm_counts = mm_items.get_all_counts()
 
-        dummy_inputs = self.dummy_inputs.get_dummy_processor_inputs(
-            self.info.ctx.model_config.max_model_len,
-            mm_counts,
-        )
-
         _, mm_kwargs, _ = self._apply_hf_processor_text_mm(
-            prompt_text=dummy_inputs.prompt_text,
+            prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )

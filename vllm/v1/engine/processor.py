@@ -77,6 +77,7 @@ class Processor:
         params: SamplingParams,
     ) -> None:
         self._validate_structured_output(params)
+        self._validate_logit_bias(params)
 
         if params.allowed_token_ids is None:
             return
@@ -86,6 +87,26 @@ class Processor:
         if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
             raise ValueError(
                 "allowed_token_ids contains out-of-vocab token id!")
+
+    def _validate_logit_bias(
+        self,
+        params: SamplingParams,
+    ) -> None:
+        """Validate logit_bias token IDs are within vocabulary range."""
+        if not params.logit_bias:
+            return
+
+        vocab_size = self.model_config.get_vocab_size()
+        invalid_token_ids = []
+
+        for token_id in params.logit_bias:
+            if token_id < 0 or token_id >= vocab_size:
+                invalid_token_ids.append(token_id)
+
+        if invalid_token_ids:
+            raise ValueError(
+                f"token_id(s) {invalid_token_ids} in logit_bias contain "
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}")
 
     def _validate_supported_sampling_params(
         self,
@@ -141,11 +162,6 @@ class Processor:
         else:
             params.guided_decoding.backend = engine_level_backend
 
-        from vllm.platforms import current_platform
-        if not current_platform.supports_structured_output():
-            raise ValueError("Structured output is not supported on "
-                             f"{current_platform.device_name}.")
-
         # Request content validation
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
@@ -187,6 +203,11 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
+        from vllm.platforms import current_platform
+        current_platform.validate_request(
+            prompt=prompt,
+            params=params,
+        )
         self._validate_lora(lora_request)
         self._validate_params(params)
         if priority != 0:
@@ -315,32 +336,34 @@ class Processor:
         *,
         prompt_type: Literal["encoder", "decoder"],
     ):
+        model_config = self.model_config
         tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
 
-        if prompt_type == "encoder":
-            model_config = self.model_config
-
-            if model_config.is_multimodal_model:
-                mm_registry = self.input_preprocessor.mm_registry
-                mm_processor = mm_registry.create_processor(
-                    model_config, tokenizer=tokenizer)
-                assert isinstance(mm_processor, EncDecMultiModalProcessor)
-
-                if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper
-
         prompt_ids = prompt_inputs["prompt_token_ids"]
-
         if not prompt_ids:
-            raise ValueError(f"The {prompt_type} prompt cannot be empty")
+            if prompt_type == "encoder" and model_config.is_multimodal_model:
+                pass  # Mllama may have empty encoder inputs for text-only data
+            else:
+                raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        max_input_id = max(prompt_ids)
+        max_input_id = max(prompt_ids, default=0)
         if max_input_id > tokenizer.max_token_id:
             raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
         if len(prompt_ids) >= max_prompt_len:
-            if self.model_config.is_multimodal_model:
+            if prompt_type == "encoder" and model_config.is_multimodal_model:
+                mm_registry = self.input_preprocessor.mm_registry
+                mm_processor = mm_registry.create_processor(
+                    model_config,
+                    tokenizer=tokenizer,
+                )
+                assert isinstance(mm_processor, EncDecMultiModalProcessor)
+
+                if mm_processor.pad_dummy_encoder_prompt:
+                    return  # Skip encoder length check for Whisper
+
+            if model_config.is_multimodal_model:
                 suggestion = (
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
