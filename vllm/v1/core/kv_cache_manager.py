@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
@@ -13,9 +13,6 @@ from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
-
-if TYPE_CHECKING:
-    pass
 
 logger = init_logger(__name__)
 
