@@ -830,6 +830,9 @@ def test_kv_connector_basic():
     while not all_finished:
         # Schedule + a few iterations until stopping.
         output = scheduler.schedule()
+        for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
+            # We should be in the decode phase now.
+            assert num_scheduled_tokens == 1
         assert len(output.kv_connector_metadata.requests) == 0
         ecos = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
         all_done = True
@@ -885,6 +888,9 @@ def test_kv_connector_basic():
     while not all_finished:
         # Schedule + a few iterations until stopping.
         output = scheduler.schedule()
+        for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
+            # We should be in the decode phase now.
+            assert num_scheduled_tokens == 1
         assert len(output.kv_connector_metadata.requests) == 0
         ecos = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
         all_done = True
