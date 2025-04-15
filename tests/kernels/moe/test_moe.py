@@ -120,9 +120,12 @@ def batch_by_experts(
     assert topk_ids.dim() == 2
     assert topk_ids.shape[0] == a.shape[0]
 
+    num_tokens = a.shape[0]
+    topk = topk_ids.shape[1]
+
     tokens_per_expert = torch.zeros(num_experts, dtype=torch.int, device=a.device)
-    for i in range(topk_ids.shape[0]):
-        for j in range(topk_ids.shape[1]):
+    for i in range(num_tokens):
+        for j in range(topk):
             expert_id = topk_ids[i, j]
             tokens_per_expert[expert_id] = tokens_per_expert[expert_id] + 1
 
@@ -132,34 +135,41 @@ def batch_by_experts(
                       dtype=a.dtype, device=a.device)
     #print(f"b_a shape {b_a.shape}")
 
-    #experts_per_token = torch.zeros(a.shape[0], dtype=torch.int, device=a.device)
+    experts_per_token = torch.zeros(num_experts, dtype=torch.int, device=a.device)
 
-    for i in range(topk_ids.shape[0]):
-        for j in range(topk_ids.shape[1]):
-            expert_id = topk_ids[i, j]
-            #idx = experts_per_token[i]
-            b_a[expert_id, j:j+1, :] = a[i, :]
-            #experts_per_token[i] = experts_per_token[i] + 1
+    for token in range(num_tokens):
+        for j in range(topk):
+            expert_id = topk_ids[token, j]
+            idx = experts_per_token[expert_id]
+            b_a[expert_id, idx:idx+1, :] = a[token, :]
+            experts_per_token[expert_id] = experts_per_token[expert_id] + 1
+
+    if False:
+        print(f"topk_ids = {topk_ids}")
+        print(f"tokens_per_expert = {tokens_per_expert}")
+        print(f"experts_per_token = {experts_per_token}")
 
     return b_a, tokens_per_expert
 
 
-def unbatch_output(b_out, topk_ids, K):
+def unbatch_output(b_out, topk_weight, topk_ids, K):
     num_tokens, topk = topk_ids.shape
 
     #print(f"b_out = {b_out.shape} M={num_tokens}, K={K}, topk={topk}")
     num_experts = b_out.shape[0]
-    out = torch.zeros((num_tokens, topk, K), dtype=b_out.dtype, device=b_out.device)
+    topk = topk_ids.shape[1]
+    out = torch.zeros((num_tokens, K), dtype=b_out.dtype, device=b_out.device)
     expert_counts = torch.zeros(num_experts, dtype=torch.int, device=b_out.device)
+    experts = torch.arange(0, num_experts, dtype=torch.int, device=b_out.device)
     for token in range(num_tokens):
         expert_ids = topk_ids[token]
         #print(f"b_out[0] = {b_out[0].shape}")
         for i in range(expert_ids.numel()):
             expert_id = expert_ids[i]
             idx = expert_counts[expert_id]
-            out[token, i:i+1, :] = b_out[expert_id, idx:idx+1, :]
-            idx = idx + 1
-            expert_counts[expert_id] = idx
+            #print(f"out = {out[token, :].shape}, b_out = {b_out[expert_id, idx:idx+1, :].shape}, topk_w = {topk_weight[token, i]}")
+            out[token, :] = out[token, :] + b_out[expert_id, idx:idx+1, :] * topk_weight[token, i]
+            expert_counts[expert_id] = expert_counts[expert_id] + 1
 
     return out
 
@@ -177,9 +187,9 @@ def torch_batched_moe(a, w1, w2, tokens_per_expert, topk_weight, topk_ids):
             #out[expert, :num, :] = SiluAndMul()(a[expert,:num,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
             out[expert, :, :] = SiluAndMul()(a[expert,:,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
 
-    out = unbatch_output(out, topk_ids, w2.shape[1])
+    out = unbatch_output(out, topk_weight, topk_ids, K)
 
-    return (out * topk_weight.view(num_tokens, -1, 1).to(out.dtype)).sum(dim=1)
+    return out #(out * topk_weight.view(num_tokens, -1, 1).to(out.dtype)).sum(dim=1)
 
 
 def torch_moe2(a, w1, w2, topk_weight, topk_ids):
@@ -204,6 +214,12 @@ def torch_moe2(a, w1, w2, topk_weight, topk_ids):
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+#@pytest.mark.parametrize("m", [33])
+#@pytest.mark.parametrize("n", [128])
+#@pytest.mark.parametrize("k", [128])
+#@pytest.mark.parametrize("e", [8])
+#@pytest.mark.parametrize("topk", [2])
+#@pytest.mark.parametrize("dtype", [torch.float16])
 def test_fused_moe_batched_experts(
     m: int,
     n: int,
@@ -212,12 +228,13 @@ def test_fused_moe_batched_experts(
     topk: int,
     dtype: torch.dtype,
 ):
+    current_platform.seed_everything(7)
+
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
-    e_map = None
 
     vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
@@ -241,6 +258,13 @@ def test_fused_moe_batched_experts(
                                           topk_weight,
                                           topk_ids,
                                           global_num_experts=e)
+
+    if False:
+        torch.set_printoptions(profile="full")
+        print("BASELINE")
+        print(torch_output)
+        print("OUTPUT")
+        print(triton_output)
 
     #torch.testing.assert_close(triton_b_output, torch_b_output, atol=2e-2, rtol=0)
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
