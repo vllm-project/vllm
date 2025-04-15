@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Type
 
@@ -28,11 +28,6 @@ if TYPE_CHECKING:
 def is_aiter_mla_enabled() -> bool:
     return envs.VLLM_ROCM_USE_AITER \
         and envs.VLLM_ROCM_USE_AITER_MLA
-
-
-def is_aiter_fa_enabled() -> bool:
-    return envs.VLLM_ROCM_USE_AITER \
-        and envs.VLLM_ROCM_USE_AITER_FA
 
 
 class AiterMLABackend(MLACommonBackend):
@@ -381,16 +376,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 "alibi_slopes, sliding_window, blocksparse_params, "
                 "logits_soft_cap")
 
-        flash_attn_func = None
-        with suppress(ImportError):
-            if is_aiter_fa_enabled():
-                from aiter import flash_attn_varlen_func
-                flash_attn_func = flash_attn_varlen_func
-            else:
-                from flash_attn import flash_attn_varlen_func
-                flash_attn_func = flash_attn_varlen_func
-
-        self.flash_attn_varlen_func = flash_attn_func
+        from aiter import flash_attn_varlen_func
+        self.flash_attn_varlen_func = flash_attn_varlen_func
 
     def _get_fwd_prefill_attn_output(self, q: torch.Tensor, k: torch.Tensor,
                                      v: torch.Tensor,
@@ -398,44 +385,21 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                                      kv_c_and_k_pe_cache: torch.Tensor,
                                      attn_metadata: MLACommonMetadata,
                                      has_context: bool) -> torch.Tensor:
-        if is_aiter_fa_enabled():
-            is_v_padded = False
-            output = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.query_start_loc,
-                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_lse=has_context,
-            )
-
-        else:
-            # For MLA the v head dim is smaller than qk head dim so we pad out
-            # v with 0s to match the qk head dim
-            v_padded = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
-            is_v_padded = True
-            output = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.query_start_loc,
-                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_attn_probs=has_context,
-            )
+        output = self.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=prefill_metadata.query_start_loc,
+            cu_seqlens_k=prefill_metadata.query_start_loc,
+            max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+            max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+            softmax_scale=self.scale,
+            causal=True,
+            return_lse=has_context,
+        )
 
         if has_context:
-            # ROCm flash_attn_varlen_func will return 3 objects instead of 2
-            suffix_output, suffix_lse, *rest = output
+            suffix_output, suffix_lse = output
             context_output, context_lse = self._compute_prefill_context( \
                 q, kv_c_and_k_pe_cache, attn_metadata)
 
@@ -448,13 +412,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 suffix_lse=suffix_lse,
             )
 
-        if is_v_padded:
-            # slice by `:v.shape[-1]` in order to remove v headdim padding
-            return output\
-                .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                    .reshape(-1, self.num_heads * v.shape[-1])
-        else:
-            return output.reshape(-1, self.num_heads * v.shape[-1])
+        return output.reshape(-1, self.num_heads * v.shape[-1])
 
     def _get_prefill_ctx_attn_output(
             self, index: int, q: torch.Tensor, k: torch.Tensor,
@@ -463,33 +421,18 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert metadata.context_chunk_cu_seq_lens is not None
         assert metadata.context_chunk_max_seq_lens is not None
 
-        if is_aiter_fa_enabled():
-            return self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=metadata.query_start_loc,
-                cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
-                max_seqlen_q=metadata.max_query_len,
-                max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_lse=True,
-            )
-        else:
-            attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=metadata.query_start_loc,
-                cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
-                max_seqlen_q=metadata.max_query_len,
-                max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_attn_probs=True,
-            )
-            return attn_output, attn_softmax_lse
+        return self.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=metadata.query_start_loc,
+            cu_seqlens_k=metadata.context_chunk_cu_seq_lens[index],
+            max_seqlen_q=metadata.max_query_len,
+            max_seqlen_k=metadata.context_chunk_max_seq_lens[index],
+            softmax_scale=self.scale,
+            causal=False,  # Context is unmasked
+            return_lse=True,
+        )
 
     def _forward_decode(
         self,
