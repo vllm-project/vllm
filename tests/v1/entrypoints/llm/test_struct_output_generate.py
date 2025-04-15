@@ -329,7 +329,9 @@ def test_structured_output(
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=json_schema)
 
-
+@pytest.mark.skipif(
+    current_platform.is_hpu(),
+    reason="Guided decoding is not supported on HPU V1 backend")
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("model_name, tokenizer_mode",
                          PARAMS_MODELS_TOKENIZER_MODE)
