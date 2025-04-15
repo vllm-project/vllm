@@ -1356,6 +1356,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc_np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
+
+            # Reset the lora mapping for prompt logprobs computing
+            if self.lora_config:
+                self.set_active_loras_for_prompt_logprobs(self.input_batch, req_idx, num_logits)
+
             logits = self.model.compute_logits(prompt_hidden_states, None)
 
             # Get the "target" tokens for each index. For prompt at index i,

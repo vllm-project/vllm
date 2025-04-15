@@ -635,6 +635,22 @@ class InputBatch:
 
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
 
+    def make_prompt_logprobs_lora_inputs(
+        self, req_idx: int, num_logits: int
+    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
+        """
+        Given the req_idx and num_logits for a request, return datastructures
+        used to activate the LoRA for prompt logprobs computing.
+        """
+        req_lora_mapping = self.request_lora_mapping[[req_idx]]
+        prompt_lora_mapping = tuple(req_lora_mapping)
+        token_lora_mapping = tuple(
+            req_lora_mapping.repeat(num_logits))
+        active_lora_requests: set[LoRARequest] = set(
+            self.lora_id_to_lora_request.values())
+
+        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
