@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Sequence
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -37,3 +38,8 @@ def matryoshka_fy(tensor, dimensions):
     tensor = tensor[..., :dimensions]
     tensor = F.normalize(tensor, p=2, dim=1)
     return tensor
+
+
+class EmbedModelInfo(NamedTuple):
+    name: str
+    is_matryoshka: bool

@@ -124,6 +124,8 @@ _EMBEDDING_MODELS = {
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
+    "NomicBertModel": ("bert", "NomicBertEmbeddingModel"),
+    "GteModel": ("bert", "GteEmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
