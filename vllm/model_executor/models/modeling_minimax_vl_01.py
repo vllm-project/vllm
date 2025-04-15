@@ -239,7 +239,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             vision_hidden_size=vision_hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act,
-            multimodal_projector_bias=config.multimodal_projector_bias)
+            multimodal_projector_bias=True)
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
