@@ -12,7 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -32,7 +32,7 @@ class ReqMeta:
     is_store: bool
 
     @staticmethod
-    def from_request(request: "Request", block_size: int,
+    def from_request(request: NewRequestData, block_size: int,
                      is_store: bool) -> "ReqMeta":
         valid_num_tokens = align_to_block_size(len(request.prompt_token_ids),
                                                block_size)
@@ -59,7 +59,7 @@ class SharedStorageConnectorMetadata(KVConnectorMetadata):
 
     def add_request(
         self,
-        request: "Request",
+        request: NewRequestData,
         block_size: int,
         is_store: bool,
     ) -> None:
@@ -281,7 +281,18 @@ class SharedStorageConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         meta = SharedStorageConnectorMetadata()
-        for request in scheduler_output.scheduled_new_reqs:
+
+        # If we have a rescheduled preempted request with a
+        # remote KV cache hit, it will be in scheduled_cached_reqs.
+        # NOTE(rob): this requires a pass over all
+        if scheduler_output.scheduled_cached_reqs:
+            scheduled_reqs = (scheduler_output.scheduled_new_reqs +
+                              scheduler_output.scheduled_cached_reqs)
+        else:
+            scheduled_reqs = scheduler_output.scheduled_new_reqs
+
+        # Check if the regu
+        for request in scheduled_reqs:
             if request.req_id in self._requests_need_load:
                 meta.add_request(request, self._block_size, is_store=False)
             else:
