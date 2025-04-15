@@ -231,8 +231,8 @@ class P2pNcclPipe:
         logger.info(
             "🔵[GET]Recv From %s, tensor_id:%s, shape:%s, duration:%.3fms, "
             "size:%.3fGB, rank:%d", remote_address, tensor_id, tensor.shape,
-            duration * 1000, tensor.element_size() * tensor.numel() / 1024**3,
-            self.rank)
+            duration * 1000,
+            tensor.element_size() * tensor.numel() / 1024 ** 3, self.rank)
 
         return tensor
 
