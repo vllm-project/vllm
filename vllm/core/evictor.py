@@ -106,8 +106,7 @@ class LRUEvictor(Evictor):
             if (block_id in self.free_table and
                     self.free_table[block_id].last_accessed == last_accessed and
                     self.free_table[block_id].content_hash == content_hash and
-                    self.free_table[block_id].num_hashed_tokens == num_hashed_tokens
-               ):
+                    self.free_table[block_id].num_hashed_tokens == num_hashed_tokens):
                 self.free_table.pop(block_id)
                 return block_id, content_hash
 
