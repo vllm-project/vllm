@@ -531,7 +531,8 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
-
+        logger.info(f"num_images: {num_images}")
+        num_images = 0
         image_token = "<image>"
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
@@ -542,9 +543,10 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                                    height=target_height,
                                    num_images=num_images)
         }
-
+        prompt_text="image:" + image_token * num_images
+        logger.info(f"mm_data: {mm_data}, prompt_text: {prompt_text}")
         return ProcessorInputs(
-            prompt_text=image_token * num_images,
+            prompt_text=prompt_text,
             mm_data=mm_data,
         )
 
@@ -1209,7 +1211,7 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
             return merged_patch_embeddings
 
         raise ValueError(f"Unexpected patch merge strategy: {strategy}")
-    
+        
     def _process_image_input(
         self,
         image_input: LlavaNextImageInputs,
