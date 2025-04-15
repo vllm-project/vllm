@@ -9,7 +9,7 @@ from torch.nn.parameter import Parameter
 from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_fp4_moe
+from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase,
                                                         FusedMoeWeightScaleSupported)

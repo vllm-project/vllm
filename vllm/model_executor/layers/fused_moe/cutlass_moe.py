@@ -272,17 +272,12 @@ def cutlass_moe_fp4(
 
     # Get the problem sizes separately because k, n change based on which gemm.
     # This passes the right metrics for problem sizes 1
-    # TODO: @pavanimajety Modify the get_cutlass_moe_mm_data to take in w1_n, w2_n 
-    # as two different parameters
     # problem shapes should have [m, n, k]
+    # Note that problem sizes are based on logical number of elements.
     ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
                                 problem_sizes2, a_map, c_map, 
                                 num_experts=w1_fp4.shape[0],
-                                n=n, 
-                                k=w1_fp4.shape[2])
-    # Fix problem_sizes2 for nvfp4 shapes to match w2_fp4
-    problem_sizes2[:,1] *= 2
-    problem_sizes2[:,2] //= 2
+                                n=n, k=k)
 
     # Replicated scales 
     rep_a_fp4 = a_fp4[a_map]
@@ -320,7 +315,13 @@ def cutlass_moe_fp4(
         alphas = 1 / (a1_gscale * w1_tensorscale)
     else:
         alphas = 1 / (mat_a_gs * w1_tensorscale)
-    print(f"{problem_sizes1=}")
+    print(f"{problem_sizes1=}, {rep_a_fp4.stride()=}"
+          f"{rep_a_blockscale.shape=}, {w1_fp4.shape=}"
+          f"{rep_a_blockscale.stride()=}, {w1_fp4.stride()=}"
+          f"{w1_fp4.stride()=}{w1_blockscale.stride()=}"
+          f"{alphas=}{alphas.stride()=}"
+          f"{expert_offsets=}")
+          
     ops.cutlass_fp4_moe_mm(c1, rep_a_fp4, w1_fp4, rep_a_blockscale,
                         w1_blockscale, alphas, a_strides1, b_strides1,
                         c_strides1,a1_sf_layout, w1_sf_layout, problem_sizes1,
