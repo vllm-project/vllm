@@ -17,6 +17,8 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    check_moe_marlin_supports_layer)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
@@ -53,16 +55,15 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             "input_activations")
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
-            # Prefer to use the non-marlin kernel when:
-            # 1. Many experts (MarlinMoE gives poor performance when >= 16)
-            # 2. Non-FP16 dtype (MarlinMoE only supports FP16)
-            # 3. Actorder is not group/dynamic (g_idx is unsupported)
-            # 4. Scaled are grouped (channelwise is unsupported)
-            if ((layer.local_num_experts >= 16
-                 or layer.params_dtype != torch.float16) and
-                    weight_quant.actorder not in (ActivationOrdering.GROUP,
-                                                  ActivationOrdering.DYNAMIC)
-                    and weight_quant.strategy in QuantizationStrategy.GROUP):
+            # Prefer to use the MarlinMoE kernel when it is supported.
+            if not check_moe_marlin_supports_layer(layer,
+                                                   weight_quant.group_size):
+                if (weight_quant.strategy in QuantizationStrategy.GROUP and
+                        weight_quant.actorder in (ActivationOrdering.GROUP,
+                                                  ActivationOrdering.DYNAMIC)):
+                    raise ValueError(
+                        "WNA16MoE is not supported with actorder=group/dynamic."
+                    )
                 return CompressedTensorsWNA16MoEMethod(quant_config)
             else:
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
@@ -555,10 +556,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
-        assert params_dtype == torch.float16, (
-            "float16 is required for MoE compressed models. Set dtype=torch.float16"  # noqa: E501
-        )
-
         intermediate_size_full = extra_weight_attrs.pop(
             "intermediate_size_full")
 
@@ -811,6 +808,13 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         )
         replace_tensor("w2_weight_scale", marlin_w2_scales)
 
+        device = layer.w13_weight_packed.device
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        layer.workspace = torch.zeros((sms * 4, ),
+                                      dtype=torch.int,
+                                      device=device,
+                                      requires_grad=False)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -830,10 +834,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         activation: str = "silu",
     ) -> torch.Tensor:
         assert activation == "silu", "Only SiLU activation is supported."
-        if expert_map is not None:
-            raise NotImplementedError(
-                "Expert Parallelism is not supported for "
-                "fused Marlin MoE method.")
         if apply_router_weight_on_input:
             raise NotImplementedError(
                 "Apply router weight on input is not supported for "
@@ -860,11 +860,14 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             router_logits,
             topk_weights,
             topk_ids,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             g_idx1=layer.w13_weight_g_idx,
             g_idx2=layer.w2_weight_g_idx,
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.num_bits,
+            workspace=layer.workspace,
             is_k_full=self.is_k_full)
 
 
@@ -1048,7 +1051,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
-        assert activation == "silu", "Only SiLU activation is supported."
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -1068,6 +1071,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
+            activation=activation,
             use_int4_w4a16=self.num_bits == 4,
             use_int8_w8a16=self.num_bits == 8,
             global_num_experts=global_num_experts,
