@@ -397,7 +397,8 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
-                request.num_computed_tokens = num_computed_tokens
+                request.num_computed_tokens = (num_computed_tokens +
+                                               num_external_tokens)
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
