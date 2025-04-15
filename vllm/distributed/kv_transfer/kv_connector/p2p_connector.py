@@ -274,7 +274,7 @@ class P2pConnector(KVConnectorBase):
 
     @staticmethod
     def parse_request_id(request_id: str, is_prefill=True) -> Tuple[str, int]:
-        logger.info("parse_request_id, request_id: %s, is_prefill: %s",
+        logger.debug("parse_request_id, request_id: %s, is_prefill: %s",
                     request_id, is_prefill)
         # Regular expression to match the string hostname and integer port
         if is_prefill:
@@ -289,7 +289,7 @@ class P2pConnector(KVConnectorBase):
             ip = match.group(1)
             port = int(match.group(2))
 
-            logger.info("parse_request_id, request_id: %s, ip: %s, port: %s",
+            logger.debug("parse_request_id, request_id: %s, ip: %s, port: %s",
                         request_id, ip, str(port))
             return ip, port
         raise ValueError(
