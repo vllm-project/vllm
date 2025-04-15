@@ -70,12 +70,14 @@ def test_encode_decode():
 
     assert_equal(decoded, obj)
 
-    # Test whether MsgpackEncoder properly reuses the buffers.
+    # Test encode_into case
 
-    encoded2 = encoder.encode(obj)
+    preallocated = bytearray()
+
+    encoded2 = encoder.encode_into(obj, preallocated)
 
     assert len(encoded2) == 6
-    assert encoded2[0] is encoded[0]
+    assert encoded2[0] is preallocated
 
     decoded2: MyType = decoder.decode(encoded2)
 

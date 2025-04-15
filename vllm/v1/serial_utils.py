@@ -58,19 +58,27 @@ class MsgpackEncoder:
         # This is used as a local stash of buffers that we can then access from
         # our custom `msgspec` hook, `enc_hook`. We don't have a way to
         # pass custom data to the hook otherwise.
-        self.msg_buffer = bytearray()
         self.aux_buffers: Optional[list[bytestr]] = None
         self.size_threshold = size_threshold
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
+            self.aux_buffers = bufs = [b'']
+            bufs[0] = self.encoder.encode(obj)
             # This `bufs` list allows us to collect direct pointers to backing
             # buffers of tensors and np arrays, and return them along with the
             # top-level encoded buffer instead of copying their data into the
             # new buffer.
-            self.aux_buffers = [self.msg_buffer]
-            bufs = self.aux_buffers
-            self.encoder.encode_into(obj, self.msg_buffer)
+            return bufs
+        finally:
+            self.aux_buffers = None
+
+    # TODO: would be nice to make this automatic
+    def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
+        try:
+            self.aux_buffers = [buf]
+            bufs = [buf]
+            self.encoder.encode_into(obj, buf)
             return bufs
         finally:
             self.aux_buffers = None
