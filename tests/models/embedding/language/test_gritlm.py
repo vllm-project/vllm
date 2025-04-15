@@ -57,24 +57,25 @@ def test_find_array(monkeypatch: pytest.MonkeyPatch):
 def server_embedding():
     # GritLM embedding implementation is only supported by XFormers backend.
     args = ["--task", "embed", "--max_model_len", str(MAX_MODEL_LEN)]
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
+    with pytest.MonkeyPatch.context() as m:
+        m.setenv(STR_BACKEND_ENV_VAR, "XFORMERS")
+        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+            yield remote_server
 
 
 @pytest.fixture(scope="module")
 def server_generate():
     args = ["--task", "generate", "--max_model_len", str(MAX_MODEL_LEN)]
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
+    with pytest.MonkeyPatch.context() as m:
+        m.setenv(STR_BACKEND_ENV_VAR, "XFORMERS")
+        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+            yield remote_server
 
 
 @pytest_asyncio.fixture
-async def client_embedding(monkeypatch: pytest.MonkeyPatch,
-                           server_embedding: RemoteOpenAIServer):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
-        async with server_embedding.get_async_client() as async_client:
-            yield async_client
+async def client_embedding(server_embedding: RemoteOpenAIServer):
+    async with server_embedding.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest_asyncio.fixture
