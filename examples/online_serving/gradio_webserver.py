@@ -10,8 +10,8 @@ Start Webserver:
 Note that `pip install --upgrade gradio` is needed to run this example.
 More details: https://github.com/gradio-app/gradio
 
-This can happen if your antivirus software blocks the download of this
-frpc for gradio. You can install manually by following these steps:
+If your antivirus software blocks the download of frpc for gradio,
+you can install it manually by following these steps:
 
 1. Download this file: https://cdn-media.huggingface.co/frpc-gradio-0.3/frpc_linux_amd64
 2. Rename the downloaded file to: frpc_linux_amd64_v0.3

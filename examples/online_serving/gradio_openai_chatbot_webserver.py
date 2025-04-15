@@ -10,8 +10,8 @@ Start Gradio OpenAI Chatbot Webserver:
 Note that `pip install --upgrade gradio` is needed to run this example.
 More details: https://github.com/gradio-app/gradio
 
-This can happen if your antivirus software blocks the download of this
-frpc for gradio. You can install manually by following these steps:
+If your antivirus software blocks the download of frpc for gradio,
+you can install it manually by following these steps:
 
 1. Download this file: https://cdn-media.huggingface.co/frpc-gradio-0.3/frpc_linux_amd64
 2. Rename the downloaded file to: frpc_linux_amd64_v0.3
@@ -94,6 +94,20 @@ def parse_args():
     return parser.parse_args()
 
 
+def build_gradio_interface(client, model_name, temp, stop_token_ids, host,
+                           port):
+
+    def chat_predict(message, history):
+        return predict(message, history, client, model_name, temp,
+                       stop_token_ids)
+
+    return gr.ChatInterface(
+        fn=chat_predict,
+        title="Chatbot Interface",
+        description="A simple chatbot powered by vLLM").queue().launch(
+            server_name=host, server_port=port, share=True)
+
+
 def main():
     # Parse the arguments
     args = parse_args()
@@ -103,16 +117,11 @@ def main():
     openai_api_base = args.model_url
 
     # Create an OpenAI client
-    client = create_openai_client(openai_api_key, openai_api_base)
+    client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
 
     # Define the Gradio chatbot interface using the predict function
-    gr.ChatInterface(fn=lambda message, history: predict(
-        message, history, client, args.model, args.temp, args.stop_token_ids),
-                     title="Chatbot Interface",
-                     description="A simple chatbot powered by vLLM").queue(
-                     ).launch(server_name=args.host,
-                              server_port=args.port,
-                              share=True)
+    build_gradio_interface(client, args.model, args.temp, args.stop_token_ids,
+                           args.host, args.port)
 
 
 if __name__ == "__main__":
