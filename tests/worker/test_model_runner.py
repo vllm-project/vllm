@@ -50,19 +50,19 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio, monkeypatch):
     seq_lens: list[int] = []
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
     block_tables = {0: [1]}
-    input_embeds_len = 0
+    expected_input_embeds_len = 0
     for i in range(batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
         if random.random() < prompt_embeds_ratio:
             seq_data = SequenceData.from_seqs(
-                [],
+                prompt_token_ids=[0] * seq_len,
                 prompt_embeds=torch.rand(seq_len, 10),
             )
-            input_embeds_len += seq_len
+            expected_input_embeds_len += seq_len
         else:
-            seq_data = SequenceData.from_seqs(range(seq_len))
+            seq_data = SequenceData.from_seqs(prompt_token_ids=range(seq_len))
 
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
@@ -138,11 +138,11 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio, monkeypatch):
 
     assert len(input_tokens) == sum(seq_lens)
     assert len(input_positions) == sum(seq_lens)
-    if input_embeds_len == 0:
+    if expected_input_embeds_len == 0:
         torch.testing.assert_close(input_tokens, input_positions)
         assert input_embeds is None
     else:
-        assert len(input_embeds) == input_embeds_len
+        assert len(input_embeds) == expected_input_embeds_len
 
     sampling_metadata = SamplingMetadata.prepare(
         seq_group_metadata_list,
@@ -187,20 +187,21 @@ def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio,
     context_lens: list[int] = []
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
     # Assume each seq group finishes prefill.
-    input_embeds_len = 0
+    expected_input_embeds_len = 0
     for i in range(batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
         if random.random() < prompt_embeds_ratio:
             seq_data = SequenceData.from_seqs(
-                [],
+                prompt_token_ids=[0] * context_len,
                 prompt_embeds=torch.rand(context_len, 10),
             )
-            input_embeds_len += context_len
+            expected_input_embeds_len += context_len
             output_embed = torch.rand(10)
         else:
-            seq_data = SequenceData.from_seqs(range(context_len))
+            seq_data = SequenceData.from_seqs(
+                prompt_token_ids=range(context_len))
             output_embed = None
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
@@ -368,19 +369,20 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
     block_tables = {0: [1]}
     prefill_batch_size = batch_size // 2
     decode_batch_size = batch_size - prefill_batch_size
-    input_embeds_len = 0
+    expected_input_embeds_len = 0
     for i in range(prefill_batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
         if random.random() < prompt_embeds_ratio:
             seq_data = SequenceData.from_seqs(
-                [],
+                prompt_token_ids=[0] * seq_len,
                 prompt_embeds=torch.rand(seq_len, 10),
             )
-            input_embeds_len += seq_len
+            expected_input_embeds_len += seq_len
         else:
-            seq_data = SequenceData.from_seqs(range(seq_len))
+            seq_data = SequenceData.from_seqs(
+                prompt_token_ids=range(seq_len), )
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -398,13 +400,18 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
         context_len = i % (model_runner.block_size - 1) + 1
         if random.random() < prompt_embeds_ratio:
             seq_data = SequenceData.from_seqs(
-                [],
+                prompt_token_ids=[0] * context_len,
                 prompt_embeds=torch.rand(context_len, 10),
             )
             output_embed = torch.rand(10)
+            # This also iterates the expected input_embeds, because the model
+            # needs both the input and output embeddings passed into together
+            expected_input_embeds_len += 1
         else:
-            seq_data = SequenceData.from_seqs(range(context_len))
+            seq_data = SequenceData.from_seqs(
+                prompt_token_ids=range(context_len), )
             output_embed = None
+        assert len(seq_data.prompt_token_ids) == context_len
         seq_data.append_token_id(1, 0, output_embed)
         seq_data.update_num_computed_tokens(context_len)
         seq_group_metadata = SequenceGroupMetadata(
@@ -434,10 +441,10 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
     assert attn_metadata.num_prefills == prefill_batch_size
     assert attn_metadata.num_decode_tokens == decode_batch_size
     assert attn_metadata.num_prefill_tokens == sum(seq_lens)
-    if input_embeds_len == 0:
+    if expected_input_embeds_len == 0:
         assert input_embeds is None
     else:
-        assert len(input_embeds) == input_embeds_len
+        assert len(input_embeds) == expected_input_embeds_len
 
     # Verify attn metadata is consistent. We don't need to test individual
     # values here because they are tested above.
