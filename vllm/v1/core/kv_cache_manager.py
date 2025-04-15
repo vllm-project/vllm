@@ -283,11 +283,12 @@ class KVCacheManager:
         # for a running request.
         num_cached_blocks = self.num_cached_block.get(request.request_id,
                                                       len(new_computed_blocks))
-        # Speculated tokens might be rejected in the future, so we does
+        # Speculated tokens might be rejected in the future, so we do
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
-        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
-            request.spec_token_ids)) // self.block_size
+        num_full_blocks_after_append = (
+            num_computed_tokens + num_external_tokens + num_tokens -
+            len(request.spec_token_ids)) // self.block_size
 
         self.block_pool.cache_full_blocks(
             request=request,

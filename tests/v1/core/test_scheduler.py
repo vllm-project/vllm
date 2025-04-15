@@ -771,26 +771,92 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert stats.num_accepted_tokens == expected[1]
 
 
+def _assert_right_scheduler_output(
+    output: SchedulerOutput,
+    num_requests: int,
+    expected_num_scheduled_tokens: int,
+):
+    # We should inject the kv_connector_metadata.
+    assert len(output.kv_connector_metadata.requests) == num_requests
+
+    # Only num_tokens - matched_num_new_tokens should be scheduled.
+    for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
+        assert num_scheduled_tokens == expected_num_scheduled_tokens
+
+
+def _assert_right_kv_cache_manager(
+    scheduler: Scheduler,
+    req_ids: list[str],
+    num_tokens: int,
+    block_size: int,
+    num_requests: int,
+    num_total_blocks: int,
+):
+    """Assert KV Cache Manager Is Right After Remote Cache Hit."""
+
+    EXPECTED_ACTUAL_BLOCKS = num_tokens // block_size
+    EXPECTED_TOTAL_BLOCKS = (EXPECTED_ACTUAL_BLOCKS +
+                             scheduler.kv_cache_manager.num_preallocate_blocks)
+    for req_id in req_ids:
+        blocks = scheduler.kv_cache_manager.req_to_blocks[req_id]
+        hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
+        assert (scheduler.kv_cache_manager.num_cached_block[req_id] ==
+                EXPECTED_ACTUAL_BLOCKS)
+        assert len(blocks) == EXPECTED_TOTAL_BLOCKS
+        assert len(hashes) == EXPECTED_ACTUAL_BLOCKS
+
+    # Make sure we actually touched all the blocks.
+    BLOCKS_PER_REQ = (num_tokens / block_size +
+                      scheduler.kv_cache_manager.num_preallocate_blocks)
+    assert (scheduler.kv_cache_manager.block_pool.get_num_free_blocks() ==
+            num_total_blocks - num_requests * BLOCKS_PER_REQ)
+
+
+def _step_until_done(
+    scheduler: Scheduler,
+    output: SchedulerOutput,
+    model_runner_output: ModelRunnerOutput,
+):
+    all_finished = False
+    _ = scheduler.update_from_output(output, model_runner_output)
+    while not all_finished:
+        # Schedule + a few iterations until stopping.
+        output = scheduler.schedule()
+        for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
+            # We should be in the decode phase now.
+            assert num_scheduled_tokens == 1
+        assert len(output.kv_connector_metadata.requests) == 0
+        ecos = scheduler.update_from_output(output, model_runner_output)
+        all_done = True
+        for eco in ecos.outputs:
+            if eco.finish_reason is None:
+                all_done = False
+        all_finished = all_done
+    _ = scheduler.schedule()
+
+
 def test_kv_connector_basic():
     """Test basic functionality of KVConnector."""
 
+    # Setup Scheduler.
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         use_kv_connector=True,
     )
-
     NUM_TOTAL_BLOCKS = (
         scheduler.kv_cache_manager.block_pool.get_num_free_blocks())
     BLOCK_SIZE = scheduler.cache_config.block_size
 
-    # Every request should match a single block.
-    NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
+    # Mock External Cache Hit.
+    NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
         NUM_MATCHED_NEW_TOKENS)
 
+    ######################################################
+    # FIRST SET OF REQUESTS - External Hit Only
     NUM_REQUESTS = 2
-    NUM_TOKENS = BLOCK_SIZE * 2
+    NUM_TOKENS = NUM_MATCHED_NEW_TOKENS * 2
     MAX_TOKENS = 3
     requests = create_requests(num_requests=NUM_REQUESTS,
                                num_tokens=NUM_TOKENS,
@@ -811,43 +877,30 @@ def test_kv_connector_basic():
         prompt_logprobs_dict={},
     )
 
-    # We should get an external prefix cache hit.
+    # Ensure ScheduleOutput is correct.
     output = scheduler.schedule()
-    assert len(output.kv_connector_metadata.requests) == NUM_REQUESTS
-    for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
-        # We should only schedule new tokens beyond this request.
-        assert num_scheduled_tokens == NUM_TOKENS - NUM_MATCHED_NEW_TOKENS
+    _assert_right_scheduler_output(
+        output=output,
+        num_requests=NUM_REQUESTS,
+        # Just the incremental tokens should be scheduled.
+        expected_num_scheduled_tokens=NUM_TOKENS - NUM_MATCHED_NEW_TOKENS,
+    )
 
-    # Make sure we actually touched all the blocks.
-    BLOCKS_PER_REQ = (NUM_TOKENS / BLOCK_SIZE +
-                      scheduler.kv_cache_manager.num_preallocate_blocks)
-    assert (scheduler.kv_cache_manager.block_pool.get_num_free_blocks() ==
-            NUM_TOTAL_BLOCKS - NUM_REQUESTS * BLOCKS_PER_REQ)
+    # Ensure KVCacheManager is correct.
+    _assert_right_kv_cache_manager(scheduler, req_ids, NUM_TOKENS, BLOCK_SIZE,
+                                   NUM_REQUESTS, NUM_TOTAL_BLOCKS)
 
-    # We should not have any connector metadata in running.
-    all_finished = False
-    _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
-    while not all_finished:
-        # Schedule + a few iterations until stopping.
-        output = scheduler.schedule()
-        for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
-            # We should be in the decode phase now.
-            assert num_scheduled_tokens == 1
-        assert len(output.kv_connector_metadata.requests) == 0
-        ecos = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
-        all_done = True
-        for eco in ecos.outputs:
-            if eco.finish_reason is None:
-                all_done = False
-        all_finished = all_done
-    output = scheduler.schedule()
-
-    # Confirm we have no leaks (all blocks are freed).
+    # Continue Generation until done.
+    _step_until_done(scheduler, output, MODEL_RUNNER_OUTPUT)
+    # Confirm we clean up the memory properly.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
         == NUM_TOTAL_BLOCKS
 
-    # Every request should match a single block.
+    ######################################################
+    # SECOND SET OF REQUESTS - Local And External Hit
     NUM_TOKENS_PREFIX = NUM_TOKENS
+    # We will get a local prefix cache hit for the first
+    # NUM_TOKENS_PREFIX tokens since they are used above.
     NUM_TOKENS = NUM_TOKENS_PREFIX * 2
     requests = create_requests(num_requests=NUM_REQUESTS,
                                num_tokens=NUM_TOKENS,
@@ -871,35 +924,19 @@ def test_kv_connector_basic():
     # We should get a local cache hit of NUM_TOKENS_PREFIX and
     # a remote KV cache hit of NUM_MATCHED_NEW_TOKENS.
     output = scheduler.schedule()
-    assert len(output.kv_connector_metadata.requests) == NUM_REQUESTS
-    for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
-        # We should only schedule new tokens beyond this request.
-        assert num_scheduled_tokens == (NUM_TOKENS - NUM_TOKENS_PREFIX -
-                                        NUM_MATCHED_NEW_TOKENS)
+    _assert_right_scheduler_output(
+        output=output,
+        num_requests=NUM_REQUESTS,
+        # Just the incremental tokens after local + remote cache hit.
+        expected_num_scheduled_tokens=(NUM_TOKENS - NUM_TOKENS_PREFIX -
+                                       NUM_MATCHED_NEW_TOKENS))
 
-    # Make sure we actually touched all the blocks.
-    BLOCKS_PER_REQ = (NUM_TOKENS / BLOCK_SIZE +
-                      scheduler.kv_cache_manager.num_preallocate_blocks)
-    assert (scheduler.kv_cache_manager.block_pool.get_num_free_blocks() ==
-            NUM_TOTAL_BLOCKS - NUM_REQUESTS * BLOCKS_PER_REQ)
+    # Ensure KVCacheManager is correct.
+    _assert_right_kv_cache_manager(scheduler, req_ids, NUM_TOKENS, BLOCK_SIZE,
+                                   NUM_REQUESTS, NUM_TOTAL_BLOCKS)
 
-    all_finished = False
-    _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
-    while not all_finished:
-        # Schedule + a few iterations until stopping.
-        output = scheduler.schedule()
-        for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
-            # We should be in the decode phase now.
-            assert num_scheduled_tokens == 1
-        assert len(output.kv_connector_metadata.requests) == 0
-        ecos = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
-        all_done = True
-        for eco in ecos.outputs:
-            if eco.finish_reason is None:
-                all_done = False
-        all_finished = all_done
-    output = scheduler.schedule()
-
-    # Confirm we have no leaks (all blocks are freed).
+    # Continue Generation until done.
+    _step_until_done(scheduler, output, MODEL_RUNNER_OUTPUT)
+    # Confirm we clean up the memory properly.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
         == NUM_TOTAL_BLOCKS
