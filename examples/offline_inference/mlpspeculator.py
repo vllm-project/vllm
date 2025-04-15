@@ -34,8 +34,7 @@ def time_generation(llm: LLM, prompts: list[str],
         print("-" * 50)
 
 
-if __name__ == "__main__":
-
+def main():
     template = (
         "Below is an instruction that describes a task. Write a response "
         "that appropriately completes the request.\n\n### Instruction:\n{}"
@@ -66,3 +65,7 @@ if __name__ == "__main__":
     )
 
     time_generation(llm, prompts, sampling_params, "With speculation")
+
+
+if __name__ == "__main__":
+    main()
