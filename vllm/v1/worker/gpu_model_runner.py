@@ -458,13 +458,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        if batch_changed:
-            # Some attention backends (namely MLA) may want to separate
-            # requests based on if the attention computation will be
-            # compute-bound or memory-bound. This gives them a hook to do that.
-            self.attn_metadata_builder.reorder_batch(self.input_batch,
-                                                     scheduler_output)
+        # Some attention backends (namely MLA) may want to separate requests
+        # based on if the attention computation will be compute-bound or
+        # memory-bound. This gives them a hook to do that.
+        batch_reordered = self.attn_metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
 
+        if batch_changed or batch_reordered:
             self.input_batch.refresh_sampling_metadata()
 
     def _prepare_inputs(

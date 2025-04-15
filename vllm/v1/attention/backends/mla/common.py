@@ -378,7 +378,7 @@ class MLACommonMetadataBuilder(Generic[M]):
             self.page_size = self.runner.block_size
 
     def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> None:
+                      scheduler_output: "SchedulerOutput") -> bool:
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
         # swaps possible. (NOTE for now we loosely use "decode" to mean requests
@@ -415,6 +415,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         # the above loop
         num_decodes = len(decodes)
         num_prefills = len(prefills)
+        modified_batch = False
 
         for i in range(1, min(num_decodes, num_prefills) + 1):
             # If the decode is at the "back" of the batch, i, we can swap it
@@ -424,6 +425,7 @@ class MLACommonMetadataBuilder(Generic[M]):
                 break
 
             input_batch.swap_states(prefills[i - 1], decode_idx)
+            modified_batch = True
 
         # Save for next `build` call
         # TODO(lucas): this is a bit of a hack, we should probably have a
@@ -432,6 +434,8 @@ class MLACommonMetadataBuilder(Generic[M]):
         self._num_prefills = num_prefills
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
+
+        return modified_batch
 
     def _build_decode(self, input_positions: torch.Tensor,
                       block_table: torch.Tensor, seq_lens: torch.Tensor):
