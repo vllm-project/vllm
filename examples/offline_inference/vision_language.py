@@ -728,16 +728,18 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
 def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
-    model_name = "Isotr0py/Ovis2-1B-dev"
+    model_name = "AIDC-AI/Ovis2-1B"
+    tokenizer = "Isotr0py/Ovis2-1B-dev"
 
     engine_args = EngineArgs(
         model=model_name,
+        tokenizer=tokenizer,
         max_model_len=4096,
         max_num_seqs=2,
         trust_remote_code=True,
         dtype="half",
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
         hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
+        limit_mm_per_prompt={"image": 1},
     )
 
     placeholder = "<image>\n"
