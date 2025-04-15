@@ -828,6 +828,7 @@ class Scheduler(SchedulerInterface):
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats()
-        spec_decoding_stats.observe(num_draft_tokens=num_draft_tokens,
-                                    num_accepted_tokens=num_accepted_tokens)
+        spec_decoding_stats.observe_draft(
+            num_draft_tokens=num_draft_tokens,
+            num_accepted_tokens=num_accepted_tokens)
         return spec_decoding_stats

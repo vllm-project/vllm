@@ -21,10 +21,12 @@ class SpecDecodingStats:
     frontend in EngineCoreOutputs->SchedulerStats.
     """
 
+    num_drafts: int = 0
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
 
-    def observe(self, num_draft_tokens: int, num_accepted_tokens: int):
+    def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
+        self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
 
@@ -41,27 +43,33 @@ class SpecDecodingLogging:
         self.reset()
 
     def reset(self):
+        self.num_drafts: list[int] = []
         self.num_draft_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
 
     def observe(self, spec_decoding_stats: SpecDecodingStats):
+        self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
         self.num_accepted_tokens.append(
             spec_decoding_stats.num_accepted_tokens)
 
     def log(self, log_fn=logger.info):
+        num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
 
         draft_acceptance_rate = (num_accepted_tokens / num_draft_tokens *
                                  100 if num_draft_tokens > 0 else float("nan"))
+        mean_acceptance_length = (num_accepted_tokens / num_drafts)
 
         log_fn(
             "SpecDecoding metrics: "
             "Draft acceptance rate: %.1f%%, "
+            "Mean acceptance length: %.2f, "
             "Accepted: %d tokens, "
             "Drafted: %d tokens",
             draft_acceptance_rate,
+            mean_acceptance_length,
             num_accepted_tokens,
             num_draft_tokens,
         )
@@ -75,6 +83,11 @@ class SpecDecodingProm:
 
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
       rate(vllm:spec_decode_num_draft_tokens_total[$interval])
+
+    The mean acceptance length can be calculated using:
+
+      rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
+      rate(vllm:spec_decode_num_drafts[$interval])
     """
 
     def __init__(self, speculative_config: Optional[SpeculativeConfig],
@@ -83,6 +96,11 @@ class SpecDecodingProm:
         if not self.spec_decoding_enabled:
             return
 
+        self.counter_spec_decode_num_drafts = \
+            prometheus_client.Counter(
+                name="vllm:spec_decode_num_drafts_total",
+                documentation="Number of spec decoding drafts.",
+                labelnames=labelnames).labels(*labelvalues)
         self.counter_spec_decode_num_draft_tokens = \
             prometheus_client.Counter(
                 name="vllm:spec_decode_num_draft_tokens_total",
@@ -97,6 +115,7 @@ class SpecDecodingProm:
     def observe(self, spec_decoding_stats: SpecDecodingStats):
         if not self.spec_decoding_enabled:
             return
+        self.counter_spec_decode_num_drafts.inc(spec_decoding_stats.num_drafts)
         self.counter_spec_decode_num_draft_tokens.inc(
             spec_decoding_stats.num_draft_tokens)
         self.counter_spec_decode_num_accepted_tokens.inc(
