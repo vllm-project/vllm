@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, List
 
 import torch
 
+import vllm.envs
 from vllm.logger import init_logger
 
 try:
@@ -131,8 +132,13 @@ class GrammarCompilerCache:
                 encoded_vocab=config_data.encoded_vocab,
                 metadata=config_data.metadata,
             )
+            cache_size = vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024
             cls._cache[cache_key] = xgr.GrammarCompiler(
-                tokenizer_info, max_threads=config.max_threads)
+                tokenizer_info,
+                max_threads=config.max_threads,
+                cache_enabled=True,
+                cache_limit_bytes=cache_size,
+            )
 
         return cls._cache[cache_key]
 
@@ -146,6 +152,7 @@ class GrammarConfig:
     grammar_str: str | None = None
     json_object: bool | None = None
     any_whitespace: bool = True
+    regex_str: str | None = None
     max_threads: int = 8
 
     @classmethod
@@ -249,6 +256,13 @@ class GrammarConfig:
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
             )
+        elif guided_params.regex:
+            return cls(
+                regex_str=guided_params.regex,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                tokenizer_data=tokenizer_data,
+            )
         else:
             raise ValueError(
                 "Currently only support JSON and EBNF grammar mode for xgrammar"
@@ -324,6 +338,8 @@ class XGrammarLogitsProcessor:
                 self.ctx = compiler\
                     .compile_json_schema('{"type": "object"}',
                                          any_whitespace=any_whitespace)
+            elif self.config.regex_str:
+                self.ctx = compiler.compile_regex(self.config.regex_str)
             else:
                 raise ValueError(
                     "Invalid configuration for xgrammar logits processor")
