@@ -569,7 +569,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             multimodal_projector_bias=True,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "multi_modal_projector"))
-
+        self.image_newline = nn.Parameter(
+            torch.empty(config.text_config.hidden_size))
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
