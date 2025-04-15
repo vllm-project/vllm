@@ -282,15 +282,6 @@ class BaseMultiModalField(ABC):
 
         return self._reduce_data([item.data for item in elems])
 
-    @abstractmethod
-    def field_type(self) -> tuple[Any, ...]:
-        """
-        Return the type of this field instance and constructor args.
-
-        Required for serialization.
-        """
-        raise NotImplementedError
-
 
 @dataclass(frozen=True)
 class MultiModalBatchedField(BaseMultiModalField):
@@ -320,9 +311,6 @@ class MultiModalBatchedField(BaseMultiModalField):
                 return torch.stack(batch)
 
         return batch
-
-    def field_type(self) -> tuple[Any, ...]:
-        return ("batched", )
 
 
 @dataclass(frozen=True)
@@ -356,9 +344,6 @@ class MultiModalFlatField(BaseMultiModalField):
 
         return [e for elem in batch for e in elem]
 
-    def field_type(self) -> tuple[Any, ...]:
-        return ("flat", self.slices)
-
 
 @dataclass(frozen=True)
 class MultiModalSharedField(BaseMultiModalField):
@@ -379,9 +364,6 @@ class MultiModalSharedField(BaseMultiModalField):
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         return batch[0]
-
-    def field_type(self) -> tuple[Any, ...]:
-        return ("shared", self.batch_size)
 
 
 class MultiModalFieldConfig:

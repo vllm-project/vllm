@@ -14,9 +14,10 @@ import torch
 import zmq
 from msgspec import msgpack
 
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalFieldElem,
-                                    MultiModalKwargs, MultiModalKwargsItem,
-                                    NestedTensors)
+from vllm import envs
+from vllm.multimodal.inputs import (BaseMultiModalField, MultiModalFieldConfig,
+                                    MultiModalFieldElem, MultiModalKwargs,
+                                    MultiModalKwargsItem, NestedTensors)
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
@@ -39,16 +40,21 @@ class MsgpackEncoder:
     See: https://github.com/vllm-project/vllm/issues/16185
     """
 
-    def __init__(self, size_threshold=256):
+    def __init__(self, size_threshold=None):
+        if (size_threshold is None):
+            size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
         # This is used as a local stash of buffers that we can then access from
         # our custom `msgspec` hook, `enc_hook`. We don't have a way to
         # pass custom data to the hook otherwise.
+        self.msg_buffer = bytearray()
         self.aux_buffers: Optional[list[bytestr]] = None
         self.size_threshold = size_threshold
 
+    # TODO - merge these constructors and remove the need for externally managed
+    # serialization buffers.
     def encode(self, obj: Any) -> Sequence[bytestr]:
-        return self.encode_into(obj, bytearray())
+        return self.encode_into(obj, self.msg_buffer)
 
     def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
         try:
@@ -85,9 +91,8 @@ class MsgpackEncoder:
             ret = []
             for elem in obj.values():
                 # Encode as plain dictionary + special handling for .field
-                d = asdict(elem)
-                d["field"] = elem.field.field_type()
-                ret.append(d)
+                ret.append(
+                    asdict(elem) | {"field": self._encode_field(elem.field)})
             return ret
 
         if isinstance(obj, FunctionType):
@@ -106,8 +111,7 @@ class MsgpackEncoder:
         # Sending memoryviews is theoretically faster, but in this particular
         # case, it triggers some unnecessary copies anyway.
         # With this, the tensors can still be zero-copy read.
-        arr_data = obj.data.tobytes() if obj.data.c_contiguous \
-            else obj.tobytes()
+        arr_data = obj.tobytes()
         if not obj.shape or obj.nbytes < self.size_threshold:
             # Encode small arrays and scalars inline. Using this extension type
             # ensures we can avoid copying when decoding.
@@ -121,6 +125,13 @@ class MsgpackEncoder:
         # The data is either inlined if small, or an index into a list of
         # backing buffers that we've stashed in `aux_buffers`.
         return obj.dtype.str, obj.shape, data
+
+    def _encode_field(self, field: BaseMultiModalField):
+        # Encode the field as a dictionary + special handling for .field
+        d = asdict(field)
+        # Strip first 10 characters and last 5 characters from the class name
+        # to get the field type name that matches the factory function name.
+        return (field.__class__.__name__[10:-5].lower(), *d.values())
 
 
 class MsgpackDecoder:
