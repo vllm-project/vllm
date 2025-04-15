@@ -182,13 +182,19 @@ def config(cls: type[Config]) -> type[Config]:
     return cls
 
 
-def get_field(cls: type[Config], name: str) -> Field:
+def get_default_factory_field(cls: type[Config], name: str) -> Field:
     """Get the field of a dataclass by name. Primarily used for getting
     non-trivial defaults for `EngineArgs`."""
     if not is_dataclass(cls):
         raise TypeError("The given class is not a dataclass.")
-    f = {f.name: f for f in fields(cls)}.get(name)
-    return field(default=f.default, default_factory=f.default_factory)
+    cls_fields = {f.name: f for f in fields(cls)}
+    if name not in cls_fields:
+        raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
+    f: Field = cls_fields.get(name)
+    if f.default_factory is MISSING:
+        raise ValueError(
+            f"{cls.__name__}.{name} does not have a default factory.")
+    return field(default_factory=f.default_factory)
 
 
 class ModelConfig:
