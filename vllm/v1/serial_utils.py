@@ -52,8 +52,8 @@ class MsgpackEncoder:
     See: https://github.com/vllm-project/vllm/issues/16185
     """
 
-    def __init__(self, size_threshold=None):
-        if (size_threshold is None):
+    def __init__(self, size_threshold: Optional[int] = None):
+        if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
         # This is used as a local stash of buffers that we can then access from
@@ -84,27 +84,22 @@ class MsgpackEncoder:
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
 
-        if isinstance(obj, MultiModalKwargs):
-            mm: MultiModalKwargs = obj
-            if mm.modalities:
-                # ignore the main dict, it will be re-indexed.
-                # pass a list of MultiModalKwargsItem, then see below
-                # Any tensors *not* indexed by modality will be ignored.
-                return list(mm._items_by_modality.values())
-            # just return the main dict if there are no modalities
+    if isinstance(obj, MultiModalKwargs):
+        mm: MultiModalKwargs = obj
+        if not mm.modalities:
+            # just return the main dict if there are no modalities.
             return dict(mm)
-
-        if isinstance(obj, MultiModalKwargsItem):
-            ret = []
-            for elem in obj.values():
-                # Encode as plain dictionary + special handling for .field
-                ret.append({
-                    "modality": elem.modality,
-                    "key": elem.key,
-                    "data": self._encode_nested_tensors(elem.data),
-                    "field": self._encode_field(elem.field),
-                })
-            return ret
+        
+        # ignore the main dict, it will be re-indexed.
+        # Encode a list of MultiModalKwargsItems as plain dicts
+        # + special handling for .field.
+        # Any tensors *not* indexed by modality will be ignored.
+        return [{
+            "modality": elem.modality,
+            "key": elem.key,
+            "data": self._encode_nested_tensors(elem.data),
+            "field": self._encode_field(elem.field),
+        } for item in mm._items_by_modality.values() for elem in item]
 
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
