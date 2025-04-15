@@ -1840,6 +1840,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                      lora_request=lora_request)
 
     def profile_run(self) -> None:
+        if self.vllm_config.kv_transfer_config is not None and\
+            self.vllm_config.kv_transfer_config.is_kv_consumer:
+            return
+
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
         bind_kv_cache(
