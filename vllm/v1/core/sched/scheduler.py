@@ -189,10 +189,8 @@ class Scheduler(SchedulerInterface):
             if request.has_encoder_inputs:
                 (encoder_inputs_to_schedule, num_new_tokens,
                  new_encoder_budget) = self._try_schedule_encoder_inputs(
-                     request=request,
-                     num_total_computed_tokens=request.num_computed_tokens,
-                     num_new_tokens=num_new_tokens,
-                     encoder_budget=encoder_budget)
+                     request, request.num_computed_tokens, num_new_tokens,
+                     encoder_budget)
                 if num_new_tokens == 0:
                     # The request cannot be scheduled because the encoder budget
                     # or the encoder cache is exhausted.
@@ -321,16 +319,19 @@ class Scheduler(SchedulerInterface):
                 # Get externally-cached tokens if using a KVConnector.
                 num_external_tokens = 0
                 if self.connector is not None:
-                    num_external_tokens = (
+                    num_external_tokens += (
                         self.connector.get_num_new_matched_tokens(
                             request, num_computed_tokens))
+
+                # Total computed blocks (local + external).
+                num_total_computed_tokens = (num_computed_tokens +
+                                             num_external_tokens)
 
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
-                num_new_tokens = (request.num_tokens - num_computed_tokens -
-                                  num_external_tokens)
+                num_new_tokens = request.num_tokens - num_total_computed_tokens
                 if (0 < self.scheduler_config.long_prefill_token_threshold <
                         num_new_tokens):
                     num_new_tokens = (
@@ -342,11 +343,8 @@ class Scheduler(SchedulerInterface):
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
                      new_encoder_budget) = self._try_schedule_encoder_inputs(
-                         request=request,
-                         num_total_computed_tokens=num_computed_tokens +
-                         num_external_tokens,
-                         num_new_tokens=num_new_tokens,
-                         encoder_budget=encoder_budget)
+                         request, num_total_computed_tokens, num_new_tokens,
+                         encoder_budget)
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
@@ -396,8 +394,7 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
-                request.num_computed_tokens = (num_computed_tokens +
-                                               num_external_tokens)
+                request.num_computed_tokens = num_total_computed_tokens
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
