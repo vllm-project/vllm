@@ -759,7 +759,7 @@ On the other hand, modalities separated by `/` are mutually exclusive.
 See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the model.
 
 :::{important}
-To enable multiple multi-modal items per text prompt, you have to set `limit_mm_per_prompt` (offline inference)
+**To enable multiple multi-modal items per text prompt in vLLM V0**, you have to set `limit_mm_per_prompt` (offline inference)
 or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
 
 Offline inference:
@@ -776,6 +776,8 @@ Online serving:
 ```bash
 vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
 ```
+
+**This is no longer required if you are using vLLM V1.**
 
 :::
 
@@ -883,6 +885,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
   *
   * ✅︎
+  * ✅︎
+- * `KimiVLForConditionalGeneration`
+  * Kimi-VL-A3B-Instruct, Kimi-VL-A3B-Thinking
+  * T + I<sup>+</sup>
+  * `moonshotai/Kimi-VL-A3B-Instruct`, `moonshotai/Kimi-VL-A3B-Thinking`
+  *
+  *
   * ✅︎
 - * `Llama4ForConditionalGeneration`
   * Llama 4
