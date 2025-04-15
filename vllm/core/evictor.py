@@ -100,8 +100,8 @@ class LRUEvictor(Evictor):
             # entries are filtered out here during eviction. Outdated entries
             # would either not in the free table, or have older last accessed
             # time.
-            last_accessed, num_hashed_tokens, block_id, content_hash = \
-            heapq.heappop(self.priority_queue)
+            last_accessed, num_hashed_tokens, block_id, \
+            content_hash = heapq.heappop(self.priority_queue)
             num_hashed_tokens = -num_hashed_tokens
             if (block_id in self.free_table and
                     self.free_table[block_id].last_accessed == last_accessed
