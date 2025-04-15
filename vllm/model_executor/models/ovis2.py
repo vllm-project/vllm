@@ -60,13 +60,7 @@ from .utils import merge_multimodal_embeddings
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 
 # Cannot find the following number from hf config.
-IGNORE_ID = -100
-IMAGE_TOKEN_ID = -200
 IMAGE_TOKEN = "<image>"
-IMAGE_ATOM_ID = -300
-IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
-MAX_SEGMENTS = 30  # default value in the ovis2 modeling
-
 NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT = 256
 
 
@@ -93,10 +87,6 @@ class VisualEmbedding(torch.nn.Embedding):
         if visual_tokens.dtype in [torch.int8, torch.int16, torch.int32, torch.int64, torch.long]:
             return super().forward(visual_tokens)
         return torch.matmul(visual_tokens, self.weight)
-
-    def reset_parameters(self, mean=0., std=1.) -> None:
-        init.normal_(self.weight, mean=mean, std=std)
-        self._fill_padding_idx_with_zero()
 
     @property
     def device(self):
@@ -228,7 +218,7 @@ class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(Ovis2MultiModalProcessor,
                                         info=Ovis2ProcessingInfo,
                                         dummy_inputs=Ovis2DummyInputsBuilder)
-class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -257,56 +247,9 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             dtype=self.visual_tokenizer.dtype
         )
 
-        # we'll instantiate a tokenizer and keep just the external mapping
-        # tokenizer = AutoTokenizer.from_pretrained(config.name_or_path)
-        tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-
-        self.extra_special_tokens = {
-            "image_token": "<image>",
-            "image_atom": "<image_atom>",
-            "image_start": "<img>",
-            "image_prefix": "<pre>",
-            "image_col_sep": "<col>",
-            "image_row_sep": "<row>",
-            "image_end": "</img>",
-            'image_pad': '<image_pad>',
-        }
-
-        self.extra_token_mapping = {
-            k: tokenizer(v)['input_ids'][0] for k, v in self.extra_special_tokens.items()
-        }
-
-        self.extra_token_mapping_for_substitution = {
-            k: tokenizer(v)['input_ids'][0] for k, v in self.extra_special_tokens.items() if k in
-                                                                                                  {'image_atom',
-                                                                                                   'image_pad'}
-        }
-
-        self.visual_indicators_embeds_dict = None
-
         # TODO(Isotr0py): PP support
         # self.make_empty_intermediate_tensors = (
         #    self.language_model.make_empty_intermediate_tensors)
-
-    def _init_embed_representation(self):
-        if not self.visual_indicators_embeds_dict:
-            # we precalcualte the embeddings for the image tokens
-            visual_vocab_size = self.visual_tokenizer.config.vocab_size
-            visual_indicator_embeds = self.vte(
-                torch.tensor(
-                    list(range(visual_vocab_size - 5, visual_vocab_size)),
-                    dtype=torch.long,
-                    device=self.vte.device
-                )
-            )
-
-            self.visual_indicators_embeds_dict = {
-                'image_start': visual_indicator_embeds[0],
-                'image_prefix': visual_indicator_embeds[1],
-                'image_col_sep': visual_indicator_embeds[2],
-                'image_row_sep': visual_indicator_embeds[3],
-                'image_end': visual_indicator_embeds[4],
-            }
 
     @property
     def sampler(self):
@@ -333,7 +276,6 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _process_image_input(
             self, image_input: Ovis2ImagePatchInputs) -> MultiModalEmbeddings:
-        self._init_embed_representation()
         image_patches_flat = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"]
 
