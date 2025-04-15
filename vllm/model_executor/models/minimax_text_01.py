@@ -109,13 +109,34 @@ class MiniMaxText01RMSNormTP(CustomOp):
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         
-        # 确保输入张量和权重张量的维度匹配
-        if x.size(-1) != self.weight.size(0):
-            # 如果维度不匹配，调整权重张量的大小
-            weight = self.weight[:x.size(-1)]
+        # 处理多种可能的维度情况
+        if x.dim() == 0:
+            # 标量情况，直接返回
+            return x.to(orig_dtype)
+        
+        # 获取最后一个维度的大小
+        last_dim = x.size(-1)
+        weight_dim = self.weight.size(0)
+        
+        # 处理维度不匹配的情况
+        if last_dim != weight_dim:
+            # 情况1: 输入维度小于权重维度 - 截断权重以匹配输入
+            if last_dim < weight_dim:
+                weight = self.weight[:last_dim]
+            # 情况2: 输入维度大于权重维度 - 填充权重以匹配输入
+            else:
+                # 创建与输入最后维度相同大小的权重张量，使用原始权重值填充，其余部分填充1
+                weight = torch.ones(last_dim, dtype=self.weight.dtype, device=self.weight.device)
+                weight[:weight_dim] = self.weight
         else:
             weight = self.weight
         
+        # 确保 weight 的形状适合于广播操作
+        if x.dim() > 1:
+            weight_shape = [1] * (x.dim() - 1) + [weight.size(0)]
+            weight = weight.view(weight_shape)
+        
+        # 对最后一个维度进行标准化
         var = torch.mean(x * x, dim=-1, keepdim=True)
         x_norm = x * torch.rsqrt(var + self.variance_epsilon)
         result = weight * x_norm
@@ -740,29 +761,33 @@ class MiniMaxText01DecoderLayer(nn.Module):
         )
 
         residual = residual * self.layernorm_attention_alpha
-        self_attention_output = (self_attention_output *
-                                 self.layernorm_attention_beta)
-
-        # 打印形状信息以调试尺寸不匹配问题
-        print(f"[DEBUG] residual.shape: {residual.shape}, self_attention_output.shape: {self_attention_output.shape}")
         
-        # 检查self_attention_output是否为空张量，如果是，则创建与residual相同维度的零张量
+        # 检查self_attention_output是否为空张量或尺寸为0
         if self_attention_output.numel() == 0 or 0 in self_attention_output.shape:
-            print(f"[WARNING] 检测到self_attention_output为空张量或维度为0，将创建与residual相同形状的零张量替代")
             self_attention_output = torch.zeros_like(residual)
-        
-        # 如果形状不匹配，尝试适应形状
-        if residual.shape[1] != self_attention_output.shape[1]:
-            print(f"[WARNING] 检测到形状不匹配: residual.shape[1]={residual.shape[1]}, self_attention_output.shape[1]={self_attention_output.shape[1]}")
-            # 临时解决方案：如果residual的第二维大于self_attention_output，则截取相应的部分
-            if residual.shape[1] > self_attention_output.shape[1]:
-                print(f"[INFO] 截取residual以匹配self_attention_output的形状")
-                # 确保residual的第一维与self_attention_output的第一维相同
-                residual = residual[:, :self_attention_output.shape[1]]
-            # 如果self_attention_output的第二维大于residual，则截取相应的部分
-            elif self_attention_output.shape[1] > residual.shape[1]:
-                print(f"[INFO] 截取self_attention_output以匹配residual的形状")
-                self_attention_output = self_attention_output[:, :residual.shape[1]]
+        else:
+            self_attention_output = self_attention_output * self.layernorm_attention_beta
+            
+            # 处理形状不匹配
+            if residual.shape != self_attention_output.shape:
+                # 获取两个张量的维度数
+                residual_dims = residual.dim()
+                output_dims = self_attention_output.dim()
+                
+                # 统一维度数
+                if residual_dims > output_dims:
+                    # 扩展 self_attention_output 的维度
+                    for _ in range(residual_dims - output_dims):
+                        self_attention_output = self_attention_output.unsqueeze(-1)
+                elif output_dims > residual_dims:
+                    # 扩展 residual 的维度
+                    for _ in range(output_dims - residual_dims):
+                        residual = residual.unsqueeze(-1)
+                
+                # 确保形状匹配，如果不匹配，调整到最小的共同尺寸
+                min_shape = [min(s1, s2) for s1, s2 in zip(residual.shape, self_attention_output.shape)]
+                residual = residual[[slice(0, s) for s in min_shape]]
+                self_attention_output = self_attention_output[[slice(0, s) for s in min_shape]]
         
         layernorm_input = residual + self_attention_output
         layernorm_output = self.post_attention_layernorm(layernorm_input)
@@ -967,6 +992,10 @@ class MiniMaxText01Model(nn.Module):
             kwargs["request_ids_to_seq_ids"] = {}
         if "finished_requests_ids" not in kwargs:
             kwargs["finished_requests_ids"] = []
+            
+        if kv_caches is None:
+            kv_caches = []
+            
         (
             minimax_cache_tensors,
             state_indices_tensor,
@@ -994,7 +1023,7 @@ class MiniMaxText01Model(nn.Module):
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             _caches = None
-            if isinstance(layer.self_attn, MiniMaxText01Attention):
+            if isinstance(layer.self_attn, MiniMaxText01Attention) and kv_caches and kv_cache_index < len(kv_caches):
                 _caches = kv_caches[kv_cache_index]
                 kv_cache_index += 1
             if isinstance(layer.self_attn, MiniMaxText01LinearAttention):
