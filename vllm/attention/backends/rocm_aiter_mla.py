@@ -399,6 +399,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                                      attn_metadata: MLACommonMetadata,
                                      has_context: bool) -> torch.Tensor:
         if is_aiter_fa_enabled():
+            is_v_padded = False
             output = self.flash_attn_varlen_func(
                 q=q,
                 k=k,
@@ -411,13 +412,18 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 causal=True,
                 return_lse=has_context,
             )
-            if not has_context:
-                return output[0]
+
         else:
+            # For MLA the v head dim is smaller than qk head dim so we pad out
+            # v with 0s to match the qk head dim
+            v_padded = torch.nn.functional.pad(v,
+                                               [0, q.shape[-1] - v.shape[-1]],
+                                               value=0)
+            is_v_padded = True
             output = self.flash_attn_varlen_func(
                 q=q,
                 k=k,
-                v=v,
+                v=v_padded,
                 cu_seqlens_q=prefill_metadata.query_start_loc,
                 cu_seqlens_k=prefill_metadata.query_start_loc,
                 max_seqlen_q=prefill_metadata.max_prefill_seq_len,
@@ -441,8 +447,16 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
             )
+        else:
+            output = output[0]
 
-        return output
+        if is_v_padded:
+            # slice by `:v.shape[-1]` in order to remove v headdim padding
+            return output\
+                .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
+                    .reshape(-1, self.num_heads * v.shape[-1])
+        else:
+            return output.reshape(-1, self.num_heads * v.shape[-1])
 
     def _get_prefill_ctx_attn_output(
             self, index: int, q: torch.Tensor, k: torch.Tensor,
