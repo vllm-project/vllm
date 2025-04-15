@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
+import os
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-import os
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
 from vllm.multimodal import MultiModalPlaceholderMap
@@ -13,7 +13,6 @@ try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
-    from flashinfer import gen_single_decode_with_kv_cache
 
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -25,7 +24,8 @@ except ImportError:
         BatchPrefillWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
-FLASHINFER_KV_CACHE_LAYOUT: str = os.getenv("FLASHINFER_KV_CACHE_LAYOUT", "NHD").upper()
+FLASHINFER_KV_CACHE_LAYOUT: str = os.getenv("FLASHINFER_KV_CACHE_LAYOUT",
+                                            "NHD").upper()
 
 import torch
 
@@ -84,8 +84,9 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def get_kv_cache_stride_order() -> Tuple[int, ...]:
         cache_layout = FLASHINFER_KV_CACHE_LAYOUT
-        assert(cache_layout in ("NHD", "HND"))
-        stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2, 4)
+        assert (cache_layout in ("NHD", "HND"))
+        stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3,
+                                                                      2, 4)
         return stride_order
 
     @staticmethod
@@ -1044,7 +1045,7 @@ class FlashInferImpl(AttentionImpl):
                 assert prefill_meta.prefill_wrapper._logits_soft_cap == (
                     logits_soft_cap or 0.0)
                 assert prefill_meta.prefill_wrapper._sm_scale == softmax_scale
-                
+
                 prefill_output = prefill_meta.prefill_wrapper.run(
                     query,
                     kv_cache.permute(*stride_order),
@@ -1066,7 +1067,7 @@ class FlashInferImpl(AttentionImpl):
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
             )
-           
+
         if prefill_output is None and decode_output is not None:
             # Decode only batch.
             output, num_tokens = decode_output, num_decode_tokens

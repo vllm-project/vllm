@@ -270,10 +270,10 @@ __global__ void reshape_and_cache_flash_kernel(
     cache_t* __restrict__ value_cache,   // [num_blocks, block_size, num_heads,
                                          // head_size]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride, const int page_stride, const int head_stride,
-    const int64_t key_stride, const int64_t value_stride, const int num_heads,
-    const int head_size, const int block_size, const float* k_scale,
-    const float* v_scale) {
+    const int64_t block_stride, const int64_t page_stride,
+    const int64_t head_stride, const int64_t key_stride,
+    const int64_t value_stride, const int num_heads, const int head_size,
+    const int block_size, const float* k_scale, const float* v_scale) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   // NOTE: slot_idx can be -1 if the token is padded
@@ -433,11 +433,11 @@ void reshape_and_cache_flash(
   int head_size = key.size(2);
   int block_size = key_cache.size(1);
 
-  int key_stride = key.stride(0);
-  int value_stride = value.stride(0);
-  int block_stride = key_cache.stride(0);
-  int page_stride = key_cache.stride(1);
-  int head_stride = key_cache.stride(2);
+  int64_t key_stride = key.stride(0);
+  int64_t value_stride = value.stride(0);
+  int64_t block_stride = key_cache.stride(0);
+  int64_t page_stride = key_cache.stride(1);
+  int64_t head_stride = key_cache.stride(2);
   TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
   dim3 grid(num_tokens);

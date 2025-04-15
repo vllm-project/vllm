@@ -76,19 +76,22 @@ class CacheEngine:
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         try:
-            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order()
+            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
+            )
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_generic_shape)))
-        kv_cache_shape = tuple(kv_cache_generic_shape[i] for i in kv_cache_stride_order)
+        kv_cache_shape = tuple(kv_cache_generic_shape[i]
+                               for i in kv_cache_stride_order)
 
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
-            layer_kv_cache = torch.zeros(kv_cache_shape,
-                                         dtype=self.dtype,
-                                         pin_memory=pin_memory,
-                                         device=device).permute(*kv_cache_stride_order)
+            layer_kv_cache = torch.zeros(
+                kv_cache_shape,
+                dtype=self.dtype,
+                pin_memory=pin_memory,
+                device=device).permute(*kv_cache_stride_order)
 
             # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases
             # when entry_shape is higher than 1D

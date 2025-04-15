@@ -1275,7 +1275,8 @@ def reshape_and_cache_flash(
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
                                                    value_cache, slot_mapping,
-                                                   kv_cache_dtype, k_scale, v_scale)
+                                                   kv_cache_dtype, k_scale,
+                                                   v_scale)
 
 
 def concat_and_cache_mla(
