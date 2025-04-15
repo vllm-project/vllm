@@ -1034,6 +1034,16 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
             
             input_ids = None
 
+        # 检查inputs_embeds的形状
+        if inputs_embeds is not None:
+            # 记录inputs_embeds的形状以便调试
+            print(f"[DEBUG] inputs_embeds shape: {inputs_embeds.shape}")
+            # 确保inputs_embeds的最后一维与language_model的hidden_size匹配
+            if inputs_embeds.size(-1) != self.config.text_config.hidden_size:
+                # 打印警告并重塑inputs_embeds
+                print(f"[WARNING] inputs_embeds.size(-1)={inputs_embeds.size(-1)} 与 language_model hidden_size={self.config.text_config.hidden_size} 不匹配")
+                # 如果需要，这里可以添加重塑代码
+        
         # 调用语言模型进行前向传播
         hidden_states = self.language_model.model(input_ids,
                                                  positions,

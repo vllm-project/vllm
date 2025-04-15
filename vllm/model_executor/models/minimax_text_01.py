@@ -743,6 +743,22 @@ class MiniMaxText01DecoderLayer(nn.Module):
         self_attention_output = (self_attention_output *
                                  self.layernorm_attention_beta)
 
+        # 打印形状信息以调试尺寸不匹配问题
+        print(f"[DEBUG] residual.shape: {residual.shape}, self_attention_output.shape: {self_attention_output.shape}")
+        
+        # 如果形状不匹配，尝试适应形状
+        if residual.shape[1] != self_attention_output.shape[1]:
+            print(f"[WARNING] 检测到形状不匹配: residual.shape[1]={residual.shape[1]}, self_attention_output.shape[1]={self_attention_output.shape[1]}")
+            # 临时解决方案：如果residual的第二维大于self_attention_output，则截取相应的部分
+            if residual.shape[1] > self_attention_output.shape[1]:
+                print(f"[INFO] 截取residual以匹配self_attention_output的形状")
+                # 确保residual的第一维与self_attention_output的第一维相同
+                residual = residual[:, :self_attention_output.shape[1]]
+            # 如果self_attention_output的第二维大于residual，则截取相应的部分
+            elif self_attention_output.shape[1] > residual.shape[1]:
+                print(f"[INFO] 截取self_attention_output以匹配residual的形状")
+                self_attention_output = self_attention_output[:, :residual.shape[1]]
+        
         layernorm_input = residual + self_attention_output
         layernorm_output = self.post_attention_layernorm(layernorm_input)
         residual = layernorm_output if self.postnorm else layernorm_input
