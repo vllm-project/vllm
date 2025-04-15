@@ -101,11 +101,9 @@ def build_gradio_interface(client, model_name, temp, stop_token_ids, host,
         return predict(message, history, client, model_name, temp,
                        stop_token_ids)
 
-    return gr.ChatInterface(
-        fn=chat_predict,
-        title="Chatbot Interface",
-        description="A simple chatbot powered by vLLM").queue().launch(
-            server_name=host, server_port=port, share=True)
+    return gr.ChatInterface(fn=chat_predict,
+                            title="Chatbot Interface",
+                            description="A simple chatbot powered by vLLM")
 
 
 def main():
@@ -120,8 +118,13 @@ def main():
     client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
 
     # Define the Gradio chatbot interface using the predict function
-    build_gradio_interface(client, args.model, args.temp, args.stop_token_ids,
-                           args.host, args.port)
+    gradio_interface = build_gradio_interface(client, args.model, args.temp,
+                                              args.stop_token_ids, args.host,
+                                              args.port)
+
+    gradio_interface.queue().launch(server_name=args.host,
+                                    server_port=args.port,
+                                    share=True)
 
 
 if __name__ == "__main__":
