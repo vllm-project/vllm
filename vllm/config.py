@@ -1522,6 +1522,7 @@ class LoadConfig:
         else:
             self.ignore_patterns = ["original/**/*"]
 
+DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 
 @config
 @dataclass
