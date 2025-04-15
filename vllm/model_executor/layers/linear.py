@@ -51,15 +51,6 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptNvFp4LinearMethod",
 ]
 
-
-def adjust_marlin_shard(param, shard_size, shard_offset):
-    marlin_tile_size = getattr(param, "marlin_tile_size", None)
-    if marlin_tile_size is None:
-        return shard_size, shard_offset
-
-    return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
-
-
 def adjust_bitblas_shard(param, shard_size, shard_offset):
     bitblas_tile_size = getattr(param, "bitblas_tile_size", None)
     if bitblas_tile_size is not None:
@@ -67,6 +58,13 @@ def adjust_bitblas_shard(param, shard_size, shard_offset):
                 shard_offset // bitblas_tile_size)
 
     return shard_size, shard_offset
+
+def adjust_marlin_shard(param, shard_size, shard_offset):
+    marlin_tile_size = getattr(param, "marlin_tile_size", None)
+    if marlin_tile_size is None:
+        return shard_size, shard_offset
+
+    return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
 
 def adjust_bitsandbytes_4bit_shard(param: Parameter,
@@ -496,7 +494,7 @@ class ColumnParallelLinear(LinearBase):
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
-        s += f", bias={self.bias is not None}" if hasattr(self, "bias") else ""
+        s += f", bias={self.bias is not None}"
         s += f", tp_size={get_tensor_model_parallel_world_size()}"
         s += f", gather_output={self.gather_output}"
         return s
@@ -939,6 +937,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[str] = None):
+
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
@@ -1287,7 +1286,7 @@ class RowParallelLinear(LinearBase):
     def extra_repr(self) -> str:
         s = f"input_features={self.input_size_per_partition}"
         s += f", output_features={self.output_size}"
-        s += f", bias={self.bias is not None}" if hasattr(self, "bias") else ""
+        s += f", bias={self.bias is not None}"
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s
