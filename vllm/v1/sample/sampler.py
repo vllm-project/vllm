@@ -8,7 +8,8 @@ from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.penalties import (apply_all_penalties,
-                                          apply_min_token_penalties)
+                                          apply_min_token_penalties,
+                                          apply_dry)
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
@@ -184,10 +185,13 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
+        # Apply min tokens penalty first (modifies logits in-place)
         if sampling_metadata.min_tokens:
             apply_min_token_penalties(logits,
                                       sampling_metadata.output_token_ids,
                                       sampling_metadata.min_tokens)
+
+        # Apply standard penalties (Freq, Presence, Repetition)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
             logits = apply_all_penalties(
@@ -196,8 +200,13 @@ class Sampler(nn.Module):
                 sampling_metadata.presence_penalties,
                 sampling_metadata.frequency_penalties,
                 sampling_metadata.repetition_penalties,
-                sampling_metadata.output_token_ids,
+                sampling_metadata.output_token_ids, # Passed as list of lists
             )
+
+        # Apply DRY penalty using the metadata object
+        # The check for whether DRY is active is now inside apply_dry
+        logits = apply_dry(logits, sampling_metadata)
+
         return logits
 
     def apply_min_p(
