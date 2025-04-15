@@ -65,6 +65,11 @@ class P2pNcclPipe:
         self.poller = zmq.Poller()
         self.poller.register(self.router_socket, zmq.POLLIN)
 
+        self.send_store_cv = threading.Condition()
+        self.send_queue_cv = threading.Condition()
+        self.recv_store_cv = threading.Condition()
+        self.comm_cv = threading.Condition()
+
         # The sending type includes tree mutually exclusive options:
         # PUT, GET, PUT_ASYNC.
         self.send_type = self.config.get_from_extra_config("send_type", "PUT")
@@ -87,11 +92,6 @@ class P2pNcclPipe:
 
         self.buffer_size = 0
         self.buffer_size_threshold = self.config.kv_buffer_size
-
-        self.send_store_cv = threading.Condition()
-        self.send_queue_cv = threading.Condition()
-        self.recv_store_cv = threading.Condition()
-        self.comm_cv = threading.Condition()
 
         self._listener_thread = threading.Thread(
             target=self._listen_for_requests, daemon=True)
@@ -218,7 +218,7 @@ class P2pNcclPipe:
         data = msgpack.loads(message)
         if data["ret"] != 0:
             logger.warning("🔴[GET]Recv From %s, tensor_id: %s, ret: %d",
-                        remote_address, tensor_id, data["ret"])
+                           remote_address, tensor_id, data["ret"])
             return None
 
         tensor = torch.empty(data["shape"],
@@ -226,11 +226,10 @@ class P2pNcclPipe:
                              device=self.device)
         self._recv(comm, tensor, rank ^ 1)
 
-        logger.info("🔵[GET]Recv From %s, tensor_id:%s, shape:%s, "
-                    "size:%.3fGB, rank:%d", remote_address,
-                    tensor_id, tensor.shape,
-                    tensor.element_size() * tensor.numel() / 1024**3,
-                    self.rank)
+        logger.info(
+            "🔵[GET]Recv From %s, tensor_id:%s, shape:%s, "
+            "size:%.3fGB, rank:%d", remote_address, tensor_id, tensor.shape,
+            tensor.element_size() * tensor.numel() / 1024**3, self.rank)
 
         return tensor
 
@@ -317,8 +316,9 @@ class P2pNcclPipe:
                         self._send(comm, tensor.to(self.device), rank ^ 1)
 
                     logger.info(
-                        "🔵[GET]Send Tensor, %s👉%s, MyRank:%s, data:%s",
-                        self.zmq_address, remote_address.decode(), rank, data)
+                        "🔵[GET]Send Tensor, %s👉%s, "
+                        "MyRank:%s, data:%s", self.zmq_address,
+                        remote_address.decode(), rank, data)
                 else:
                     logger.warning(
                         "🚧Unexpected, Received message from %s, data:%s",
