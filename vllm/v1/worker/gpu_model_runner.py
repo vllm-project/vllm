@@ -1138,6 +1138,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if logprobs_tensors is not None else None
 
         # Compute prompt logprobs if needed.
+        # TODO: Fix compatibility issues between prompt_logprobs and LoRA.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
             hidden_states,
             scheduler_output,
