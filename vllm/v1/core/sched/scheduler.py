@@ -344,7 +344,7 @@ class Scheduler(SchedulerInterface):
                     (encoder_inputs_to_schedule, num_new_tokens,
                      new_encoder_budget) = self._try_schedule_encoder_inputs(
                          request=request,
-                         num_computed_tokens=request.num_computed_tokens,
+                         num_computed_tokens=num_computed_tokens,
                          num_new_tokens=num_new_tokens,
                          num_external_tokens=num_external_tokens,
                          encoder_budget=encoder_budget)

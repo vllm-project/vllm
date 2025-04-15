@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 from typing import Optional
+from unittest.mock import Mock
 
 import pytest
 import torch
 
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
+                         SchedulerConfig, VllmConfig)
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -25,6 +27,8 @@ def create_scheduler(
     enable_prefix_caching: Optional[bool] = None,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
+    use_kv_connector: bool = False,
+    num_blocks: int = 10000,
 ) -> Scheduler:
     '''Create scheduler under test.
 
@@ -66,20 +70,27 @@ def create_scheduler(
         cache_dtype="auto",
         **kwargs_cache,
     )
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="SharedStorageConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"shared_storage_path": "local_storage"},
+    ) if use_kv_connector else None
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
+        kv_transfer_config=kv_transfer_config,
     )
     kv_cache_config = KVCacheConfig(
-        num_blocks=10000,  # A large number of blocks to hold all requests
+        num_blocks=num_blocks,  # A large number of blocks to hold all requests
         tensors={},
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(16, 1, 1, torch.float32, False))
         ],
     )
-    cache_config.num_gpu_blocks = 10000
+    cache_config.num_gpu_blocks = num_blocks
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
@@ -758,3 +769,93 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         stats = scheduler_stats.spec_decoding_stats
         assert stats.num_draft_tokens == expected[0]
         assert stats.num_accepted_tokens == expected[1]
+
+
+def test_kv_connector_basic():
+    """Test basic functionality of KVConnector."""
+
+    scheduler = create_scheduler(use_kv_connector=True)
+    NUM_TOTAL_BLOCKS = (
+        scheduler.kv_cache_manager.block_pool.get_num_free_blocks())
+    BLOCK_SIZE = scheduler.cache_config.block_size
+
+    # Every request should match a single block.
+    NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
+    scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
+    scheduler.connector.get_num_new_matched_tokens.return_value = (
+        NUM_MATCHED_NEW_TOKENS)
+
+    NUM_REQUESTS = 2
+    NUM_TOKENS = BLOCK_SIZE * 2
+    MAX_TOKENS = 3
+    requests = create_requests(num_requests=NUM_REQUESTS,
+                               num_tokens=NUM_TOKENS,
+                               max_tokens=MAX_TOKENS)
+    req_ids = []
+    req_to_index = {}
+    for i, request in enumerate(requests):
+        scheduler.add_request(request)
+        req_ids.append(request.request_id)
+        req_to_index[request.request_id] = i
+
+    MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0]] * len(req_ids),
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+
+    # We should get an external prefix cache hit for every request.
+    output = scheduler.schedule()
+    assert len(output.kv_connector_metadata.requests) == NUM_REQUESTS
+    for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
+        # We should only schedule new tokens beyond this request.
+        assert num_scheduled_tokens == NUM_TOKENS - NUM_MATCHED_NEW_TOKENS
+
+    # We should not have any connector metadata in running.
+    all_finished = False
+    _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+    while not all_finished:
+        # Schedule + a few iterations until stopping.
+        output = scheduler.schedule()
+        assert len(output.kv_connector_metadata.requests) == 0
+        ecos = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+        all_done = True
+        for eco in ecos.outputs:
+            if eco.finish_reason is None:
+                all_done = False
+        all_finished = all_done
+
+    # Confirm we have no leaks (all blocks are freed).
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
+        == NUM_TOTAL_BLOCKS
+
+    # Every request should match a single block.
+    NUM_TOKENS_PREFIX = NUM_TOKENS
+    NUM_TOKENS = NUM_TOKENS_PREFIX * 2
+    requests = create_requests(num_requests=NUM_REQUESTS,
+                               num_tokens=NUM_TOKENS,
+                               max_tokens=MAX_TOKENS)
+
+    # We should get an external prefix cache hit for every request,
+    # but only for the i
+    output = scheduler.schedule()
+    assert len(output.kv_connector_metadata.requests) == NUM_REQUESTS
+    for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
+        # We should only schedule new tokens beyond this request.
+        assert num_scheduled_tokens == (NUM_TOKENS - NUM_TOKENS_PREFIX -
+                                        NUM_MATCHED_NEW_TOKENS)
+
+    all_finished = False
+    while not all_finished:
+        # Schedule + a few iterations until stopping.
+        output = scheduler.schedule()
+        assert len(output.kv_connector_metadata.requests) == 0
+        ecos = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+        all_done = True
+        for eco in ecos.outputs:
+            if eco.finish_reason is None:
+                all_done = False
+        all_finished = all_done
