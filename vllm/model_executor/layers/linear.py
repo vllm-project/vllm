@@ -51,6 +51,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptNvFp4LinearMethod",
 ]
 
+
 def adjust_bitblas_shard(param, shard_size, shard_offset):
     bitblas_tile_size = getattr(param, "bitblas_tile_size", None)
     if bitblas_tile_size is not None:
@@ -58,6 +59,7 @@ def adjust_bitblas_shard(param, shard_size, shard_offset):
                 shard_offset // bitblas_tile_size)
 
     return shard_size, shard_offset
+
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
     marlin_tile_size = getattr(param, "marlin_tile_size", None)
