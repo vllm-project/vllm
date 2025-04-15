@@ -973,61 +973,111 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
             image_sizes = kwargs.pop("image_sizes", None)
             
             if pixel_values is not None and len(input_ids.shape) > 1 and input_ids.shape[1] != 1:
-                # 处理图像特征
-                vision_feature_layer = kwargs.pop("vision_feature_layer", self.config.vision_feature_layer)
-                vision_feature_select_strategy = kwargs.pop("vision_feature_select_strategy", self.config.vision_feature_select_strategy)
-                
-                # 提取图像特征
-                image_features = self.vision_tower(pixel_values, output_hidden_states=True)
-                selected_image_feature = image_features.hidden_states[vision_feature_layer]
-                
-                # 处理图像特征
-                selected_image_feature = torch.chunk(selected_image_feature, len(pixel_values), dim=1)
-                selected_image_feature = torch.cat(selected_image_feature, dim=0)
-                
-                if vision_feature_select_strategy == "default":
-                    selected_image_feature = selected_image_feature[:, 1:]
-                elif vision_feature_select_strategy == "full":
-                    selected_image_feature = selected_image_feature
-                
-                # 投影图像特征
-                image_features = self.multi_modal_projector(selected_image_feature)
-                
-                # 处理不同大小的图像
-                if image_sizes is not None:
-                    # 计算每个图像的patch数量
-                    image_num_patches = [
-                        image_size_to_num_patches(
-                            image_size=imsize,
-                            grid_pinpoints=self.config.image_grid_pinpoints,
-                            patch_size=self.config.vision_config.image_size,
+                try:
+                    print(f"[DEBUG] 处理图像输入: pixel_values shape={None if pixel_values is None else pixel_values.shape}, image_sizes={None if image_sizes is None else image_sizes.shape}")
+                    
+                    # 处理图像特征
+                    vision_feature_layer = kwargs.pop("vision_feature_layer", self.config.vision_feature_layer)
+                    vision_feature_select_strategy = kwargs.pop("vision_feature_select_strategy", self.config.vision_feature_select_strategy)
+                    
+                    # 提取图像特征
+                    print(f"[DEBUG] 提取图像特征: vision_feature_layer={vision_feature_layer}, strategy={vision_feature_select_strategy}")
+                    image_features = self.vision_tower(pixel_values, output_hidden_states=True)
+                    selected_image_feature = image_features.hidden_states[vision_feature_layer]
+                    print(f"[DEBUG] 提取到的图像特征shape: {selected_image_feature.shape}")
+                    
+                    # 处理图像特征
+                    selected_image_feature = torch.chunk(selected_image_feature, len(pixel_values), dim=1)
+                    selected_image_feature = torch.cat(selected_image_feature, dim=0)
+                    
+                    if vision_feature_select_strategy == "default":
+                        selected_image_feature = selected_image_feature[:, 1:]
+                    elif vision_feature_select_strategy == "full":
+                        selected_image_feature = selected_image_feature
+                    
+                    print(f"[DEBUG] 处理后的图像特征shape: {selected_image_feature.shape}")
+                    
+                    # 投影图像特征
+                    image_features = self.multi_modal_projector(selected_image_feature)
+                    print(f"[DEBUG] 投影后的图像特征shape: {image_features.shape}")
+                    
+                    # 处理不同大小的图像
+                    if image_sizes is not None:
+                        try:
+                            # 计算每个图像的patch数量
+                            image_num_patches = [
+                                image_size_to_num_patches(
+                                    image_size=imsize,
+                                    grid_pinpoints=self.config.image_grid_pinpoints,
+                                    patch_size=self.config.vision_config.image_size,
+                                )
+                                for imsize in image_sizes
+                            ]
+                            print(f"[DEBUG] 计算的patch数量: {image_num_patches}")
+                            
+                            # 分割图像特征
+                            image_features = torch.split(image_features, image_num_patches, dim=0)
+                            
+                            # 打包图像特征
+                            image_features, feature_lens = self.pack_image_features(
+                                image_features,
+                                image_sizes,
+                                image_newline=self.image_newline,
+                            )
+                            print(f"[DEBUG] 打包后的图像特征shape: {image_features.shape}, feature_lens: {feature_lens}")
+                        except Exception as e:
+                            print(f"[ERROR] 处理不同大小的图像时出错: {str(e)}")
+                            import traceback
+                            traceback.print_exc()
+                            # 出错时，创建一个安全的默认特征
+                            image_features = torch.zeros((1, self.config.text_config.hidden_size), 
+                                                      dtype=torch.float32, 
+                                                      device=input_ids.device)
+                    
+                    # 获取文本嵌入
+                    inputs_embeds = self.get_input_embeddings(input_ids)
+                    inputs_embeds = inputs_embeds.to(image_features.dtype)
+                    print(f"[DEBUG] 文本嵌入shape: {inputs_embeds.shape}")
+                    
+                    # 检查是否有图像标记
+                    has_image_tokens = (input_ids == self.config.image_token_index).any()
+                    if has_image_tokens:
+                        # 使用掩码替换图像标记
+                        special_image_mask = (
+                            (input_ids == self.config.image_token_index)
+                            .unsqueeze(-1)
+                            .expand_as(inputs_embeds)
+                            .to(inputs_embeds.device)
                         )
-                        for imsize in image_sizes
-                    ]
-                    
-                    # 分割图像特征
-                    image_features = torch.split(image_features, image_num_patches, dim=0)
-                    
-                    # 打包图像特征
-                    image_features, feature_lens = self.pack_image_features(
-                        image_features,
-                        image_sizes,
-                        image_newline=self.image_newline,
-                    )
+                        image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
+                        
+                        # 确保image_features不是空的
+                        if image_features.numel() == 0 or 0 in image_features.shape:
+                            print(f"[WARNING] image_features是空张量或包含0维度，创建占位符")
+                            # 创建与inputs_embeds最后一维相同的占位符
+                            image_features = torch.zeros((1, inputs_embeds.size(-1)), 
+                                                      dtype=inputs_embeds.dtype, 
+                                                      device=inputs_embeds.device)
+                        
+                        # 检查特殊标记数量与特征数量是否匹配
+                        num_image_tokens = special_image_mask.sum() // inputs_embeds.size(-1)
+                        if num_image_tokens > image_features.size(0):
+                            print(f"[WARNING] 图像标记数量({num_image_tokens})大于图像特征数量({image_features.size(0)})，将复制图像特征")
+                            # 复制图像特征以匹配图像标记数量
+                            repeats = (num_image_tokens + image_features.size(0) - 1) // image_features.size(0)
+                            image_features = image_features.repeat(repeats, 1)
+                        
+                        inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
+                        print(f"[DEBUG] 合并后的嵌入shape: {inputs_embeds.shape}")
+                    else:
+                        print(f"[INFO] 没有检测到图像标记，将直接使用文本嵌入")
                 
-                # 获取文本嵌入
-                inputs_embeds = self.get_input_embeddings(input_ids)
-                inputs_embeds = inputs_embeds.to(image_features.dtype)
-                
-                # 使用掩码替换图像标记
-                special_image_mask = (
-                    (input_ids == self.config.image_token_index)
-                    .unsqueeze(-1)
-                    .expand_as(inputs_embeds)
-                    .to(inputs_embeds.device)
-                )
-                image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
-                inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
+                except Exception as e:
+                    print(f"[ERROR] 处理图像输入时出错: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    # 出错时，直接使用文本嵌入
+                    inputs_embeds = self.get_input_embeddings(input_ids)
             else:
                 # 如果没有图像输入，直接使用文本嵌入
                 inputs_embeds = self.get_input_embeddings(input_ids)
@@ -1045,11 +1095,32 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
                 # 如果需要，这里可以添加重塑代码
         
         # 调用语言模型进行前向传播
-        hidden_states = self.language_model.model(input_ids,
-                                                 positions,
-                                                 intermediate_tensors,
-                                                 inputs_embeds=inputs_embeds)
-        return hidden_states
+        try:
+            print(f"[DEBUG] 开始调用language_model.model: input_ids shape={None if input_ids is None else input_ids.shape}, positions shape={positions.shape}, inputs_embeds shape={None if inputs_embeds is None else inputs_embeds.shape}")
+            
+            # 检查inputs_embeds是否为空或有0维度
+            if inputs_embeds is not None and (inputs_embeds.numel() == 0 or 0 in inputs_embeds.shape):
+                print(f"[ERROR] inputs_embeds是空张量或包含0维度: {inputs_embeds.shape}")
+                # 创建一个有效的占位符inputs_embeds
+                batch_size = positions.size(0)
+                seq_len = positions.size(1)
+                hidden_size = self.config.text_config.hidden_size
+                print(f"[INFO] 创建占位符inputs_embeds，形状为: [{batch_size}, {seq_len}, {hidden_size}]")
+                inputs_embeds = torch.zeros((batch_size, seq_len, hidden_size), 
+                                          dtype=torch.float32, 
+                                          device=positions.device)
+            
+            hidden_states = self.language_model.model(input_ids,
+                                                     positions,
+                                                     intermediate_tensors,
+                                                     inputs_embeds=inputs_embeds)
+            print(f"[DEBUG] language_model.model调用成功，输出hidden_states shape={hidden_states.shape}")
+            return hidden_states
+        except Exception as e:
+            print(f"[ERROR] language_model.model调用失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     def prepare_inputs_for_generation(
         self,

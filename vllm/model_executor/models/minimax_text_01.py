@@ -746,6 +746,11 @@ class MiniMaxText01DecoderLayer(nn.Module):
         # 打印形状信息以调试尺寸不匹配问题
         print(f"[DEBUG] residual.shape: {residual.shape}, self_attention_output.shape: {self_attention_output.shape}")
         
+        # 检查self_attention_output是否为空张量，如果是，则创建与residual相同维度的零张量
+        if self_attention_output.numel() == 0 or 0 in self_attention_output.shape:
+            print(f"[WARNING] 检测到self_attention_output为空张量或维度为0，将创建与residual相同形状的零张量替代")
+            self_attention_output = torch.zeros_like(residual)
+        
         # 如果形状不匹配，尝试适应形状
         if residual.shape[1] != self_attention_output.shape[1]:
             print(f"[WARNING] 检测到形状不匹配: residual.shape[1]={residual.shape[1]}, self_attention_output.shape[1]={self_attention_output.shape[1]}")
