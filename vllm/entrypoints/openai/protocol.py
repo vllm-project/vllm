@@ -1577,16 +1577,6 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     ## TODO (varun) : Support if set to 0, certain thresholds are met !!
-    # doc: begin-transcription-sampling-params
-    temperature: float = Field(default=0.0)
-    """The sampling temperature, between 0 and 1.
-
-    Higher values like 0.8 will make the output more random, while lower values
-    like 0.2 will make it more focused / deterministic. If set to 0, the model
-    will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
-    to automatically increase the temperature until certain thresholds are hit.
-    """
-    # doc: end-transcription-sampling-params
 
     timestamp_granularities: list[Literal["word", "segment"]] = Field(
         alias="timestamp_granularities[]", default=[])
@@ -1598,6 +1588,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     timestamps incurs additional latency.
     """
 
+    # doc: begin-transcription-extra-params
     stream: Optional[bool] = False
     """Custom field not present in the original OpenAI definition. When set, 
     it will enable output to be streamed in a similar fashion as the Chat
@@ -1606,8 +1597,18 @@ class TranscriptionRequest(OpenAIBaseModel):
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
+    # doc: end-transcription-extra-params
 
-    # doc: begin-transcription-extra-params
+    # doc: begin-transcription-sampling-params
+    temperature: float = Field(default=0.0)
+    """The sampling temperature, between 0 and 1.
+
+    Higher values like 0.8 will make the output more random, while lower values
+    like 0.2 will make it more focused / deterministic. If set to 0, the model
+    will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
+    to automatically increase the temperature until certain thresholds are hit.
+    """
+
     top_p: Optional[float] = None
     """Enables nucleus (top-p) sampling, where tokens are selected from the 
     smallest possible set whose cumulative probability exceeds `p`.
@@ -1632,7 +1633,7 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     presence_penalty: Optional[float] = 0.0
     """The presence penalty to use for sampling."""
-    # doc: end-transcription-extra-params
+    # doc: end-transcription-sampling-params
 
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
