@@ -73,7 +73,8 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(MiniMaxVL01Config)
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
+        from vllm.model_executor.models.processing_minimax_vl_01 import MiniMaxVL01Processor
+        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor, **kwargs)
 
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
