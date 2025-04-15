@@ -914,6 +914,10 @@ class LLMEngine:
             scheduler.abort_seq_group(
                 request_id, seq_id_to_seq_group=self.seq_id_to_seq_group)
 
+    def get_vllm_config(self) -> VllmConfig:
+        """Gets the vllm configuration."""
+        return self.vllm_config
+
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
         return self.model_config
