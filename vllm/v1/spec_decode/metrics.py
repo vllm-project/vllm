@@ -24,16 +24,6 @@ class SpecDecodingStats:
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
 
-    def take(self):
-        copied = SpecDecodingStats(self.num_draft_tokens,
-                                   self.num_accepted_tokens)
-        self.reset()
-        return copied
-
-    def reset(self):
-        self.num_draft_tokens = 0
-        self.num_accepted_tokens = 0
-
     def observe(self, num_draft_tokens: int, num_accepted_tokens: int):
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
