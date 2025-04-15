@@ -430,15 +430,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
 
-            # For MLA the v head dim is smaller than qk head dim so we pad
-            # out v with 0s to match the qk head dim
-            v_padded = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
             attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
                 q=q,
                 k=k,
-                v=v_padded,
+                v=v,
                 cu_seqlens_q=prefill_metadata.query_start_loc,
                 cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
                 max_seqlen_q=prefill_metadata.max_query_len,
@@ -489,15 +484,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
-
         output = self.flash_attn_varlen_func(
             q=q,
             k=k,
-            v=v_padded,
+            v=v,
             cu_seqlens_q=prefill_metadata.query_start_loc,
             cu_seqlens_k=prefill_metadata.query_start_loc,
             max_seqlen_q=prefill_metadata.max_prefill_seq_len,
@@ -521,10 +511,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 suffix_lse=suffix_lse,
             )
 
-        # slice by `:v.shape[-1]` in order to remove v headdim padding
-        output = output\
-            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                .reshape(-1, self.num_heads * v.shape[-1])
+        output = output.reshape(-1, self.num_heads * v.shape[-1])
 
         return self.o_proj(output)[0]
 
