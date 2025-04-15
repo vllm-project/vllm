@@ -8,6 +8,7 @@ from abc import abstractmethod
 import numpy as np
 import torch
 import torch.utils.checkpoint
+from vllm.transformers_utils.configs import MiniMaxText01Config
 from torch import nn
 from transformers.image_utils import to_numpy_array
 from transformers import LlavaNextProcessor
@@ -37,8 +38,8 @@ from .modeling_clip import CLIPVisionModel, CLIPVisionConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from .minimax_text_01 import MiniMaxText01ForCausalLM
-from vllm.transformers_utils.configs import MiniMaxText01Config, MiniMaxVL01Config
+from .modeling_minimax_text_01 import MiniMaxText01ForCausalLM
+from vllm.transformers_utils.configs import MiniMaxVL01Config
 from .llava import LlavaDummyInputsBuilder
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
@@ -587,11 +588,13 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
 
         # 初始化语言模型
         self.vocab_size = config.text_config.vocab_size
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        text_config = MiniMaxText01Config.from_dict(config.text_config.to_dict())
+        self.language_model = MiniMaxText01ForCausalLM(text_config)
+        # self.language_model = init_vllm_registered_model(
+        #     vllm_config=vllm_config,
+        #     hf_config=config.text_config,
+        #     prefix=maybe_prefix(prefix, "language_model"),
+        # )
         
         # 设置填充相关参数
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
