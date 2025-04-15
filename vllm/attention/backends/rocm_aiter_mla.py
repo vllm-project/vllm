@@ -447,8 +447,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
             )
-        else:
-            output = output[0]
 
         if is_v_padded:
             # slice by `:v.shape[-1]` in order to remove v headdim padding
