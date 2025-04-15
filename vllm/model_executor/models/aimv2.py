@@ -114,7 +114,8 @@ class Aimv2VisualTokenizer(torch.nn.Module):
 
         return features
 
-    def forward(self, pixel_values) -> torch.Tensor:  # [BatchSize, ImageShape] -> [BatchSize, #Token, VocabSize]
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """[BatchSize, ImageShape] -> [BatchSize, Token, VocabSize]"""
         features = self.encode(pixel_values)
         logits, _ = self.head[0](features) # we spllit the sequncial here for not throwing an error
         logits = self.head[1](logits)
@@ -226,14 +227,11 @@ class AIMv2Attention(nn.Module):
                    # bias=config.qkv_bias,
                    # quant_config=quant_config,
                    # prefix=f"{prefix}.qkv")
-        self.attn_drop = nn.Dropout(config.attention_dropout)
         self.proj = nn.Linear(dim, dim, bias=config.use_bias)#RowParallelLinear(input_size=dim,
                     #                  output_size=dim,
                     #                  bias = config.use_bias,
                     #                  quant_config=quant_config,
                     #                  prefix=f"{prefix}.proj")
-
-        self.proj_drop = nn.Dropout(config.projection_dropout)
 
     def forward( # todo might implement multiple attn implementations
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
@@ -248,7 +246,6 @@ class AIMv2Attention(nn.Module):
         x = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         x = x.transpose(1, 2).contiguous().reshape(B, N, C)
         x= self.proj(x)#, _ = self.proj(x)
-        x = self.proj_drop(x)
         return x
 
 
@@ -281,7 +278,7 @@ class AIMv2Transformer(nn.Module):
         self,
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, ...]]]:
+    ) -> torch.Tensor:
         #outputs = []
         for block in self.blocks: # they take the -1 as the ref embeddings, like a clip skip
             tokens = block(tokens, mask)
@@ -308,11 +305,7 @@ class AIMv2Model(torch.nn.Module):
         self,
         pixel_values: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> Union[
-        Tuple[torch.Tensor],
-        Tuple[torch.Tensor, Tuple[torch.Tensor, ...]],
-        BaseModelOutputWithNoAttention,
-    ]:
+    ) -> torch.Tensor:
 
         x = self.preprocessor(pixel_values)
         x = self.trunk(
