@@ -64,7 +64,7 @@ class AsyncLLM(EngineClient):
         assert start_engine_loop
 
         self.model_config = vllm_config.model_config
-
+        self.vllm_config = vllm_config
         self.log_requests = log_requests
         self.log_stats = log_stats
 
@@ -428,6 +428,9 @@ class AsyncLLM(EngineClient):
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
+
+    async def get_vllm_config(self) -> VllmConfig:
+        return self.vllm_config
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config

@@ -58,6 +58,16 @@ def get_response(response: requests.Response) -> list[str]:
     return output
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", type=str, default="localhost")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--n", type=int, default=1)
+    parser.add_argument("--prompt", type=str, default="San Francisco is a")
+    parser.add_argument("--stream", action="store_true")
+    return parser.parse_args()
+
+
 def main(args: Namespace):
     prompt = args.prompt
     api_url = f"http://{args.host}:{args.port}/generate"
@@ -82,11 +92,5 @@ def main(args: Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--n", type=int, default=1)
-    parser.add_argument("--prompt", type=str, default="San Francisco is a")
-    parser.add_argument("--stream", action="store_true")
-    args = parser.parse_args()
+    args = parse_args()
     main(args)
