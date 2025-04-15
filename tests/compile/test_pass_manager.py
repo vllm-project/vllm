@@ -16,10 +16,10 @@ def simple_callable(graph: torch.fx.Graph):
 
 # Should fail to add directly to the pass manager
 def test_bad_callable():
-    config = CompilationConfig().pass_config
+    config = CompilationConfig()
 
     pass_manager = PostGradPassManager()
-    pass_manager.configure(config)
+    pass_manager.configure(config.pass_config, config.static_forward_context)
 
     with pytest.raises(AssertionError):
         pass_manager.add(simple_callable)  # noqa, type wrong on purpose
@@ -46,7 +46,7 @@ def test_pass_manager_uuid(callable):
     config = CompilationConfig().pass_config
 
     pass_manager = PostGradPassManager()
-    pass_manager.configure(config)
+    pass_manager.configure(config.pass_config, config.static_forward_context)
 
     # Check that UUID is different if the same pass is added 2x
     pass_manager.add(callable)
@@ -58,14 +58,14 @@ def test_pass_manager_uuid(callable):
     # UUID should be the same as the original one,
     # as we constructed in the same way.
     pass_manager2 = PostGradPassManager()
-    pass_manager2.configure(config)
+    pass_manager2.configure(config.pass_config, config.static_forward_context)
     pass_manager2.add(callable)
     assert uuid1 == pass_manager2.uuid()
 
     # UUID should be different due to config change
-    config2 = copy.deepcopy(config)
-    config2.enable_fusion = not config2.enable_fusion
+    pass_config2 = copy.deepcopy(config.pass_config)
+    pass_config2.enable_fusion = not pass_config2.enable_fusion
     pass_manager3 = PostGradPassManager()
-    pass_manager3.configure(config2)
+    pass_manager3.configure(pass_config2, config.static_forward_context)
     pass_manager3.add(callable)
     assert uuid1 != pass_manager3.uuid()
