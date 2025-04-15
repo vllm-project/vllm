@@ -846,13 +846,28 @@ class FusedMoE(torch.nn.Module):
         return topk_weights, topk_ids
 
     def hpu_multicast(self, x: torch.Tensor,
-                      cu_tokens_across_dp_cpu: torch.Tensor):
-        buffer = get_dp_group().all_gather(x, 0)
-
-        return buffer
+                      cu_tokens_across_dp_cpu: torch.Tensor,
+                      output_tensor: Optional[torch.Tensor] = None):
+        if output_tensor is None:
+            world_size = get_dp_group().world_size
+            input_size = x.size()
+            # Allocate output tensor.
+            output_size = list(input_size)
+            output_size[0] *= world_size
+            output_tensor = torch.empty(output_size,
+                                        dtype=x.dtype,
+                                        device=x.device)
+        else:
+            if output_tensor.ndim == 3 and x.ndim == 2:
+                output_tensor.view(-1, x.size(1))
+        # All-gather.
+        torch.distributed.all_gather_into_tensor(output_tensor, x,
+                                                 group=get_dp_group().device_group)
+        return output_tensor
 
     def naive_multicast(self, x: torch.Tensor,
-                        cu_tokens_across_dp_cpu: torch.Tensor):
+                        cu_tokens_across_dp_cpu: torch.Tensor,
+                        output_tensor: Optional[torch.Tensor] = None):
         assert (len(x.shape) in [2, 3])
         ori_shape = x.shape
         if len(ori_shape) == 3:
@@ -889,11 +904,17 @@ class FusedMoE(torch.nn.Module):
         if self.dp_size > 1:
             cu_tokens_across_dp_cpu = get_forward_context(
             ).dp_metadata.cu_tokens_across_dp_cpu
+            hidden_states_across_dp = get_forward_context(
+            ).dp_metadata.hidden_states_across_dp
+            router_logits_across_dp = get_forward_context(
+            ).dp_metadata.router_logits_across_dp
 
             hidden_states = self.multicast_fn(hidden_states,
-                                              cu_tokens_across_dp_cpu)
+                                              cu_tokens_across_dp_cpu,
+                                              hidden_states_across_dp)
             router_logits = self.multicast_fn(router_logits,
-                                              cu_tokens_across_dp_cpu)
+                                              cu_tokens_across_dp_cpu,
+                                              router_logits_across_dp)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(

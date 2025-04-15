@@ -64,7 +64,7 @@ def main(model,
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-    ] * 5
+    ] * 5 * dp_size
 
     # with DP, each rank should process different prompts.
     # usually all the DP ranks process a full dataset,
