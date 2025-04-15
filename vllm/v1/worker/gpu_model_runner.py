@@ -1359,7 +1359,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Reset the lora mapping for prompt logprobs computing
             if self.lora_config:
-                self.set_active_loras_for_prompt_logprobs(self.input_batch, req_idx, num_logits)
+                self.set_active_loras_for_prompt_logprobs(
+                    self.input_batch, req_idx, num_logits)
 
             logits = self.model.compute_logits(prompt_hidden_states, None)
 

@@ -644,8 +644,7 @@ class InputBatch:
         """
         req_lora_mapping = self.request_lora_mapping[[req_idx]]
         prompt_lora_mapping = tuple(req_lora_mapping)
-        token_lora_mapping = tuple(
-            req_lora_mapping.repeat(num_logits))
+        token_lora_mapping = tuple(req_lora_mapping.repeat(num_logits))
         active_lora_requests: set[LoRARequest] = set(
             self.lora_id_to_lora_request.values())
 
