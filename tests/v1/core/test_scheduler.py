@@ -1130,6 +1130,10 @@ def test_kv_connector_handles_preemption():
 
     # Restarts the preempted request - generate 3rd token.
     # This will have a local and remote cache hit.
+
+    # FIXME(rob): this is currently broken because:
+    # https://vllm-dev.slack.com/archives/C08MSU8THEC/p1744692863711629
+
     breakpoint()
     output = scheduler.schedule()
     breakpoint()
