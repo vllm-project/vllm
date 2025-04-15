@@ -341,6 +341,13 @@ steps:
   commands:
   - bash scripts/run-benchmarks.sh
 
+- label: Benchmarks CLI Test # 10min
+  source_file_dependencies:
+  - vllm/
+  - tests/benchmarks/
+  commands:
+  - pytest -v -s benchmarks/
+
 - label: Quantization Test # 33min
   source_file_dependencies:
   - csrc/
