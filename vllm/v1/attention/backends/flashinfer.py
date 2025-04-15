@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from flashinfer import (BatchPrefillWithPagedKVCacheWrapper,
+from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
+                        BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.layer import Attention
@@ -17,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -31,23 +33,23 @@ class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [64, 128, 256]
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHINFER"
+        return "FLASHINFER_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type[FlashInferImpl]:
+    def get_impl_cls() -> type[FlashInferImpl]:
         return FlashInferImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type[FlashInferMetadata]:
+    def get_metadata_cls() -> type[FlashInferMetadata]:
         return FlashInferMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type[FlashInferMetadataBuilder]:
+    def get_builder_cls() -> type[FlashInferMetadataBuilder]:
         return FlashInferMetadataBuilder
 
     @staticmethod
@@ -56,7 +58,7 @@ class FlashInferBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
 
@@ -73,14 +75,14 @@ class PerLayerParameters:
 
 
 def get_per_layer_parameters(
-        vllm_config: VllmConfig) -> Dict[str, PerLayerParameters]:
+        vllm_config: VllmConfig) -> dict[str, PerLayerParameters]:
     """
     Scan all attention layers and determine some hyperparameters
     to use during `plan`.
     """
 
     layers = vllm_config.compilation_config.static_forward_context
-    per_layer_params: Dict[str, PerLayerParameters] = {}
+    per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
         assert isinstance(layer, Attention)
@@ -101,7 +103,7 @@ def get_per_layer_parameters(
 
 
 def infer_global_hyperparameters(
-        per_layer_params: Dict[str, PerLayerParameters]) -> PerLayerParameters:
+        per_layer_params: dict[str, PerLayerParameters]) -> PerLayerParameters:
     """
     Currently, FlashInfer backend only support models in which all layers share
     the same values for the following hyperparameters:
@@ -165,6 +167,12 @@ class FlashInferMetadata:
 
     slot_mapping: torch.Tensor
 
+    # For handling prefill decode split
+    num_decodes: int
+    num_decode_tokens: int
+    num_prefills: int
+    num_prefill_tokens: int
+
     # For cascade attention.
     use_cascade: bool
     shared_qo_indptr: Optional[torch.Tensor] = None
@@ -172,8 +180,9 @@ class FlashInferMetadata:
     shared_kv_page_indices: Optional[torch.Tensor] = None
     shared_kv_last_page_len: Optional[torch.Tensor] = None
 
-    prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper = None
-    cascade_wrapper: MultiLevelCascadeAttentionWrapper = None
+    prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
+    decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
+    cascade_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -200,6 +209,7 @@ class FlashInferMetadataBuilder:
         self.runner = runner
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
+        self._decode_wrapper = None  # Wrapper for decode
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
@@ -208,8 +218,65 @@ class FlashInferMetadataBuilder:
         self.vllm_config = get_current_vllm_config()
 
     def reorder_batch(self, input_batch: InputBatch,
-                      scheduler_output: SchedulerOutput):
-        pass
+                      scheduler_output: SchedulerOutput) -> bool:
+        # We now want to reorder the batch so that the "decode" requests are and
+        # the front and the "prefill" requests are at the using the least amount
+        # swaps possible. (NOTE for now we loosely use "decode" to mean requests
+        # where attention is likely memory-bound and "prefill" to mean requests
+        # where attention is likely compute-bound, TODO(lucas): figure out a
+        # better naming here)
+        decodes = []
+        prefills = []
+        num_decode_tokens = 0
+        num_prefill_tokens = 0
+
+        for i, req_id in enumerate(input_batch.req_ids):
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            # for now treat 1 scheduled token as "decode" even if its not,
+            # we should update this to something like < 8 in the future but
+            # currently the decode run only supports num_tokens = 1
+            if num_tokens == 1:
+                decodes.append(i)
+                num_decode_tokens += num_tokens
+            else:
+                prefills.append(i)
+                num_prefill_tokens += num_tokens
+
+        # We hope that this is fairly minimal since decodes
+        # should be around for a number of iterations so hopefully they are
+        # relatively stationary (and new request are generally appended to the
+        # persistent batch so already should be at the back)
+        # To achieve this we loop over the decodes in descending order and
+        # the prefills in ascending order. We swap decodes from the  "back"
+        # i.e. past where the last decode should be in the reodorered with
+        # prefills from the front of the batch.
+        # `decodes` and `prefills` are already in ascending order just based on
+        # the above loop
+        num_decodes = len(decodes)
+        num_prefills = len(prefills)
+        first_prefill = 0
+        modified_batch = False
+
+        for i in range(1, min(num_decodes, num_prefills) + 1):
+            # If the decode is at the "back" of the batch, i, we can swap it
+            # with the prefill closest to the front of the batch
+            if decodes[num_decodes - i] >= num_decodes:
+                input_batch.swap_states(prefills[first_prefill],
+                                        decodes[num_decodes - i])
+                first_prefill += 1
+                modified_batch = True
+            else:
+                break
+
+        # Save for next `build` call
+        # TODO(lucas): this is a bit of a hack, we should probably have a
+        # better way of doing this
+        self._num_decodes = num_decodes
+        self._num_prefills = num_prefills
+        self._num_decode_tokens = num_decode_tokens
+        self._num_prefill_tokens = num_prefill_tokens
+
+        return modified_batch
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -224,6 +291,20 @@ class FlashInferMetadataBuilder:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(), "NHD")
         return self._prefill_wrapper
+
+    def _get_decode_wrapper(self):
+        if self._decode_wrapper is None:
+            num_qo_heads = (self.runner.model_config.get_num_attention_heads(
+                self.runner.parallel_config))
+            num_kv_heads = self.runner.model_config.get_num_kv_heads(
+                self.runner.parallel_config)
+            use_tensor_cores = envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or (
+                num_qo_heads // num_kv_heads > 4)
+            self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                self._get_workspace_buffer(),
+                "NHD",
+                use_tensor_cores=use_tensor_cores)
+        return self._decode_wrapper
 
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
@@ -262,26 +343,67 @@ class FlashInferMetadataBuilder:
                 q_data_type=attn_metadata.q_data_type,
             )
         else:
-            attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
-            attn_metadata.prefill_wrapper.plan(
-                attn_metadata.qo_indptr,
-                attn_metadata.paged_kv_indptr,
-                attn_metadata.paged_kv_indices,
-                attn_metadata.paged_kv_last_page_len,
-                attn_metadata.num_qo_heads,
-                attn_metadata.num_kv_heads,
-                attn_metadata.head_dim,
-                attn_metadata.page_size,
-                causal=True,
-                sm_scale=self.global_hyperparameters.sm_scale,
-                window_left=self.global_hyperparameters.window_left,
-                logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
-                q_data_type=attn_metadata.q_data_type,
-                kv_data_type=attn_metadata.data_type,
-            )
+            # Regular attention (common case).
+            # Decodes are at the front and prefills are at the back,
+            # according to reorder_batch()
+            if self._num_prefills > 0:
+                # Decodes are first so prefills start after the last decode
+                prefill_start = self._num_decodes
+                attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
+                assert attn_metadata.qo_indptr[prefill_start:].shape[
+                    0] == self._num_prefills + 1
+                assert attn_metadata.paged_kv_indptr[prefill_start:].shape[
+                    0] == self._num_prefills + 1
+                assert attn_metadata.paged_kv_last_page_len[
+                    prefill_start:].shape[0] == self._num_prefills
+                # Since prefill_wrapper.run() will be called with
+                # query[num_decode_tokens:] we need to adjust the qo_indptr
+                # to be relative to the start of the prefill queries.
+                qo_indptr = attn_metadata.qo_indptr[
+                    prefill_start:] - attn_metadata.qo_indptr[prefill_start]
+                attn_metadata.prefill_wrapper.plan(
+                    qo_indptr,
+                    attn_metadata.paged_kv_indptr[prefill_start:],
+                    attn_metadata.paged_kv_indices,
+                    attn_metadata.paged_kv_last_page_len[prefill_start:],
+                    attn_metadata.num_qo_heads,
+                    attn_metadata.num_kv_heads,
+                    attn_metadata.head_dim,
+                    attn_metadata.page_size,
+                    causal=True,
+                    sm_scale=self.global_hyperparameters.sm_scale,
+                    window_left=self.global_hyperparameters.window_left,
+                    logits_soft_cap=self.global_hyperparameters.
+                    logits_soft_cap,
+                    q_data_type=attn_metadata.q_data_type,
+                    kv_data_type=attn_metadata.data_type,
+                )
+
+            if self._num_decodes > 0:
+                attn_metadata.decode_wrapper = self._get_decode_wrapper()
+                attn_metadata.decode_wrapper.plan(
+                    attn_metadata.paged_kv_indptr[:self._num_decodes + 1],
+                    attn_metadata.paged_kv_indices,
+                    attn_metadata.paged_kv_last_page_len[:self._num_decodes],
+                    attn_metadata.num_qo_heads,
+                    attn_metadata.num_kv_heads,
+                    attn_metadata.head_dim,
+                    attn_metadata.page_size,
+                    # Disable flashinfer's pos encoding and use vllm's rope.
+                    pos_encoding_mode="NONE",
+                    sm_scale=self.global_hyperparameters.sm_scale,
+                    window_left=self.global_hyperparameters.window_left,
+                    logits_soft_cap=self.global_hyperparameters.
+                    logits_soft_cap,
+                    q_data_type=attn_metadata.q_data_type,
+                    kv_data_type=attn_metadata.data_type,
+                )
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int):
+        assert self._num_decodes + self._num_prefills == num_reqs
+        assert (self._num_decode_tokens +
+                self._num_prefill_tokens == num_actual_tokens)
         page_size = self.runner.block_size
         device = self.runner.device
         qo_indptr = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
@@ -349,6 +471,10 @@ class FlashInferMetadataBuilder:
             data_type=self.runner.kv_cache_dtype,
             q_data_type=self.runner.dtype,
             slot_mapping=slot_mapping,
+            num_decodes=self._num_decodes,
+            num_decode_tokens=self._num_decode_tokens,
+            num_prefills=self._num_prefills,
+            num_prefill_tokens=self._num_prefill_tokens,
             use_cascade=use_cascade,
             shared_qo_indptr=shared_qo_indptr,
             shared_kv_page_indptr=shared_kv_page_indptr,
@@ -376,10 +502,10 @@ class FlashInferImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> None:
@@ -440,6 +566,7 @@ class FlashInferImpl(AttentionImpl):
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
 
+        num_actual_tokens = attn_metadata.num_actual_tokens
         # Reshape the input keys and values and store them in the cache.
         # NOTE(woosuk): Here, key and value are padded while slot_mapping is
         # not padded. However, we don't need to do key[:num_actual_tokens] and
@@ -459,24 +586,54 @@ class FlashInferImpl(AttentionImpl):
         window_left = (self.sliding_window[0]
                        if self.sliding_window is not None else -1)
 
-        if not attn_metadata.use_cascade:
-            # Regular attention (common case).
-            assert attn_metadata.prefill_wrapper is not None
-            assert attn_metadata.prefill_wrapper._causal
-            assert attn_metadata.prefill_wrapper._window_left == window_left
-            assert attn_metadata.prefill_wrapper._logits_soft_cap == (
-                self.logits_soft_cap or 0.0)
-            assert attn_metadata.prefill_wrapper._sm_scale == self.scale
-            output = attn_metadata.prefill_wrapper.run(
-                query,
+        # Inputs and outputs may be padded for CUDA graphs
+        query = query[:num_actual_tokens]
+        output_padded = output
+        output = output[:num_actual_tokens]
+
+        if attn_metadata.use_cascade:
+            # Cascade attention (rare case).
+            assert attn_metadata.cascade_wrapper is not None
+            output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
+            return output
+
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+
+        # Regular attention (common case).
+        # Decodes are at the front and prefills are at the back,
+        # according to reorder_batch()
+        if prefill_wrapper := attn_metadata.prefill_wrapper:
+            prefill_query = query[num_decode_tokens:]
+            assert prefill_query.shape[0] == num_prefill_tokens
+            assert prefill_wrapper is not None
+            assert prefill_wrapper._causal
+            assert prefill_wrapper._window_left == window_left
+            assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap
+                                                        or 0.0)
+            assert prefill_wrapper._sm_scale == self.scale
+            prefill_wrapper.run(
+                prefill_query,
                 kv_cache,
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
-                out=output,
+                out=output[num_decode_tokens:],
             )
-            return output
 
-        # Cascade attention (rare case).
-        assert attn_metadata.cascade_wrapper is not None
-        output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
-        return output
+        if decode_wrapper := attn_metadata.decode_wrapper:
+            decode_query = query[:num_decode_tokens]
+            assert decode_query.shape[0] == num_decode_tokens
+            assert decode_wrapper is not None
+            assert decode_wrapper._window_left == window_left
+            assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
+                                                       or 0.0)
+            assert decode_wrapper._sm_scale == self.scale
+            decode_wrapper.run(
+                decode_query,
+                kv_cache,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                out=output[:num_decode_tokens],
+            )
+
+        return output_padded
