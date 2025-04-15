@@ -990,6 +990,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                     "video"] = self._parse_and_validate_video_input(**kwargs)
         return mm_input_by_modality
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 

@@ -160,6 +160,35 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+#### Using a proxy
+
+Here are some tips for loading/downloading models from Hugging Face using a proxy:
+
+- Set the proxy globally for your session (or set it in the profile file):
+
+```shell
+export http_proxy=http://your.proxy.server:port
+export https_proxy=http://your.proxy.server:port
+```
+
+- Set the proxy for just the current command:
+
+```shell
+https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
+
+# or use vllm cmd directly
+https_proxy=http://your.proxy.server:port  vllm serve <model_name> --disable-log-requests
+```
+
+- Set the proxy in Python interpreter:
+
+```python
+import os
+
+os.environ['http_proxy'] = 'http://your.proxy.server:port'
+os.environ['https_proxy'] = 'http://your.proxy.server:port'
+```
+
 ### ModelScope
 
 To use models from [ModelScope](https://www.modelscope.cn) instead of Hugging Face Hub, set an environment variable:
@@ -301,6 +330,11 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `GlmForCausalLM`
   * GLM-4
   * `THUDM/glm-4-9b-chat-hf`, etc.
+  * ✅︎
+  * ✅︎
+- * `Glm4ForCausalLM`
+  * GLM-4-0414
+  * `THUDM/GLM-4-32B-Chat-0414`, etc.
   * ✅︎
   * ✅︎
 - * `GPT2LMHeadModel`
@@ -725,7 +759,7 @@ On the other hand, modalities separated by `/` are mutually exclusive.
 See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the model.
 
 :::{important}
-To enable multiple multi-modal items per text prompt, you have to set `limit_mm_per_prompt` (offline inference)
+**To enable multiple multi-modal items per text prompt in vLLM V0**, you have to set `limit_mm_per_prompt` (offline inference)
 or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
 
 Offline inference:
@@ -742,6 +776,8 @@ Online serving:
 ```bash
 vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
 ```
+
+**This is no longer required if you are using vLLM V1.**
 
 :::
 
@@ -844,14 +880,21 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
 - * `InternVLChatModel`
-  * InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
+  * InternVL 3.0, InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
-  * `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
+  * `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
   *
   * ✅︎
   * ✅︎
+- * `KimiVLForConditionalGeneration`
+  * Kimi-VL-A3B-Instruct, Kimi-VL-A3B-Thinking
+  * T + I<sup>+</sup>
+  * `moonshotai/Kimi-VL-A3B-Instruct`, `moonshotai/Kimi-VL-A3B-Thinking`
+  *
+  *
+  * ✅︎
 - * `Llama4ForConditionalGeneration`
-  * Llama-4-17B-Omni-Instruct
+  * Llama 4
   * T + I<sup>+</sup>
   * `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc.
   *
@@ -994,6 +1037,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * Skywork-R1V-38B
   * T + I
   * `Skywork/Skywork-R1V-38B`
+  *
+  * ✅︎
+  * ✅︎
+- * `SmolVLMForConditionalGeneration`
+  * SmolVLM2
+  * T + I
+  * `SmolVLM2-2.2B-Instruct`
   *
   * ✅︎
   * ✅︎
