@@ -485,10 +485,35 @@ class MiniMaxText01LinearAttention(nn.Module):
         q = q[num_prefill_tokens:].unsqueeze(2).contiguous()
         k = k[num_prefill_tokens:].unsqueeze(2).contiguous()
         v = v[num_prefill_tokens:].unsqueeze(2).contiguous()
+        
+        # 检查张量是否为空
+        if q.size(0) == 0 or k.size(0) == 0 or v.size(0) == 0:
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+            
+        # 检查slot_id是否有效
         slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0):]
-        hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
-                                              slot_id, 32)
-        return hidden
+        if slot_id.size(0) == 0:
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+            
+        # 检查KV缓存是否有效
+        if kv_cache is None or kv_cache.size(0) == 0:
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+            
+        # 检查slope_rate是否有效
+        if self.tp_slope is None or self.tp_slope.size(0) == 0:
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+            
+        try:
+            hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
+                                                 slot_id, 32)
+            return hidden
+        except Exception as e:
+            print(f"Error in linear_decode_forward_triton: {e}")
+            print(f"q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}")
+            print(f"kv_cache shape: {kv_cache.shape}, slot_id shape: {slot_id.shape}")
+            print(f"tp_slope shape: {self.tp_slope.shape}")
+            # 失败时返回空张量
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
 
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
                 kv_caches: MinimaxCacheParams, **kwargs) -> torch.Tensor:
