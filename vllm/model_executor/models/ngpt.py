@@ -1,10 +1,3 @@
-# pyright: reportArgumentType=false
-# pyright: reportAssignmentType=false
-# pyright: reportOptionalMemberAccess=false
-# pyright: reportReturnType=false
-# pyright: reportOptionalOperand=false
-# pyright: reportOperatorIssue=false
-# pyright: reportPrivateImportUsage=false
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from

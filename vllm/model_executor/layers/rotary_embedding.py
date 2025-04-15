@@ -1145,6 +1145,47 @@ class MRotaryEmbedding(RotaryEmbedding):
         ).expand(3, -1)
 
 
+class CustomWavelengthsRotaryEmbedding(RotaryEmbedding):
+    """RotaryEmbedding extended with custom rope wavelengths."""
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+        wavelengths: List[Union[float, str]],
+    ) -> None:
+        self.wavelengths = torch.tensor([float(w) for w in wavelengths],
+                                        dtype=torch.float32)
+        super().__init__(
+            head_size,
+            rotary_dim,
+            max_position_embeddings,
+            base,
+            is_neox_style,
+            dtype,
+        )
+
+    def _compute_inv_freq(self) -> torch.Tensor:
+        """Compute the inverse frequency."""
+        inv_freq = 2 * torch.pi / self.wavelengths
+        return inv_freq
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        """Compute the cos and sin cache."""
+        inv_freq = self._compute_inv_freq()
+        t = torch.arange(self.max_position_embeddings, dtype=torch.float)
+
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+        return cache
+
+
 _ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}
 
 
@@ -1272,6 +1313,17 @@ def get_rope(
                 head_size, rotary_dim, max_position, original_max_position,
                 base, is_neox_style, dtype, short_factor, long_factor,
                 **extra_kwargs)
+        elif scaling_type == "custom_wavelengths":
+            wavelengths = rope_scaling["wavelengths"]
+            rotary_emb = CustomWavelengthsRotaryEmbedding(
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                is_neox_style,
+                dtype,
+                wavelengths,
+            )
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb
