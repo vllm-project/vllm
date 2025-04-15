@@ -126,6 +126,23 @@ model_example_map = {
 }
 
 
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description='Demo on using vLLM for offline inference with '
+        'vision language models for text generation')
+    parser.add_argument('--model-type',
+                        '-m',
+                        type=str,
+                        default="mllama",
+                        choices=model_example_map.keys(),
+                        help='Huggingface "model_type".')
+    parser.add_argument("--seed",
+                        type=int,
+                        default=None,
+                        help="Set the seed when initializing `vllm.LLM`.")
+    return parser.parse_args()
+
+
 def main(args):
     model = args.model_type
     if model not in model_example_map:
@@ -171,19 +188,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser(
-        description='Demo on using vLLM for offline inference with '
-        'vision language models for text generation')
-    parser.add_argument('--model-type',
-                        '-m',
-                        type=str,
-                        default="mllama",
-                        choices=model_example_map.keys(),
-                        help='Huggingface "model_type".')
-    parser.add_argument("--seed",
-                        type=int,
-                        default=None,
-                        help="Set the seed when initializing `vllm.LLM`.")
-
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

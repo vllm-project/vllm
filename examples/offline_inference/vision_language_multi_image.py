@@ -767,22 +767,7 @@ def run_chat(model: str, question: str, image_urls: list[str],
         print("-" * 50)
 
 
-def main(args: Namespace):
-    model = args.model_type
-    method = args.method
-    seed = args.seed
-
-    image_urls = IMAGE_URLS[:args.num_images]
-
-    if method == "generate":
-        run_generate(model, QUESTION, image_urls, seed)
-    elif method == "chat":
-        run_chat(model, QUESTION, image_urls, seed)
-    else:
-        raise ValueError(f"Invalid method: {method}")
-
-
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'vision language models that support multi-image input for text '
@@ -808,6 +793,24 @@ if __name__ == "__main__":
         choices=list(range(1, 13)),  # 12 is the max number of images
         default=2,
         help="Number of images to use for the demo.")
+    return parser.parse_args()
 
-    args = parser.parse_args()
+
+def main(args: Namespace):
+    model = args.model_type
+    method = args.method
+    seed = args.seed
+
+    image_urls = IMAGE_URLS[:args.num_images]
+
+    if method == "generate":
+        run_generate(model, QUESTION, image_urls, seed)
+    elif method == "chat":
+        run_chat(model, QUESTION, image_urls, seed)
+    else:
+        raise ValueError(f"Invalid method: {method}")
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)

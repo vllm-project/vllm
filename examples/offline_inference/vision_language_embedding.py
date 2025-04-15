@@ -156,16 +156,13 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
         print("-" * 50)
 
 
-def main(args: Namespace):
-    run_encode(args.model_name, args.modality, args.seed)
-
-
 model_example_map = {
     "e5_v": run_e5_v,
     "vlm2vec": run_vlm2vec,
 }
 
-if __name__ == "__main__":
+
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'vision language models for multimodal embedding')
@@ -184,6 +181,13 @@ if __name__ == "__main__":
                         type=int,
                         default=None,
                         help="Set the seed when initializing `vllm.LLM`.")
+    return parser.parse_args()
 
-    args = parser.parse_args()
+
+def main(args: Namespace):
+    run_encode(args.model_name, args.modality, args.seed)
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)

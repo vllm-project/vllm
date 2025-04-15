@@ -6,6 +6,16 @@ from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 
+def parse_args():
+    parser = FlexibleArgumentParser()
+    parser = EngineArgs.add_cli_args(parser)
+    # Set example specific arguments
+    parser.set_defaults(model="BAAI/bge-reranker-v2-m3",
+                        task="score",
+                        enforce_eager=True)
+    return parser.parse_args()
+
+
 def main(args: Namespace):
     # Sample prompts.
     text_1 = "What is the capital of France?"
@@ -30,11 +40,5 @@ def main(args: Namespace):
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser()
-    parser = EngineArgs.add_cli_args(parser)
-    # Set example specific arguments
-    parser.set_defaults(model="BAAI/bge-reranker-v2-m3",
-                        task="score",
-                        enforce_eager=True)
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

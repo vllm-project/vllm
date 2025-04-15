@@ -417,6 +417,38 @@ def run_model(input_data,
     return pred_imgs
 
 
+def parse_args():
+    parser = argparse.ArgumentParser("MAE run inference", add_help=False)
+
+    parser.add_argument(
+        "--data_file",
+        type=str,
+        default="./India_900498_S2Hand.tif",
+        help="Path to the file.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="output",
+        help="Path to the directory where to save outputs.",
+    )
+    parser.add_argument(
+        "--input_indices",
+        default=[1, 2, 3, 8, 11, 12],
+        type=int,
+        nargs="+",
+        help=
+        "0-based indices of the six Prithvi channels to be selected from the  "
+        "input. By default selects [1,2,3,8,11,12] for S2L1C data.",
+    )
+    parser.add_argument(
+        "--rgb_outputs",
+        action="store_true",
+        help="If present, output files will only contain RGB channels. "
+        "Otherwise, all bands will be saved.",
+    )
+
+
 def main(
     data_file: str,
     output_dir: str,
@@ -496,35 +528,7 @@ def main(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("MAE run inference", add_help=False)
 
-    parser.add_argument(
-        "--data_file",
-        type=str,
-        default="./India_900498_S2Hand.tif",
-        help="Path to the file.",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="output",
-        help="Path to the directory where to save outputs.",
-    )
-    parser.add_argument(
-        "--input_indices",
-        default=[1, 2, 3, 8, 11, 12],
-        type=int,
-        nargs="+",
-        help=
-        "0-based indices of the six Prithvi channels to be selected from the  "
-        "input. By default selects [1,2,3,8,11,12] for S2L1C data.",
-    )
-    parser.add_argument(
-        "--rgb_outputs",
-        action="store_true",
-        help="If present, output files will only contain RGB channels. "
-        "Otherwise, all bands will be saved.",
-    )
-    args = parser.parse_args()
+    args = parse_args()
 
     main(**vars(args))
