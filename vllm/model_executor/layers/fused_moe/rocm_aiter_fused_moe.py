@@ -469,11 +469,10 @@ def rocm_aiter_fused_experts(
     apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
 
-    if apply_router_weight_on_input:
-        hidden_states = hidden_states * topk_weights
-        topk_weights = torch.ones_like(topk_weights)
-
     if is_rocm_aiter_block_scaled_moe_enabled() and use_fp8_w8a8:
+        assert not apply_router_weight_on_input, (
+            "apply_router_weight_on_input is not supported for block scaled moe"
+        )
 
         assert w1_scale is not None
         assert w2_scale is not None
@@ -565,23 +564,8 @@ def rocm_aiter_fused_experts(
         #                activation_str=activation)
 
     elif use_fp8_w8a8:
-        # if apply_router_weight_on_input:
-        #     _hidden_states = hidden_states * topk_weights
-        #     _topk_weights = torch.ones_like(topk_weights)
-
-        #     return torch.ops.vllm.rocm_aiter_asm_moe(
-        #                   hidden_states=_hidden_states,
-        #                   w1=w1,
-        #                   w2=w2,
-        #                   topk_weight=_topk_weights,
-        #                   topk_ids=topk_ids,
-        #                   fc1_scale=w1_scale,
-        #                   fc2_scale=w2_scale,
-        #                   fc1_smooth_scale=None,
-        #                   fc2_smooth_scale=None,
-        #                   a16=False,
-        #                   activation=activation)
-        # else:
+        assert not apply_router_weight_on_input, (
+            "apply_router_weight_on_input is not supported for fp8_w8a8")
         return torch.ops.vllm.rocm_aiter_asm_moe(hidden_states=hidden_states,
                                                  w1=w1,
                                                  w2=w2,
@@ -594,11 +578,15 @@ def rocm_aiter_fused_experts(
                                                  a16=False,
                                                  activation=activation)
 
-    return torch.ops.vllm.rocm_aiter_ck_moe(hidden_states=hidden_states,
-                                            w1=w1,
-                                            w2=w2,
-                                            topk_weights=topk_weights,
-                                            topk_ids=topk_ids)
+    if apply_router_weight_on_input:
+        hidden_states = hidden_states * topk_weights
+
+    return torch.ops.vllm.rocm_aiter_ck_moe(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=torch.ones_like(topk_weights),
+        topk_ids=topk_ids)
 
 
 def rocm_aiter_topk_softmax_wrapper(
