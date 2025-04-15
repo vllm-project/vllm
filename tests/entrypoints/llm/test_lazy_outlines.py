@@ -29,6 +29,7 @@ def run_normal_opt125m(enforce_eager):
 
     # Create an LLM without guided decoding as a baseline.
     llm = LLM(model="/mnt/weka/data/pytorch/llama3.2/Meta-Llama-3.2-1B",
+              dtype="bfloat16",
               enforce_eager=enforce_eager,
               gpu_memory_utilization=0.3)
     outputs = llm.generate(prompts, sampling_params)
@@ -53,6 +54,7 @@ def run_normal(enforce_eager):
 
     # Create an LLM without guided decoding as a baseline.
     llm = LLM(model="distilbert/distilgpt2",
+              dtype="bfloat16",
               enforce_eager=enforce_eager,
               gpu_memory_utilization=0.3)
     outputs = llm.generate(prompts, sampling_params)
@@ -70,6 +72,7 @@ def run_lmfe(sample_regex, enforce_eager):
     # Create an LLM with guided decoding enabled.
     llm = LLM(model="distilbert/distilgpt2",
               enforce_eager=enforce_eager,
+              dtype="bfloat16",
               guided_decoding_backend="lm-format-enforcer",
               gpu_memory_utilization=0.3)
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)

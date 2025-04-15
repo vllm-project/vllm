@@ -21,7 +21,7 @@ GUIDED_DECODING_BACKENDS = [
 ]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
