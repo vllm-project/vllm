@@ -247,10 +247,19 @@ class CustomBatchFeature(BatchFeature):
         # Do the tensor conversion in batch
         for key, value in self.items():
             if key == "pixel_values":
-                for i, image in enumerate(value):
-                    if not is_tensor(image):
-                        tensor = as_tensor(image)
-                        self[key][i] = tensor
+                # 处理嵌套结构: 每个图像有多个patch
+                for i, image_patches in enumerate(value):
+                    # 检查是否已经是嵌套列表结构
+                    if isinstance(image_patches, list):
+                        for j, patch in enumerate(image_patches):
+                            if not is_tensor(patch):
+                                tensor = as_tensor(patch)
+                                self[key][i][j] = tensor
+                    else:
+                        # 向后兼容，处理非嵌套结构
+                        if not is_tensor(image_patches):
+                            tensor = as_tensor(image_patches)
+                            self[key][i] = tensor
                 continue
             try:
                 if not is_tensor(value):
@@ -301,7 +310,15 @@ class CustomBatchFeature(BatchFeature):
         # We cast only floating point tensors to avoid issues with tokenizers casting `LongTensor` to `FloatTensor`
         for k, v in self.items():
             if k == "pixel_values":
-                new_data[k] = [v[i].to(*args, **kwargs) for i in range(len(v))]
+                # 处理嵌套结构: 每个图像有多个patch
+                if len(v) > 0 and isinstance(v[0], list):
+                    new_data[k] = [
+                        [patch.to(*args, **kwargs) for patch in image_patches] 
+                        for image_patches in v
+                    ]
+                else:
+                    # 向后兼容，处理非嵌套结构
+                    new_data[k] = [v[i].to(*args, **kwargs) for i in range(len(v))]
                 continue
             # check if v is a floating point
             if torch.is_floating_point(v):
@@ -586,18 +603,22 @@ class ImageProcessor(BaseImageProcessor):
             )
             logger.info(f"图像分块数量: {len(image_patches)}")
             
+            # 收集所有这张图像的patch
+            image_patches_list = []
+            
             for j, patch in enumerate(image_patches):
                 logger.info(f"处理第 {j+1} 个图像块")
                 transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(patch)
                 img_array = to_numpy_array(transform_img)
                 img_array = to_channel_dimension_format(img_array, data_format, input_channel_dim=input_data_format)
-                
-                # 对每个图像块添加一个对应的尺寸
-                all_pixel_values.append(img_array)
-                all_image_sizes.append([ori_h, ori_w])
+                image_patches_list.append(img_array)
                 logger.info(f"图像块 {j+1} 处理完成，形状: {img_array.shape}")
+            
+            # 为这张图像添加一个条目，包含所有patch
+            all_pixel_values.append(image_patches_list)
+            all_image_sizes.append([ori_h, ori_w])
         
-        logger.info(f"所有图像处理完成，图像块数量: {len(all_pixel_values)}")
+        logger.info(f"所有图像处理完成，图像数量: {len(all_pixel_values)}")
 
         data = {"pixel_values": all_pixel_values, "image_sizes": all_image_sizes}
         logger.info(f"返回数据 keys: {data.keys()}")
@@ -627,18 +648,22 @@ class ImageProcessor(BaseImageProcessor):
             )
             logger.info(f"图像分块数量: {len(image_patches)}")
             
+            # 收集所有这张图像的patch
+            image_patches_list = []
+            
             for j, patch in enumerate(image_patches):
                 logger.info(f"处理第 {j+1} 个图像块")
                 transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(patch)
                 img_array = to_numpy_array(transform_img)
                 img_array = to_channel_dimension_format(img_array, data_format, input_channel_dim=input_data_format)
-                
-                # 对每个图像块添加一个对应的尺寸
-                all_pixel_values.append(img_array)
-                all_image_sizes.append([ori_h, ori_w])
+                image_patches_list.append(img_array)
                 logger.info(f"图像块 {j+1} 处理完成，形状: {img_array.shape}")
+            
+            # 为这张图像添加一个条目，包含所有patch
+            all_pixel_values.append(image_patches_list)
+            all_image_sizes.append([ori_h, ori_w])
         
-        logger.info(f"所有图像处理完成，图像块数量: {len(all_pixel_values)}")
+        logger.info(f"所有图像处理完成，图像数量: {len(all_pixel_values)}")
 
         data = {"pixel_values": all_pixel_values, "image_sizes": all_image_sizes}
         logger.info(f"返回数据 keys: {data.keys()}")
