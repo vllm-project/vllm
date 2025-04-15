@@ -80,8 +80,8 @@ class MiniMaxText01RMSNormTP(CustomOp):
         super().__init__()
         self.tp_world = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.weight = nn.Parameter(torch.ones(int(hidden_size /
-                                                  self.tp_world)))
+        self.hidden_size = hidden_size
+        self.weight = nn.Parameter(torch.ones(hidden_size // self.tp_world))
 
         self.weight.weight_loader = self.weight_loader
         self.variance_epsilon = eps
@@ -94,25 +94,11 @@ class MiniMaxText01RMSNormTP(CustomOp):
     ) -> None:
         tp_world = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-
+            
         shard_size = loaded_weight.shape[0] // tp_world
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         param.data.copy_(loaded_weight[shard])
         return
-
-    def _forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
-        if self.tp_world > 1:
-            variance = tensor_model_parallel_all_reduce(
-                variance) / self.tp_world
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = x.to(orig_dtype) * self.weight
-        return x
 
     def forward(
         self,
@@ -120,7 +106,21 @@ class MiniMaxText01RMSNormTP(CustomOp):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         assert residual is None, "RMSNorm does not support residual connection."
-        return self._forward(x)
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+        
+        # 确保输入张量和权重张量的维度匹配
+        if x.size(-1) != self.weight.size(0):
+            # 如果维度不匹配，调整权重张量的大小
+            weight = self.weight[:x.size(-1)]
+        else:
+            weight = self.weight
+        
+        var = torch.mean(x * x, dim=-1, keepdim=True)
+        x_norm = x * torch.rsqrt(var + self.variance_epsilon)
+        result = weight * x_norm
+        
+        return result.to(orig_dtype)
 
 
 class MiniMaxText01RotaryEmbedding(CustomOp):
@@ -422,6 +422,10 @@ class MiniMaxText01LinearAttention(nn.Module):
                                attn_metadata):
         hidden = []
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
+            if _prefill_idx >= len(attn_metadata.query_start_loc):
+                break
+            if _prefill_idx >= len(state_indices_tensor):
+                break
             _start = attn_metadata.query_start_loc[_prefill_idx]
             _end = attn_metadata.query_start_loc[_prefill_idx + 1]
             slot_id = state_indices_tensor[_prefill_idx]
@@ -444,16 +448,23 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden.append(
                 self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
                                    attn_metadata))
+        
+        if not hidden:
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+            
         hidden = torch.concat(hidden, dim=0).contiguous()
         return hidden
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor,
                       attn_metadata):
-        q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0
-                                               ):]
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        if num_prefill_tokens >= q.size(0):
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+            
+        q = q[num_prefill_tokens:].unsqueeze(2).contiguous()
+        k = k[num_prefill_tokens:].unsqueeze(2).contiguous()
+        v = v[num_prefill_tokens:].unsqueeze(2).contiguous()
+        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0):]
         hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
                                               slot_id, 32)
         return hidden
@@ -479,8 +490,28 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden = self._decode_infer(q, k, v, kv_cache,
                                         state_indices_tensor, attn_metadata)
 
-        hidden = self.norm._forward(hidden)
+        # 如果 hidden 是空张量，直接返回
+        if hidden.size(0) == 0:
+            return hidden
+
+        hidden = self.norm(hidden)
         gate, _ = self.output_gate(hidden_states)
+        
+        # 确保 gate 和 hidden 的维度匹配
+        if gate.size(0) != hidden.size(0):
+            # 如果 batch size 不匹配，截断 gate
+            gate = gate[:hidden.size(0)]
+        
+        # 确保 gate 和 hidden 的其他维度也匹配
+        if gate.size(-1) != hidden.size(-1):
+            # 如果特征维度不匹配，调整 gate 的大小
+            if gate.size(-1) > hidden.size(-1):
+                gate = gate[..., :hidden.size(-1)]
+            else:
+                # 如果 gate 的特征维度小于 hidden，需要扩展
+                pad_size = hidden.size(-1) - gate.size(-1)
+                gate = torch.nn.functional.pad(gate, (0, pad_size))
+        
         hidden = F.sigmoid(gate) * hidden
         hidden = hidden.to(hidden_states.dtype)
         hidden, _ = self.out_proj(hidden)
@@ -878,6 +909,8 @@ class MiniMaxText01Model(nn.Module):
 
         slots_to_clear = []
         for _prefill_id in range(getattr(attn_metadata, "num_prefills", 0)):
+            if _prefill_id >= len(seq_id_map):
+                break
             seq_id = seq_id_map[_prefill_id]
             if attn_metadata.context_lens_tensor[
                     _prefill_id] == 0 and seq_id in seq_to_slot_maps:
@@ -889,11 +922,14 @@ class MiniMaxText01Model(nn.Module):
                                         dtype=torch.long)
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
         return self.embed_tokens(input_ids)
     
-    def get_input_embeddings(self) -> torch.Tensor:
-        return self.embed_tokens()
+    # def get_input_embeddings(self):
+    #     return self.embed_tokens
 
     def forward(self,
                 input_ids: Optional[torch.Tensor],
@@ -1019,6 +1055,30 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(
             batch_size)
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.model.embed_tokens(input_ids)
+    
+    # def get_input_embeddings(self):
+    #     return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    def set_decoder(self, decoder):
+        self.model = decoder
+
+    def get_decoder(self):
+        return self.model
+
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
@@ -1031,9 +1091,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
 
         return hidden_states
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
-    
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states,
