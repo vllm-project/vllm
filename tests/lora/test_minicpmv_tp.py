@@ -67,7 +67,10 @@ def test_minicpmv_lora(minicpmv_lora_files):
         max_lora_rank=8,
         enforce_eager=True,
         max_model_len=2048,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={
+            "image": 2,
+            "video": 0
+        },
         trust_remote_code=True,
     )
     output1 = do_sample(llm, minicpmv_lora_files, lora_id=1)
@@ -92,7 +95,10 @@ def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
         max_loras=4,
         max_lora_rank=64,
         tensor_parallel_size=4,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={
+            "image": 2,
+            "video": 0
+        },
         trust_remote_code=True,
     )
     output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
@@ -115,7 +121,10 @@ def test_minicpmv_tp4_fully_sharded_loras(minicpmv_lora_files):
         max_lora_rank=8,
         tensor_parallel_size=4,
         trust_remote_code=True,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={
+            "image": 1,
+            "video": 0
+        },
         fully_sharded_loras=True,
     )
     output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
