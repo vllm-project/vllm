@@ -70,14 +70,12 @@ def test_encode_decode():
 
     assert_equal(decoded, obj)
 
-    # Test encode_into case
+    # Test whether MsgpackEncoder properly reuses the buffers.
 
-    preallocated = bytearray()
-
-    encoded2 = encoder.encode_into(obj, preallocated)
+    encoded2 = encoder.encode(obj)
 
     assert len(encoded2) == 6
-    assert encoded2[0] is preallocated
+    assert encoded2[0] is encoded[0]
 
     decoded2: MyType = decoder.decode(encoded2)
 
@@ -112,7 +110,7 @@ def test_multimodal_kwargs():
 
     assert len(encoded) == 6
 
-    total_len = sum(len(x) for x in encoded)
+    total_len = sum(memoryview(x).cast("B").nbytes for x in encoded)
 
     # expected total encoding length, should be 44536, +-20 for minor changes
     assert total_len >= 44516 and total_len <= 44556
@@ -151,7 +149,7 @@ def test_multimodal_items_by_modality():
 
     assert len(encoded) == 8
 
-    total_len = sum([len(x) for x in encoded])
+    total_len = sum(memoryview(x).cast("B").nbytes for x in encoded)
 
     # expected total encoding length, should be 14255, +-20 for minor changes
     assert total_len >= 14235 and total_len <= 14275

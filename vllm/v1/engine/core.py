@@ -507,15 +507,15 @@ class EngineCoreProc(EngineCore):
         """Output socket IO thread."""
 
         # Msgpack serialization encoding.
+        # The wrapper keeps an internal encoding buffer that avoids
+        # creating a new buffer for each encode call.
         encoder = MsgpackEncoder()
-        # Reuse send buffer.
-        buffer = bytearray()
 
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 outputs = self.output_queue.get()
                 outputs.engine_index = engine_index
-                buffers = encoder.encode_into(outputs, buffer)
+                buffers = encoder.encode(outputs)
                 socket.send_multipart(buffers, copy=False)
 
 

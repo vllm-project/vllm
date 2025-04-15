@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import dataclasses
 import pickle
 from collections.abc import Sequence
-from dataclasses import asdict
 from inspect import isclass
 from itertools import chain
 from types import FunctionType
@@ -15,13 +15,25 @@ import zmq
 from msgspec import msgpack
 
 from vllm import envs
-from vllm.multimodal.inputs import (BaseMultiModalField, MultiModalFieldConfig,
-                                    MultiModalFieldElem, MultiModalKwargs,
-                                    MultiModalKwargsItem, NestedTensors)
+from vllm.multimodal.inputs import (BaseMultiModalField,
+                                    MultiModalBatchedField,
+                                    MultiModalFieldConfig, MultiModalFieldElem,
+                                    MultiModalFlatField, MultiModalKwargs,
+                                    MultiModalKwargsItem,
+                                    MultiModalSharedField, NestedTensors)
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
 CUSTOM_TYPE_RAW_VIEW = 3
+
+# MultiModealField class serialization type map.
+# These need to list all possible field types and match them
+# to factory methods in `MultiModalFieldConfig`.
+MMF_CLASS_TO_FACTORY = {
+    MultiModalFlatField: "flat",
+    MultiModalSharedField: "shared",
+    MultiModalBatchedField: "batched",
+}
 
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
@@ -51,20 +63,15 @@ class MsgpackEncoder:
         self.aux_buffers: Optional[list[bytestr]] = None
         self.size_threshold = size_threshold
 
-    # TODO - merge these constructors and remove the need for externally managed
-    # serialization buffers.
     def encode(self, obj: Any) -> Sequence[bytestr]:
-        return self.encode_into(obj, self.msg_buffer)
-
-    def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
         try:
             # This `bufs` list allows us to collect direct pointers to backing
             # buffers of tensors and np arrays, and return them along with the
             # top-level encoded buffer instead of copying their data into the
             # new buffer.
-            self.aux_buffers = [buf]
+            self.aux_buffers = [self.msg_buffer]
             bufs = self.aux_buffers
-            self.encoder.encode_into(obj, buf)
+            self.encoder.encode_into(obj, self.msg_buffer)
             return bufs
         finally:
             self.aux_buffers = None
@@ -111,11 +118,8 @@ class MsgpackEncoder:
         self, obj: np.ndarray
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
-        # Either copy the memoryview directly or flatten the array to bytes.
-        # Sending memoryviews is theoretically faster, but in this particular
-        # case, it triggers some unnecessary copies anyway.
-        # With this, the tensors can still be zero-copy read.
-        arr_data = obj.tobytes()
+        # If the array is non-contiguous, we need to copy it first
+        arr_data = obj.data if obj.data.c_contiguous else obj.tobytes()
         if not obj.shape or obj.nbytes < self.size_threshold:
             # Encode small arrays and scalars inline. Using this extension type
             # ensures we can avoid copying when decoding.
@@ -136,11 +140,15 @@ class MsgpackEncoder:
         return [self._encode_nested_tensors(x) for x in obj]
 
     def _encode_field(self, field: BaseMultiModalField):
-        # Encode the field as a dictionary + special handling for .field
-        d = asdict(field)
-        # Strip first 10 characters and last 5 characters from the class name
-        # to get the field type name that matches the factory function name.
-        return (field.__class__.__name__[10:-5].lower(), *d.values())
+        # Figure out the factory name for the field type.
+        name = MMF_CLASS_TO_FACTORY.get(field.__class__)
+        if not name:
+            raise TypeError(f"Unsupported field type: {field.__class__}")
+        # We just need to copy all of the field values in order
+        # which will be then used to reconstruct the field.
+        field_values = (getattr(field, f.name)
+                        for f in dataclasses.fields(field))
+        return (name, *field_values)
 
 
 class MsgpackDecoder:
