@@ -66,8 +66,7 @@ def test_minicpmv_lora(minicpmv_lora_files):
         max_loras=2,
         max_lora_rank=8,
         enforce_eager=True,
-        trust_remote_code=True,
-        enable_chunked_prefill=True,
+        max_model_len=2048,
     )
     output1 = do_sample(llm, minicpmv_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
@@ -91,9 +90,6 @@ def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
         max_loras=4,
         max_lora_rank=64,
         tensor_parallel_size=4,
-        trust_remote_code=True,
-        enforce_eager=True,
-        enable_chunked_prefill=True,
     )
     output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
@@ -114,9 +110,6 @@ def test_minicpmv_tp4_fully_sharded_loras(minicpmv_lora_files):
         max_loras=2,
         max_lora_rank=8,
         tensor_parallel_size=4,
-        trust_remote_code=True,
-        fully_sharded_loras=True,
-        enable_chunked_prefill=True,
     )
     output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
