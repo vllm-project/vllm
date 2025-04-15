@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
+import prometheus_client
 
+from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -29,7 +32,7 @@ class SpecDecodingStats:
         self.num_accepted_tokens += num_accepted_tokens
 
 
-class SpecDecodingMetrics:
+class SpecDecodingLogging:
 
     def __init__(self):
         self.reset()
@@ -60,3 +63,31 @@ class SpecDecodingMetrics:
             num_draft_tokens,
         )
         self.reset()
+
+
+class SpecDecodingProm:
+
+    def __init__(self, speculative_config: Optional[SpeculativeConfig],
+                 labelnames: list[str], labelvalues: list[str]):
+        self.spec_decoding_enabled = speculative_config is not None
+        if not self.spec_decoding_enabled:
+            return
+
+        self.counter_spec_decode_num_draft_tokens = \
+            prometheus_client.Counter(
+                name="vllm:spec_decode_num_draft_tokens_total",
+                documentation="Number of draft tokens.",
+                labelnames=labelnames).labels(*labelvalues)
+        self.counter_spec_decode_num_accepted_tokens = \
+            prometheus_client.Counter(
+                name="vllm:spec_decode_num_accepted_tokens_total",
+                documentation="Number of accepted tokens.",
+                labelnames=labelnames).labels(*labelvalues)
+
+    def observe(self, spec_decoding_stats: SpecDecodingStats):
+        if not self.spec_decoding_enabled:
+            return
+        self.counter_spec_decode_num_draft_tokens.inc(
+            spec_decoding_stats.num_draft_tokens)
+        self.counter_spec_decode_num_accepted_tokens.inc(
+            spec_decoding_stats.num_accepted_tokens)
