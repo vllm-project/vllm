@@ -63,6 +63,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
+    "kimi_vl": KimiVLConfig,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
