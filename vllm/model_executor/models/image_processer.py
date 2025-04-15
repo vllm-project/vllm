@@ -572,39 +572,34 @@ class ImageProcessor(BaseImageProcessor):
         logger.info(f"do_pad: {do_pad}")
         
         images = make_list_of_images(images)
-        new_images = []
-        image_sizes = []
+        all_pixel_values = []
+        all_image_sizes = []
 
         for i, image in enumerate(images):
             logger.info(f"处理第 {i+1} 张图像")
             ori_w, ori_h = image.size
             logger.info(f"原始图像尺寸: {ori_w}x{ori_h}")
-            image_sizes.append([ori_h, ori_w])
+            
             image_patches = self.get_image_patches(
                 image,
                 self.image_grid_pinpoints
             )
             logger.info(f"图像分块数量: {len(image_patches)}")
             
-            all_images = []
             for j, patch in enumerate(image_patches):
                 logger.info(f"处理第 {j+1} 个图像块")
                 transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(patch)
                 img_array = to_numpy_array(transform_img)
                 img_array = to_channel_dimension_format(img_array, data_format, input_channel_dim=input_data_format)
-                all_images.append(img_array)
-                logger.info(f"图像块 {j+1} 处理完成，形状: {img_array.shape}")
                 
-            pixel_values = np.array(all_images)
-            logger.info(f"所有图像块处理完成，形状: {pixel_values.shape}")
-            new_images.append(pixel_values)
+                # 对每个图像块添加一个对应的尺寸
+                all_pixel_values.append(img_array)
+                all_image_sizes.append([ori_h, ori_w])
+                logger.info(f"图像块 {j+1} 处理完成，形状: {img_array.shape}")
         
-        logger.info(f"所有图像处理完成，新图像数量: {len(new_images)}")
+        logger.info(f"所有图像处理完成，图像块数量: {len(all_pixel_values)}")
 
-        new_images = self._pad_for_batching(new_images)
-        logger.info(f"填充后的图像数量: {len(new_images)}")
-
-        data = {"pixel_values": new_images, "image_sizes": image_sizes}
+        data = {"pixel_values": all_pixel_values, "image_sizes": all_image_sizes}
         logger.info(f"返回数据 keys: {data.keys()}")
         return BatchFeature(data=data, tensor_type=return_tensors)
 
@@ -618,39 +613,33 @@ class ImageProcessor(BaseImageProcessor):
         logger.info(f"do_pad: {do_pad}")
         
         images = make_list_of_images(images)
-        new_images = []
-        image_sizes = []
+        all_pixel_values = []
+        all_image_sizes = []
 
         for i, image in enumerate(images):
             logger.info(f"处理第 {i+1} 张图像")
             ori_w, ori_h = image.size
             logger.info(f"原始图像尺寸: {ori_w}x{ori_h}")
-            image_sizes.append([ori_h, ori_w])
+            
             image_patches = self.get_image_patches(
                 image,
                 self.image_grid_pinpoints
             )
             logger.info(f"图像分块数量: {len(image_patches)}")
             
-            all_images = []
             for j, patch in enumerate(image_patches):
                 logger.info(f"处理第 {j+1} 个图像块")
                 transform_img = _transform(self.size[0], self.size[1], self.image_mean, self.image_std)(patch)
                 img_array = to_numpy_array(transform_img)
                 img_array = to_channel_dimension_format(img_array, data_format, input_channel_dim=input_data_format)
-                all_images.append(img_array)
-                logger.info(f"图像块 {j+1} 处理完成，形状: {img_array.shape}")
                 
-            pixel_values = np.array(all_images)
-            logger.info(f"所有图像块处理完成，形状: {pixel_values.shape}")
-            new_images.append(pixel_values)
+                # 对每个图像块添加一个对应的尺寸
+                all_pixel_values.append(img_array)
+                all_image_sizes.append([ori_h, ori_w])
+                logger.info(f"图像块 {j+1} 处理完成，形状: {img_array.shape}")
         
-        logger.info(f"所有图像处理完成，新图像数量: {len(new_images)}")
+        logger.info(f"所有图像处理完成，图像块数量: {len(all_pixel_values)}")
 
-        if do_pad:
-            new_images = self._pad_for_batching(new_images)
-            logger.info(f"填充后的图像数量: {len(new_images)}")
-
-        data = {"pixel_values": new_images, "image_sizes": image_sizes}
+        data = {"pixel_values": all_pixel_values, "image_sizes": all_image_sizes}
         logger.info(f"返回数据 keys: {data.keys()}")
         return CustomBatchFeature(data=data, tensor_type=return_tensors)

@@ -517,9 +517,18 @@ class MiniMaxVL01MultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        # 获取pixel_values的批处理大小，如果存在
+        batch_size = 1
+        if "pixel_values" in hf_inputs:
+            if isinstance(hf_inputs["pixel_values"], torch.Tensor):
+                batch_size = hf_inputs["pixel_values"].shape[0] 
+            elif isinstance(hf_inputs["pixel_values"], list):
+                batch_size = len(hf_inputs["pixel_values"])
+        
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
+            # 使用shared配置确保image_sizes批处理大小一致
+            image_sizes=MultiModalFieldConfig.shared("image", batch_size),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
     
@@ -547,35 +556,9 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         return ProcessorInputs(
             prompt_text=image_token * num_images,
             mm_data=mm_data,
-        )
-    """
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        num_images = mm_counts.get("image", 0)
-        
-        processor = self.info.get_hf_processor()
-        image_token = processor.image_token
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
-        
-        mm_data = {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images)
-        }
-
-        prompt_text = image_token * num_images
-        
-        return ProcessorInputs(
-            prompt_text=prompt_text,
-            mm_data=mm_data,
             hf_processor_mm_kwargs={}
         )
-
+    
     def _get_dummy_images(
         self,
         *,
@@ -589,10 +572,9 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             # 创建不同颜色的图像
             color = ((i * 50) % 255, ((i+1) * 70) % 255, ((i+2) * 90) % 255)
             image = Image.new('RGB', (width, height), color=color)
-            # 添加一些简单的形状以增加复杂性
-            images.append(image)
+            # 转换为NumPy数组并添加到列表中
+            images.append(np.array(image))
         return images
-    """
 
 @add_start_docstrings(
     """The MiniMaxVL01 model which consists of a vision backbone and a language model.""",
