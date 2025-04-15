@@ -184,7 +184,6 @@ def test_prepare_decode_cuda_graph(batch_size, use_prompt_embeds, monkeypatch):
     context_lens: list[int] = []
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
     # Assume each seq group finishes prefill.
-    expected_input_embeds_len = 0
     for i in range(batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
@@ -194,7 +193,6 @@ def test_prepare_decode_cuda_graph(batch_size, use_prompt_embeds, monkeypatch):
                 prompt_token_ids=[0] * context_len,
                 prompt_embeds=torch.rand(context_len, 10),
             )
-            expected_input_embeds_len += context_len
             output_embed = torch.rand(10)
         else:
             seq_data = SequenceData.from_seqs(
@@ -271,8 +269,11 @@ def test_prepare_decode_cuda_graph(batch_size, use_prompt_embeds, monkeypatch):
 
     assert len(input_tokens) == expected_bs
     assert len(input_positions) == expected_bs
-    torch.allclose(input_tokens, input_positions)
-    assert input_embeds is None
+    torch.testing.assert_close(input_tokens, input_positions)
+    if use_prompt_embeds:
+        assert len(input_embeds) == len(input_tokens)
+    else:
+        assert input_embeds is None
 
     # Verify Sampling
     expected_selected_token_indices = []
