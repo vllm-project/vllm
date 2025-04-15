@@ -281,18 +281,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         meta = SharedStorageConnectorMetadata()
-
-        # If we have a rescheduled preempted request with a
-        # remote KV cache hit, it will be in scheduled_cached_reqs.
-        # NOTE(rob): this requires a pass over all
-        if scheduler_output.scheduled_cached_reqs:
-            scheduled_reqs = (scheduler_output.scheduled_new_reqs +
-                              scheduler_output.scheduled_cached_reqs)
-        else:
-            scheduled_reqs = scheduler_output.scheduled_new_reqs
-
-        # Check if the regu
-        for request in scheduled_reqs:
+        for request in scheduler_output.scheduled_new_reqs:
             if request.req_id in self._requests_need_load:
                 meta.add_request(request, self._block_size, is_store=False)
             else:
