@@ -1371,6 +1371,10 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
+BatchRequestInputBody = Union[ChatCompletionRequest, EmbeddingRequest,
+                              ScoreRequest, RerankRequest]
+
+
 class BatchRequestInput(OpenAIBaseModel):
     """
     The per-line object of the batch input file.
@@ -1391,8 +1395,7 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameters of the request.
-    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest,
-                RerankRequest]
+    body: BatchRequestInputBody
 
     @field_validator('body', mode='plain')
     @classmethod
@@ -1407,9 +1410,11 @@ class BatchRequestInput(OpenAIBaseModel):
             return ScoreRequest.model_validate(value)
         if url.endswith("/rerank"):
             return RerankRequest.model_validate(value)
-        return TypeAdapter(Union[ChatCompletionRequest, EmbeddingRequest,
-                                 ScoreRequest,
-                                 RerankRequest]).validate_python(value)
+        return TypeAdapter(BatchRequestInputBody).validate_python(value)
+
+
+BatchResponseDataBody = Union[ChatCompletionResponse, EmbeddingResponse,
+                              ScoreResponse, RerankResponse]
 
 
 class BatchResponseData(OpenAIBaseModel):
@@ -1420,8 +1425,7 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
-                         ScoreResponse, RerankResponse]] = None
+    body: Optional[BatchResponseDataBody] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
