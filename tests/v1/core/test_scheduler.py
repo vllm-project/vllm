@@ -774,7 +774,11 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
 def test_kv_connector_basic():
     """Test basic functionality of KVConnector."""
 
-    scheduler = create_scheduler(use_kv_connector=True)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=True,
+    )
+
     NUM_TOTAL_BLOCKS = (
         scheduler.kv_cache_manager.block_pool.get_num_free_blocks())
     BLOCK_SIZE = scheduler.cache_config.block_size
@@ -801,18 +805,24 @@ def test_kv_connector_basic():
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[0]] * len(req_ids),
+        sampled_token_ids=[[1000]] * len(req_ids),
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
     )
 
-    # We should get an external prefix cache hit for every request.
+    # We should get an external prefix cache hit.
     output = scheduler.schedule()
     assert len(output.kv_connector_metadata.requests) == NUM_REQUESTS
     for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
         # We should only schedule new tokens beyond this request.
         assert num_scheduled_tokens == NUM_TOKENS - NUM_MATCHED_NEW_TOKENS
+
+    # Make sure we actually touched all the blocks.
+    BLOCKS_PER_REQ = (NUM_TOKENS / BLOCK_SIZE +
+                      scheduler.kv_cache_manager.num_preallocate_blocks)
+    assert (scheduler.kv_cache_manager.block_pool.get_num_free_blocks() ==
+            NUM_TOTAL_BLOCKS - NUM_REQUESTS * BLOCKS_PER_REQ)
 
     # We should not have any connector metadata in running.
     all_finished = False
@@ -827,6 +837,7 @@ def test_kv_connector_basic():
             if eco.finish_reason is None:
                 all_done = False
         all_finished = all_done
+    output = scheduler.schedule()
 
     # Confirm we have no leaks (all blocks are freed).
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
@@ -838,9 +849,24 @@ def test_kv_connector_basic():
     requests = create_requests(num_requests=NUM_REQUESTS,
                                num_tokens=NUM_TOKENS,
                                max_tokens=MAX_TOKENS)
+    req_ids = []
+    req_to_index = {}
+    for i, request in enumerate(requests):
+        scheduler.add_request(request)
+        req_ids.append(request.request_id)
+        req_to_index[request.request_id] = i
 
-    # We should get an external prefix cache hit for every request,
-    # but only for the i
+    MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[1000]] * len(req_ids),
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+
+    # We should get a local cache hit of NUM_TOKENS_PREFIX and
+    # a remote KV cache hit of NUM_MATCHED_NEW_TOKENS.
     output = scheduler.schedule()
     assert len(output.kv_connector_metadata.requests) == NUM_REQUESTS
     for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
@@ -848,7 +874,14 @@ def test_kv_connector_basic():
         assert num_scheduled_tokens == (NUM_TOKENS - NUM_TOKENS_PREFIX -
                                         NUM_MATCHED_NEW_TOKENS)
 
+    # Make sure we actually touched all the blocks.
+    BLOCKS_PER_REQ = (NUM_TOKENS / BLOCK_SIZE +
+                      scheduler.kv_cache_manager.num_preallocate_blocks)
+    assert (scheduler.kv_cache_manager.block_pool.get_num_free_blocks() ==
+            NUM_TOTAL_BLOCKS - NUM_REQUESTS * BLOCKS_PER_REQ)
+
     all_finished = False
+    _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
     while not all_finished:
         # Schedule + a few iterations until stopping.
         output = scheduler.schedule()
@@ -859,3 +892,8 @@ def test_kv_connector_basic():
             if eco.finish_reason is None:
                 all_done = False
         all_finished = all_done
+    output = scheduler.schedule()
+
+    # Confirm we have no leaks (all blocks are freed).
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
+        == NUM_TOTAL_BLOCKS
