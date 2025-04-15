@@ -42,7 +42,9 @@ def rocm_aiter_fused_experts(
 
     if apply_router_weight_on_input:
         _, topk = topk_weights.shape
-        assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
+        assert (
+            topk == 1
+        ), "Only support topk=1 when `apply_router_weight_on_input` is True"
 
         hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         topk_ids = topk_ids.to(torch.int32)
