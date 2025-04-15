@@ -291,10 +291,13 @@ class LlavaMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
-        )
+        mm_fields = {}
+        if "pixel_values" in hf_inputs:
+            mm_fields["pixel_values"] = MultiModalFieldConfig.batched("image")
+            mm_fields["embed_is_patch"] = MultiModalFieldConfig.batched("image")
+        if "image_embeds" in hf_inputs:
+            mm_fields["image_embeds"] = MultiModalFieldConfig.batched("image")
+        return mm_fields
 
 
 class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
@@ -368,11 +371,13 @@ class PixtralHFMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            embed_is_patch=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
-        )
+        mm_fields = {}
+        if "pixel_values" in hf_inputs:
+            mm_fields["pixel_values"] = MultiModalFieldConfig.batched("image")
+            mm_fields["embed_is_patch"] = MultiModalFieldConfig.batched("image")
+        if "image_embeds" in hf_inputs:
+            mm_fields["image_embeds"] = MultiModalFieldConfig.batched("image")
+        return mm_fields
 
     def _get_prompt_updates(
         self,
