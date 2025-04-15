@@ -258,7 +258,7 @@ def test_varlen_with_paged_kv(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
-    output = torch.empty_like(query) if use_out else None
+    out = torch.empty_like(query) if use_out else None
 
     maybe_quantized_query = query
     maybe_quantized_key_cache = key_cache
@@ -277,11 +277,11 @@ def test_varlen_with_paged_kv(
         k_descale = torch.ones(scale_shape, dtype=torch.float32)
         v_descale = torch.ones(scale_shape, dtype=torch.float32)
 
-    chunked_prefill_paged_decode(
+    output = flash_attn_varlen_func(
         q=maybe_quantized_query,
         k=maybe_quantized_key_cache,
         v=maybe_quantized_value_cache,
-        out=output,
+        out=out,
         cu_seqlens_q=cu_query_lens,
         seqused_k=kv_lens,
         max_seqlen_q=max_query_len,
@@ -296,6 +296,7 @@ def test_varlen_with_paged_kv(
         k_descale=k_descale,
         v_descale=v_descale,
     )
+    output = output if not use_out else out
 
     ref_output = ref_paged_attn(
         query=query,

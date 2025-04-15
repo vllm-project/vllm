@@ -9,14 +9,9 @@ from vllm.platforms import current_platform
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 
-#NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
-NUM_HEADS = [(32, 8)]
-
-#HEAD_SIZES = [128, 256]
-HEAD_SIZES = [128]
-
-#BLOCK_SIZES = [16, 32]
-BLOCK_SIZES = [16]
+NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
+HEAD_SIZES = [128, 256]
+BLOCK_SIZES = [16, 32]
 
 DTYPES = [torch.float16, torch.bfloat16]
 QDTYPES = [None]
@@ -80,12 +75,9 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
-#@pytest.mark.parametrize("seq_lens",
-#                         [[(1, 1328), (5, 18),
-#                           (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
-
 @pytest.mark.parametrize("seq_lens",
-                         [[(1081, 1081)]])
+                         [[(1, 1328), (5, 18),
+                           (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
 
 #@pytest.mark.parametrize("seq_lens", [[(1, 523), (1, 37), (1, 2011)]])
 

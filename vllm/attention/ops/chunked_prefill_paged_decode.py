@@ -66,7 +66,6 @@ def kernel_paged_attention_2d(
         query_start_len_ptr,  # [num_seqs+1]
         BLOCK_Q: tl.constexpr, # int
         num_seqs: tl.int32,
-        q_block_start_idx_ptr,
 ):
 
     q_block_global_idx = tl.program_id(0)
@@ -76,14 +75,14 @@ def kernel_paged_attention_2d(
     right = num_seqs
     while left < right:
         mid = (left + right) // 2
-        mid_val = tl.load(q_block_start_idx_ptr + mid)
+        mid_val = tl.load(query_start_len_ptr + mid) // BLOCK_Q + mid
         if mid_val <= q_block_global_idx:
             left = mid + 1
         else:
             right = mid
 
     seq_idx = left - 1
-    q_block_start_idx = tl.load(q_block_start_idx_ptr + seq_idx)
+    q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
 
     q_block_local_idx = q_block_global_idx - q_block_start_idx
 
@@ -266,8 +265,6 @@ def chunked_prefill_paged_decode(
     q_descale,
     k_descale,
     v_descale,
-    total_num_q_blocks,
-    cu_seqlens_q_block,
     alibi_slopes=None,
 ):
 
@@ -332,6 +329,10 @@ def chunked_prefill_paged_decode(
     #print("num_seqs:           ", num_seqs)
     #print("max_num_query_blocks: ", max_num_query_blocks)
 
+
+    total_num_q_blocks = cu_seqlens_q[num_seqs].to(device="cpu", non_blocking=False).item() // BLOCK_Q + num_seqs
+    
+
     kernel_paged_attention_2d[(
         total_num_q_blocks,
         num_kv_heads,
@@ -370,7 +371,6 @@ def chunked_prefill_paged_decode(
         query_start_len_ptr=cu_seqlens_q,
         BLOCK_Q=BLOCK_Q,
         num_seqs=num_seqs,
-        q_block_start_idx_ptr=cu_seqlens_q_block,
     )
 
     #torch.cuda.synchronize()

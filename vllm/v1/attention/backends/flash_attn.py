@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import torch
-import triton
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -86,8 +85,6 @@ class FlashAttentionMetadata:
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
-    query_block_start_loc: torch.Tensor
-    total_num_q_blocks: int
 
     # For cascade attention.
     use_cascade: bool
@@ -290,17 +287,6 @@ class FlashAttentionMetadataBuilder:
               common_prefix_len: int):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-
-        # probably a better way
-        query_block_start_loc_cpu = torch.zeros_like(query_start_loc_cpu)
-        for i in range(num_reqs):
-            this_q_len = query_start_loc_cpu[i+1]-query_start_loc_cpu[i]
-            query_block_start_loc_cpu[i+1] = query_block_start_loc_cpu[i] + triton.cdiv(this_q_len, 4)
-        total_num_q_blocks = query_block_start_loc_cpu[num_reqs]
-
-        query_block_start_loc = query_block_start_loc_cpu.to(self.runner.device,
-                                                 non_blocking=True)
-
         query_start_loc = query_start_loc_cpu.to(self.runner.device,
                                                  non_blocking=True)
         seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
@@ -353,8 +339,6 @@ class FlashAttentionMetadataBuilder:
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
-            query_block_start_loc=query_block_start_loc,
-            total_num_q_blocks=total_num_q_blocks,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
             block_table=block_table,
