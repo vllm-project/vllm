@@ -122,11 +122,7 @@ def batch_by_experts(
     num_tokens = a.shape[0]
     topk = topk_ids.shape[1]
 
-    tokens_per_expert = torch.zeros(num_experts, dtype=torch.int, device=a.device)
-    for i in range(num_tokens):
-        for j in range(topk):
-            expert_id = topk_ids[i, j]
-            tokens_per_expert[expert_id] = tokens_per_expert[expert_id] + 1
+    tokens_per_expert = torch.bincount(topk_ids.view(-1), minlength=num_experts)
 
     max_num_tokens = tokens_per_expert.max()
     b_a = torch.zeros((num_experts, max_num_tokens, a.shape[1]),
@@ -174,7 +170,6 @@ def torch_batched_moe(a, w1, w2, tokens_per_expert, topk_weight, topk_ids):
         num = tokens_per_expert[expert]
         if num > 0:
             out[expert, :num, :] = SiluAndMul()(a[expert,:num,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
-            #out[expert, :, :] = SiluAndMul()(a[expert,:,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
 
     out = unbatch_output(out, topk_weight, topk_ids, K)
 
@@ -235,12 +230,14 @@ def test_fused_moe_batched_experts(
                                               topk_weight,
                                               topk_ids)
         else:
-            triton_output = fused_experts(b_a,
-                                          w1,
-                                          w2,
-                                          topk_weight,
-                                          topk_ids,
-                                          global_num_experts=e)
+            triton_output = fused_batched_experts(
+                b_a,
+                w1,
+                w2,
+                topk_weight,
+                topk_ids,
+                global_num_experts=e
+            )
 
     if False:
         torch.set_printoptions(profile="full")

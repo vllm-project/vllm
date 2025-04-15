@@ -1751,6 +1751,72 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return intermediate_cache3
 
 
+class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
+
+    def __init__(
+        self,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        use_int4_w4a16: bool = False,
+        block_shape: Optional[List[int]] = None,
+        block_m: Optional[int] = None,
+    ):
+        super().__init__()
+        assert not use_fp8_w8a8
+        assert not use_int4_w4a16
+        assert not use_int8_w8a16
+        assert block_shape is None
+        assert block_m is None
+
+    def workspace_shapes(
+        self,
+        a_dtype: torch.dtype,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        num_experts: int,
+        a: torch.Tensor,
+    ) -> Tuple[int, int, torch.dtype]:
+        max_num_tokens = a.shape[1]
+        workspace13 = num_experts * max_num_tokens * K
+        workspace2 = M * topk * N * num_experts
+        return (workspace13, workspace2, a_dtype)
+
+    def apply(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        w1_scale: Optional[torch.Tensor],
+        w2_scale: Optional[torch.Tensor],
+        w1_zp: Optional[torch.Tensor],
+        w2_zp: Optional[torch.Tensor],
+        a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.activation import SiluAndMul
+        assert hidden_states.dim() == 3
+        num_tokens, topk = topk_ids.shape
+        _, max_num_tokens, K = hidden_states.shape
+        num_experts = w1.shape[0]
+        out = _resize_cache(workspace13, (num_experts, max_num_tokens, w2.shape[1]))
+        #tokens_per_expert = torch.bincount(topk_ids.view(-1), minlength=num_experts)
+        for expert in range(num_experts):
+            num = 1 #tokens_per_expert[expert]
+            if num > 0:
+                #out[expert, :num, :] = SiluAndMul(hidden_states[expert,:num,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
+                out[expert, :, :] = SiluAndMul()(hidden_states[expert,:,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
+
+        return out
+
+
 def modular_triton_fused_moe(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,

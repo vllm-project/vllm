@@ -32,7 +32,7 @@ from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda_alike():
     from .dispatch_combine import StandardDispatchCombine
-    from .fused_moe import TritonExperts, fused_experts
+    from .fused_moe import TritonExperts, BatchedExperts, fused_experts
     from .modular_kernel import FusedMoEModularKernel, FusedMoEQuantizeDispatchCombine
     from .pplx_dispatch_combine import PplxDispatchCombine
 else:
@@ -259,13 +259,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         block_m = MOE_DP_CHUNK_SIZE * (self.moe.ep_size // self.moe.dp_size)
         #print(f"block_m = {block_m}")
 
-        experts = TritonExperts(
-            use_fp8_w8a8 = False,
-            use_int8_w8a16 = False,
-            use_int4_w4a16 = False,
-            block_shape = None,
-            block_m = None, #block_m,
-        )
+        if False:
+            experts = TritonExperts(
+                use_fp8_w8a8 = False,
+                use_int8_w8a16 = False,
+                use_int4_w4a16 = False,
+                block_shape = None,
+                block_m = None, #block_m,
+            )
+        else:
+            experts = BatchedExperts()
 
         self.fused_experts = FusedMoEModularKernel(
             dispatch_combine,
@@ -1054,7 +1057,7 @@ class FusedMoE(torch.nn.Module):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            print(f"loop {chunk_start}:{chunk_end}")
+            #print(f"loop {chunk_start}:{chunk_end}")
 
             cu_tokens_across_dp_this_iter = torch.cumsum(
                 num_tokens_remaining_across_dp.clamp(
