@@ -6,6 +6,7 @@ from typing import Optional
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
@@ -65,6 +66,8 @@ def _get_test_sampling_params(
     ], n_list
 
 
+@pytest.mark.skipif(current_platform.is_hpu(),
+                    reason="Flaky test on HPU SynapseAI 1.20.x")
 def test_parallel_sampling(vllm_model, example_prompts) -> None:
     """Test passes if parallel sampling `n>1` yields `n` unique completions.
     

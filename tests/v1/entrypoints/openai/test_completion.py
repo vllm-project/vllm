@@ -306,6 +306,7 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
             f"Expected {n} unique completions, got {num_unique};"
             f" repeats: {repeats}.")
 
+
 @pytest.mark.skipif(current_platform.is_hpu(),
                     reason="Flaky test on HPU, to be investigated")
 @pytest.mark.asyncio
@@ -554,6 +555,7 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
             choice = chunk.choices[0]
             texts[choice.index] += choice.text
         assert texts[0] == texts[1]
+
 
 @pytest.mark.skipif(current_platform.is_hpu(),
                     reason="Flaky test on HPU, to be investigated")
