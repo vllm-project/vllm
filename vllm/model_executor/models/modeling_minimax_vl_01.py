@@ -291,13 +291,10 @@ class LlavaMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        mm_fields = {}
-        if "pixel_values" in hf_inputs:
-            mm_fields["pixel_values"] = MultiModalFieldConfig.batched("image")
-            mm_fields["embed_is_patch"] = MultiModalFieldConfig.batched("image")
-        if "image_embeds" in hf_inputs:
-            mm_fields["image_embeds"] = MultiModalFieldConfig.batched("image")
-        return mm_fields
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+        )
 
 
 class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
@@ -371,13 +368,11 @@ class PixtralHFMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        mm_fields = {}
-        if "pixel_values" in hf_inputs:
-            mm_fields["pixel_values"] = MultiModalFieldConfig.batched("image")
-            mm_fields["embed_is_patch"] = MultiModalFieldConfig.batched("image")
-        if "image_embeds" in hf_inputs:
-            mm_fields["image_embeds"] = MultiModalFieldConfig.batched("image")
-        return mm_fields
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            embed_is_patch=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+        )
 
     def _get_prompt_updates(
         self,
@@ -532,8 +527,8 @@ def init_vision_tower_for_llava(
     raise NotImplementedError(msg)
 
 
-@MULTIMODAL_REGISTRY.register_processor(_build_llava_or_pixtral_hf_processor,
-                                        info=_build_llava_or_pixtral_hf_info,
+@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
+                                        info=LlavaProcessingInfo,
                                         dummy_inputs=LlavaDummyInputsBuilder)
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
@@ -828,102 +823,3 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
-
-class MantisProcessingInfo(LlavaProcessingInfo):
-
-    def get_hf_processor(self, **kwargs: object):
-        hf_config = self.get_hf_config()
-        vision_info = self.get_vision_encoder_info()
-
-        kwargs.setdefault("patch_size", vision_info.get_patch_size())
-
-        if Version(TRANSFORMERS_VERSION) < Version("4.48"):
-            # BUG: num_additional_image_tokens = 0 but treated as 1,
-            # so we set vision_feature_select_strategy to None to offset this
-            kwargs.setdefault("vision_feature_select_strategy", None)
-        else:
-            # FIXED: https://github.com/huggingface/transformers/pull/33424/files#diff-6a37acc21efcadaae622b079b2712a131131448ff64262bd219aa346aeec38faL150
-            kwargs.setdefault(
-                "vision_feature_select_strategy",
-                hf_config.vision_feature_select_strategy,
-            )
-
-        return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
-
-
-class MantisMultiModalProcessor(LlavaMultiModalProcessor):
-
-    def apply(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        return_mm_hashes: bool = False,
-    ) -> MultiModalInputs:
-        hf_config = self.info.get_hf_config()
-        image_token_id = hf_config.image_token_index
-
-        # Assume that it doesn't depend on the image size
-        num_image_tokens = self.info.get_num_image_tokens(
-            image_width=-1,
-            image_height=-1,
-        )
-
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                               return_mm_hashes)
-
-        mm_items = self._to_mm_items(mm_data)
-        mm_item_counts = mm_items.get_all_counts()
-        mm_kwargs = result["mm_kwargs"]
-        mm_hashes = result["mm_hashes"]
-
-        # We reimplement the functionality of MLlavaProcessor from
-        # https://github.com/TIGER-AI-Lab/Mantis.git
-        def get_replacement_mantis(item_idx: int):
-            return "".join([
-                f"(image {item_idx+1}: <Image>",  # 7 tokens
-                "<image>" * num_image_tokens,
-                "</Image>)",  # 3 tokens
-            ])
-
-        mantis_mm_repls = self._bind_and_group_updates([
-            PromptReplacement(
-                modality="image",
-                target=[image_token_id] * num_image_tokens,
-                replacement=get_replacement_mantis,
-            )
-        ])
-
-        prompt_ids, prompt, _ = self._apply_prompt_updates(
-            result["prompt_token_ids"],
-            mantis_mm_repls,
-            mm_item_counts,
-        )
-
-        unbound_orig_repls = self._get_prompt_updates(
-            mm_items,
-            hf_processor_mm_kwargs,
-            mm_kwargs,
-        )
-        orig_repls = self._bind_and_group_updates(unbound_orig_repls)
-
-        mm_placeholders = self._find_mm_placeholders(
-            orig_repls,
-            prompt_ids,
-            mm_item_counts,
-        )
-        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
-
-        mm_placeholder_ranges = {
-            modality: [item.to_range() for item in placeholders]
-            for modality, placeholders in mm_placeholders.items()
-        }
-
-        return MultiModalInputs(
-            type="multimodal",
-            prompt=prompt,
-            prompt_token_ids=prompt_ids,
-            mm_kwargs=mm_kwargs,
-            mm_hashes=mm_hashes,
-            mm_placeholders=mm_placeholder_ranges,
-        )
