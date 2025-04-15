@@ -119,10 +119,6 @@ class PreparedKernel:
     def __call__(self, *args, **kwargs):
         assert len(args) == 0
 
-        # non_constsexpr_vals = []
-        # # order is always the same...
-        # for arg_n in self.non_const_arg_names:
-        #     non_constsexpr_vals.append(kwargs[arg_n])
         for arg_n, idx in self.update_args_index.items():
             self.non_const_vals_lst[idx] = kwargs[arg_n]
 
@@ -150,7 +146,6 @@ class PreparedKernel:
             self.launch_metadata,
             self.launch_enter_hook,
             self.launch_exit_hook,
-            # *non_constsexpr_vals,
             *self.non_const_vals_lst,
         )
 
