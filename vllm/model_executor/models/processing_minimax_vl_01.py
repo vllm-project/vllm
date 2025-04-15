@@ -50,7 +50,10 @@ def split_special_tokens(text, special_tokens):
     # 使用正则表达式匹配所有特殊标记及其前后内容
     import re
     pattern = '|'.join(map(re.escape, special_tokens))
-    return re.split(f'({pattern})', text)
+    parts = re.split(f'({pattern})', text)
+    
+    # 过滤掉空字符串
+    return [p for p in parts if p]
 
 
 def select_best_resolution(original_size, possible_resolutions):
@@ -210,6 +213,7 @@ class MiniMaxVL01Processor(ProcessorMixin):
               `None`).
             - **pixel_values** -- Pixel values to be fed to a model. Returned when `images` is not `None`.
         """
+        logger.info(f"start processing text: {text}")
         if images is None and text is None:
             raise ValueError("You have to specify at least one of `images` or `text`.")
 
@@ -237,17 +241,24 @@ class MiniMaxVL01Processor(ProcessorMixin):
                 if LEGACY_PROCESSING:# 推理时不提前替换image token
                     pixel_values = image_inputs["pixel_values"]
                     image_sizes = image_inputs["image_sizes"]
-                    # height, width = get_image_size(to_numpy_array(pixel_values[0]))
-                    # num_image_tokens = (height // self.patch_size) * (width // self.patch_size) + 1
-                    # if self.vision_feature_select_strategy == "default":
-                    #     num_image_tokens -= 1
+                    
+                    # 确保pixel_values和image_sizes长度一致
+                    if isinstance(pixel_values, list) and isinstance(image_sizes, list):
+                        if len(pixel_values) != len(image_sizes):
+                            # 如果不一致，调整为相同长度
+                            if len(pixel_values) > len(image_sizes):
+                                # 复制image_sizes以匹配pixel_values的长度
+                                image_sizes = [image_sizes[0]] * len(pixel_values)
+                            else:
+                                # 保留与image_sizes相同数量的pixel_values
+                                pixel_values = pixel_values[:len(image_sizes)]
+                                
                     all_image_tokens = []
                     for pixel_value, image_size in zip(pixel_values, image_sizes):
                         height, width = image_size
                         num_image_tokens = get_num_token(height, width, self.grid_pinpoints, self.patch_size)
-                        # if self.vision_feature_select_strategy == "default":
-                        #     num_image_tokens -= 1
                         all_image_tokens.append(num_image_tokens)
+                    
                     prompt_strings = []
                     image_index = 0
                     for sample in text:
@@ -255,11 +266,14 @@ class MiniMaxVL01Processor(ProcessorMixin):
                         final_text = ''
                         for i, _sample in enumerate(split_text):
                             if _sample == self.image_token:
-                                final_text += _sample * all_image_tokens[image_index]
-                                image_index += 1
+                                if image_index < len(all_image_tokens):
+                                    final_text += _sample * all_image_tokens[image_index]
+                                    image_index += 1
+                                else:
+                                    # 如果图像索引超出范围，保持原始token
+                                    final_text += _sample
                             else:
                                 final_text += _sample
-                        #sample = sample.replace(self.image_token, self.image_token * all_image_tokens)
                         prompt_strings.append(final_text)
             elif self.process_image_mode == 'resize':
                 pixel_values = image_inputs["pixel_values"]
@@ -329,7 +343,9 @@ class MiniMaxVL01Processor(ProcessorMixin):
 
         text_inputs = self.tokenizer(prompt_strings, **output_kwargs["text_kwargs"])
         #return {**text_inputs, **image_inputs}
-        return CustomBatchFeature(data={**text_inputs, **image_inputs})
+        data={**text_inputs, **image_inputs}
+        logger.info(f"data: {data}")
+        return CustomBatchFeature(data)
 
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.batch_decode with CLIP->Llama
     def batch_decode(self, *args, **kwargs):
