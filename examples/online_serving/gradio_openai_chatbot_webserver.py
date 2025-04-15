@@ -94,8 +94,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_gradio_interface(client, model_name, temp, stop_token_ids, host,
-                           port):
+def build_gradio_interface(client, model_name, temp, stop_token_ids):
 
     def chat_predict(message, history):
         return predict(message, history, client, model_name, temp,
@@ -119,8 +118,7 @@ def main():
 
     # Define the Gradio chatbot interface using the predict function
     gradio_interface = build_gradio_interface(client, args.model, args.temp,
-                                              args.stop_token_ids, args.host,
-                                              args.port)
+                                              args.stop_token_ids)
 
     gradio_interface.queue().launch(server_name=args.host,
                                     server_port=args.port,
