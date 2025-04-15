@@ -351,6 +351,13 @@ steps:
   commands:
   - bash scripts/run-benchmarks.sh
 
+- label: Benchmarks CLI Test # 10min
+  source_file_dependencies:
+  - vllm/
+  - tests/benchmarks/
+  commands:
+  - pytest -v -s benchmarks/
+
 - label: Quantization Test # 33min
   mirror_hardwares: [amd_experimental]
   source_file_dependencies:
@@ -392,8 +399,10 @@ steps:
   source_file_dependencies:
     - vllm/
     - tests/tool_use
+    - tests/mistral_tool_use
   commands:
     - pytest -v -s tool_use
+    - pytest -v -s mistral_tool_use
 
 #####  models test  #####
 
