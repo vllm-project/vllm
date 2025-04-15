@@ -91,8 +91,12 @@ class MsgpackEncoder:
             ret = []
             for elem in obj.values():
                 # Encode as plain dictionary + special handling for .field
-                ret.append(
-                    asdict(elem) | {"field": self._encode_field(elem.field)})
+                ret.append({
+                    "modality": elem.modality,
+                    "key": elem.key,
+                    "data": self._encode_nested_tensors(elem.data),
+                    "field": self._encode_field(elem.field),
+                })
             return ret
 
         if isinstance(obj, FunctionType):
@@ -125,6 +129,11 @@ class MsgpackEncoder:
         # The data is either inlined if small, or an index into a list of
         # backing buffers that we've stashed in `aux_buffers`.
         return obj.dtype.str, obj.shape, data
+
+    def _encode_nested_tensors(self, obj: Any) -> NestedTensors:
+        if isinstance(obj, torch.Tensor):
+            return self._encode_ndarray(obj.numpy())
+        return [self._encode_nested_tensors(x) for x in obj]
 
     def _encode_field(self, field: BaseMultiModalField):
         # Encode the field as a dictionary + special handling for .field
