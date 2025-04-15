@@ -208,7 +208,7 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
-
+        num_images = 0
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
         target_width, target_height = \
@@ -222,7 +222,7 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         }
 
         return ProcessorInputs(
-            prompt_text=image_token * num_images,
+            prompt_text="image:" + image_token * num_images,
             mm_data=mm_data,
         )
 
@@ -295,162 +295,6 @@ class LlavaMultiModalProcessor(
             pixel_values=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
-
-
-class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
-
-    def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
-
-
-class PixtralHFMultiModalProcessor(
-        BaseMultiModalProcessor[PixtralHFProcessingInfo]):
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
-
-        pixel_values = processed_outputs.get("pixel_values")
-        if pixel_values is not None:
-            # Before/after https://github.com/huggingface/transformers/pull/35122
-            if Version(TRANSFORMERS_VERSION) <= Version("4.48.3"):
-                images = mm_data["images"]
-                assert isinstance(images, list)
-
-                # Original output: (1, num_images, C, H, W)
-                # New output: (num_images, C, H, W)
-                assert (isinstance(pixel_values, list)
-                        and len(pixel_values) == 1)
-                assert (isinstance(pixel_values[0], list)
-                        and len(pixel_values[0]) == len(images))
-
-                processed_outputs["pixel_values"] = pixel_values[0]
-            else:
-                # Avoid padding since we need the output for each image to be
-                # independent of other images for the cache to work correctly
-                image_sizes = processed_outputs["image_sizes"]
-                assert len(pixel_values) == len(image_sizes)
-
-                processed_outputs["pixel_values"] = [
-                    p[:, :h, :w]
-                    for p, (h, w) in zip(pixel_values, image_sizes)
-                ]
-
-            hf_config = self.info.get_hf_config()
-            vision_config = hf_config.vision_config
-            assert isinstance(vision_config, PixtralVisionConfig)
-            encoder_info = PixtralHFEncoderInfo(vision_config)
-
-            tile_sizes = [
-                encoder_info.get_patch_grid_size(
-                    image_width=pixel_value.shape[-1],
-                    image_height=pixel_value.shape[-2],
-                ) for pixel_value in processed_outputs["pixel_values"]
-            ]
-            embed_is_patch = [
-                torch.tensor(([True] * ncols + [False]) * nrows)
-                for ncols, nrows in tile_sizes
-            ]
-            processed_outputs["embed_is_patch"] = embed_is_patch
-
-        return processed_outputs
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            embed_is_patch=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
-        )
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
-    ) -> Sequence[PromptUpdate]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        hf_config = self.info.get_hf_config()
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-
-        image_break_id = vocab[processor.image_break_token]
-        image_token_id = hf_config.image_token_index
-        image_end_id = vocab[processor.image_end_token]
-
-        vision_config = hf_config.vision_config
-        assert isinstance(vision_config, PixtralVisionConfig)
-        encoder_info = PixtralHFEncoderInfo(vision_config)
-
-        def get_replacement(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            image_size = images.get_image_size(item_idx)
-
-            ncols, nrows = encoder_info.get_patch_grid_size(
-                image_width=image_size.width,
-                image_height=image_size.height,
-            )
-
-            tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
-            tokens[-1] = image_end_id
-
-            return tokens
-
-        return [
-            PromptReplacement(
-                modality="image",
-                target=[image_token_id],
-                replacement=get_replacement,
-            ),
-        ]
-
-
-def _build_llava_or_pixtral_hf_info(
-    ctx: InputProcessingContext, ) -> BaseLlavaProcessingInfo:
-    hf_config = ctx.get_hf_config(MiniMaxVL01Config)
-
-    if isinstance(hf_config.vision_config, PixtralVisionConfig):
-        return PixtralHFProcessingInfo(ctx)
-
-    return LlavaProcessingInfo(ctx)
-
-
-def _build_llava_or_pixtral_hf_processor(
-    info: _I,
-    dummy_inputs: BaseDummyInputsBuilder[_I],
-    *,
-    cache: Optional[ProcessingCache] = None,
-    enable_sanity_checks: bool = True,
-) -> BaseMultiModalProcessor:
-    if isinstance(info, PixtralHFProcessingInfo):
-        return PixtralHFMultiModalProcessor(
-            info,
-            dummy_inputs,  # type: ignore
-            cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
-        )
-
-    if isinstance(info, LlavaProcessingInfo):
-        return LlavaMultiModalProcessor(
-            info,
-            dummy_inputs,  # type: ignore
-            cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
-        )
-
-    raise NotImplementedError(type(info))
-
 
 def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
     """Determine the number of hidden layers to initialize up to in the
