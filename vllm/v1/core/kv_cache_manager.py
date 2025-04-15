@@ -183,7 +183,9 @@ class KVCacheManager:
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
             num_external_tokens: The number of external tokens to allocate.
-                This is used by KVConnector for remote KV cache.
+                This is used by KVConnector for remote KV cache. KVConnector
+                injects external tokens into the blocks during execute_model.
+                
 
         Blocks layout:
         -----------------------------------------------------------------------
