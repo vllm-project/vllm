@@ -12,7 +12,7 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
-MODEL_NAME = "/mnt/weka/data/pytorch/Qwen/Qwen2-7b-Instruct"
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 GUIDED_DECODING_BACKENDS = [
     "outlines",
     "lm-format-enforcer",
