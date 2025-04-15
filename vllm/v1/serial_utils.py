@@ -4,7 +4,6 @@ import dataclasses
 import pickle
 from collections.abc import Sequence
 from inspect import isclass
-from itertools import chain
 from types import FunctionType
 from typing import Any, Optional, Union
 
@@ -84,22 +83,24 @@ class MsgpackEncoder:
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
 
-    if isinstance(obj, MultiModalKwargs):
-        mm: MultiModalKwargs = obj
-        if not mm.modalities:
-            # just return the main dict if there are no modalities.
-            return dict(mm)
-        
-        # ignore the main dict, it will be re-indexed.
-        # Encode a list of MultiModalKwargsItems as plain dicts
-        # + special handling for .field.
-        # Any tensors *not* indexed by modality will be ignored.
-        return [{
-            "modality": elem.modality,
-            "key": elem.key,
-            "data": self._encode_nested_tensors(elem.data),
-            "field": self._encode_field(elem.field),
-        } for item in mm._items_by_modality.values() for elem in item]
+        if isinstance(obj, MultiModalKwargs):
+            mm: MultiModalKwargs = obj
+            if not mm.modalities:
+                # just return the main dict if there are no modalities.
+                return dict(mm)
+
+            # ignore the main dict, it will be re-indexed.
+            # Encode a list of MultiModalKwargsItems as plain dicts
+            # + special handling for .field.
+            # Any tensors *not* indexed by modality will be ignored.
+            return [[{
+                "modality": elem.modality,
+                "key": elem.key,
+                "data": self._encode_nested_tensors(elem.data),
+                "field": self._encode_field(elem.field),
+            } for elem in item.values()]
+                    for itemlist in mm._items_by_modality.values()
+                    for item in itemlist]
 
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
@@ -199,7 +200,7 @@ class MsgpackDecoder:
 
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
         all = []
-        for item in chain.from_iterable(obj):
+        for item in obj:
             elems = []
             for v in item:
                 v["data"] = self._decode_nested_tensors(v["data"])
