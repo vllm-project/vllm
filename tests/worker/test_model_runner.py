@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import random
-
 import pytest
 import torch
 
@@ -34,9 +32,9 @@ def test_deepseek_mla_attn_backend_module():
 
 
 @pytest.mark.parametrize("batch_size", list(range(1, 257, 3)))
-@pytest.mark.parametrize("prompt_embeds_ratio", (0.0, 0.5, 1.0))
-def test_prepare_prompt(batch_size, prompt_embeds_ratio, monkeypatch):
-    if prompt_embeds_ratio > 0.0:
+@pytest.mark.parametrize("use_prompt_embeds", [True, False])
+def test_prepare_prompt(batch_size, use_prompt_embeds, monkeypatch):
+    if use_prompt_embeds:
         # Prompt Embeddings is only currently supported on V0
         monkeypatch.setenv("VLLM_USE_V1", "0")
 
@@ -55,7 +53,7 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio, monkeypatch):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        if random.random() < prompt_embeds_ratio:
+        if use_prompt_embeds:
             seq_data = SequenceData.from_seqs(
                 prompt_token_ids=[0] * seq_len,
                 prompt_embeds=torch.rand(seq_len, 10),
@@ -167,10 +165,9 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio, monkeypatch):
 
 
 @pytest.mark.parametrize("batch_size", list(range(1, 257, 3)))
-@pytest.mark.parametrize("prompt_embeds_ratio", (0.0, 0.5, 1.0))
-def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio,
-                                   monkeypatch):
-    if prompt_embeds_ratio > 0.0:
+@pytest.mark.parametrize("use_prompt_embeds", [True, False])
+def test_prepare_decode_cuda_graph(batch_size, use_prompt_embeds, monkeypatch):
+    if use_prompt_embeds:
         # Prompt Embeddings is only currently supported on V0
         monkeypatch.setenv("VLLM_USE_V1", "0")
 
@@ -192,7 +189,7 @@ def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio,
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
-        if random.random() < prompt_embeds_ratio:
+        if use_prompt_embeds:
             seq_data = SequenceData.from_seqs(
                 prompt_token_ids=[0] * context_len,
                 prompt_embeds=torch.rand(context_len, 10),
@@ -344,10 +341,10 @@ def distributed_init():
 
 @pytest.mark.parametrize("batch_size", list(range(2, 128, 3)))
 @pytest.mark.parametrize("enforce_eager", [True, False])
-@pytest.mark.parametrize('prompt_embeds_ratio', [0.0, 0.5, 1.0])
-def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
+@pytest.mark.parametrize('use_prompt_embeds', [True, False])
+def test_hybrid_batches(batch_size, enforce_eager, use_prompt_embeds,
                         distributed_init, monkeypatch):
-    if prompt_embeds_ratio > 0.0:
+    if use_prompt_embeds:
         # Prompt Embeddings is only currently supported on V0
         monkeypatch.setenv("VLLM_USE_V1", "0")
 
@@ -374,7 +371,7 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        if random.random() < prompt_embeds_ratio:
+        if use_prompt_embeds:
             seq_data = SequenceData.from_seqs(
                 prompt_token_ids=[0] * seq_len,
                 prompt_embeds=torch.rand(seq_len, 10),
@@ -398,7 +395,7 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
     for i in range(prefill_batch_size, batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
-        if random.random() < prompt_embeds_ratio:
+        if use_prompt_embeds:
             seq_data = SequenceData.from_seqs(
                 prompt_token_ids=[0] * context_len,
                 prompt_embeds=torch.rand(context_len, 10),
