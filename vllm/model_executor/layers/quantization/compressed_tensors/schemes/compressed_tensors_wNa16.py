@@ -128,14 +128,14 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         }
 
         zeros_args = {
+            "weight_loader":
+            weight_loader,
             "data":
             torch.zeros(
                 output_size_per_partition // self.pack_factor,
                 scales_and_zp_size,
                 dtype=torch.int32,
-            ),
-            "weight_loader":
-            weight_loader
+            )
         }
 
         if not partition_scales:
