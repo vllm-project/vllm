@@ -92,7 +92,6 @@ class MarlinLinearKernel(MPLinearKernel):
             layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
         if c.zero_points:
-            # TODO figure out a more efficient way to do it
             grouped_k = (c.partition_weight_shape[0] //
                          c.group_size if c.group_size != -1 else 1)
             self._transform_param(layer, self.w_zp_name, lambda x: \
