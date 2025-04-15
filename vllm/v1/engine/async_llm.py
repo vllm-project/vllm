@@ -64,7 +64,7 @@ class AsyncLLM(EngineClient):
         assert start_engine_loop
 
         self.model_config = vllm_config.model_config
-
+        self.vllm_config = vllm_config
         self.log_requests = log_requests
         self.log_stats = log_stats
 
@@ -378,6 +378,9 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
     ):
         raise ValueError("Not Supported on V1 yet.")
+
+    async def get_vllm_config(self) -> VllmConfig:
+        return self.vllm_config
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
