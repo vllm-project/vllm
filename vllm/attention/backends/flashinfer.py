@@ -24,9 +24,6 @@ except ImportError:
         BatchPrefillWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
-FLASHINFER_KV_CACHE_LAYOUT: str = os.getenv("FLASHINFER_KV_CACHE_LAYOUT",
-                                            "NHD").upper()
-
 import torch
 
 import vllm.envs as envs
@@ -48,6 +45,9 @@ from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
+
+FLASHINFER_KV_CACHE_LAYOUT: str = os.getenv("FLASHINFER_KV_CACHE_LAYOUT",
+                                            "NHD").upper()
 
 
 class FlashInferBackend(AttentionBackend):
