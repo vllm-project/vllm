@@ -167,10 +167,10 @@ class P2pNcclPipe:
                     self.buffer_size += tensor_size
                     logger.info(
                         "🔵[GET]Send to %s, tensor_id:%s, tensor_size:%d, "
-                        "buffer_size:%d(%.2f%%), rank:%d", remote_address,
-                        tensor_id, tensor_size, self.buffer_size,
-                        self.buffer_size / self.buffer_size_threshold * 100,
-                        self.rank)
+                        "shape:%s, rank:%d, buffer_size:%d(%.2f%%)",
+                        remote_address, tensor_id, tensor_size,
+                        self.buffer_size, tensor.shape, self.rank,
+                        self.buffer_size / self.buffer_size_threshold * 100)
 
         return True
 
@@ -224,12 +224,15 @@ class P2pNcclPipe:
         tensor = torch.empty(data["shape"],
                              dtype=getattr(torch, data["dtype"]),
                              device=self.device)
-        self._recv(comm, tensor, rank ^ 1)
 
+        start_time = time.time()
+        self._recv(comm, tensor, rank ^ 1)
+        duration = time.time() - start_time
         logger.info(
-            "🔵[GET]Recv From %s, tensor_id:%s, shape:%s, "
+            "🔵[GET]Recv From %s, tensor_id:%s, shape:%s, duration:%.3fms, "
             "size:%.3fGB, rank:%d", remote_address, tensor_id, tensor.shape,
-            tensor.element_size() * tensor.numel() / 1024**3, self.rank)
+            duration * 1000, tensor.element_size() * tensor.numel() / 1024**3,
+            self.rank)
 
         return tensor
 
