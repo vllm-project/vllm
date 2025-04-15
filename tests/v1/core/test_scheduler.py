@@ -778,6 +778,8 @@ def _assert_right_scheduler_output(
     num_requests: int,
     expected_num_scheduled_tokens: int,
 ):
+    """Check if SchedulerOutput is correct after remote KV cache hit."""
+
     # We should inject the kv_connector_metadata.
     assert len(output.kv_connector_metadata.requests) == num_requests
 
@@ -794,8 +796,9 @@ def _assert_right_kv_cache_manager(
     num_requests: int,
     num_total_blocks: int,
 ):
-    """Assert KV Cache Manager Is Right After Remote Cache Hit."""
+    """Check whether KVCacheManager is correct after allocate."""
 
+    # Make sure the request stats are right.
     EXPECTED_ACTUAL_BLOCKS = num_tokens // block_size
     EXPECTED_TOTAL_BLOCKS = (EXPECTED_ACTUAL_BLOCKS +
                              scheduler.kv_cache_manager.num_preallocate_blocks)
@@ -819,6 +822,8 @@ def _step_until_done(
     output: SchedulerOutput,
     model_runner_output: ModelRunnerOutput,
 ):
+    """Loop over schedule(), update_from_output() until finished."""
+
     all_finished = False
     _ = scheduler.update_from_output(output, model_runner_output)
     while not all_finished:
@@ -838,7 +843,10 @@ def _step_until_done(
 
 
 def test_kv_connector_basic():
-    """Test basic functionality of KVConnector."""
+    """
+    Test whether Scheduler with KVConnector schedules tokens, allocates
+    memory, and cleans up requests as expected under normal operation.
+    """
 
     # Setup Scheduler.
     scheduler = create_scheduler(
@@ -948,8 +956,8 @@ def test_kv_connector_basic():
 
 def test_kv_connector_unable_to_allocate():
     """
-    Test KVConnector is able to handle unable to allocate (run out of
-    blocks during 
+    Test whether scheduler with KVConnector is able to handle
+    unable to allocate (run out of blocks in allocate_slots().
     """
 
     # Setup Scheduler With Mock External Cache Hit.
