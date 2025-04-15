@@ -187,7 +187,8 @@ def get_field(cls: type[Config], name: str) -> Field:
     non-trivial defaults for `EngineArgs`."""
     if not is_dataclass(cls):
         raise TypeError("The given class is not a dataclass.")
-    return {f.name: f for f in fields(cls)}.get(name)
+    f = {f.name: f for f in fields(cls)}.get(name)
+    return field(default=f.default, default_factory=f.default_factory)
 
 
 class ModelConfig:
