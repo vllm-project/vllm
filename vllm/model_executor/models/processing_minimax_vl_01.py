@@ -2,7 +2,7 @@
 Processor class for MiniMaxVL01.
 """
 
-from typing import List, Union, Mapping
+from typing import List, Union
 
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
@@ -11,8 +11,9 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging
 
 from .image_processer import CustomBatchFeature
+logger = logging.get_logger(__name__)
+
 import os
-import re
 
 LEGACY_PROCESSING = int(os.getenv('LEGACY_PROCESSING', 1))
 
@@ -233,23 +234,20 @@ class MiniMaxVL01Processor(ProcessorMixin):
         prompt_strings = text
         if image_inputs.get("pixel_values") is not None:
             if self.process_image_mode == 'anyres':
-                if LEGACY_PROCESSING:  # 推理时不提前替换image token
+                if LEGACY_PROCESSING:# 推理时不提前替换image token
                     pixel_values = image_inputs["pixel_values"]
                     image_sizes = image_inputs["image_sizes"]
-                    
-                    # 确保 pixel_values 和 image_sizes 的长度一致
-                    if len(pixel_values) != len(image_sizes):
-                        # 假设 pixel_values 已经是平铺的格式，每个元素对应一个图像块
-                        # 此处没必要调整 image_sizes，因为 image_processor 已经进行了调整
-                        pass
-                        
-                    # 计算每个图像的 token 数量
+                    # height, width = get_image_size(to_numpy_array(pixel_values[0]))
+                    # num_image_tokens = (height // self.patch_size) * (width // self.patch_size) + 1
+                    # if self.vision_feature_select_strategy == "default":
+                    #     num_image_tokens -= 1
                     all_image_tokens = []
-                    for idx, image_size in enumerate(image_sizes):
+                    for pixel_value, image_size in zip(pixel_values, image_sizes):
                         height, width = image_size
                         num_image_tokens = get_num_token(height, width, self.grid_pinpoints, self.patch_size)
+                        # if self.vision_feature_select_strategy == "default":
+                        #     num_image_tokens -= 1
                         all_image_tokens.append(num_image_tokens)
-                    
                     prompt_strings = []
                     image_index = 0
                     for sample in text:
@@ -257,18 +255,18 @@ class MiniMaxVL01Processor(ProcessorMixin):
                         final_text = ''
                         for i, _sample in enumerate(split_text):
                             if _sample == self.image_token:
-                                if image_index < len(all_image_tokens):
-                                    final_text += _sample * all_image_tokens[image_index]
-                                    image_index += 1
-                                else:
-                                    # 如果图像索引超出范围，则使用默认值
-                                    final_text += _sample
+                                final_text += _sample * all_image_tokens[image_index]
+                                image_index += 1
                             else:
                                 final_text += _sample
+                        #sample = sample.replace(self.image_token, self.image_token * all_image_tokens)
                         prompt_strings.append(final_text)
             elif self.process_image_mode == 'resize':
                 pixel_values = image_inputs["pixel_values"]
-                # 确保 pixel_values 和 image_sizes 的批处理大小一致
+                # height, width = get_image_size(to_numpy_array(pixel_values[0]))
+                # num_image_tokens = (height // self.patch_size) * (width // self.patch_size) + 1
+                # if self.vision_feature_select_strategy == "default":
+                #     num_image_tokens -= 1
                 all_image_tokens = []
                 for pixel_value in pixel_values:
                     height, width = get_image_size(to_numpy_array(pixel_value))
@@ -281,23 +279,28 @@ class MiniMaxVL01Processor(ProcessorMixin):
                     final_text = ''
                     for i, _sample in enumerate(split_text):
                         if _sample == self.image_token:
-                            if image_index < len(all_image_tokens):
-                                final_text += _sample * all_image_tokens[image_index]
-                                image_index += 1
-                            else:
-                                final_text += _sample
+                            final_text += _sample * all_image_tokens[image_index]
+                            image_index += 1
                         else:
                             final_text += _sample
+                    #sample = sample.replace(self.image_token, self.image_token * all_image_tokens)
                     prompt_strings.append(final_text)
             else:
+                
                 if self.patch_size is not None:
                     # Replace the image token with the expanded image token sequence
                     pixel_values = image_inputs["pixel_values"]
+                    # height, width = get_image_size(to_numpy_array(pixel_values[0]))
+                    # num_image_tokens = (height // self.patch_size) * (width // self.patch_size) + 1
+                    # if self.vision_feature_select_strategy == "default":
+                    #     num_image_tokens -= 1
                     all_image_tokens = []
                     for pixel_value in pixel_values:
                         height, width = get_image_size(to_numpy_array(pixel_value))
                         new_width, new_height = get_hw_multiple_of((width, height), self.patch_size, self.max_size)
-                        num_image_tokens = (new_height // self.patch_size) * (new_width // self.patch_size)
+                        num_image_tokens = (new_height // self.patch_size) * (new_width // self.patch_size)# + 1
+                        # if self.vision_feature_select_strategy == "default":
+                        #     num_image_tokens -= 1
                         all_image_tokens.append(num_image_tokens)
                     
                     prompt_strings = []
@@ -307,13 +310,11 @@ class MiniMaxVL01Processor(ProcessorMixin):
                         final_text = ''
                         for i, _sample in enumerate(split_text):
                             if _sample == self.image_token:
-                                if image_index < len(all_image_tokens):
-                                    final_text += _sample * all_image_tokens[image_index]
-                                    image_index += 1
-                                else:
-                                    final_text += _sample
+                                final_text += _sample * all_image_tokens[image_index]
+                                image_index += 1
                             else:
                                 final_text += _sample
+                        #sample = sample.replace(self.image_token, self.image_token * all_image_tokens)
                         prompt_strings.append(final_text)
                 else:
                     logger.warning_once(
@@ -327,6 +328,7 @@ class MiniMaxVL01Processor(ProcessorMixin):
                     )
 
         text_inputs = self.tokenizer(prompt_strings, **output_kwargs["text_kwargs"])
+        #return {**text_inputs, **image_inputs}
         return CustomBatchFeature(data={**text_inputs, **image_inputs})
 
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.batch_decode with CLIP->Llama
