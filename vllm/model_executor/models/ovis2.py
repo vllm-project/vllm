@@ -478,7 +478,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         visual_tokens = self.visual_tokenizer(image_patches_flat.to(target_dtype))
         visual_embeds = self.vte(visual_tokens)  # 1:1 numeric eq.
 
-        return visual_embeds.split(patches_per_image, dim=0)
+        return tuple(x.flatten(0, 1) for x in visual_embeds.split(patches_per_image, dim=0))
     
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
