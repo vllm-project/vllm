@@ -33,12 +33,13 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              EAGLEConfig, ExaoneConfig,
                                              H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
-                                             MedusaConfig, MllamaConfig,
-                                             MLPSpeculatorConfig, MPTConfig,
-                                             NemotronConfig, NVLM_D_Config,
-                                             Olmo2Config, RWConfig,
-                                             SkyworkR1VChatConfig, SolarConfig,
-                                             Telechat2Config, UltravoxConfig)
+                                             KimiVLConfig, MedusaConfig,
+                                             MllamaConfig, MLPSpeculatorConfig,
+                                             MPTConfig, NemotronConfig,
+                                             NVLM_D_Config, Olmo2Config,
+                                             RWConfig, SkyworkR1VChatConfig,
+                                             SolarConfig, Telechat2Config,
+                                             UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
@@ -62,6 +63,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
+    "kimi_vl": KimiVLConfig,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
@@ -262,6 +264,11 @@ def get_config(
                                      MISTRAL_CONFIG_NAME,
                                      revision=revision):
                 config_format = ConfigFormat.MISTRAL
+            else:
+                raise ValueError(
+                    "Could not detect config format for no config file found. "
+                    "Ensure your model has either config.json (HF format) "
+                    "or params.json (Mistral format).")
 
         except Exception as e:
             error_message = (
@@ -324,7 +331,14 @@ def get_config(
     elif config_format == ConfigFormat.MISTRAL:
         config = load_params_config(model, revision, token=HF_TOKEN, **kwargs)
     else:
-        raise ValueError(f"Unsupported config format: {config_format}")
+        supported_formats = [
+            fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
+        ]
+        raise ValueError(
+            f"Unsupported config format: {config_format}. "
+            f"Supported formats are: {', '.join(supported_formats)}. "
+            f"Ensure your model uses one of these configuration formats "
+            f"or specify the correct format explicitly.")
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
@@ -700,6 +714,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
 def get_hf_image_processor_config(
     model: Union[str, Path],
+    hf_token: Optional[Union[bool, str]] = None,
     revision: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
@@ -709,7 +724,10 @@ def get_hf_image_processor_config(
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
         model = Path(model).parent
-    return get_image_processor_config(model, revision=revision, **kwargs)
+    return get_image_processor_config(model,
+                                      token=hf_token,
+                                      revision=revision,
+                                      **kwargs)
 
 
 def get_hf_text_config(config: PretrainedConfig):
