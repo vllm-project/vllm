@@ -77,6 +77,7 @@ def _not_fully_sharded_can_replace(can_replace):
 @dataclass
 class LoRAMapping(AdapterMapping):
     is_prefill: bool = False
+    is_prompt_logprobs: bool = False
 
 
 class BaseLayerWithLoRA(nn.Module):
@@ -1135,7 +1136,15 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                      out=lora_logits[:-1])
         lora_logits[-1] = float("-inf")
         lora_logits = lora_logits.mT
-        indices_padded = self.punica_wrapper.sampler_indices_padded
+
+        if self.punica_wrapper.is_prompt_logprobs:
+            # All tokens should have same lora ids when compute
+            # prompt logprobs, just repeat sampler_indices_padded
+            # for num_tokens times
+            indices_padded = self.punica_wrapper.sampler_indices_padded.repeat(lora_logits.shape[1])
+        else:
+            indices_padded = self.punica_wrapper.sampler_indices_padded
+
         lora_logits = (lora_logits.reshape(
             lora_logits.shape[0] * lora_logits.shape[1],
             lora_logits.shape[2],
