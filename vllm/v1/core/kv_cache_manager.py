@@ -203,7 +203,6 @@ class KVCacheManager:
         """
         if num_tokens == 0:
             raise ValueError("num_tokens must be greater than 0")
-
         new_computed_blocks = new_computed_blocks or []
 
         req_blocks = self.req_to_blocks[request.request_id]
