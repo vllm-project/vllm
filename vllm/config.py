@@ -298,12 +298,18 @@ class ModelConfig:
         factors.append(self.quantization)
         factors.append(self.revision)
         factors.append(self.code_revision)
+        factors.append(self.max_model_len)
+        factors.append(self.max_logprobs)
+        factors.append(self.disable_sliding_window)
         factors.append(self.trust_remote_code)
+        factors.append(self.mm_processor_kwargs)
+        factors.append(self.generation_config)
+        factors.append(self.model_impl)
+        factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
-        # rope cos/sin cache depends on the max_position_embeddings
-        factors.append(
-            getattr(self.hf_config, "max_position_embeddings", "None"))
+        # hf_config can control how the model looks!
+        factors.append(self.hf_config.to_json_string())
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __init__(
