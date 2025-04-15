@@ -187,6 +187,33 @@ model_example_map = {
 }
 
 
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description='Demo on using vLLM for offline inference with '
+        'audio language models')
+    parser.add_argument('--model-type',
+                        '-m',
+                        type=str,
+                        default="ultravox",
+                        choices=model_example_map.keys(),
+                        help='Huggingface "model_type".')
+    parser.add_argument('--num-prompts',
+                        type=int,
+                        default=1,
+                        help='Number of prompts to run.')
+    parser.add_argument("--num-audios",
+                        type=int,
+                        default=1,
+                        choices=[0, 1, 2],
+                        help="Number of audio items per prompt.")
+    parser.add_argument("--seed",
+                        type=int,
+                        default=None,
+                        help="Set the seed when initializing `vllm.LLM`.")
+
+    return parser.parse_args()
+
+
 def main(args):
     model = args.model_type
     if model not in model_example_map:
@@ -195,6 +222,11 @@ def main(args):
     audio_count = args.num_audios
     req_data = model_example_map[model](question_per_audio_count[audio_count],
                                         audio_count)
+
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
     llm = LLM(**engine_args)
@@ -235,28 +267,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser(
-        description='Demo on using vLLM for offline inference with '
-        'audio language models')
-    parser.add_argument('--model-type',
-                        '-m',
-                        type=str,
-                        default="ultravox",
-                        choices=model_example_map.keys(),
-                        help='Huggingface "model_type".')
-    parser.add_argument('--num-prompts',
-                        type=int,
-                        default=1,
-                        help='Number of prompts to run.')
-    parser.add_argument("--num-audios",
-                        type=int,
-                        default=1,
-                        choices=[0, 1, 2],
-                        help="Number of audio items per prompt.")
-    parser.add_argument("--seed",
-                        type=int,
-                        default=None,
-                        help="Set the seed when initializing `vllm.LLM`.")
-
-    args = parser.parse_args()
+    args = parse_args()
     main(args)
