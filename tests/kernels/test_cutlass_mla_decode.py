@@ -47,7 +47,7 @@ def ref_mla(
 @pytest.mark.parametrize("mean_seq_len", [128, 1024, 4096])
 @pytest.mark.parametrize("bs", [1, 2, 4])
 @pytest.mark.parametrize("varlen", [False, True])
-@pytest.mark.parametrize("block_size", [16, 128])
+@pytest.mark.parametrize("block_size", [16, 64, 128])
 def test_cutlass_mla_decode(dtype: torch.dtype, mean_seq_len: int, bs: int,
                             varlen: bool, block_size: int):
     torch.set_default_dtype(dtype)
@@ -68,6 +68,12 @@ def test_cutlass_mla_decode(dtype: torch.dtype, mean_seq_len: int, bs: int,
         seq_lens = torch.full((bs, ), mean_seq_len, dtype=torch.int32)
     max_seq_len = seq_lens.max().item()
     block_num = (max_seq_len + block_size - 1) // block_size
+
+    # Pad block_num so that small blocks can be packed into full 128-sized
+    # CUTLASS tiles. One 128-wide tile can hold (128 // block_size) small
+    # blocks.
+    pack_factor = 128 // block_size
+    block_num = ((block_num + pack_factor - 1) // pack_factor) * pack_factor
 
     q = torch.randn(bs, h_q, d)
     block_table = torch.randint(0,

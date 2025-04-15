@@ -1440,8 +1440,10 @@ def cutlass_mla_decode(q_nope_and_q_pe: torch.Tensor,
     assert not current_platform.is_rocm()
     assert q_nope_and_q_pe.ndim == 3, f"q_nope_and_q_pe must be a 3D tensor, but got {q_nope_and_q_pe.ndim}"
     assert kv_c_and_k_pe_cache.ndim == 3, f"kv_c_and_k_pe_cache must be a 3D tensor, but got {kv_c_and_k_pe_cache.ndim}"
+    assert page_table.ndim == 2, f"page_table must be a 2D tensor, but got {page_table.ndim}"
     B_q, H, D_q = q_nope_and_q_pe.shape
     _, PAGE_SIZE, D_ckv = kv_c_and_k_pe_cache.shape
+    B_pt, PAGE_NUM = page_table.shape
 
     D_latent = 512
     D_rope = 64
@@ -1453,6 +1455,11 @@ def cutlass_mla_decode(q_nope_and_q_pe: torch.Tensor,
     assert PAGE_SIZE > 0 and (
         PAGE_SIZE & (PAGE_SIZE - 1)
     ) == 0, f"PAGE_SIZE must be a power of 2, but got {PAGE_SIZE}"
+    assert B_pt == B_q, f"Batch dims must be same for page_table and q_nope_and_q_pe, but got {B_pt} and {B_q}"
+
+    # Current cutlass MLA implementation will pack smaller pages into a 128 page.
+    assert PAGE_NUM % (128 / PAGE_SIZE) == 0, f"PAGE_NUM must be divisible by 128 / PAGE_SIZE, but got {PAGE_NUM} and {128 / PAGE_SIZE}"
+
 
     # TODO(kaixih@nvidia): support fp8
     assert q_nope_and_q_pe.dtype in (torch.float16, torch.bfloat16), (
