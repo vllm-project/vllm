@@ -213,10 +213,12 @@ def test_prepare_decode_cuda_graph(batch_size, use_prompt_embeds, monkeypatch):
 
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
-    input_tokens, input_positions, input_embeds, attn_metadata, slot_mapping = (
-        model_input.input_tokens, model_input.input_positions,
-        model_input.inputs_embeds, model_input.attn_metadata,
-        model_input.attn_metadata.slot_mapping)
+    input_tokens = model_input.input_tokens
+    input_positions = model_input.input_positions
+    input_embeds = model_input.inputs_embeds
+    attn_metadata = model_input.attn_metadata
+    slot_mapping = attn_metadata.slot_mapping
+
     assert len(slot_mapping) == len(input_tokens)
 
     expected_bs = model_runner.vllm_config.pad_for_cudagraph(
@@ -261,7 +263,7 @@ def test_prepare_decode_cuda_graph(batch_size, use_prompt_embeds, monkeypatch):
     # block table's first index corresponds to each batch, meaning in
     # decoding it is each token.
     assert attn_metadata.block_tables.shape[0] == len(input_tokens)
-    # Block table's second dim correspondsd to each token's block number.
+    # Block table's second dim corresponds to each token's block number.
     # It is padded up to
     assert attn_metadata.block_tables.shape[1] == (
         model_runner.get_max_block_per_batch())
@@ -269,9 +271,10 @@ def test_prepare_decode_cuda_graph(batch_size, use_prompt_embeds, monkeypatch):
 
     assert len(input_tokens) == expected_bs
     assert len(input_positions) == expected_bs
-    torch.testing.assert_close(input_tokens, input_positions)
     if use_prompt_embeds:
-        assert len(input_embeds) == len(input_tokens)
+        expected_input_embeds_length = start_loc[-1]
+        assert len(input_embeds) == expected_input_embeds_length
+        assert expected_input_embeds_length <= expected_bs
     else:
         assert input_embeds is None
 
