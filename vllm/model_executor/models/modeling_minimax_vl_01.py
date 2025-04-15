@@ -418,7 +418,7 @@ class PixtralHFMultiModalProcessor(
 
 def _build_llava_or_pixtral_hf_info(
     ctx: InputProcessingContext, ) -> BaseLlavaProcessingInfo:
-    hf_config = ctx.get_hf_config(LlavaConfig)
+    hf_config = ctx.get_hf_config(MiniMaxVL01Config)
 
     if isinstance(hf_config.vision_config, PixtralVisionConfig):
         return PixtralHFProcessingInfo(ctx)
