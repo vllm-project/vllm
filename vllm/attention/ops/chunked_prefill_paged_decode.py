@@ -329,9 +329,11 @@ def chunked_prefill_paged_decode(
     #print("num_seqs:           ", num_seqs)
     #print("max_num_query_blocks: ", max_num_query_blocks)
 
+    #torch.cuda.synchronize()
+    #print("q.shape[0]: ", q.shape[0])
+    #print("cu_seqlens_q[num_seqs]: ", cu_seqlens_q[num_seqs])
 
-    total_num_q_blocks = cu_seqlens_q[num_seqs].to(device="cpu", non_blocking=False).item() // BLOCK_Q + num_seqs
-    
+    total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
     kernel_paged_attention_2d[(
         total_num_q_blocks,
