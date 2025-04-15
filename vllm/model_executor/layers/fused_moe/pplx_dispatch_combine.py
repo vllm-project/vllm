@@ -133,7 +133,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         #device = get_dp_group().device
         #assert fused_expert_output.device == device
 
-        print(f"COMBINE START {self.rank}")
+        #print(f"COMBINE START {self.rank}")
 
         # This argument is optional
         #bound_m = get_forward_context().dp_metadata.dp_rank_num_tokens
@@ -154,4 +154,4 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
 
-        print(f"COMBINE END {self.rank}")
+        #print(f"COMBINE END {self.rank}")

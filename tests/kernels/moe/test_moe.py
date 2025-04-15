@@ -112,7 +112,7 @@ def test_fused_moe(
                                rtol=0)
 
 
-def batch_by_experts(
+def torch_dispatch(
     a: torch.Tensor,
     topk_ids: torch.Tensor,
     num_experts: int
@@ -142,14 +142,14 @@ def batch_by_experts(
     return b_a, tokens_per_expert
 
 
-def unbatch_output(b_out, topk_weight, topk_ids, K):
+def torch_combine(b_out, topk_weight, topk_ids):
     num_tokens, topk = topk_ids.shape
 
     num_experts = b_out.shape[0]
     topk = topk_ids.shape[1]
+    K = b_out.shape[-1]
     out = torch.zeros((num_tokens, K), dtype=b_out.dtype, device=b_out.device)
     expert_counts = torch.zeros(num_experts, dtype=torch.int, device=b_out.device)
-    experts = torch.arange(0, num_experts, dtype=torch.int, device=b_out.device)
     for token in range(num_tokens):
         expert_ids = topk_ids[token]
         for i in range(expert_ids.numel()):
@@ -161,22 +161,25 @@ def unbatch_output(b_out, topk_weight, topk_ids, K):
     return out
 
 
-def torch_batched_moe(a, w1, w2, tokens_per_expert, topk_weight, topk_ids):
-    assert a.dim() == 3
-    num_tokens, topk = topk_ids.shape
-    _, max_num_tokens, K = a.shape
+def torch_batched_moe(a, w1, w2, topk_weight, topk_ids):
     num_experts = w1.shape[0]
-    out = torch.zeros((num_experts, max_num_tokens, w2.shape[1]), dtype=a.dtype, device=a.device)
+    b_a, tokens_per_expert = torch_dispatch(a, topk_ids, num_experts)
+    assert b_a.dim() == 3
+    num_tokens, topk = topk_ids.shape
+    _, max_num_tokens, K = b_a.shape
+    assert num_experts == b_a.shape[0] and K == w2.shape[1]
+    out = torch.zeros((num_experts, max_num_tokens, K), dtype=b_a.dtype, device=b_a.device)
+    tmp = torch.empty((max_num_tokens, w1.shape[1] // 2), dtype=b_a.dtype, device=b_a.device)
     for expert in range(num_experts):
         num = tokens_per_expert[expert]
         if num > 0:
-            out[expert, :num, :] = SiluAndMul()(a[expert,:num,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
+            torch.ops._C.silu_and_mul(tmp[:num], b_a[expert,:num,:] @ w1[expert].transpose(0, 1))
+            out[expert, :num, :] = tmp[:num] @ w2[expert].transpose(0, 1)
 
-    out = unbatch_output(out, topk_weight, topk_ids, K)
-
-    return out
+    return torch_combine(out, topk_weight, topk_ids)
 
 
+# TODO: same as torch_moe but with fused_topk factored out.
 def torch_moe2(a, w1, w2, topk_weight, topk_ids):
     M, K = a.shape
     topk = topk_ids.shape[1]
@@ -221,16 +224,14 @@ def test_fused_moe_batched_experts(
 
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
 
-        b_a, tokens_per_expert = batch_by_experts(a, topk_ids, e)
-
         if True:
-            triton_output = torch_batched_moe(b_a,
+            triton_output = torch_batched_moe(a,
                                               w1,
                                               w2,
-                                              tokens_per_expert,
                                               topk_weight,
                                               topk_ids)
         else:
+            b_a, tokens_per_expert = batch_by_experts(a, topk_ids, e)
             triton_output = fused_batched_experts(
                 b_a,
                 w1,

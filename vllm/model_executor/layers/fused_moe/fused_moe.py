@@ -1780,7 +1780,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> Tuple[int, int, torch.dtype]:
         max_num_tokens = a.shape[1]
         workspace13 = num_experts * max_num_tokens * K
-        workspace2 = M * topk * N * num_experts
+        workspace2 = max_num_tokens * (N // 2)
         return (workspace13, workspace2, a_dtype)
 
     def apply(
@@ -1807,12 +1807,14 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         _, max_num_tokens, K = hidden_states.shape
         num_experts = w1.shape[0]
         out = _resize_cache(workspace13, (num_experts, max_num_tokens, w2.shape[1]))
+        # causes deadlock
         #tokens_per_expert = torch.bincount(topk_ids.view(-1), minlength=num_experts)
         for expert in range(num_experts):
-            num = 1 #tokens_per_expert[expert]
+            num = max_num_tokens #tokens_per_expert[expert]
             if num > 0:
-                #out[expert, :num, :] = SiluAndMul(hidden_states[expert,:num,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
-                out[expert, :, :] = SiluAndMul()(hidden_states[expert,:,:] @ w1[expert].transpose(0, 1)) @ w2[expert].transpose(0, 1)
+                tmp = _resize_cache(workspace2, (num, w1.shape[1] // 2))
+                torch.ops._C.silu_and_mul(tmp, hidden_states[expert,:num,:] @ w1[expert].transpose(0, 1))
+                out[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
 
         return out
 

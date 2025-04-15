@@ -1053,11 +1053,15 @@ class FusedMoE(torch.nn.Module):
                         full_hidden_states.shape[0])
         full_final_hidden_states = torch.empty_like(full_hidden_states)
 
-        for _ in range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank):
+        #print(f"ORIGINAL SHAPE {full_hidden_states.shape}")
+
+        #print(f"moe_dp_chunk_size_per_rank = {moe_dp_chunk_size_per_rank}")
+
+        for iter in range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            #print(f"loop {chunk_start}:{chunk_end}")
+            #print(f"loop {iter}: {chunk_start}:{chunk_end}, {hidden_states.shape}")
 
             cu_tokens_across_dp_this_iter = torch.cumsum(
                 num_tokens_remaining_across_dp.clamp(
@@ -1087,6 +1091,8 @@ class FusedMoE(torch.nn.Module):
                 activation=self.activation,
             )
 
+            #print(f"final1 = {final_hidden_states.shape}")
+
             if self.dp_size > 1:
                 start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_this_iter[
                     self.dp_rank - 1]
@@ -1096,18 +1102,30 @@ class FusedMoE(torch.nn.Module):
                     final_hidden_states)
                 final_hidden_states = all_hidden_states[start:end, :]
 
+                #print(f"final2 (AR) = {final_hidden_states.shape}")
+
             if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
                 # Default set to False. (May have to add shared expert outputs.)
                 final_hidden_states = tensor_model_parallel_all_reduce(
                     final_hidden_states)
 
+                #print(f"final3 (AR) = {final_hidden_states.shape}")
+
             full_final_hidden_states[chunk_start:chunk_end, :].copy_(
                 final_hidden_states)
+
+            #print(f"full final = {full_final_hidden_states.shape}")
 
             # Update bounds
             num_tokens_remaining_across_dp = torch.clamp(
                 num_tokens_remaining_across_dp - moe_dp_chunk_size_per_rank,
                 min=0)
+
+            #print(f"num remaining = {num_tokens_remaining_across_dp}")
+
+            # HACK FIX
+            if num_tokens_remaining_across_dp.sum() == 0:
+                break
 
             def update_chunk_bound(x: int):
                 return min(x + moe_dp_chunk_size_per_rank,
