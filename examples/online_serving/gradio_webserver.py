@@ -15,7 +15,7 @@ frpc for gradio. You can install manually by following these steps:
 
 1. Download this file: https://cdn-media.huggingface.co/frpc-gradio-0.3/frpc_linux_amd64
 2. Rename the downloaded file to: frpc_linux_amd64_v0.3
-3. Move the file to this location: /user/reid/.cache/huggingface/gradio/frpc
+3. Move the file to this location: /home/user/.cache/huggingface/gradio/frpc
 """
 import argparse
 import json
