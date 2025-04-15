@@ -14,6 +14,13 @@ logger = init_logger(__name__)
 
 @dataclass
 class SpecDecodingStats:
+    """Per-step iteration decoding stats from scheduler.
+
+    Each scheduler step, statistics on spec decoding performance are
+    aggregated across requests by the scheduler and returned to the
+    frontend in EngineCoreOutputs->SchedulerStats.
+    """
+
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
 
@@ -33,6 +40,12 @@ class SpecDecodingStats:
 
 
 class SpecDecodingLogging:
+    """Aggregate and log spec decoding metrics.
+
+    LoggingStatLogger aggregates per-iteration metrics over a set
+    time interval using observe() and then logs them using log()
+    before resetting to zero.
+    """
 
     def __init__(self):
         self.reset()
@@ -66,6 +79,13 @@ class SpecDecodingLogging:
 
 
 class SpecDecodingProm:
+    """Record spec decoding metrics in Prometheus.
+
+    The acceptance rate can be calculated using a PromQL query:
+
+      rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
+      rate(vllm:spec_decode_num_draft_tokens_total[$interval])
+    """
 
     def __init__(self, speculative_config: Optional[SpeculativeConfig],
                  labelnames: list[str], labelvalues: list[str]):
