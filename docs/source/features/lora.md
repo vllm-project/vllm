@@ -193,7 +193,7 @@ Steps to implement your own LoRAResolver plugin:
             return lora_request
     ```
 
-2. Register LoRAResolver plugin with vLLM.
+2. Register LoRAResolver plugin.
 
      ```python
     from vllm.lora.resolver import LoRAResolverRegistry
