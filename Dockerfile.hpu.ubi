@@ -1,0 +1,102 @@
+ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.20.0/rhel9.4/habanalabs/pytorch-installer-2.6.0:latest
+FROM ${BASE_IMAGE} as habana-base
+
+USER root
+
+ENV VLLM_TARGET_DEVICE="hpu"
+ENV HABANA_SOFTWARE_VERSION="1.20.0-545"
+
+RUN dnf -y update --best --allowerasing --skip-broken && dnf clean all
+
+WORKDIR /workspace
+
+## Python Installer #################################################################
+FROM habana-base as python-install
+
+ARG PYTHON_VERSION=3.11
+
+ENV VIRTUAL_ENV=/opt/vllm
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+RUN dnf install -y --setopt=install_weak_deps=0 --nodocs \
+    python${PYTHON_VERSION}-wheel && \
+    python${PYTHON_VERSION} -m venv $VIRTUAL_ENV --system-site-packages && pip install --no-cache -U pip wheel && dnf clean all
+
+## Python Habana base #################################################################
+FROM python-install as python-habana-base
+
+ENV VIRTUAL_ENV=/opt/vllm
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# install Habana Software and common dependencies
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=requirements-common.txt,target=requirements-common.txt \
+    --mount=type=bind,source=requirements-hpu.txt,target=requirements-hpu.txt \
+    pip install \
+    -r requirements-hpu.txt
+
+## Builder #####################################################################
+FROM python-habana-base AS build
+
+# install build dependencies
+
+# copy input files
+COPY csrc csrc
+COPY setup.py setup.py
+COPY cmake cmake
+COPY CMakeLists.txt CMakeLists.txt
+COPY requirements-common.txt requirements-common.txt
+COPY requirements-hpu.txt requirements-hpu.txt
+COPY pyproject.toml pyproject.toml
+
+# max jobs used by Ninja to build extensions
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+# # make sure punica kernels are built (for LoRA)
+# HPU currently doesn't support LoRA
+# ENV VLLM_INSTALL_PUNICA_KERNELS=1
+
+# Copy the entire directory before building wheel
+COPY vllm vllm
+
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,src=.git,target=/workspace/.git \
+    env CFLAGS="-march=haswell" \
+    CXXFLAGS="$CFLAGS $CXXFLAGS" \
+    CMAKE_BUILD_TYPE=Release \
+    python3 setup.py bdist_wheel --dist-dir=dist
+
+## Release #####################################################################
+FROM python-install AS vllm-openai
+
+WORKDIR /workspace
+
+ENV VIRTUAL_ENV=/opt/vllm
+ENV PATH=$VIRTUAL_ENV/bin/:$PATH
+
+# Triton needs a CC compiler
+RUN dnf install -y --setopt=install_weak_deps=0 --nodocs gcc \
+    && dnf clean all
+
+# install vllm wheel first, so that torch etc will be installed
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install $(echo dist/*.whl)'[tensorizer]' --verbose
+
+ENV HF_HUB_OFFLINE=1 \
+    PORT=8000 \
+    HOME=/home/vllm \
+    VLLM_USAGE_SOURCE=production-docker-image
+
+# setup non-root user for OpenShift
+# In OpenShift the user ID is randomly assigned, for compatibility we also
+# set up a non-root user here.
+RUN umask 002 \
+    && useradd --uid 2000 --gid 0 vllm \
+    && chmod g+rwx $HOME /usr/src /workspace
+
+COPY LICENSE /licenses/vllm.md
+
+USER 2000
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
