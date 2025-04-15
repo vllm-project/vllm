@@ -404,7 +404,7 @@ class MiniMaxVL01ProcessingInfo(BaseLlavaProcessingInfo):
         return {"image": 1}
 
     def get_hf_processor(self, **kwargs: object):
-        hf_processor = self.ctx.get_hf_processor(ImageProcessor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(MiniMaxVL01Processor, **kwargs)
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v
         if hf_processor.patch_size is None:
