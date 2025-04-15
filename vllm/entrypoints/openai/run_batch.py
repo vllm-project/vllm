@@ -19,8 +19,9 @@ from vllm.entrypoints.logger import RequestLogger, logger
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
                                               BatchResponseData,
-                                              BatchResponseDataBody,
-                                              ErrorResponse)
+                                              ChatCompletionResponse,
+                                              EmbeddingResponse, ErrorResponse,
+                                              RerankResponse, ScoreResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -269,7 +270,11 @@ async def run_request(serving_engine_func: Callable,
                       tracker: BatchProgressTracker) -> BatchRequestOutput:
     response = await serving_engine_func(request.body)
 
-    if isinstance(response, BatchResponseDataBody):
+    if isinstance(
+            response,
+        (ChatCompletionResponse, EmbeddingResponse, ScoreResponse,
+         RerankResponse),
+    ):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,

@@ -1413,10 +1413,6 @@ class BatchRequestInput(OpenAIBaseModel):
         return TypeAdapter(BatchRequestInputBody).validate_python(value)
 
 
-BatchResponseDataBody = Union[ChatCompletionResponse, EmbeddingResponse,
-                              ScoreResponse, RerankResponse]
-
-
 class BatchResponseData(OpenAIBaseModel):
     # HTTP status code of the response.
     status_code: int = 200
@@ -1425,7 +1421,8 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Optional[BatchResponseDataBody] = None
+    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
+                         ScoreResponse, RerankResponse]] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -1605,9 +1602,9 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     stream: Optional[bool] = False
-    """Custom field not present in the original OpenAI definition. When set, 
+    """Custom field not present in the original OpenAI definition. When set,
     it will enable output to be streamed in a similar fashion as the Chat
-    Completion endpoint. 
+    Completion endpoint.
     """
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
