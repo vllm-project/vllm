@@ -169,7 +169,7 @@ class P2pNcclPipe:
                         "🔵[GET]Send to %s, tensor_id:%s, tensor_size:%d, "
                         "shape:%s, rank:%d, buffer_size:%d(%.2f%%)",
                         remote_address, tensor_id, tensor_size,
-                        self.buffer_size, tensor.shape, self.rank,
+                        tensor.shape, self.rank, self.buffer_size,
                         self.buffer_size / self.buffer_size_threshold * 100)
 
         return True
