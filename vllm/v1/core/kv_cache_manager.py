@@ -203,6 +203,7 @@ class KVCacheManager:
         """
         if num_tokens == 0:
             raise ValueError("num_tokens must be greater than 0")
+
         new_computed_blocks = new_computed_blocks or []
 
         req_blocks = self.req_to_blocks[request.request_id]
@@ -219,12 +220,16 @@ class KVCacheManager:
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
-        num_computed_tokens = (request.num_computed_tokens +
-                               len(new_computed_blocks) * self.block_size)
+        num_total_computed_tokens = (
+            request.num_computed_tokens +
+            len(new_computed_blocks) * self.block_size)
+        if num_external_tokens > 0:
+            num_total_computed_tokens += num_external_tokens
+            assert num_total_computed_tokens % self.block_size == 0
 
         num_required_blocks = cdiv(
-            num_computed_tokens + num_external_tokens + num_tokens +
-            num_lookahead_tokens, self.block_size)
+            num_total_computed_tokens + num_tokens + num_lookahead_tokens,
+            self.block_size)
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
 
@@ -282,11 +287,11 @@ class KVCacheManager:
         # for a running request.
         num_cached_blocks = self.num_cached_block.get(request.request_id,
                                                       len(new_computed_blocks))
-        # Speculated tokens might be rejected in the future, so we do
+        # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
         num_full_blocks_after_append = (
-            num_computed_tokens + num_external_tokens + num_tokens -
+            num_total_computed_tokens + num_tokens -
             len(request.spec_token_ids)) // self.block_size
 
         self.block_pool.cache_full_blocks(
