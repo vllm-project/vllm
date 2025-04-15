@@ -624,7 +624,7 @@ class MiniMaxVL01ForConditionalGeneration(MiniMaxVL01PreTrainedModel, SupportsMu
     ) -> torch.Tensor:
 
         if multimodal_embeddings is None:
-            return self.language_model.get_input_embeddings(input_ids)
+            return self.language_model.model.get_input_embeddings(input_ids)
 
         inputs_embeds = embed_multimodal(
             input_ids,
