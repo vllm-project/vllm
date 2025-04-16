@@ -497,6 +497,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `adept/persimmon-8b-base`, `adept/persimmon-8b-chat`, etc.
   *
   * ✅︎
+- * `Plamo2ForCausalLM`
+  * PLaMo2
+  * `pfnet/plamo-2-1b`, `pfnet/plamo-2-8b`, etc.
+  *
+  *
 - * `QWenLMHeadModel`
   * Qwen
   * `Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.
@@ -733,6 +738,11 @@ If your model is not in the above list, we will try to automatically convert the
 - * `XLMRobertaForSequenceClassification`
   * XLM-RoBERTa-based
   * `BAAI/bge-reranker-v2-m3`, etc.
+  *
+  *
+- * `ModernBertForSequenceClassification`
+  * ModernBert-based
+  * `Alibaba-NLP/gte-reranker-modernbert-base`, etc.
   *
   *
 :::
