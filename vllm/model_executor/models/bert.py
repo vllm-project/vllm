@@ -414,6 +414,15 @@ class BertModel(nn.Module, SupportsQuant):
                  rotary_kwargs: Optional[dict] = None,
                  add_pooling_layer: bool = False):
         super().__init__()
+        """
+        For BertModel, all linear layers have bias.
+        For NomicBertModel, all linear layers do not have bias, 
+            the bias parameter intended to control all linear layers.
+        For GteModel, only up_gate_proj layer does not have bias, 
+            so the gate_up_proj_bias parameter must be added.
+        see #16649
+        """
+
         config = vllm_config.model_config.hf_config
         self.embeddings = embedding_class(config)
         self.encoder = BertEncoder(vllm_config=vllm_config,

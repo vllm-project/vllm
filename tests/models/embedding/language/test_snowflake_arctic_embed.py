@@ -15,18 +15,38 @@ EMBEDDING_PROMPTS = [
 ]
 
 MODELS = [
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-xs", is_matryoshka=False),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-s", is_matryoshka=False),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-m", is_matryoshka=False),
+    EmbedModelInfo("Snowflake/snowflake-arctic-embed-xs",
+                   is_matryoshka=False,
+                   architecture="BertModel",
+                   enable_ci_test=True),
+    EmbedModelInfo("Snowflake/snowflake-arctic-embed-s",
+                   is_matryoshka=False,
+                   architecture="BertModel",
+                   enable_ci_test=False),
+    EmbedModelInfo("Snowflake/snowflake-arctic-embed-m",
+                   is_matryoshka=False,
+                   architecture="BertModel",
+                   enable_ci_test=False),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-long",
-                   is_matryoshka=False),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-l", is_matryoshka=False),
+                   is_matryoshka=False,
+                   architecture="NomicBertModel",
+                   enable_ci_test=True),
+    EmbedModelInfo("Snowflake/snowflake-arctic-embed-l",
+                   is_matryoshka=False,
+                   architecture="BertModel",
+                   enable_ci_test=False),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-v1.5",
-                   is_matryoshka=True),
+                   is_matryoshka=True,
+                   architecture="BertModel",
+                   enable_ci_test=True),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-l-v2.0",
-                   is_matryoshka=True),
+                   is_matryoshka=True,
+                   architecture="XLMRobertaModel",
+                   enable_ci_test=True),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
-                   is_matryoshka=True),
+                   is_matryoshka=True,
+                   architecture="GteModel",
+                   enable_ci_test=True),
 ]
 
 
@@ -40,6 +60,10 @@ def test_models(
     dtype: str,
     monkeypatch,
 ) -> None:
+    if not model_info.enable_ci_test:
+        # A model family has many models with the same architecture,
+        # and we don't need to test each one.
+        pytest.skip("Skipping CI test.")
 
     example_prompts = example_prompts + EMBEDDING_PROMPTS
 
@@ -61,6 +85,10 @@ def test_models(
 
         assert (vllm_model.model.llm_engine.model_config.is_matryoshka ==
                 model_info.is_matryoshka)
+
+        if model_info.architecture:
+            assert (model_info.architecture
+                    in vllm_model.model.llm_engine.model_config.architectures)
 
         vllm_outputs = vllm_model.encode(example_prompts)
 
