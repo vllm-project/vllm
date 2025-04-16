@@ -1357,6 +1357,11 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
+        # FIXME: apply input within the FusedMoe kernel.
+        if apply_router_weight_on_input:
+            assert topk_ids.shape[1] == 1, "Can only apply router weight \
+                on input when topk is 1!"
+            qcurr_hidden_states = qcurr_hidden_states * curr_topk_weights
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
                                 intermediate_cache1,
@@ -1367,7 +1372,11 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 sorted_token_ids,
                                 expert_ids,
                                 num_tokens_post_padded,
-                                apply_router_weight_on_input,
+                                # FIXME: Always False here because fused_moe_kernel
+                                # apply router weight on mm result, not on input
+                                # before mm. Apply router weight on input is done
+                                # outside the kernel for now.
+                                False,
                                 top_k_num,
                                 config,
                                 compute_type=compute_type,
@@ -1486,8 +1495,8 @@ def fused_moe(
         Defaults to False.
     - global_num_experts (int): The total number of experts in the global
         expert space.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
-        from the global expert space to the local expert space of the expert 
+    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+        from the global expert space to the local expert space of the expert
         parallel shard.
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.
