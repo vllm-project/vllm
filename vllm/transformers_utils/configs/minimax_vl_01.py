@@ -4,7 +4,7 @@
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.auto import CONFIG_MAPPING
 
-from .configuration_minimax_text_01 import MiniMaxText01Config
+from .minimax_text_01 import MiniMaxText01Config
 
 
 class MiniMaxVL01Config(PretrainedConfig):
