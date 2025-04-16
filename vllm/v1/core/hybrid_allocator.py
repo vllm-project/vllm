@@ -96,8 +96,9 @@ class HybridMemoryAllocator(ABC):
         new_blocks: list[list[KVCacheBlock]] = []
         start = 0
         for n in num_new_blocks:
-            new_blocks.append(total_new_blocks[start:start + n])
-            start += n
+            end = start + n
+            new_blocks.append(total_new_blocks[start:end])
+            start = end
         return new_blocks
 
     @abstractmethod
@@ -312,6 +313,6 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
 
     def sort_by_eviction_order(
         self,
-        blocks: dict[int, list[KVCacheBlock]],
+        blocks: list[list[KVCacheBlock]],
     ) -> Iterable[KVCacheBlock]:
         pass
