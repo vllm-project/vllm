@@ -210,7 +210,8 @@ class MsgpackDecoder:
                 v["data"] = self._decode_nested_tensors(v["data"])
                 # Reconstruct the field processor using MultiModalFieldConfig
                 factory_meth_name, *field_args = v["field"]
-                factory_meth = getattr(MultiModalFieldConfig, factory_meth_name)
+                factory_meth = getattr(MultiModalFieldConfig,
+                                       factory_meth_name)
                 v["field"] = factory_meth(None, *field_args).field
                 elems.append(MultiModalFieldElem(**v))
             all.append(MultiModalKwargsItem.from_elems(elems))
