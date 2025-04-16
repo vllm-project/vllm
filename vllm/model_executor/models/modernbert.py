@@ -107,14 +107,11 @@ class ModernBertAttention(nn.Module):
         self.Wo = RowParallelLinear(config.hidden_size,
                                     config.hidden_size,
                                     bias=config.attention_bias)
-        self.pruned_heads = set()
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_ids: Optional[torch.LongTensor] = None,
-        output_attentions: Optional[bool] = False,
-        **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.Wqkv(hidden_states)
         q, k, v = qkv.split([self.all_head_size] * 3, dim=-1)
@@ -179,10 +176,6 @@ class ModernBertLayer(nn.Module):
                                      bias=config.norm_bias)
         self.mlp = ModernBertMLP(config)
 
-    @torch.compile(dynamic=True)
-    def compiled_mlp(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.mlp(self.mlp_norm(hidden_states))
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -191,9 +184,7 @@ class ModernBertLayer(nn.Module):
         attn_outputs = self.attn(self.attn_norm(hidden_states),
                                  position_ids=position_ids)
         hidden_states = hidden_states + attn_outputs
-        mlp_output = (self.compiled_mlp(hidden_states)
-                      if self.config.reference_compile else self.mlp(
-                          self.mlp_norm(hidden_states)))
+        mlp_output = self.mlp(self.mlp_norm(hidden_states))
         hidden_states = hidden_states + mlp_output
         return hidden_states
 
@@ -235,8 +226,6 @@ class ModernBertModel(nn.Module):
         self.final_norm = nn.LayerNorm(config.hidden_size,
                                        eps=config.norm_eps,
                                        bias=config.norm_bias)
-        self.gradient_checkpointing = False
-        self.dtype = torch.float16
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
