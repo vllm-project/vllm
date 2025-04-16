@@ -55,15 +55,42 @@ def cutlass_scaled_mm(A: torch.Tensor, B: torch.Tensor, As: torch.Tensor,
                                  scale_b=Bs.T)
 
 
-def rocm_aiter_gemm_w8a8_blockscale(A: torch.Tensor,
-                                    B: torch.Tensor,
-                                    As: torch.Tensor,
-                                    Bs: torch.Tensor,
-                                    output_dtype: torch.dtype = torch.float16,
-                                    **kwargs) -> torch.Tensor:
+def rocm_aiter_gemm_w8a8_blockscale_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+    block_size: Optional[List[int]] = None,
+) -> torch.Tensor:
     import aiter as rocm_aiter
 
     return rocm_aiter.gemm_a8w8_blockscale_CK(A, B, As, Bs, dtype=output_dtype)
+
+
+def rocm_aiter_gemm_w8a8_blockscale_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+    block_size: Optional[List[int]] = None,
+) -> torch.Tensor:
+
+    m = A.shape[0]
+    n = B.shape[0]
+    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
+    return Y
+
+
+if current_platform.is_rocm():
+    direct_register_custom_op(
+        op_name="rocm_aiter_gemm_w8a8_blockscale",
+        op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
+        mutates_args=[],
+        fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
 
 
 def is_rocm_aiter_gemm_w8a8_blockscale_enabled() -> bool:
@@ -77,7 +104,7 @@ def dispatch_w8a8_blockscale_func(
     if use_cutlass:
         return cutlass_scaled_mm
     if is_rocm_aiter_gemm_w8a8_blockscale_enabled():
-        return rocm_aiter_gemm_w8a8_blockscale
+        return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale
     return w8a8_block_fp8_matmul
 
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+import torch
 
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp
@@ -15,8 +16,7 @@ from vllm.model_executor.layers.layernorm import (
     RMSNorm, dispatch_cuda_rmsnorm_func, fused_add_rms_norm, rms_norm,
     rocm_aiter_fused_add_rms_norm, rocm_aiter_rms_norm)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    cutlass_scaled_mm, dispatch_w8a8_blockscale_func,
-    rocm_aiter_gemm_w8a8_blockscale, w8a8_block_fp8_matmul)
+    cutlass_scaled_mm, dispatch_w8a8_blockscale_func, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
 
 
@@ -115,7 +115,8 @@ def test_w8a8_blockscale_dispatch(use_cutlass: bool, use_rocm_aiter: str,
         assert block_scale_func == cutlass_scaled_mm
     elif current_platform.is_rocm() and int(use_rocm_aiter) and int(
             use_rocm_aiter_gemm_w8a8_blockscale):
-        assert block_scale_func == rocm_aiter_gemm_w8a8_blockscale
+        assert block_scale_func == (
+            torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale)
     else:
         assert block_scale_func == w8a8_block_fp8_matmul
 
