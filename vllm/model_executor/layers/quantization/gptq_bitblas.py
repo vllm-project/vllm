@@ -194,7 +194,7 @@ class GPTQBitBLASConfig(QuantizationConfig):
         if (num_bits is None or group_size is None or sym is None
                 or desc_act is None):
             return False
-        
+
         if (num_bits, sym) not in cls.TYPE_MAP:
             return False
 
