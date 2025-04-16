@@ -354,9 +354,8 @@ class Scheduler(SchedulerInterface):
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request=request,
-                    num_tokens=num_new_tokens,
-                    new_computed_blocks=computed_blocks,
-                    num_external_tokens=num_external_tokens)
+                    num_tokens=num_new_tokens + num_external_tokens,
+                    new_computed_blocks=computed_blocks)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
