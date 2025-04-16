@@ -539,7 +539,7 @@ class Scheduler(SchedulerInterface):
         An encoder input will be scheduled if:
         - Its output tokens overlap with the range of tokens being computed
         in this step, i.e.,
-        [num_computed_tokens, num_computed_tokens + num_new_tokens),
+        [num_computed_tokens, num_computed_tokens + num_new_tokens).
         - It is not already computed and stored in the encoder cache.
         - There is sufficient encoder token budget to process it.
         - The encoder cache has space to store it.
@@ -560,7 +560,7 @@ class Scheduler(SchedulerInterface):
             num_encoder_tokens = pos_info.length
 
             # The encoder output is needed if the two ranges overlap:
-            # [num_cached_tokens, num_cached_tokens + num_new_tokens) and
+            # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
             # [start_pos, start_pos + num_encoder_tokens)
             if start_pos >= num_computed_tokens + num_new_tokens:
                 # The encoder input is not needed in this step.
@@ -595,8 +595,8 @@ class Scheduler(SchedulerInterface):
                     # encoder input.
                     num_new_tokens = start_pos - num_computed_tokens
                 else:
-                    # Because of prefix caching, num_computed_tokens is
-                    # greater than start_pos even though encoder input is not
+                    # Because of prefix caching, num_computed_tokens is greater
+                    # than start_pos even though its encoder input is not
                     # available. In this case, we can't schedule any token for
                     # the request in this step.
                     num_new_tokens = 0
