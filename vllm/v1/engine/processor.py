@@ -22,8 +22,8 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
-from vllm.v1.structured_output.utils import (
-    validate_structured_output_request_xgrammar)
+from vllm.v1.structured_output.backend_xgrammar import (
+    validate_xgrammar_grammar)
 
 
 class Processor:
@@ -165,7 +165,7 @@ class Processor:
         # Request content validation
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
-            validate_structured_output_request_xgrammar(params)
+            validate_xgrammar_grammar(params)
             params.guided_decoding.backend = engine_level_backend
         elif engine_level_backend == "auto":
             # "auto" is an opt-in to opinionated behavior where we try to
@@ -173,7 +173,7 @@ class Processor:
             # default as it is less predictable and subject to change
             # between releases as feature support changes.
             try:
-                validate_structured_output_request_xgrammar(params)
+                validate_xgrammar_grammar(params)
                 params.guided_decoding.backend = "xgrammar"
             except ValueError:
                 # The request includes some jsonschema feature(s) that
