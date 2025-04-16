@@ -462,3 +462,49 @@ def test_structured_output_number_range(
         assert 18 <= output_json["age"] <= 99
         assert 0.0 <= output_json["score"] <= 100.0
         assert 1 <= output_json["level"] <= 10
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("model_name, guided_decoding_backend, tokenizer_mode",
+                         PARAMS_MODELS_BACKENDS_TOKENIZER_MODE)
+def test_structured_output_pattern(
+    monkeypatch: pytest.MonkeyPatch,
+    guided_decoding_backend: str,
+    tokenizer_mode: str,
+    model_name: str,
+):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    llm = LLM(model=model_name,
+              enforce_eager=True,
+              max_model_len=1024,
+              guided_decoding_backend=guided_decoding_backend,
+              tokenizer_mode=tokenizer_mode)
+
+    pattern_schema = {
+        "type": "object",
+        "properties": {
+            "zipcode": {"type": "string", "pattern": r"^\\d{5}(-\\d{4})?$"},
+        },
+        "required": ["zipcode"]
+    }
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        max_tokens=1000,
+        guided_decoding=GuidedDecodingParams(json=pattern_schema))
+    outputs = llm.generate(prompts=[
+        "Create a JSON object for a US zipcode (5 or 9 digits)."
+    ] * 2,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
+
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        if 'disable-any-whitespace' in guided_decoding_backend:
+            assert "\n" not in generated_text
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json, schema=pattern_schema)
+        assert re.fullmatch(r"^\d{5}(-\d{4})?$", output_json["zipcode"]) is not None
