@@ -886,10 +886,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         use_cache = kwargs.pop("use_cache", False)
         output_hidden_states = kwargs.pop("output_hidden_states", True)
         vision_feature_select_strategy = self.config.vision_feature_select_strategy
-        legacy_processing = False
-        legacy_processing = (
-            (input_ids == self.config.image_token_index).sum(1).max() < self.config.image_seq_length
-        ) or (input_ids.shape[-1] == 1 and pixel_values is not None)
 
         if inputs_embeds is None:
             # 1. Extract the input embeddings
@@ -934,25 +930,14 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                     )
 
                 inputs_embeds = inputs_embeds.to(image_features.dtype)
-                if legacy_processing:
-                    inputs_embeds, attention_mask, position_ids, labels, _ = self._merge_input_ids_with_image_features(
-                        image_features,
-                        feature_lens,
-                        inputs_embeds,
-                        input_ids,
-                        attention_mask,
-                        position_ids,
-                        labels=labels,
-                    )
-                else:
-                    special_image_mask = (
-                        (input_ids == self.config.image_token_index)
-                        .unsqueeze(-1)
-                        .expand_as(inputs_embeds)
-                        .to(inputs_embeds.device)
-                    )
-                    image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
-                    inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
+                special_image_mask = (
+                    (input_ids == self.config.image_token_index)
+                    .unsqueeze(-1)
+                    .expand_as(inputs_embeds)
+                    .to(inputs_embeds.device)
+                )
+                image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
 
             # pixel_values is not None but is empty ---> text only cases
             elif pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) == 0:
