@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-from compressed_tensors.quantization import FP8_DTYPE
 
 import vllm.envs as envs
 import vllm.plugins
@@ -14,8 +13,11 @@ from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_FP8_SUPPORTED, Fp8LinearOp, maybe_create_device_identity)
+from vllm.platforms import current_platform
 
 from .backend import TestBackend
+
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class TestModel(torch.nn.Module):
@@ -42,12 +44,17 @@ class TestModel(torch.nn.Module):
         resid = torch.sqrt(x)
         y = self.norm[0](x)
 
-        x2 = self.fp8_linear.apply(y, self.w[0], self.wscale[0], self.scale[0])
+        x2 = self.fp8_linear.apply(y,
+                                   self.w[0],
+                                   self.wscale[0],
+                                   input_scale=self.scale[0])
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = self.fp8_linear.apply(y2, self.w[1], self.wscale[1],
-                                   self.scale[1])
+        x3 = self.fp8_linear.apply(y2,
+                                   self.w[1],
+                                   self.wscale[1],
+                                   input_scale=self.scale[1])
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
@@ -59,8 +66,8 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("static", [True, False])
 @pytest.mark.parametrize("cutlass_fp8_enabled",
                          [True, False] if CUTLASS_FP8_SUPPORTED else [False])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
-                    reason="Only test on CUDA")
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
+                    reason="Only test on CUDA and ROCm")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
                               cutlass_fp8_enabled):
     torch.set_default_device("cuda")

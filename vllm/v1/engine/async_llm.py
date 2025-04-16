@@ -64,7 +64,7 @@ class AsyncLLM(EngineClient):
         assert start_engine_loop
 
         self.model_config = vllm_config.model_config
-
+        self.vllm_config = vllm_config
         self.log_requests = log_requests
         self.log_stats = log_stats
 
@@ -379,6 +379,9 @@ class AsyncLLM(EngineClient):
     ):
         raise ValueError("Not Supported on V1 yet.")
 
+    async def get_vllm_config(self) -> VllmConfig:
+        return self.vllm_config
+
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
 
@@ -424,8 +427,8 @@ class AsyncLLM(EngineClient):
     async def sleep(self, level: int = 1) -> None:
         await self.engine_core.sleep_async(level)
 
-    async def wake_up(self) -> None:
-        await self.engine_core.wake_up_async()
+    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        await self.engine_core.wake_up_async(tags)
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()

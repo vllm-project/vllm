@@ -30,7 +30,7 @@ from starlette.routing import Mount
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import ModelConfig
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
@@ -327,6 +327,7 @@ def mount_metrics(app: FastAPI):
                 "/load",
                 "/ping",
                 "/version",
+                "/server_info",
             ],
             registry=registry,
         ).add().instrument(app).expose(app)
@@ -687,6 +688,11 @@ TASK_HANDLERS: dict[str, dict[str, tuple]] = {
 
 if envs.VLLM_SERVER_DEV_MODE:
 
+    @router.get("/server_info")
+    async def show_server_info(raw_request: Request):
+        server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
+        return JSONResponse(content=server_info)
+
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
         """
@@ -705,7 +711,6 @@ if envs.VLLM_SERVER_DEV_MODE:
     async def sleep(raw_request: Request):
         # get POST params
         level = raw_request.query_params.get("level", "1")
-        logger.info("sleep the engine with level %s", level)
         await engine_client(raw_request).sleep(int(level))
         # FIXME: in v0 with frontend multiprocessing, the sleep command
         # is sent but does not finish yet when we return a response.
@@ -713,8 +718,12 @@ if envs.VLLM_SERVER_DEV_MODE:
 
     @router.post("/wake_up")
     async def wake_up(raw_request: Request):
-        logger.info("wake up the engine")
-        await engine_client(raw_request).wake_up()
+        tags = raw_request.query_params.getlist("tags")
+        if tags == []:
+            # set to None to wake up all tags if no tags are provided
+            tags = None
+        logger.info("wake up the engine with tags: %s", tags)
+        await engine_client(raw_request).wake_up(tags)
         # FIXME: in v0 with frontend multiprocessing, the wake-up command
         # is sent but does not finish yet when we return a response.
         return Response(status_code=200)
@@ -891,7 +900,7 @@ def build_app(args: Namespace) -> FastAPI:
 
 async def init_app_state(
     engine_client: EngineClient,
-    model_config: ModelConfig,
+    vllm_config: VllmConfig,
     state: State,
     args: Namespace,
 ) -> None:
@@ -912,6 +921,8 @@ async def init_app_state(
 
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
+    state.vllm_config = vllm_config
+    model_config = vllm_config.model_config
 
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
@@ -1066,8 +1077,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
 
-        model_config = await engine_client.get_model_config()
-        await init_app_state(engine_client, model_config, app.state, args)
+        vllm_config = await engine_client.get_vllm_config()
+        await init_app_state(engine_client, vllm_config, app.state, args)
 
         def _listen_addr(a: str) -> str:
             if is_valid_ipv6_address(a):
@@ -1098,9 +1109,10 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         )
 
     # NB: Await server shutdown only after the backend context is exited
-    await shutdown_task
-
-    sock.close()
+    try:
+        await shutdown_task
+    finally:
+        sock.close()
 
 
 if __name__ == "__main__":
