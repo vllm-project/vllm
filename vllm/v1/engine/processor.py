@@ -202,12 +202,6 @@ class Processor:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
-
-        from vllm.platforms import current_platform
-        current_platform.validate_request(
-            prompt=prompt,
-            params=params,
-        )
         self._validate_lora(lora_request)
         self._validate_params(params)
         if priority != 0:
@@ -230,6 +224,12 @@ class Processor:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=self.use_hash,
+        )
+        from vllm.platforms import current_platform
+        current_platform.validate_request(
+            prompt=prompt,
+            params=params,
+            processed_inputs=processed_inputs,
         )
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
