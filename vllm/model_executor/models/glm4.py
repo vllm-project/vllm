@@ -200,7 +200,7 @@ class Glm4DecoderLayer(nn.Module):
         hidden_states = self.post_self_attn_layernorm(hidden_states)
 
         # Fully Connected
-        hidden_state, residual = self.post_attention_layernorm(
+        hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_mlp_layernorm(hidden_states)
