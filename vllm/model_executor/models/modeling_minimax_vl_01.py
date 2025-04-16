@@ -518,7 +518,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
-
+        self.vision_feature_layer = config.vision_feature_layer
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
         self._padding_side = "left"
@@ -885,9 +885,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         past_key_values = kwargs.pop("past_key_values", None)
         use_cache = kwargs.pop("use_cache", False)
         output_hidden_states = kwargs.pop("output_hidden_states", True)
-        vision_feature_layer = (
-            vision_feature_layer if vision_feature_layer is not None else self.config.vision_feature_layer
-        )
+
         vision_feature_select_strategy = (
             vision_feature_select_strategy
             if vision_feature_select_strategy is not None
@@ -919,7 +917,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                     ]
 
                 image_features = self.vision_tower(pixel_values, output_hidden_states=True)
-                selected_image_feature = image_features.hidden_states[vision_feature_layer]
+                selected_image_feature = image_features.hidden_states[self.vision_feature_layer]
 
 
                 selected_image_feature = torch.chunk(selected_image_feature, len(pixel_values), dim=1)
