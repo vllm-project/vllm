@@ -330,7 +330,7 @@ class Scheduler(SchedulerInterface):
                     new_encoder_budget = encoder_budget
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_blocks)
+                    request, num_new_tokens, num_computed_tokens, computed_blocks)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break

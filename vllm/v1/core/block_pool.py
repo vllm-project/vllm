@@ -48,13 +48,14 @@ class BlockPool:
         # if there is already an identical block in the cache. This is because
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
-        self.cached_block_hash_to_block: dict[BlockHashType, dict[
-            int, dict[int, KVCacheBlock]]] = defaultdict(dict)
+        self.cached_block_hash_to_block: dict[BlockHashType, dict[int, dict[
+            int, KVCacheBlock]]] = defaultdict(dict)
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
         # avoid freeing it.
         self.null_block = self.free_block_queue.popleft()
+        self.null_block.is_null = True
 
     def get_cached_block(
         self,

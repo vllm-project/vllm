@@ -1,27 +1,132 @@
+# SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
+from typing import Any, Optional
 
-from vllm.v1.core.specialized_manager import (FullAttentionManager,
-                                              SlidingWindowManager,
-                                              SpecializedManager)
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import KVCacheSpec, BlockHashType, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.specialized_manager import (FullAttentionAllocator,
+                                              SlidingWindowAllocator,
+                                              SpecializedAllocator)
+from vllm.v1.request import Request
 
 
 class HybridMemoryAllocator(ABC):
 
+    def __init__(self, block_pool: BlockPool):
+        self.block_pool = block_pool
+        # req_id -> group_id -> block_hashes
+        # This is to avoid recomputing the block hashes for each call of
+        # `get_block_hashes`.
+        # NOTE: These entries must be freed when requests are finished
+        # to prevent memory leaks.
+        self.req_to_block_hashes: dict[str, list[list[BlockHashType]]] = {}
+
+    def get_block_hashes(
+        self,
+        request: Request,
+        hash_fn: Any,
+    ) -> list[list[BlockHashType]]:
+        # The block hashes for the request may already be computed
+        # if the scheduler has tried to schedule the request before.
+        block_hashes = self.req_to_block_hashes.get(request.request_id)
+        if block_hashes is None:
+            block_hashes = self._get_block_hashes(request, hash_fn)
+            self.req_to_block_hashes[request.request_id] = block_hashes
+        return block_hashes
+
+    @abstractmethod
+    def _get_block_hashes(
+        self,
+        request: Request,
+        hash_fn: Any,
+    ) -> list[list[BlockHashType]]:
+        raise NotImplementedError
+
     @abstractmethod
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHashType],
-    ) -> list[dict[int, KVCacheBlock]]:
+        block_hashes: list[list[BlockHashType]],
+        num_tokens: int,
+    ) -> tuple[list[list[KVCacheBlock]], int]:
         raise NotImplementedError
 
     @abstractmethod
     def remove_skipped_blocks(
         self,
-        blocks: list[dict[int, KVCacheBlock]],
+        blocks: list[list[KVCacheBlock]],
         num_computed_tokens: int,
-    ) -> list[KVCacheBlock]:
+    ) -> Iterable[KVCacheBlock]:
+        raise NotImplementedError
+
+    def allocate_blocks(
+        self,
+        total_num_tokens: int,
+        num_computed_tokens: int,
+        new_computed_blocks: list[list[KVCacheBlock]],
+        allocated_blocks: list[list[KVCacheBlock]],
+    ) -> Optional[list[list[KVCacheBlock]]]:
+        num_new_blocks = self._get_num_new_blocks(
+            total_num_tokens,
+            num_computed_tokens,
+            new_computed_blocks,
+            allocated_blocks,
+        )
+        total_num_new_blocks = sum(num_new_blocks)
+        if total_num_new_blocks <= 0:
+            # No new block is needed.
+            return []
+        flattened_new_computed_blocks = sum(new_computed_blocks, [])
+
+        # If a computed block of a request is an eviction candidate (in the
+        # free queue and ref_cnt == 0), it cannot be counted as a free block
+        # when allocating this request.
+        num_evictable_computed_blocks = sum(
+            1 for blk in flattened_new_computed_blocks if blk.ref_cnt == 0)
+        if (total_num_tokens > self.block_pool.get_num_free_blocks() -
+                num_evictable_computed_blocks):
+            # Cannot allocate new blocks
+            return None
+
+        # Touch the computed blocks to make sure they won't be evicted.
+        if flattened_new_computed_blocks:
+            self.block_pool.touch(flattened_new_computed_blocks)
+
+        total_new_blocks = self.block_pool.get_new_blocks(total_num_new_blocks)
+        new_blocks: list[list[KVCacheBlock]] = []
+        start = 0
+        for n in num_new_blocks:
+            new_blocks.append(total_new_blocks[start:start + n])
+            start += n
+        return new_blocks
+
+    @abstractmethod
+    def _get_num_new_blocks(
+        self,
+        total_num_tokens: int,
+        num_computed_tokens: int,
+        new_computed_blocks: list[list[KVCacheBlock]],
+        allocated_blocks: list[list[KVCacheBlock]],
+    ) -> list[int]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def cache_blocks(
+        self,
+        request: Request,
+        blocks: list[list[KVCacheBlock]],
+        num_computed_tokens: int,
+        num_new_tokens: int,
+        num_cached_blocks: list[int],
+        hash_fn: Any,
+    ) -> list[int]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def sort_by_eviction_order(
+        self,
+        blocks: list[list[KVCacheBlock]],
+    ) -> Iterable[KVCacheBlock]:
         raise NotImplementedError
 
 
@@ -35,25 +140,73 @@ class SingleMemoryAllocator(HybridMemoryAllocator):
 
     def __init__(
         self,
-        manager: SpecializedManager,
+        allocator: SpecializedAllocator,
     ):
-        self.manager = manager
+        super().__init__()
+        self.allocator = allocator
         self.group_ids = (0, )
+
+    def _get_block_hashes(
+        self,
+        request: Request,
+        hash_fn: Any,
+    ) -> list[list[BlockHashType]]:
+        return [self.allocator.get_block_hashes(request, hash_fn)]
 
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHashType],
+        block_hashes: list[list[BlockHashType]],
     ) -> list[dict[int, KVCacheBlock]]:
-        return self.manager.find_longest_cache_hit(block_hashes, self.group_ids)
+        return self.allocator.find_longest_cache_hit(block_hashes[0],
+                                                     self.group_ids)
 
     def remove_skipped_blocks(
         self,
-        blocks: list[dict[int, KVCacheBlock]],
+        blocks: dict[int, list[KVCacheBlock]],
         num_computed_tokens: int,
-    ) -> list[KVCacheBlock]:
-        blocks = self.manager.remove_skipped_blocks(
-            blocks, self.group_ids, num_computed_tokens)
-        return [block[0] for block in blocks]
+    ) -> Iterable[KVCacheBlock]:
+        return self.allocator.remove_skipped_blocks(blocks, self.group_ids,
+                                                    num_computed_tokens)
+
+    def _get_num_new_blocks(
+        self,
+        total_num_tokens: int,
+        num_computed_tokens: int,
+        new_computed_blocks: list[list[KVCacheBlock]],
+        allocated_blocks: list[list[KVCacheBlock]],
+    ) -> list[int]:
+        num_new_blocks = self.allocator.get_num_new_blocks(
+            total_num_tokens,
+            num_computed_tokens,
+            new_computed_blocks,
+            allocated_blocks,
+            self.group_ids,
+        )
+        return [num_new_blocks[0]]
+
+    def cache_blocks(
+        self,
+        request: Request,
+        blocks: list[list[KVCacheBlock]],
+        num_computed_tokens: int,
+        num_new_tokens: int,
+        num_cached_blocks: list[int],
+        hash_fn: Any,
+    ) -> list[int]:
+        return self.allocator.cache_blocks(
+            request,
+            blocks[0],
+            num_computed_tokens,
+            num_new_tokens,
+            num_cached_blocks[0],
+            hash_fn,
+        )
+
+    def sort_by_eviction_order(
+        self,
+        blocks: list[list[KVCacheBlock]],
+    ) -> Iterable[KVCacheBlock]:
+        return self.allocator.sort_by_eviction_order(blocks[0])
 
 
 class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
@@ -61,43 +214,57 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
 
     For example, models like Gemma 2 (1:1 full/swa) and Gemma 3 (1:5 full/swa)
     use this allocator.
-
-    # TODO(woosuk): Extend this to Llama 4.
     """
 
     def __init__(
         self,
-        full_attn_manager: FullAttentionManager,
+        full_attn_allocator: FullAttentionAllocator,
         full_attn_group_ids: tuple[int, ...],
-        swa_manager: SlidingWindowManager,
+        swa_allocator: SlidingWindowAllocator,
         swa_group_ids: tuple[int, ...],
     ):
-        self.full_attn_manager = full_attn_manager
+        self.full_attn_allocator = full_attn_allocator
         self.full_attn_group_ids = full_attn_group_ids
-        self.swa_manager = swa_manager
+        self.swa_allocator = swa_allocator
         self.swa_group_ids = swa_group_ids
-        self.num_groups = len(full_attn_group_ids) + len(swa_group_ids)
+        self.all_group_ids = sorted(full_attn_group_ids + swa_group_ids)
+        self.num_groups = len(self.all_group_ids)
+
+    def _get_block_hashes(
+        self,
+        request: Request,
+        hash_fn: Any,
+    ) -> list[list[BlockHashType]]:
+        # The full attention and sliding window attention have the same block
+        # size.
+        block_hashes = self.full_attn_allocator.get_block_hashes(
+            request, hash_fn)
+        # TODO(woosuk): Optimize this.
+        return [block_hashes] * self.num_groups
 
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHashType],
-    ) -> list[dict[int, KVCacheBlock]]:
+        block_hashes: list[list[BlockHashType]],
+    ) -> list[list[KVCacheBlock]]:
+        # Because the full attention and sliding window attention have the same
+        # block size, we can just use the block hashes for any group.
+        block_hashes = block_hashes[0]
+
         # First, find the longest cache hit for full attention.
-        full_attn_blocks = self.full_attn_manager.find_longest_cache_hit(
+        full_attn_blocks = self.full_attn_allocator.find_longest_cache_hit(
             block_hashes, self.full_attn_group_ids)
         if not full_attn_blocks:
             # No cache hit.
-            return []
+            return {}
 
         # Next, find the cache hit for sliding window attention WITHIN the
         # cache hit of full attention.
-        # TODO(woosuk): Avoid the list slicing.
         block_hashes = block_hashes[:len(full_attn_blocks)]
-        swa_attn_blocks = self.swa_manager.find_longest_cache_hit(
+        swa_attn_blocks = self.swa_allocator.find_longest_cache_hit(
             block_hashes, self.swa_group_ids)
         if not swa_attn_blocks:
             # No cache hit.
-            return []
+            return {}
 
         # Truncate the full attention cache hit to the length of the
         # sliding window cache hit.
@@ -116,14 +283,32 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
 
     def remove_skipped_blocks(
         self,
-        blocks: list[dict[int, KVCacheBlock]],
+        blocks: list[list[KVCacheBlock]],
         num_computed_tokens: int,
     ) -> list[KVCacheBlock]:
-        removed_blocks = self.swa_manager.remove_skipped_blocks(
+        return self.swa_allocator.remove_skipped_blocks(
             blocks, self.swa_group_ids, num_computed_tokens)
-        # Sort the removed blocks by the eviction order.
-        flattened: list[KVCacheBlock] = []
-        # TODO(woosuk): The loop can be slow. Optimize it.
-        for block in removed_blocks:
-            flattened.extend(block.values())
-        return flattened
+
+    def _get_num_new_blocks(
+        self,
+        total_num_tokens: int,
+        num_computed_tokens: int,
+        new_computed_blocks: list[list[KVCacheBlock]],
+        allocated_blocks: list[list[KVCacheBlock]],
+    ) -> list[int]:
+        # OPTIMIZATION(woosuk):
+        group_id = self.full_attn_group_ids[0]
+        num_new_blocks = self.full_attn_allocator.get_num_new_blocks(
+            total_num_tokens,
+            num_computed_tokens,
+            new_computed_blocks[group_id],
+            allocated_blocks[group_id],
+            group_ids=(group_id, ),
+        )
+        return [num_new_blocks] * self.num_groups
+
+    def sort_by_eviction_order(
+        self,
+        blocks: dict[int, list[KVCacheBlock]],
+    ) -> Iterable[KVCacheBlock]:
+        pass

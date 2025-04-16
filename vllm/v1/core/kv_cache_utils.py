@@ -124,6 +124,9 @@ class KVCacheBlock:
     prev_free_block: Optional["KVCacheBlock"] = None
     next_free_block: Optional["KVCacheBlock"] = None
 
+    # Whether the block is a null block.
+    is_null: bool = False
+
     def incr_ref(self):
         self.ref_cnt += 1
 
@@ -152,10 +155,17 @@ class KVCacheBlock:
         next_block_id = self.next_free_block.block_id \
             if self.next_free_block else None
         return (f"KVCacheBlock(block_id={self.block_id}, "
+                f"is_null={self.is_null}, "
                 f"ref_cnt={self.ref_cnt}, "
                 f"_block_hash={self._block_hash}, "
                 f"prev_free_block={prev_block_id}, "
                 f"next_free_block={next_block_id})")
+
+
+@dataclass
+class BlocksPerGroup:
+
+    blocks: list[list[KVCacheBlock]]
 
 
 class FreeKVCacheBlockQueue:
