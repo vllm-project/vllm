@@ -25,7 +25,10 @@ except Exception:
 
 logger = init_logger(__name__)
 
-CUSTOM_ALL_REDUCE_DEFAULT_MAX_SIZE = 16384 * 1024  # 16 MB
+if current_platform.is_cuda():
+    CUSTOM_ALL_REDUCE_DEFAULT_MAX_SIZE = 8192 * 1024  # 8 MB
+else:
+    CUSTOM_ALL_REDUCE_DEFAULT_MAX_SIZE = 2 * 8192 * 1024  # 16 MB
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
