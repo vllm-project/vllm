@@ -16,7 +16,7 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
 from vllm.attention.backends.utils import (compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
+from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_forward,
                                                get_aiter_mla_metadata)
 from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 
@@ -456,9 +456,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
-        aiter_mla_decode_fwd(q, kv_buffer, o, self.scale,
-                             attn_metadata.paged_kv_indptr,
-                             attn_metadata.paged_kv_indices,
-                             attn_metadata.paged_kv_last_page_lens)
+        aiter_mla_decode_forward(q, kv_buffer, o, self.scale,
+                                 attn_metadata.paged_kv_indptr,
+                                 attn_metadata.paged_kv_indices,
+                                 attn_metadata.paged_kv_last_page_lens)
 
         return self._v_up_proj_and_o_proj(o)

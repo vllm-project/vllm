@@ -708,6 +708,50 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0)
 
+    def _get_prefill_ctx_attn_output(
+        self, index: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+        prefill_metadata: MLACommonPrefillMetadata
+    ) -> tuple[torch.Tensor, ...]:
+        output = None
+        output_lse = None
+        assert prefill_metadata.chunked_context is not None
+        # For MLA the v head dim is smaller than qk head dim so we pad
+        # out v with 0s to match the qk head dim
+        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
+                                           value=0)
+
+        attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v_padded,
+            cu_seqlens_q=prefill_metadata.query_start_loc,
+            cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[index],
+            max_seqlen_q=prefill_metadata.max_query_len,
+            max_seqlen_k=prefill_metadata.chunked_context.max_seq_lens[index],
+            softmax_scale=self.scale,
+            causal=False,  # Context is unmasked
+            return_softmax_lse=True,
+        )
+
+        if output is None:
+            output = attn_output
+            output_lse = attn_softmax_lse
+        else:
+            output_tmp = torch.empty_like(output)
+            output_lse_tmp = torch.empty_like(output_lse)
+            merge_attn_states(
+                output=output_tmp,
+                output_lse=output_lse_tmp,
+                prefix_output=output,
+                prefix_lse=output_lse,
+                suffix_output=attn_output,
+                suffix_lse=attn_softmax_lse,
+            )
+            output = output_tmp
+            output_lse = output_lse_tmp
+
+        return output, output_lse
+
     def _compute_prefill_context(
         self,
         q: torch.Tensor,
@@ -747,62 +791,17 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
 
-            # For MLA the v head dim is smaller than qk head dim so we pad
-            # out v with 0s to match the qk head dim
-            v_padded = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
-
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[i],
-                max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=prefill_metadata.chunked_context.max_seq_lens[i],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_softmax_lse=True,
-            )
-
-            if output is None:
-                output = attn_output
-                output_lse = attn_softmax_lse
-            else:
-                output_tmp = torch.empty_like(output)
-                output_lse_tmp = torch.empty_like(output_lse)
-                merge_attn_states(
-                    output=output_tmp,
-                    output_lse=output_lse_tmp,
-                    prefix_output=output,
-                    prefix_lse=output_lse,
-                    suffix_output=attn_output,
-                    suffix_lse=attn_softmax_lse,
-                )
-                output = output_tmp
-                output_lse = output_lse_tmp
+            output, output_lse = self._get_prefill_ctx_attn_output(
+                i, q, k, v, prefill_metadata)
 
         return output, output_lse
 
-    def _forward_prefill(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
-    ) -> torch.Tensor:
+    def _get_fwd_prefill_attn_output(self, q: torch.Tensor, k: torch.Tensor,
+                                     v: torch.Tensor,
+                                     kv_c_and_k_pe_cache: torch.Tensor,
+                                     attn_metadata: MLACommonMetadata,
+                                     has_context: bool) -> torch.Tensor:
         assert attn_metadata.prefill is not None
-
-        has_context = attn_metadata.prefill.chunked_context is not None
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
-            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv_nope\
-            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
-        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
-
         # For MLA the v head dim is smaller than qk head dim so we pad out
         # v with 0s to match the qk head dim
         v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
@@ -839,6 +838,30 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         output = output\
             .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
                 .reshape(-1, self.num_heads * v.shape[-1])
+
+        return output
+
+    def _forward_prefill(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: MLACommonMetadata,
+    ) -> torch.Tensor:
+        assert attn_metadata.prefill is not None
+
+        has_context = attn_metadata.prefill.chunked_context is not None
+        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope, v = kv_nope\
+            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+
+        output = self._get_fwd_prefill_attn_output(q, k, v,
+                                                   kv_c_and_k_pe_cache,
+                                                   attn_metadata, has_context)
 
         return self.o_proj(output)[0]
 

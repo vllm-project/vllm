@@ -147,16 +147,24 @@ class RocmPlatform(Platform):
 
             if selected_backend == _Backend.TRITON_MLA:
                 if block_size != 1:
-                    logger.info("Using Triton MLA backend.")
-                    return "vllm.attention.backends.triton_mla.TritonMLABackend"  # noqa: E501
+                    if use_v1:
+                        logger.info("Using Triton MLA backend.")
+                        return "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"  # noqa: E501
+                    else:
+                        logger.info("Using Triton MLA backend.")
+                        return "vllm.attention.backends.triton_mla.TritonMLABackend"  # noqa: E501
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
                         "does not support block size {block_size}.")
             else:
                 if block_size == 1:
-                    logger.info("Using AITER MLA backend.")
-                    return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                    if use_v1:
+                        logger.info("Using AITER MLA backend.")
+                        return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                    else:
+                        logger.info("Using AITER MLA backend.")
+                        return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
