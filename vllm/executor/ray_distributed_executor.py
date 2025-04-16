@@ -168,6 +168,14 @@ class RayDistributedExecutor(DistributedExecutorBase):
                           **ray_remote_kwargs):
         num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
 
+        def retain_envs(var_name):
+            retain_var_list = [
+                'GLOO_SOCKET_IFNAME', 'HCCL_SOCKET_IFNAME',
+                'NCCL_SOCKET_IFNAME'
+            ]
+            return ('HPU' in var_name or 'RAY' in var_name
+                    or 'VLLM' in var_name or var_name in retain_var_list)
+
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
         self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
@@ -225,11 +233,16 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
                                            rpc_rank=rank)
             else:
+                runtime_env_vars = {
+                    k: v
+                    for k, v in os.environ.items() if retain_envs(k)
+                }
                 worker = ray.remote(
                     num_cpus=0,
                     num_gpus=0,
                     resources={current_platform.ray_device_key: num_gpus},
                     scheduling_strategy=scheduling_strategy,
+                    runtime_env={"env_vars": runtime_env_vars},
                     **ray_remote_kwargs,
                 )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
                                            rpc_rank=rank)
