@@ -380,9 +380,9 @@ def test_cutlass_moe_16_bit_no_graph(
                                       topk_ids)
         cutlass_output = run_16_bit(mt, topk_weights, topk_ids)
 
-        print(triton_output)
-        print(cutlass_output)
-        print("*")
+        # print(triton_output)
+        # print(cutlass_output)
+        # print("*")
 
         torch.testing.assert_close(triton_output.view(cutlass_output.shape),
                                    cutlass_output,
@@ -429,9 +429,9 @@ def test_cutlass_moe_16_bit_cuda_graph(
         graph.replay()
         torch.cuda.synchronize()
 
-        print(triton_output)
-        print(cutlass_output)
-        print("*")
+        # print(triton_output)
+        # print(cutlass_output)
+        # print("*")
 
         torch.testing.assert_close(triton_output,
                                    cutlass_output,
