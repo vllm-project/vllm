@@ -433,9 +433,21 @@ def test_structured_output_number_range(
     number_range_schema = {
         "type": "object",
         "properties": {
-            "age": {"type": "integer", "minimum": 18, "maximum": 99},
-            "score": {"type": "number", "minimum": 0.0, "maximum": 100.0},
-            "level": {"type": "integer", "minimum": 1, "maximum": 10},
+            "age": {
+                "type": "integer",
+                "minimum": 18,
+                "maximum": 99
+            },
+            "score": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 100.0
+            },
+            "level": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+            },
         },
         "required": ["age", "score", "level"]
     }
@@ -483,7 +495,10 @@ def test_structured_output_pattern(
     pattern_schema = {
         "type": "object",
         "properties": {
-            "zipcode": {"type": "string", "pattern": r"^\\d{5}(-\\d{4})?$"},
+            "zipcode": {
+                "type": "string",
+                "pattern": r"^\\d{5}(-\\d{4})?$"
+            },
         },
         "required": ["zipcode"]
     }
@@ -491,11 +506,10 @@ def test_structured_output_pattern(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=pattern_schema))
-    outputs = llm.generate(prompts=[
-        "Create a JSON object for a US zipcode (5 or 9 digits)."
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
+    outputs = llm.generate(
+        prompts=["Create a JSON object for a US zipcode (5 or 9 digits)."] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True)
 
     assert outputs is not None
     for output in outputs:
@@ -507,4 +521,5 @@ def test_structured_output_pattern(
             assert "\n" not in generated_text
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=pattern_schema)
-        assert re.fullmatch(r"^\d{5}(-\d{4})?$", output_json["zipcode"]) is not None
+        assert re.fullmatch(r"^\d{5}(-\d{4})?$",
+                            output_json["zipcode"]) is not None
