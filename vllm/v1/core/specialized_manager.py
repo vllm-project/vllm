@@ -45,7 +45,7 @@ class SpecializedAllocator(ABC):
         self,
         block_hashes: list[BlockHashType],
         group_ids: Sequence[int],
-    ) -> dict[int, list[KVCacheBlock]]:
+    ) -> tuple[dict[int, list[KVCacheBlock]], int]:
         """
         Get the longest cache hit prefix of the blocks. If no cache hit is 
         found, return an empty list.
@@ -58,7 +58,6 @@ class SpecializedAllocator(ABC):
             [NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)] for block size 4 and 
             sliding window 8. 
         """
-
         raise NotImplementedError
 
     @abstractmethod
@@ -130,7 +129,7 @@ class FullAttentionAllocator(SpecializedAllocator):
         self,
         block_hashes: list[BlockHashType],
         group_ids: Sequence[int],
-    ) -> dict[int, list[KVCacheBlock]]:
+    ) -> tuple[dict[int, list[KVCacheBlock]], int]:
         computed_blocks: dict[int, list[KVCacheBlock]] = {
             group_id: []
             for group_id in group_ids
@@ -146,7 +145,9 @@ class FullAttentionAllocator(SpecializedAllocator):
                     computed_blocks[group_id].append(cached_blocks[group_id])
             else:
                 break
-        return computed_blocks
+        num_computed_blocks = len(computed_blocks[group_ids[0]])
+        num_computed_tokens = num_computed_blocks * self.block_size
+        return computed_blocks, num_computed_tokens
 
     def remove_skipped_blocks(
         self,
@@ -196,14 +197,16 @@ class SlidingWindowAllocator(SpecializedAllocator):
         self,
         block_hashes: list[BlockHashType],
         group_ids: Sequence[int],
-    ) -> dict[int, list[KVCacheBlock]]:
+    ) -> tuple[dict[int, list[KVCacheBlock]], int]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(len(block_hashes)) to
         # O(len(block_hashes) / sliding_window_contiguous_blocks +
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
-        null_block = {group_id: self._null_block for group_id in group_ids}
-        computed_blocks = [null_block] * len(block_hashes)
+        computed_blocks = {
+            group_id: [self._null_block] * len(block_hashes)
+            for group_id in group_ids
+        }
         num_contiguous_blocks = 0
 
         # Search from right to left and early stop when a match is found.
@@ -215,19 +218,22 @@ class SlidingWindowAllocator(SpecializedAllocator):
                 num_contiguous_blocks = 0
                 continue
 
-            computed_blocks[i] = cached_blocks
+            for group_id in group_ids:
+                computed_blocks[group_id][i] = cached_blocks[group_id]
             num_contiguous_blocks += 1
             if (num_contiguous_blocks
                     >= self.sliding_window_contiguous_blocks):
                 # Trim the trailing blocks.
                 # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
                 # when sliding_window_contiguous_blocks=2.
-                del computed_blocks[i + num_contiguous_blocks:]
+                for group_id in group_ids:
+                    del computed_blocks[group_id][i + num_contiguous_blocks:]
                 return computed_blocks
 
         # The first `num_contiguous_blocks` is a cache hit even if
         # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
-        del computed_blocks[num_contiguous_blocks:]
+        for group_id in group_ids:
+            del computed_blocks[group_id][num_contiguous_blocks:]
         return computed_blocks
 
     def remove_skipped_blocks(

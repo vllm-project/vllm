@@ -83,7 +83,7 @@ class HybridMemoryAllocator(ABC):
         # when allocating this request.
         num_evictable_computed_blocks = sum(
             1 for blk in flattened_new_computed_blocks if blk.ref_cnt == 0)
-        if (total_num_tokens > self.block_pool.get_num_free_blocks() -
+        if (total_num_new_blocks > self.block_pool.get_num_free_blocks() -
                 num_evictable_computed_blocks):
             # Cannot allocate new blocks
             return None
@@ -146,6 +146,7 @@ class SingleMemoryAllocator(HybridMemoryAllocator):
     ):
         super().__init__(block_pool)
         self.allocator = allocator
+        self.block_size = allocator.block_size
         self.group_ids = (0, )
 
     def _get_block_hashes(
@@ -158,8 +159,12 @@ class SingleMemoryAllocator(HybridMemoryAllocator):
     def find_longest_cache_hit(
         self,
         block_hashes: list[list[BlockHashType]],
-    ) -> list[dict[int, KVCacheBlock]]:
-        return self.allocator.find_longest_cache_hit(block_hashes[0],
+        num_tokens: int,
+    ) -> tuple[list[list[KVCacheBlock]], int]:
+        block_hashes = block_hashes[0]
+        if len(block_hashes) * self.block_size == num_tokens:
+            block_hashes = block_hashes[:-1]
+        return self.allocator.find_longest_cache_hit(block_hashes,
                                                      self.group_ids)
 
     def remove_skipped_blocks(
@@ -231,8 +236,15 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
         self.full_attn_group_ids = full_attn_group_ids
         self.swa_allocator = swa_allocator
         self.swa_group_ids = swa_group_ids
+
         self.all_group_ids = sorted(full_attn_group_ids + swa_group_ids)
         self.num_groups = len(self.all_group_ids)
+        self.block_size = full_attn_allocator.block_size
+        if self.block_size != swa_allocator.block_size:
+            raise ValueError(
+                f"The block size of full attention ({self.block_size}) and "
+                f"sliding window attention ({swa_allocator.block_size}) must be "
+                "the same.")
 
     def _get_block_hashes(
         self,
@@ -249,33 +261,39 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
     def find_longest_cache_hit(
         self,
         block_hashes: list[list[BlockHashType]],
-    ) -> list[list[KVCacheBlock]]:
+        num_tokens: int,
+    ) -> tuple[list[list[KVCacheBlock]], int]:
         # Because the full attention and sliding window attention use the same
         # block size, we can just use the block hashes for any group.
         block_hashes = block_hashes[0]
+        if len(block_hashes) * self.block_size == num_tokens:
+            block_hashes = block_hashes[:-1]
 
         # First, find the longest cache hit for full attention.
-        full_attn_blocks = self.full_attn_allocator.find_longest_cache_hit(
-            block_hashes, self.full_attn_group_ids)
-        num_full_attn_blocks = len(
-            full_attn_blocks[self.full_attn_group_ids[0]])
+        full_attn_blocks, num_full_attn_tokens = (
+            self.full_attn_allocator.find_longest_cache_hit(
+                block_hashes, self.full_attn_group_ids))
+        num_full_attn_blocks = num_full_attn_tokens // self.block_size
         if num_full_attn_blocks == 0:
             # No cache hit.
-            return {}
+            return [[]] * self.num_groups, 0
 
         # Next, find the cache hit for sliding window attention WITHIN the
         # cache hit of full attention.
         block_hashes = block_hashes[:num_full_attn_blocks]
-        swa_attn_blocks = self.swa_allocator.find_longest_cache_hit(
-            block_hashes, self.swa_group_ids)
-        num_swa_attn_blocks = len(swa_attn_blocks[self.swa_group_ids[0]])
+        swa_attn_blocks, num_swa_attn_tokens = (
+            self.swa_allocator.find_longest_cache_hit(block_hashes,
+                                                      self.swa_group_ids))
+        num_swa_attn_blocks = num_swa_attn_tokens // self.block_size
         if num_swa_attn_blocks == 0:
             # No cache hit.
-            return {}
+            return [[]] * self.num_groups, 0
 
         # Truncate the full attention cache hit to the length of the
         # sliding window cache hit.
         num_blocks = num_swa_attn_blocks
+        num_computed_tokens = num_swa_attn_tokens
+
         combined_blocks: list[list[KVCacheBlock]] = []
         for group_id in self.all_group_ids:
             if group_id in self.full_attn_group_ids:
@@ -283,7 +301,7 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
             else:
                 # We don't need `[:num_blocks]` here.
                 combined_blocks.append(swa_attn_blocks[group_id])
-        return combined_blocks
+        return combined_blocks, num_computed_tokens
 
     def remove_skipped_blocks(
         self,
