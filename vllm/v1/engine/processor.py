@@ -165,10 +165,6 @@ class Processor:
                     f"initialised with '{engine_level_backend}'. This error "
                     "can be resolved by removing backend selection from the "
                     "request.")
-            logger.warning(
-                "Request-level structured output backend selection is not "
-                "supported in V1. Please only specify structured output "
-                "backend at the engine level.")
         else:
             params.guided_decoding.backend = engine_level_backend
 
