@@ -530,11 +530,6 @@ def _linear_attn_decode_kernel(
     pid_h = tl.program_id(1)  # head index
     pid_d = tl.program_id(2)  # dimension block index
 
-    # 计算维度边界并确保不超出范围
-    d_block_size = min(BLOCK_SIZE, D - pid_d * BLOCK_SIZE)
-    if d_block_size <= 0:
-        return
-
     # Load slot index for the current batch
     slot_id = tl.load(slot_idx + pid_b)
 
@@ -551,14 +546,8 @@ def _linear_attn_decode_kernel(
     # Calculate offsets for dimensions
     qk_d_offsets = tl.arange(0, D)
     v_d_offsets = tl.arange(0, BLOCK_SIZE) + pid_d * BLOCK_SIZE
-    
-    # 创建有效的掩码
-    qk_mask = qk_d_offsets < D
-    v_mask = v_d_offsets < D
-    
-    # 计算缓存索引，确保不会超出边界
-    cache_d_offsets = qk_d_offsets[:, None] * cache_d0_stride + v_d_offsets[None, :] * cache_d1_stride
-    kv_mask = qk_mask[:, None] & v_mask[None, :]
+    cache_d_offsets = qk_d_offsets[:, None] * cache_d0_stride + v_d_offsets[
+        None, :] * cache_d1_stride
 
     # Calculate offsets for the current batch and head
     q_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
@@ -567,6 +556,10 @@ def _linear_attn_decode_kernel(
 
     cache_offset = slot_id * cache_b_stride + head_id * cache_h_stride
 
+    # Create masks for loading tensors
+    qk_mask = qk_d_offsets < D
+    v_mask = v_d_offsets < D
+
     # Load query, key, and value tensors
     q = tl.load(q_ptr + q_offset + qk_d_offsets, mask=qk_mask, other=0.0)
     k = tl.load(k_ptr + k_offset + qk_d_offsets, mask=qk_mask, other=0.0)
@@ -574,6 +567,7 @@ def _linear_attn_decode_kernel(
 
     # Compute key-value outer product
     kv_outer = k[:, None] * v[None, :]
+    kv_mask = qk_mask[:, None] & v_mask[None, :]
 
     # Apply decay to previous KV cache
     ratio = tl.exp(-ratio)
@@ -621,15 +615,8 @@ def linear_decode_forward_triton(
     # Initialize output tensor
     output = torch.empty_like(q)
 
-    # 计算需要多少个block以覆盖维度D
-    num_d_blocks = (D + BLOCK_SIZE - 1) // BLOCK_SIZE
-
     # Set grid dimensions for the kernel
-    grid = (B, H, num_d_blocks)
-
-    # 安全检查，确保grid尺寸不为0
-    if B == 0 or H == 0 or num_d_blocks == 0:
-        return output.squeeze(1).contiguous()
+    grid = (B, H, D // BLOCK_SIZE)
 
     # Calculate strides for tensors
     qkv_b_stride = q.stride(0)

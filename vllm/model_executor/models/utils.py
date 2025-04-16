@@ -381,30 +381,23 @@ def _merge_multimodal_embeddings(
     multimodal_embeddings: NestedTensors,
 ) -> torch.Tensor:
     """
-    Merge multimodal embeddings into the input embeddings at the positions
-    indicated by `is_multimodal`.
+    Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
+    positions in ``inputs_embeds`` corresponding to placeholder tokens in
+    ``input_ids``.
 
-    Args:
-        inputs_embeds: The input embeddings tensor.
-        is_multimodal: A boolean tensor indicating which positions should be
-            replaced with multimodal embeddings.
-        multimodal_embeddings: The multimodal embeddings to be merged.
-
-    Returns:
-        The merged embeddings tensor.
+    Note:
+        This updates ``inputs_embeds`` in place.
     """
     num_expected_tokens = is_multimodal.sum().item()
     assert isinstance(num_expected_tokens, int)
 
     flattened = _flatten_embeddings(multimodal_embeddings)
-    
-    # 处理多模态嵌入数量与占位符数量不匹配的情况
     if flattened.shape[0] != num_expected_tokens:
         expr = _embedding_count_expression(multimodal_embeddings)
         raise ValueError(
             f"Attempted to assign {expr} = {flattened.shape[0]} "
             f"multimodal tokens to {num_expected_tokens} placeholders")
-    
+
     inputs_embeds[is_multimodal] = flattened
     return inputs_embeds
 
