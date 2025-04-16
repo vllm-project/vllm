@@ -110,6 +110,7 @@ def paged_attention_rocm(
     scale: float,
     block_tables: torch.Tensor,
     seq_lens: torch.Tensor,
+    query_start_loc: Optional[torch.Tensor],
     block_size: int,
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
@@ -120,8 +121,9 @@ def paged_attention_rocm(
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
-                                      block_size, max_seq_len, alibi_slopes,
-                                      kv_cache_dtype, k_scale, v_scale)
+                                      query_start_loc, block_size, max_seq_len,
+                                      alibi_slopes, kv_cache_dtype, k_scale,
+                                      v_scale)
 
 
 def mla_decode_kvcache_cpu(
@@ -134,6 +136,17 @@ def mla_decode_kvcache_cpu(
 ) -> None:
     torch.ops._C_cpu.mla_decode_kvcache(out, query, kv_cache, scale,
                                         block_tables, seq_lens)
+
+
+# merge attn states ops
+def merge_attn_states(output: torch.Tensor,
+                      prefix_output: torch.Tensor,
+                      prefix_lse: torch.Tensor,
+                      suffix_output: torch.Tensor,
+                      suffix_lse: torch.Tensor,
+                      output_lse: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C.merge_attn_states(output, output_lse, prefix_output,
+                                   prefix_lse, suffix_output, suffix_lse)
 
 
 # pos encoding ops
@@ -1232,6 +1245,29 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                                   token_expert_indicies, gating_output)
 
 
+def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
+                          b_qweight: torch.Tensor, b_scales: torch.Tensor,
+                          b_qzeros: Optional[torch.Tensor],
+                          g_idx: Optional[torch.Tensor],
+                          perm: Optional[torch.Tensor],
+                          workspace: torch.Tensor,
+                          sorted_token_ids: torch.Tensor,
+                          expert_ids: torch.Tensor,
+                          num_tokens_past_padded: torch.Tensor,
+                          topk_weights: torch.Tensor, moe_block_size: int,
+                          top_k: int, mul_topk_weights: bool, is_ep: bool,
+                          b_q_type: ScalarType, size_m: int, size_n: int,
+                          size_k: int, is_k_full: bool, use_atomic_add: bool,
+                          use_fp32_reduce: bool,
+                          is_zp_float: bool) -> torch.Tensor:
+    return torch.ops._moe_C.moe_wna16_marlin_gemm(
+        input, output, b_qweight, b_scales, b_qzeros, g_idx, perm, workspace,
+        sorted_token_ids, expert_ids, num_tokens_past_padded, topk_weights,
+        moe_block_size, top_k, mul_topk_weights, is_ep, b_q_type.id, size_m,
+        size_n, size_k, is_k_full, use_atomic_add, use_fp32_reduce,
+        is_zp_float)
+
+
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
 
     @register_fake("_moe_C::marlin_gemm_moe")
@@ -1249,6 +1285,29 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
         return torch.empty((size_m, topk, size_n),
                            dtype=a.dtype,
                            device=a.device)
+
+    @register_fake("_moe_C::moe_wna16_marlin_gemm")
+    def moe_wna16_marlin_gemm_fake(input: torch.Tensor,
+                                   output: Optional[torch.Tensor],
+                                   b_qweight: torch.Tensor,
+                                   b_scales: torch.Tensor,
+                                   b_qzeros: Optional[torch.Tensor],
+                                   g_idx: Optional[torch.Tensor],
+                                   perm: Optional[torch.Tensor],
+                                   workspace: torch.Tensor,
+                                   sorted_token_ids: torch.Tensor,
+                                   expert_ids: torch.Tensor,
+                                   num_tokens_past_padded: torch.Tensor,
+                                   topk_weights: torch.Tensor,
+                                   moe_block_size: int, top_k: int,
+                                   mul_topk_weights: bool, is_ep: bool,
+                                   b_q_type: ScalarType, size_m: int,
+                                   size_n: int, size_k: int, is_k_full: bool,
+                                   use_atomic_add: bool, use_fp32_reduce: bool,
+                                   is_zp_float: bool) -> torch.Tensor:
+        return torch.empty((size_m * top_k, size_n),
+                           dtype=input.dtype,
+                           device=input.device)
 
 
 def reshape_and_cache(

@@ -5,8 +5,8 @@
 set -ex
 set -o pipefail
 
-# cd into parent directory of this file
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# cd 2 levels into the working directory
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
 

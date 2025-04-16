@@ -288,7 +288,7 @@ def process_image(image: Any) -> Mapping[str, Any]:
 class RandomDataset(BenchmarkDataset):
     # Default values copied from benchmark_serving.py for the random dataset.
     DEFAULT_PREFIX_LEN = 0
-    DEFAULT_RANGE_RATIO = 1.0
+    DEFAULT_RANGE_RATIO = 0.0
     DEFAULT_INPUT_LEN = 1024
     DEFAULT_OUTPUT_LEN = 128
 
@@ -308,19 +308,32 @@ class RandomDataset(BenchmarkDataset):
         output_len: int = DEFAULT_OUTPUT_LEN,
         **kwargs,
     ) -> list[SampleRequest]:
+        # Enforce range_ratio < 1
+        assert range_ratio < 1.0, (
+            "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        )
+
         vocab_size = tokenizer.vocab_size
 
         prefix_token_ids = (np.random.randint(
             0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
 
-        input_low = int(input_len * range_ratio)
-        output_low = int(output_len * range_ratio)
+        # New sampling logic: [X * (1 - b), X * (1 + b)]
+        input_low = int(input_len * (1 - range_ratio))
+        input_high = int(input_len * (1 + range_ratio))
+        output_low = int(output_len * (1 - range_ratio))
+        output_high = int(output_len * (1 + range_ratio))
+
+        # Add logging for debugging
+        logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
+        logger.info("Sampling output_len from [%s, %s]", output_low,
+                    output_high)
 
         input_lens = np.random.randint(input_low,
-                                       input_len + 1,
+                                       input_high + 1,
                                        size=num_requests)
         output_lens = np.random.randint(output_low,
-                                        output_len + 1,
+                                        output_high + 1,
                                         size=num_requests)
         offsets = np.random.randint(0, vocab_size, size=num_requests)
 
@@ -472,11 +485,11 @@ class SonnetDataset(BenchmarkDataset):
 
         # Determine how many poem lines to use.
         num_input_lines = round((input_len - base_offset) / avg_len)
-        num_prefix_lines = round((prefix_len - base_offset) / avg_len)
+        num_prefix_lines = max(round((prefix_len - base_offset) / avg_len), 0)
         prefix_lines = self.data[:num_prefix_lines]
 
         samples = []
-        for _ in range(num_requests):
+        while len(samples) < num_requests:
             extra_lines = random.choices(self.data,
                                          k=num_input_lines - num_prefix_lines)
             prompt = f"{base_prompt}{''.join(prefix_lines + extra_lines)}"
@@ -484,13 +497,14 @@ class SonnetDataset(BenchmarkDataset):
             prompt_formatted = tokenizer.apply_chat_template(
                 msg, add_generation_prompt=True, tokenize=False)
             prompt_len = len(tokenizer(prompt_formatted).input_ids)
-            samples.append(
-                SampleRequest(
-                    prompt=prompt_formatted
-                    if return_prompt_formatted else prompt,
-                    prompt_len=prompt_len,
-                    expected_output_len=output_len,
-                ))
+            if prompt_len <= input_len:
+                samples.append(
+                    SampleRequest(
+                        prompt=prompt_formatted
+                        if return_prompt_formatted else prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=output_len,
+                    ))
         return samples
 
 
@@ -749,6 +763,55 @@ class InstructCoderDataset(HuggingFaceDataset):
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# AIMO Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class AIMODataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a AIMO dataset with reasoning questions.
+    """
+    SUPPORTED_DATASET_PATHS = {
+        "AI-MO/aimo-validation-aime", "AI-MO/NuminaMath-1.5",
+        "AI-MO/NuminaMath-CoT"
+    }
+
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
+               output_len: Optional[int] = None,
+               **kwargs) -> list:
+        sampled_requests = []
+        dynamic_output = output_len is None
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt, completion = item['problem'], item["solution"]
+
+            prompt_ids = tokenizer(prompt).input_ids
+            completion_ids = tokenizer(completion).input_ids
+            prompt_len = len(prompt_ids)
+            completion_len = len(completion_ids)
+            output_len = completion_len if dynamic_output else output_len
+            assert isinstance(output_len, int) and output_len > 0
+            if dynamic_output and not is_valid_sequence(prompt_len,
+                                                        completion_len,
+                                                        max_prompt_len=2048,
+                                                        max_total_len=32000):
+                continue
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=None,
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests

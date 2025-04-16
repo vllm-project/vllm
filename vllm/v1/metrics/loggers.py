@@ -239,7 +239,8 @@ class PrometheusStatLogger(StatLoggerBase):
                 documentation="Histogram of time to first token in seconds.",
                 buckets=[
                     0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
-                    0.75, 1.0, 2.5, 5.0, 7.5, 10.0
+                    0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0, 160.0,
+                    640.0, 2560.0
                 ],
                 labelnames=labelnames).labels(*labelvalues)
 
@@ -249,13 +250,13 @@ class PrometheusStatLogger(StatLoggerBase):
                 documentation="Histogram of time per output token in seconds.",
                 buckets=[
                     0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5,
-                    0.75, 1.0, 2.5
+                    0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
                 ],
                 labelnames=labelnames).labels(*labelvalues)
 
         request_latency_buckets = [
             0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
-            40.0, 50.0, 60.0
+            40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
         ]
         self.histogram_e2e_time_request = \
             prometheus_client.Histogram(

@@ -10,10 +10,33 @@ from vllm.platforms import current_platform
 from .utils import ARGS, CONFIGS, ServerConfig
 
 
+# select models to test based on command line arguments
+def pytest_addoption(parser):
+    parser.addoption("--models",
+                     nargs="+",
+                     help="Specify one or more models to test")
+    parser.addoption("--extended",
+                     action="store_true",
+                     default=False,
+                     help="invoke extended tests requiring large GPUs")
+
+
 # for each server config, download the model and return the config
 @pytest.fixture(scope="session", params=CONFIGS.keys())
 def server_config(request):
-    config = CONFIGS[request.param]
+    extended = request.config.getoption("--extended")
+    models = request.config.getoption("--models")
+
+    config_keys_to_test = [
+        key for key in CONFIGS if (models is None or key in models) and (
+            extended or not CONFIGS[key].get("extended", False))
+    ]
+
+    config_key = request.param
+    if config_key not in config_keys_to_test:
+        pytest.skip(f"Skipping config '{config_key}'")
+
+    config = CONFIGS[config_key]
 
     if current_platform.is_rocm() and not config.get("supports_rocm", True):
         pytest.skip("The {} model can't be tested on the ROCm platform".format(
