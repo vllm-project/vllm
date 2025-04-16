@@ -140,9 +140,10 @@ class SingleMemoryAllocator(HybridMemoryAllocator):
 
     def __init__(
         self,
+        block_pool: BlockPool,
         allocator: SpecializedAllocator,
     ):
-        super().__init__()
+        super().__init__(block_pool)
         self.allocator = allocator
         self.group_ids = (0, )
 
@@ -218,11 +219,13 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
 
     def __init__(
         self,
+        block_pool: BlockPool,
         full_attn_allocator: FullAttentionAllocator,
         full_attn_group_ids: tuple[int, ...],
         swa_allocator: SlidingWindowAllocator,
         swa_group_ids: tuple[int, ...],
     ):
+        super().__init__(block_pool)
         self.full_attn_allocator = full_attn_allocator
         self.full_attn_group_ids = full_attn_group_ids
         self.swa_allocator = swa_allocator
@@ -235,7 +238,7 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
         request: Request,
         hash_fn: Any,
     ) -> list[list[BlockHashType]]:
-        # The full attention and sliding window attention have the same block
+        # The full attention and sliding window attention use the same block
         # size.
         block_hashes = self.full_attn_allocator.get_block_hashes(
             request, hash_fn)
@@ -246,7 +249,7 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
         self,
         block_hashes: list[list[BlockHashType]],
     ) -> list[list[KVCacheBlock]]:
-        # Because the full attention and sliding window attention have the same
+        # Because the full attention and sliding window attention use the same
         # block size, we can just use the block hashes for any group.
         block_hashes = block_hashes[0]
 
@@ -277,6 +280,7 @@ class FullAndSwaMemoryAllocator(HybridMemoryAllocator):
             if group_id in self.full_attn_group_ids:
                 combined_blocks.append(full_attn_blocks[group_id][:num_blocks])
             else:
+                # We don't need `[:num_blocks]` here.
                 combined_blocks.append(swa_attn_blocks[group_id])
         return combined_blocks
 
