@@ -356,7 +356,8 @@ class Fp8LinearOp:
         else:
             global USE_ROWWISE_TORCH_SCALED_MM
             if USE_ROWWISE_TORCH_SCALED_MM is None:
-                USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
+                USE_ROWWISE_TORCH_SCALED_MM = (
+                    current_platform.is_rocm()
                     and torch.__version__[0:3] >= "2.7"
                     and current_platform.has_device_capability(94))
             if input.dtype != current_platform.fp8_dtype():
