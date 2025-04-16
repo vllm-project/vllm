@@ -361,13 +361,12 @@ direct_register_custom_op(
 )
 
 
-def unified_attention_with_output(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
+def unified_attention_with_output(query: torch.Tensor,
+                                  key: torch.Tensor,
+                                  value: torch.Tensor,
+                                  output: torch.Tensor,
+                                  layer_name: str,
+                                  output_scale: torch.Tensor = None) -> None:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.no_compile_layers[layer_name]
@@ -378,16 +377,17 @@ def unified_attention_with_output(
                       value,
                       kv_cache,
                       attn_metadata,
-                      output=output)
+                      output=output,
+                      output_scale=output_scale)
 
 
 def unified_attention_with_output_fake(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        layer_name: str,
+        output_scale: Optional[torch.Tensor] = None) -> None:
     return
 
 
