@@ -317,11 +317,10 @@ class Scheduler(SchedulerInterface):
                     self.kv_cache_manager.get_computed_blocks(request)
 
                 # Get externally-cached tokens if using a KVConnector.
-                num_external_tokens = 0
-                if self.connector is not None:
-                    num_external_tokens += (
-                        self.connector.get_num_new_matched_tokens(
-                            request, num_computed_tokens))
+                num_external_tokens = (
+                    0 if self.connector is None else
+                    self.connector.get_num_new_matched_tokens(
+                        request, num_computed_tokens))
 
                 # Total computed tokens (local + external).
                 num_computed_tokens += num_external_tokens
@@ -352,9 +351,8 @@ class Scheduler(SchedulerInterface):
                     new_encoder_budget = encoder_budget
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request=request,
-                    num_tokens=num_new_tokens + num_external_tokens,
-                    new_computed_blocks=computed_blocks)
+                    request, num_new_tokens + num_external_tokens,
+                    computed_blocks)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
