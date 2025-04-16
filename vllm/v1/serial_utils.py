@@ -25,10 +25,10 @@ CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
 CUSTOM_TYPE_RAW_VIEW = 3
 
-# MultiModealField class serialization type map.
+# MultiModalField class serialization type map.
 # These need to list all possible field types and match them
 # to factory methods in `MultiModalFieldConfig`.
-MMF_CLASS_TO_FACTORY = {
+MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
     MultiModalFlatField: "flat",
     MultiModalSharedField: "shared",
     MultiModalBatchedField: "batched",
@@ -133,10 +133,14 @@ class MsgpackEncoder:
         # backing buffers that we've stashed in `aux_buffers`.
         return obj.dtype.str, obj.shape, data
 
-    def _encode_nested_tensors(self, obj: Any) -> NestedTensors:
-        if isinstance(obj, torch.Tensor):
-            return self._encode_ndarray(obj.numpy())
-        return [self._encode_nested_tensors(x) for x in obj]
+    def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
+        if isinstance(nt, torch.Tensor):
+            return self._encode_ndarray(nt.numpy())
+        if isinstance(nt, (int, float)):
+            # Although it violates NestedTensors type, MultiModalKwargs
+            # values are sometimes floats.
+            return nt
+        return [self._encode_nested_tensors(x) for x in nt]
 
     def _encode_mm_field(self, field: BaseMultiModalField):
         # Figure out the factory name for the field type.
@@ -147,7 +151,7 @@ class MsgpackEncoder:
         # which will be then used to reconstruct the field.
         field_values = (getattr(field, f.name)
                         for f in dataclasses.fields(field))
-        return (name, *field_values)
+        return name, *field_values
 
 
 class MsgpackDecoder:
@@ -202,7 +206,7 @@ class MsgpackDecoder:
         return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
 
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
-        all = []
+        decoded_items = []
         for item in obj:
             elems = []
             for v in item:
@@ -213,10 +217,14 @@ class MsgpackDecoder:
                                        factory_meth_name)
                 v["field"] = factory_meth(None, *field_args).field
                 elems.append(MultiModalFieldElem(**v))
-            all.append(MultiModalKwargsItem.from_elems(elems))
-        return all
+            decoded_items.append(MultiModalKwargsItem.from_elems(elems))
+        return decoded_items
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
+        if isinstance(obj, (int, float)):
+            # Although it violates NestedTensors type, MultiModalKwargs
+            # values are sometimes floats.
+            return obj
         if not isinstance(obj, list):
             raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
         if obj and isinstance(obj[0], str):
