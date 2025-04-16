@@ -66,8 +66,8 @@ def has_lmf_unsupported_json_features(schema: dict) -> bool:
             return False
 
         # Check for pattern restrictions
-        # if "pattern" in obj:
-        #     return True
+        if "pattern" in obj:
+            return True
 
         # Recursively check all nested objects and arrays
         for value in obj.values():
