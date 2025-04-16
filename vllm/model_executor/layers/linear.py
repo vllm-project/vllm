@@ -56,7 +56,8 @@ def rocm_aiter_tgemm_mm(x: torch.Tensor, weight: torch.Tensor,
     return tgemm.mm(x, weight, bias)
 
 
-def dispatch_unquantized_linear_func() -> Callable[..., torch.Tensor]:
+def dispatch_unquantized_linear_func(
+) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (  # noqa: E501
         is_rocm_aiter_linear_enabled)
     if is_rocm_aiter_linear_enabled():
