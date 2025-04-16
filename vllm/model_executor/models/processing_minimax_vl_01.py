@@ -213,7 +213,6 @@ class MiniMaxVL01Processor(ProcessorMixin):
               `None`).
             - **pixel_values** -- Pixel values to be fed to a model. Returned when `images` is not `None`.
         """
-        logger.info(f"start processing text: {text}")
         if images is None and text is None:
             raise ValueError("You have to specify at least one of `images` or `text`.")
 
@@ -344,7 +343,6 @@ class MiniMaxVL01Processor(ProcessorMixin):
         text_inputs = self.tokenizer(prompt_strings, **output_kwargs["text_kwargs"])
         #return {**text_inputs, **image_inputs}
         data={**text_inputs, **image_inputs}
-        logger.info(f"data: {data}")
         return CustomBatchFeature(data)
 
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.batch_decode with CLIP->Llama
