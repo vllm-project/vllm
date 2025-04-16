@@ -17,9 +17,9 @@ def model_runner():
         max_model_len=512,
     )
     model_config = ModelConfig(
-        model="facebook/opt-125m",
+        model="/mnt/weka/data/pytorch/llama3.2/Meta-Llama-3.2-1B",
         task="generate",
-        tokenizer="facebook/opt-125m",
+        tokenizer="/mnt/weka/data/pytorch/llama3.2/Meta-Llama-3.2-1B",
         tokenizer_mode="auto",
         trust_remote_code=True,
         dtype="float16" if not current_platform.is_hpu() else "bfloat16",
