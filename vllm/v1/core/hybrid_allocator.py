@@ -166,8 +166,9 @@ class SingleMemoryAllocator(HybridMemoryAllocator):
         block_hashes = block_hashes[0]
         if len(block_hashes) * self.block_size == num_tokens:
             block_hashes = block_hashes[:-1]
-        return self.allocator.find_longest_cache_hit(block_hashes,
-                                                     self.group_ids)
+        blocks, num_computed_tokens = self.allocator.find_longest_cache_hit(
+            block_hashes, self.group_ids)
+        return [blocks[0]], num_computed_tokens
 
     def remove_skipped_blocks(
         self,

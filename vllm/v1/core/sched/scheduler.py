@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -144,7 +145,7 @@ class Scheduler(SchedulerInterface):
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
 
-        req_to_new_block_ids: dict[str, list[int]] = {}
+        req_to_new_block_ids: dict[str, list[list[int]]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -165,7 +166,8 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            num_new_tokens = (request.num_tokens_with_spec -
+            num_draft_tokens = len(request.draft_token_ids)
+            num_new_tokens = (request.num_tokens + num_draft_tokens -
                               request.num_computed_tokens)
             if (0 < self.scheduler_config.long_prefill_token_threshold <
                     num_new_tokens):
@@ -196,7 +198,8 @@ class Scheduler(SchedulerInterface):
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens,
+                    num_new_tokens - num_draft_tokens,
+                    num_draft_tokens=num_draft_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -233,7 +236,7 @@ class Scheduler(SchedulerInterface):
                 # cycle to fill in the bitmask, which could be a big no-op.
                 structured_output_request_ids[request.request_id] = req_index
             req_to_new_block_ids[request.request_id] = [
-                b.block_id for b in new_blocks
+                [b.block_id for b in blocks] for blocks in new_blocks
             ]
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
@@ -330,7 +333,11 @@ class Scheduler(SchedulerInterface):
                     new_encoder_budget = encoder_budget
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, num_computed_tokens, computed_blocks)
+                    request,
+                    num_new_tokens,
+                    new_computed_tokens=num_computed_tokens,
+                    new_computed_blocks=computed_blocks,
+                    num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
@@ -355,9 +362,9 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_block_ids[request.request_id] = [
-                    b.block_id for b in computed_blocks + new_blocks
-                ]
+                req_to_new_block_ids[request.request_id] = [[
+                    b.block_id for b in itertools.chain(b1, b2)
+                ] for b1, b2 in zip(computed_blocks, new_blocks)]
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -463,7 +470,7 @@ class Scheduler(SchedulerInterface):
         request: Request,
         num_scheduled_tokens: int,
         num_scheduled_spec_tokens: int,
-        new_block_ids: list[int],
+        new_block_ids: list[list[int]],
         resumed_from_preemption: bool,
     ) -> CachedRequestData:
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating

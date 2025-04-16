@@ -52,6 +52,7 @@ class KVCacheManager:
             kv_cache_config=kv_cache_config,
             block_pool=self.block_pool,
         )
+        self.num_groups = len(kv_cache_config.kv_cache_groups)
 
     @property
     def usage(self) -> float:
@@ -104,6 +105,7 @@ class KVCacheManager:
 
         self.prefix_cache_stats.queries += num_tokens
         self.prefix_cache_stats.hits += num_computed_tokens
+        print(f"computed_blocks: {computed_blocks}")
         return computed_blocks, num_computed_tokens
 
     def allocate_slots(
@@ -145,12 +147,13 @@ class KVCacheManager:
         assert num_input_tokens + num_draft_tokens > 0
 
         if new_computed_blocks is None:
-            new_computed_blocks = []
+            new_computed_blocks = [[] for _ in range(self.num_groups)]
             assert new_computed_tokens == 0
-        else:
-            assert new_computed_tokens > 0
 
-        req_blocks = self.req_to_blocks[request.request_id]
+        req_blocks = self.req_to_blocks.get(request.request_id)
+        if req_blocks is None:
+            req_blocks = [[] for _ in range(self.num_groups)]
+            self.req_to_blocks[request.request_id] = req_blocks
 
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
@@ -183,9 +186,9 @@ class KVCacheManager:
             return None
 
         # Add the new computed blocks and new blocks to the request.
-        # FIXME
-        req_blocks.extend(new_computed_blocks)
-        req_blocks.extend(new_blocks)
+        for group_id in range(self.num_groups):
+            req_blocks[group_id].extend(new_computed_blocks[group_id])
+            req_blocks[group_id].extend(new_blocks[group_id])
         if not self.enable_caching:
             return new_blocks
 
