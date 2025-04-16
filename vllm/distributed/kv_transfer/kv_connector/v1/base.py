@@ -138,7 +138,7 @@ class KVConnectorBase_V1(ABC):
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
                       attn_metadata: "AttentionMetadata", **kwargs) -> None:
         """
-        Start saving the a layer of KV cache from vLLM's paged buffer 
+        Start saving a layer of KV cache from vLLM's paged buffer 
         to the connector. This is called from within attention layer to
         enable async copying during execution.
 
