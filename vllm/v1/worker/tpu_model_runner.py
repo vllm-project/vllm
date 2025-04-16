@@ -925,9 +925,10 @@ class TPUModelRunner:
                                        dtype=self._hidden_states_dtype)
             dummy_require_struct_decoding = torch.zeros(
                 num_reqs, dtype=torch.bool, device=self.device).unsqueeze(1)
-            dummy_grammar_bitmask = torch.zeros((num_reqs, vocab_size // 32),
-                                                dtype=torch.int32,
-                                                device=self.device)
+            dummy_grammar_bitmask = torch.zeros(
+                (num_reqs, cdiv(vocab_size, 32)),
+                dtype=torch.int32,
+                device=self.device)
             # The first dimension of the above 3 dummy tensors cannot be
             # mark_dynamic because some operations in structured_decode require
             # them to be static.
@@ -1058,13 +1059,16 @@ class TPUModelRunner:
             self.apply_grammar_bitmask(logits, grammar_bitmask, arange),
             logits)
 
-    def apply_grammar_bitmask(self, logits, grammar_bitmask, arange):
+    def apply_grammar_bitmask(self, logits: torch.Tensor,
+                              grammar_bitmask: torch.Tensor,
+                              arange: torch.Tensor):
         assert (logits.shape[0] == grammar_bitmask.shape[0])
+        vocab_size = logits.shape[1]
         logits_cloned = logits.clone()
         for i in range(logits.shape[0]):
             unpacked_bitmask = (torch.bitwise_right_shift(
                 grammar_bitmask[i][:, None], arange[None, :]) & 1) == 0
-            unpacked_bitmask = unpacked_bitmask.reshape(-1)
+            unpacked_bitmask = unpacked_bitmask.reshape(-1)[:vocab_size]
             logits_cloned[i] = logits_cloned[i].masked_fill(
                 unpacked_bitmask, -float("inf"))
         return logits_cloned
@@ -1083,7 +1087,7 @@ class TPUModelRunner:
         num_reqs, vocab_size = logits.shape
 
         # Pad grammar bitmask so that it won't cause recompilation.
-        grammar_bitmask_padded = torch.zeros((num_reqs, vocab_size // 32),
+        grammar_bitmask_padded = torch.zeros((num_reqs, cdiv(vocab_size, 32)),
                                              dtype=torch.int32,
                                              device="cpu")
 
@@ -1092,23 +1096,22 @@ class TPUModelRunner:
         # the bitmask since the scheduler doesn't know how the tpu runner is
         # ordering the requests in the batch. We need to match the order of
         # bitmask with the order of requests
-        struct_out_req_batch_indices: dict[str, int] = {}
+        struct_out_indices: list[int] = []
+        mask_indices: list[int] = []
         for req_id in self.input_batch.req_ids:
             mask_index = scheduler_output.structured_output_request_ids.get(
                 req_id)
             if mask_index is None:
                 continue
             batch_index = self.input_batch.req_id_to_index[req_id]
-            struct_out_req_batch_indices[req_id] = batch_index
-            grammar_bitmask_padded[batch_index] = torch.from_numpy(
-                grammar_bitmask[mask_index])
+            struct_out_indices.append(batch_index)
+        grammar_bitmask_padded[struct_out_indices] = torch.from_numpy(
+            grammar_bitmask[mask_indices])
         # It's not guaranteed that all requests in this batch require
         # structured output, so create a bool tensor to represent
         # the requests that need structured output.
         require_struct_out = torch.zeros(num_reqs, dtype=torch.bool)
-        struct_out_indices = torch.tensor(list(
-            struct_out_req_batch_indices.values()),
-                                          dtype=torch.long)
+        struct_out_indices = torch.tensor(struct_out_indices, dtype=torch.long)
         require_struct_out[struct_out_indices] = True
         return require_struct_out.unsqueeze(1), grammar_bitmask_padded
 
