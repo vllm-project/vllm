@@ -490,17 +490,6 @@ class FalconH1Model(nn.Module):
             input_ids=input_ids,
             attn_metadata=attn_metadata,
         )
-        # if attn_metadata.num_prefills > 0:
-        #     seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
-        #     for i, (srt, end) in enumerate(
-        #         zip(
-        #             attn_metadata.query_start_loc,
-        #             attn_metadata.query_start_loc[1:],
-        #         )
-        #     ):
-        #         seq_idx[srt:end] = i
-        #     seq_idx.unsqueeze_(0)
-
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds * self.embedding_multiplier
