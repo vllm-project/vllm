@@ -15,6 +15,7 @@ import torch
 from torch.distributed import ProcessGroup, TCPStore
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
+                                                _unregister_process_group,
                                                 is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
 
@@ -101,10 +102,11 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
         if remaining_layers := num_hidden_layers % pp_size:
             for i in range(2, remaining_layers + 2):
                 partitions[-i] += 1
-            logger.info("Hidden layers were unevenly partitioned: %s",
-                        ",".join(str(p) for p in partitions))
-            logger.info("This can be manually overridden using the "
-                        "VLLM_PP_LAYER_PARTITION environment variable")
+            logger.info(
+                "Hidden layers were unevenly partitioned: [%s]. "
+                "This can be manually overridden using the "
+                "VLLM_PP_LAYER_PARTITION environment variable",
+                ",".join(str(p) for p in partitions))
 
     start_layer = sum(partitions[:pp_rank])
     end_layer = start_layer + partitions[pp_rank]
@@ -206,10 +208,7 @@ class StatelessProcessGroup:
     def barrier(self):
         """A barrier to synchronize all ranks."""
         for i in range(self.world_size):
-            if i == self.rank:
-                self.broadcast_obj(None, src=self.rank)
-            else:
-                self.broadcast_obj(None, src=i)
+            self.broadcast_obj(None, src=i)
 
     @staticmethod
     def create(
@@ -333,3 +332,15 @@ def stateless_init_torch_distributed_process_group(
     pg._register_backend(device, backend_type, backend_class)
 
     return pg
+
+
+def stateless_destroy_torch_distributed_process_group(
+        pg: ProcessGroup) -> None:
+    """
+    Destroy ProcessGroup returned by
+        stateless_init_torch_distributed_process_group().
+    """
+    # Lazy import for non-CUDA backends.
+    from torch.distributed.distributed_c10d import _shutdown_backend
+    _shutdown_backend(pg)
+    _unregister_process_group(pg.group_name)

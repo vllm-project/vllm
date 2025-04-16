@@ -83,8 +83,8 @@ spda_o = scaled_dot_product_attention(
 return spda_o @ W_O
 
 NOTE: in the actual code, 
-    `kv_b_proj` is [W_UK; W_UV] concatnated per head
-    `q_b_proj` is [W_UQ; W_QR] concatnated per head
+    `kv_b_proj` is [W_UK; W_UV] concatenated per head
+    `q_b_proj` is [W_UQ; W_QR] concatenated per head
     `out_proj` is W_O
 
 
@@ -204,7 +204,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -212,18 +212,25 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
 from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
+
+if HAS_TRITON:
+    from vllm.attention.ops.triton_flash_attention import triton_attention
+else:
+    triton_attention = None
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
-    # For rocm use upstream flash attention
-    from flash_attn import flash_attn_varlen_func
     is_vllm_fa = False
-
-from vllm.attention.ops.triton_flash_attention import triton_attention
+    try:
+        # For rocm use upstream flash attention
+        from flash_attn import flash_attn_varlen_func
+    except ImportError:
+        flash_attn_varlen_func = None
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -659,7 +666,7 @@ class MLACommonMetadata(AttentionMetadata):
             assert num_seqs > num_queries
 
         if turn_prefills_into_decodes:
-            # When Mutli-Step is enabled with Chunked-Prefill, prefills and
+            # When Multi-Step is enabled with Chunked-Prefill, prefills and
             # decodes are scheduled together. In the first step, all the
             # prefills turn into decodes. This update reflects that
             # conversion.

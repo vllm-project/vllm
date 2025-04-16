@@ -219,7 +219,15 @@ async def async_request_deepspeed_mii(
                 if response.status == 200:
                     parsed_resp = await response.json()
                     output.latency = time.perf_counter() - st
-                    output.generated_text = parsed_resp["text"][0]
+                    if "choices" in parsed_resp:
+                        output.generated_text = parsed_resp["choices"][0][
+                            "text"]
+                    elif "text" in parsed_resp:
+                        output.generated_text = parsed_resp["text"][0]
+                    else:
+                        output.error = ("Unexpected response format: "
+                                        "neither 'choices' nor 'text' found")
+                        output.success = False
                     output.success = True
                 else:
                     output.error = response.reason or ""
@@ -489,3 +497,9 @@ ASYNC_REQUEST_FUNCS = {
     "scalellm": async_request_openai_completions,
     "sglang": async_request_openai_completions,
 }
+
+OPENAI_COMPATIBLE_BACKENDS = [
+    k for k, v in ASYNC_REQUEST_FUNCS.items()
+    if v in (async_request_openai_completions,
+             async_request_openai_chat_completions)
+]

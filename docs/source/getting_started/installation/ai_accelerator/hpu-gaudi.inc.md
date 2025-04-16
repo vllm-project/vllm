@@ -86,7 +86,7 @@ Currently, there are no pre-built Intel Gaudi images.
 ### Build image from source
 
 ```console
-docker build -f Dockerfile.hpu -t vllm-hpu-env  .
+docker build -f docker/Dockerfile.hpu -t vllm-hpu-env  .
 docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --rm vllm-hpu-env
 ```
 
