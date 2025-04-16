@@ -65,6 +65,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             **kwargs):
 
         self.is_prefill = mapping.is_prefill
+        self.is_prompt_logprobs = mapping.is_prompt_logprobs
         self._update_base_metadata(mapping, lora_index_to_id, max_loras,
                                    vocab_size, extra_vocab_size,
                                    long_lora_context)
