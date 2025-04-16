@@ -101,7 +101,7 @@ class RequestOutputKind(Enum):
     CUMULATIVE = 0
     # Return only deltas in each RequestOutput
     DELTA = 1
-    # Do not return intermediate RequestOuputs
+    # Do not return intermediate RequestOutput
     FINAL_ONLY = 2
 
 
@@ -369,8 +369,9 @@ class SamplingParams(
             self.top_k = -1
             self.min_p = 0.0
             self._verify_greedy_sampling()
+
         # eos_token_id is added to this by the engine
-        self._all_stop_token_ids = set(self.stop_token_ids)
+        self._all_stop_token_ids.update(self.stop_token_ids)
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
@@ -384,9 +385,10 @@ class SamplingParams(
         if not -2.0 <= self.frequency_penalty <= 2.0:
             raise ValueError("frequency_penalty must be in [-2, 2], got "
                              f"{self.frequency_penalty}.")
-        if not 0.0 < self.repetition_penalty <= 2.0:
-            raise ValueError("repetition_penalty must be in (0, 2], got "
-                             f"{self.repetition_penalty}.")
+        if self.repetition_penalty <= 0.0:
+            raise ValueError(
+                "repetition_penalty must be greater than zero, got "
+                f"{self.repetition_penalty}.")
         if self.temperature < 0.0:
             raise ValueError(
                 f"temperature must be non-negative, got {self.temperature}.")

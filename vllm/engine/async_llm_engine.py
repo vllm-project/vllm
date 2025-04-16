@@ -303,8 +303,11 @@ class _AsyncLLMEngine(LLMEngine):
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
 
-            finished_requests_ids = self.scheduler[
-                virtual_engine].get_and_reset_finished_requests_ids()
+            if not scheduler_outputs.is_empty():
+                # this will cause mamba_cache/minimax_cache failed
+                # to release finished_requests_ids of the last steps
+                finished_requests_ids = self.scheduler[
+                    virtual_engine].get_and_reset_finished_requests_ids()
 
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
@@ -492,7 +495,6 @@ class _AsyncLLMEngine(LLMEngine):
 
         preprocessed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
-            request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
@@ -546,7 +548,7 @@ async def build_guided_decoding_logits_processor_async(
     sampling_params = copy.copy(sampling_params)
     guided_decoding = sampling_params.guided_decoding
 
-    logger.info(
+    logger.debug(
         "Building guided decoding logits processor. "
         "guided_decoding: %s%s", guided_decoding,
         f", reasoning_backend: {reasoning_backend}"
@@ -1165,6 +1167,10 @@ class AsyncLLMEngine(EngineClient):
                                             exception=asyncio.CancelledError,
                                             verbose=self.log_requests)
 
+    async def get_vllm_config(self) -> VllmConfig:
+        """Get the vllm configuration of the vLLM engine."""
+        return self.engine.get_vllm_config()
+
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""
         return self.engine.get_model_config()
@@ -1223,8 +1229,8 @@ class AsyncLLMEngine(EngineClient):
     async def sleep(self, level: int = 1) -> None:
         self.engine.sleep(level)
 
-    async def wake_up(self) -> None:
-        self.engine.wake_up()
+    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        self.engine.wake_up(tags)
 
     async def is_sleeping(self) -> bool:
         return self.engine.is_sleeping()

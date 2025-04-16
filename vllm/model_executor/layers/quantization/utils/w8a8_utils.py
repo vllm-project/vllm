@@ -6,6 +6,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.envs import envs
 from vllm.platforms import current_platform
 
 # Input scaling factors are no longer optional in _scaled_mm starting
@@ -18,6 +19,10 @@ TORCH_DEVICE_IDENTITY = None
 # are time consuming.
 USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
                                and current_platform.has_device_capability(94))
+
+
+def is_rocm_aiter_linear_enabled() -> bool:
+    return (envs.VLLM_ROCM_USE_AITER_LINEAR and envs.VLLM_ROCM_USE_AITER)
 
 
 def sparse_cutlass_supported() -> bool:
@@ -48,6 +53,16 @@ def cutlass_block_fp8_supported() -> bool:
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
     return ops.cutlass_scaled_mm_supports_block_fp8(capability)
+
+
+def cutlass_group_gemm_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_group_gemm_supported(capability)
 
 
 CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
@@ -259,7 +274,7 @@ def dispatch_w8a8_scaled_mm(
     if cutlass_fp8_supported:
         return cutlass_w8a8_scaled_mm
     if per_tensor_weights and per_tensor_activations:
-        if current_platform.is_rocm_aiter_linear_enabled():
+        if is_rocm_aiter_linear_enabled():
             return rocm_aiter_per_tensor_w8a8_scaled_mm
         return torch_per_tensor_w8a8_scaled_mm
     # torch.scaled_mm supports per tensor weights + activations only
@@ -302,6 +317,7 @@ class Fp8LinearOp:
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        out_dtype: Optional[torch.dtype] = None,
         input_scale: Optional[torch.Tensor] = None,
         input_scale_ub: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
@@ -321,8 +337,13 @@ class Fp8LinearOp:
         if use_per_token_if_dynamic is None:
             use_per_token_if_dynamic = self.use_per_token_if_dynamic
 
+        if out_dtype is None:
+            out_dtype = input.dtype
+
         # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
         if self.cutlass_fp8_supported:
+            assert input.dtype != current_platform.fp8_dtype(
+            ), "FP8 input to cutlass is not currently implemented"
             qinput, x_scale = ops.scaled_fp8_quant(
                 input_2d,
                 input_scale,
@@ -330,12 +351,15 @@ class Fp8LinearOp:
                 use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         else:
-            # Maybe apply padding to output, see comment in __init__
-            qinput, x_scale = ops.scaled_fp8_quant(
-                input_2d,
-                input_scale,
-                num_token_padding=self.output_padding,
-                use_per_token_if_dynamic=use_per_token_if_dynamic)
+            if input.dtype != current_platform.fp8_dtype():
+                # Maybe apply padding to output, see comment in __init__
+                qinput, x_scale = ops.scaled_fp8_quant(
+                    input_2d,
+                    input_scale,
+                    num_token_padding=self.output_padding,
+                    use_per_token_if_dynamic=use_per_token_if_dynamic)
+            else:
+                qinput, x_scale = input_2d, input_scale
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)

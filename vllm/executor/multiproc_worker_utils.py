@@ -16,7 +16,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import _check_multiproc_method, get_mp_context, run_method
+from vllm.utils import _maybe_force_spawn, get_mp_context, run_method
 
 logger = init_logger(__name__)
 
@@ -291,7 +291,7 @@ def set_multiprocessing_worker_envs(parallel_config):
     in a multiprocessing environment. This should be called by the parent 
     process before worker processes are created"""
 
-    _check_multiproc_method()
+    _maybe_force_spawn()
 
     # Configure thread parallelism if OMP_NUM_THREADS isn't set
     #

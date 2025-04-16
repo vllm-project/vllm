@@ -18,6 +18,14 @@ EXPECTED_LORA_OUTPUT = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     prompts = [
         PROMPT_TEMPLATE.format(query="How many singers do we have?"),
@@ -46,14 +54,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
 @create_new_process_for_each_test()
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
@@ -61,7 +61,6 @@ def test_chatglm3_lora(chatglm3_lora_files):
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=64,
-                   tensor_parallel_size=1,
                    trust_remote_code=True,
                    enable_chunked_prefill=True)
 
