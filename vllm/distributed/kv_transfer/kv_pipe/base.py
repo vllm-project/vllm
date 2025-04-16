@@ -23,7 +23,7 @@ class KVPipeBase(ABC):
     """
 
     @abstractmethod
-    def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
+    def send_tensor(self, tensor: Optional[torch.Tensor], target_rank: int = 0) -> None:
         """Send a tensor, or None, via the pipe.
         
         Need to support sending None -- important for error handling.
@@ -41,7 +41,7 @@ class KVPipeBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def recv_tensor(self) -> Optional[torch.Tensor]:
+    def recv_tensor(self, src_rank: int) -> Optional[torch.Tensor]:
         """Receive a tensor (can be None) from the pipeline.
 
         Returns:

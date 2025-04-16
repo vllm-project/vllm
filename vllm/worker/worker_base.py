@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 import cloudpickle
 import torch
 import torch.nn as nn
+from collections import defaultdict
 
 from vllm.config import (ObservabilityConfig, VllmConfig,
                          set_current_vllm_config)
@@ -24,6 +25,8 @@ from vllm.utils import (enable_trace_function_call_for_thread,
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
+from vllm.distributed.device_communicators.nixl import DynamoNixlConnector
+from vllm.remote_prefill import MemoryOpType, RemotePrefillResult
 
 logger = init_logger(__name__)
 
@@ -55,6 +58,9 @@ class WorkerBase:
         from vllm.platforms import current_platform
         self.current_platform = current_platform
 
+        self.nixl_connector: Optional[DynamoNixlConnector] = None
+
+    @abstractmethod
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
@@ -221,6 +227,13 @@ class WorkerInput:
     virtual_engine: int = 0
     num_steps: int = 1
 
+    local_block_ids: Optional[List[List[int]]] = None
+    staging_block_ids: Optional[List[List[int]]] = None
+    remote_block_ids: Optional[List[List[int]]] = None
+    remote_engine_id: Optional[List[str]] = None
+    notify_msg: Optional[List[str]] = None
+    op_type: Optional[List[MemoryOpType]] = None
+
     @classmethod
     def from_broadcasted_tensor_dict(
         cls: Type["WorkerInput"],
@@ -237,6 +250,12 @@ class WorkerInput:
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
             num_steps=tensor_dict.pop("num_steps"),
+            local_block_ids=tensor_dict.pop("local_block_ids"),
+            staging_block_ids=tensor_dict.pop("staging_block_ids"),
+            remote_block_ids=tensor_dict.pop("remote_block_ids"),
+            remote_engine_id=tensor_dict.pop("remote_engine_id"),
+            notify_msg=tensor_dict.pop("notify_msg"),
+            op_type=tensor_dict.pop("op_type"),
         )
 
     def as_broadcastable_tensor_dict(
@@ -251,6 +270,12 @@ class WorkerInput:
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
             "num_steps": self.num_steps,
+            "local_block_ids": self.local_block_ids,
+            "staging_block_ids": self.staging_block_ids,
+            "remote_block_ids": self.remote_block_ids,
+            "remote_engine_id": self.remote_engine_id,
+            "notify_msg": self.notify_msg,
+            "op_type": self.op_type,
         }
 
         return tensor_dict
@@ -321,13 +346,16 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             return None
 
         worker_input = WorkerInput.from_broadcasted_tensor_dict(broadcast_data)
-        model_input = (
-            self.model_runner.make_model_input_from_broadcasted_tensor_dict(
-                broadcast_data))
+        if worker_input.num_seq_groups > 0:
+            model_input = (
+                self.model_runner.make_model_input_from_broadcasted_tensor_dict(
+                    broadcast_data))
 
-        kwargs = extract_previous_hidden_states(broadcast_data)
+            kwargs = extract_previous_hidden_states(broadcast_data)
 
-        return model_input, worker_input, kwargs
+            return model_input, worker_input, kwargs
+        else:
+            return None, worker_input, {}
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
@@ -401,51 +429,96 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
+        remote_prefill_result = RemotePrefillResult()
 
         # If there is no input, we don't need to execute the model.
-        if worker_input.num_seq_groups == 0:
-            return []
+        if worker_input.num_seq_groups > 0:
+            self._read_blocks(worker_input)
+            remote_prefill_result.is_pending_remote_prefill = False
+            intermediate_tensors = None
+            orig_model_execute_time = 0.0
+            if not get_pp_group().is_first_rank:
+                intermediate_tensors = IntermediateTensors(
+                    get_pp_group().recv_tensor_dict(
+                        all_gather_group=get_tp_group()))
+                if (self.observability_config is not None
+                        and self.observability_config.collect_model_execute_time):
+                    orig_model_execute_time = intermediate_tensors.tensors.get(
+                        "model_execute_time", torch.tensor(0)).item()
 
-        intermediate_tensors = None
-        orig_model_execute_time = 0.0
-        if not get_pp_group().is_first_rank:
-            intermediate_tensors = IntermediateTensors(
-                get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group()))
+            output = self.model_runner.execute_model(
+                model_input=model_input,
+                kv_caches=self.kv_cache[worker_input.virtual_engine]
+                if self.kv_cache is not None else None,
+                intermediate_tensors=intermediate_tensors,
+                num_steps=num_steps,
+                **kwargs,
+            )
+
+            model_execute_time = time.perf_counter() - start_time
+            if not get_pp_group().is_last_rank:
+                # output is IntermediateTensors
+                assert isinstance(output, IntermediateTensors)
+                if (self.observability_config is not None
+                        and self.observability_config.collect_model_execute_time):
+                    output.tensors["model_execute_time"] = torch.tensor(
+                        model_execute_time + orig_model_execute_time)
+                get_pp_group().send_tensor_dict(output.tensors,
+                                                all_gather_group=get_tp_group())
+                return [None]
             if (self.observability_config is not None
-                    and self.observability_config.collect_model_execute_time):
-                orig_model_execute_time = intermediate_tensors.tensors.get(
-                    "model_execute_time", torch.tensor(0)).item()
+                    and self.observability_config.collect_model_execute_time
+                    and output is not None):
+                for o in output:
+                    o.model_execute_time = (orig_model_execute_time +
+                                            model_execute_time)
 
-        output = self.model_runner.execute_model(
-            model_input=model_input,
-            kv_caches=self.kv_cache[worker_input.virtual_engine]
-            if self.kv_cache is not None else None,
-            intermediate_tensors=intermediate_tensors,
-            num_steps=num_steps,
-            **kwargs,
-        )
+            self._write_blocks(worker_input)
 
-        model_execute_time = time.perf_counter() - start_time
-        if not get_pp_group().is_last_rank:
-            # output is IntermediateTensors
-            assert isinstance(output, IntermediateTensors)
-            if (self.observability_config is not None
-                    and self.observability_config.collect_model_execute_time):
-                output.tensors["model_execute_time"] = torch.tensor(
-                    model_execute_time + orig_model_execute_time)
-            get_pp_group().send_tensor_dict(output.tensors,
-                                            all_gather_group=get_tp_group())
-            return [None]
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_execute_time
-                and output is not None):
-            for o in output:
-                o.model_execute_time = (orig_model_execute_time +
-                                        model_execute_time)
+        else:
+            remote_prefill_result.is_pending_remote_prefill = True
+            output = []
+
+        # collect kv transfer notifications from non driver workers
+
+        if self.nixl_connector is not None:
+            new_notifs = self.nixl_connector.get_new_notifs()
+            rank = get_tp_group().rank
+            all_new_notifs = [new_notifs]
+            if rank > 0:
+                get_tp_group().send_object(new_notifs, dst=0)
+            else:
+                for i in range(1, get_tp_group().world_size):
+                    all_new_notifs.append(get_tp_group().recv_object(src=i))
+
+            request_notif_counter = defaultdict(int)
+            for notifs in all_new_notifs:
+                for req_ids in notifs.values():
+                    for req_id in req_ids:
+                        # the notification value is changed to bytes in
+                        # nixl commit d40858a0545e285c1b5760909a763a2411d6c89f
+                        if isinstance(req_id, bytes):
+                            req_id = req_id.decode("utf-8")
+                        request_notif_counter[req_id] += 1
+
+            if request_notif_counter:
+                logger.debug("Request notif counter: %s", request_notif_counter)
+
+            request_done_counter = defaultdict(int)
+            for req_id in self.nixl_connector.get_done_tranfers():
+                request_done_counter[req_id] += 1
+
+            remote_prefill_result.request_notif_counter = request_notif_counter
+            remote_prefill_result.request_done_counter = request_done_counter
 
         # output is List[SamplerOutput]
-        return output
+        return output, remote_prefill_result
+    
+    def _read_blocks(self, worker_input: WorkerInput) -> None:
+        pass
+
+    def _write_blocks(self, worker_input: WorkerInput) -> None:
+        pass
 
     def _execute_model_spmd(
         self,

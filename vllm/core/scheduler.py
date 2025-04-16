@@ -4,13 +4,14 @@ import enum
 import os
 import random
 import time
+import copy
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Deque, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Union
+from typing import Set, Tuple, Union, Any
 
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import ModelConfig, CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -292,6 +293,7 @@ class SchedulerPrefillOutputs:
     # Ignored sequence groups.
     ignored_seq_groups: List[SequenceGroup]
     num_lookahead_slots: int
+    num_remote_prefill_groups: int
 
     @classmethod
     def create_empty(cls) -> "SchedulerPrefillOutputs":
@@ -299,6 +301,7 @@ class SchedulerPrefillOutputs:
             seq_groups=[],
             ignored_seq_groups=[],
             num_lookahead_slots=0,
+            num_remote_prefill_groups=0,
         )
 
 
@@ -426,12 +429,14 @@ class Scheduler:
 
     def __init__(
         self,
+        model_config: ModelConfig,
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
         pipeline_parallel_size: int = 1,
         output_proc_callback: Optional[Callable] = None,
     ) -> None:
+        self.model_config = model_config
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         # Note for LoRA scheduling: the current policy is extremely
@@ -457,6 +462,7 @@ class Scheduler:
 
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
+            model_name=self.model_config.served_model_name,
             block_size=self.cache_config.block_size,
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
@@ -473,6 +479,16 @@ class Scheduler:
         # Sequence groups in the SWAPPED state.
         # Contain decode requests that are swapped out.
         self.swapped: Deque[SequenceGroup] = deque()
+
+        # Sequence groups in the REMOTE_PREFILLING state.
+        # Contain requests that are being prefilled by a remote worker.
+        self.remote_prefilling: Deque[SequenceGroup] = deque()
+        # Contain requests that are being prefilled by a local worker.
+        self.prefill_sending: Deque[SequenceGroup] = deque()
+
+        self._remote_prefill_outputs: Dict[str, int] = {}
+
+
         # Sequence groups finished requests ids since last step iteration.
         # It lets the model know that any state associated with these requests
         # can and must be released after the current step.
@@ -628,8 +644,8 @@ class Scheduler:
             self.block_manager.free_cross(seq_group)
 
     def has_unfinished_seqs(self) -> bool:
-        return (len(self.waiting) != 0 or len(self.running) != 0
-                or len(self.swapped) != 0)
+        return len(self.waiting) != 0 or len(self.running) != 0 or len(
+            self.swapped) != 0 or len(self.remote_prefilling) != 0 or len(self.prefill_sending) != 0
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
@@ -652,6 +668,8 @@ class Scheduler:
         curr_loras: Optional[Set[int]],
         enable_chunking: bool = False,
         partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
+        finished_prefills: Optional[Set[str]] = None,
+        finished_transfers: Optional[Set[str]] = None
     ) -> SchedulerRunningOutputs:
         """Schedule sequence groups that are running.
 
@@ -668,6 +686,8 @@ class Scheduler:
                 all tokens.
             partial_prefill_metadata: information about the partial prefills
             that are currently running
+            finished_remote_prefill_request_ids: Set of request ids of remote
+                prefills that have finished.
 
         Returns:
             SchedulerRunningOutputs.
@@ -696,6 +716,40 @@ class Scheduler:
             ScheduledSequenceGroup] = ret.prefill_seq_groups
         preempted: List[SequenceGroup] = ret.preempted
         swapped_out: List[SequenceGroup] = ret.swapped_out
+
+        remote_prefilling_queue = self.remote_prefilling
+        leftover_remote_prefilling_sequences: Deque[SequenceGroup] = deque()
+        while remote_prefilling_queue:
+            seq_group = remote_prefilling_queue.popleft()
+            if seq_group.request_id not in finished_prefills:
+                leftover_remote_prefilling_sequences.append(seq_group)
+                continue
+                
+            else:
+                finished_prefills.remove(seq_group.request_id)
+                assert len(seq_group.seqs) == 1
+                seq = seq_group.seqs[0]
+                # when there is one request complete remote prefill, we should run non_spec decode
+                ret.num_lookahead_slots = 0
+                # we computed all but the last token in prefill, we need to decode the first token on decode
+                seq_group.update_num_computed_tokens(seq.get_len() - 1)
+                seq.status = SequenceStatus.RUNNING
+                seq.data._stage = SequenceStage.DECODE
+                self.running.appendleft(seq_group)
+        remote_prefilling_queue.extendleft(leftover_remote_prefilling_sequences)
+
+        remote_transfers_queue = self.prefill_sending
+        leftover_remote_transfers_sequences: Deque[SequenceGroup] = deque()
+        while remote_transfers_queue:
+            seq_group = remote_transfers_queue.popleft()
+            if seq_group.request_id not in finished_transfers:
+                leftover_remote_transfers_sequences.append(seq_group)
+            else:
+                finished_transfers.remove(seq_group.request_id)
+                assert len(seq_group.seqs) == 1
+                seq = seq_group.seqs[0]
+                self.free_seq(seq)
+        remote_transfers_queue.extendleft(leftover_remote_transfers_sequences)
 
         running_queue = self.running
         assert len(self._async_stopped) == 0
@@ -1073,6 +1127,7 @@ class Scheduler:
         seq_groups: List[ScheduledSequenceGroup] = []
 
         waiting_queue = self.waiting
+        num_remote_prefill_groups = 0
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
@@ -1121,8 +1176,10 @@ class Scheduler:
                     True, enable_chunking)
 
             # If the sequence group cannot be allocated, stop.
+            is_remote_decode = seq_group.remote_prefill_params is not None and seq_group.remote_prefill_params.is_remote_decode
             can_allocate = self.block_manager.can_allocate(
-                seq_group, num_lookahead_slots=num_lookahead_slots)
+                seq_group, num_lookahead_slots=num_lookahead_slots,
+                is_remote_decode=is_remote_decode)
             if can_allocate == AllocStatus.LATER:
                 break
             elif can_allocate == AllocStatus.NEVER:
@@ -1170,7 +1227,18 @@ class Scheduler:
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
-            self._allocate_and_set_running(seq_group)
+
+            seq_group_copy = copy.deepcopy(seq_group)
+            seq_group_copy.seqs[0].seq_id = seq_group.seqs[0].seq_id + 1
+
+            logger.debug("Allocating and setting running or remote prefill for seq_group %s", seq_group.request_id)
+            logger.debug("Seq id: %s", seq_group.seqs[0].seq_id)
+            is_remote_prefill = self._allocate_and_set_running_or_remote_prefill(seq_group)
+            num_remote_prefill_groups += is_remote_prefill
+            if is_remote_decode:
+                logger.debug("Seq id: %s", seq_group_copy.seqs[0].seq_id)
+                self._allocate_and_set_running_or_remote_prefill(seq_group_copy)
+                self.prefill_sending.append(seq_group_copy)
 
             if partial_prefill_metadata is not None:
                 partial_prefill_metadata.maybe_increment_partial_prefills(
@@ -1214,9 +1282,10 @@ class Scheduler:
             ignored_seq_groups=ignored_seq_groups,
             num_lookahead_slots=self._get_num_lookahead_slots(
                 is_prefill=True, enable_chunking=enable_chunking),
+            num_remote_prefill_groups=num_remote_prefill_groups
         )
 
-    def _schedule_default(self) -> SchedulerOutputs:
+    def _schedule_default(self, finished_prefills: Optional[Set[str]] = None, finished_transfers: Optional[Set[str]] = None) -> SchedulerOutputs:
         """Schedule queued requests.
 
         The current policy is designed to optimize the throughput. First,
@@ -1232,6 +1301,9 @@ class Scheduler:
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
         for seq_group in self.running:
+            budget.add_num_seqs(seq_group.request_id,
+                                seq_group.get_max_num_running_seqs())
+        for seq_group in self.remote_prefilling:
             budget.add_num_seqs(seq_group.request_id,
                                 seq_group.get_max_num_running_seqs())
         curr_loras = (set(
@@ -1255,10 +1327,12 @@ class Scheduler:
         # Don't schedule decodes if prefills are scheduled.
         # NOTE: If `_schedule_prefills` doesn't enable chunking, self.running
         # only contains decode requests, not chunked prefills.
-        if len(prefills.seq_groups) == 0:
+        if len(prefills.seq_groups) == prefills.num_remote_prefill_groups:
             running_scheduled = self._schedule_running(budget,
                                                        curr_loras,
-                                                       enable_chunking=False)
+                                                       enable_chunking=False,
+                                                       finished_prefills=finished_prefills,
+                                                       finished_transfers=finished_transfers)
 
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
@@ -1275,7 +1349,12 @@ class Scheduler:
         self.waiting.extendleft(running_scheduled.preempted)
         # Update new running requests.
         if len(prefills.seq_groups) > 0:
-            self.running.extend([s.seq_group for s in prefills.seq_groups])
+            for s in prefills.seq_groups:
+                seq_group = s.seq_group
+                if seq_group.remote_prefill_params is not None and seq_group.remote_prefill_params.is_remote_prefill:
+                    self.remote_prefilling.append(seq_group)
+                else:
+                    self.running.append(seq_group)
 
         self.running.extend(running_scheduled.decode_seq_groups_list)
 
@@ -1452,12 +1531,14 @@ class Scheduler:
         ]
         return finishing + not_finishing
 
-    def _schedule(self) -> SchedulerOutputs:
+    def _schedule(self, finished_prefills: Optional[Set[str]] = None, finished_transfers: Optional[Set[str]] = None) -> SchedulerOutputs:
         """Schedule queued requests."""
         if self.scheduler_config.chunked_prefill_enabled:
+            if finished_prefills or finished_transfers:
+                raise ValueError("Chunked prefill does not support remote prefills")
             return self._schedule_chunked_prefill()
         else:
-            return self._schedule_default()
+            return self._schedule_default(finished_prefills, finished_transfers)
 
     def _can_append_slots(self, seq_group: SequenceGroup,
                           enable_chunking: bool) -> bool:
@@ -1491,14 +1572,16 @@ class Scheduler:
         return no_single_seq
 
     def schedule(
-            self
+            self,
+            finished_prefills: Optional[Set[str]] = None,
+            finished_transfers: Optional[Set[str]] = None
     ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs, bool]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
-        scheduler_start_time = time.perf_counter()
 
-        scheduler_outputs: SchedulerOutputs = self._schedule()
+        scheduler_start_time = time.perf_counter()
+        scheduler_outputs: SchedulerOutputs = self._schedule(finished_prefills, finished_transfers)
         now = time.time()
 
         if not self.cache_config.enable_prefix_caching:
@@ -1537,7 +1620,8 @@ class Scheduler:
                 encoder_seq_data = None
                 cross_block_table = None
 
-            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            running_or_remote_prefilling_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING) + seq_group.get_seqs(status=SequenceStatus.REMOTE_PREFILLING)
+            for seq in running_or_remote_prefilling_seqs:
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
@@ -1546,7 +1630,9 @@ class Scheduler:
             if self.cache_config.enable_prefix_caching:
                 common_computed_block_nums = (
                     self.block_manager.get_common_computed_block_ids(
-                        seq_group.get_seqs(status=SequenceStatus.RUNNING)))
+                        running_or_remote_prefilling_seqs
+                    )
+                )
 
             do_sample = True
             is_prompt = seq_group.is_prefill()
@@ -1568,9 +1654,29 @@ class Scheduler:
                         < seqs[0].data.get_len()):
                     do_sample = False
 
+            is_remote_prefill = False
+            if is_first_prefill and seq_group.remote_prefill_params is not None and seq_group.remote_prefill_params.is_remote_prefill:
+                is_remote_prefill = True
+                logger.debug("Remote prefill, computed block nums: %s", common_computed_block_nums)
+            if is_first_prefill and seq_group.remote_prefill_params is not None and seq_group.remote_prefill_params.is_remote_decode:
+                block_tables[seq_group.seqs[0].seq_id + 1] = self.block_manager.block_tables[seq.seq_id + 1].physical_block_ids
+
+                # Since we know that prefill is scheduled we can
+                # assume that the blocks computed on decode
+                # will be fetched by the time we run prefill
+                logger.debug("Computed decode blocks: %s", seq_group.remote_prefill_params.decode_computed_block_ids)
+                if seq_group.remote_prefill_params.decode_computed_block_ids:
+                    computed_block_ids = set(seq_group.remote_prefill_params.decode_computed_block_ids)
+                    prefill_block_ids = block_tables[seq_group.seqs[0].seq_id]
+                    prefill_fetched_block_ids = [prefill_block_ids[i] for i, block_id in enumerate(seq_group.remote_prefill_params.decode_block_ids) if block_id in computed_block_ids and i < len(prefill_block_ids)]
+
+                    assert len(common_computed_block_nums) == 0, "common_computed_block_nums should be empty for remote prefill as it doesn't suport prefix caching"
+                    common_computed_block_nums = prefill_fetched_block_ids
+
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config.send_delta_data:
+                logger.debug("Assinged blocks: %s", block_tables)
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,
@@ -1598,6 +1704,7 @@ class Scheduler:
                         if scheduler_outputs.num_prefill_groups > 0 else None),
                     mm_processor_kwargs=seq_group.mm_processor_kwargs,
                     prompt_adapter_request=seq_group.prompt_adapter_request,
+                    do_remote_prefill=is_remote_prefill,
                 )
             else:
                 # When SPMD mode is enabled, we only send delta data except for
@@ -1696,10 +1803,16 @@ class Scheduler:
 
             self._async_stopped.clear()
 
-    def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
+    def _allocate_and_set_running_or_remote_prefill(self, seq_group: SequenceGroup) -> bool:
         self.block_manager.allocate(seq_group)
+        is_remote_prefill = False
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
-            seq.status = SequenceStatus.RUNNING
+            if seq_group.remote_prefill_params is not None and seq_group.remote_prefill_params.is_remote_prefill:
+                seq.status = SequenceStatus.REMOTE_PREFILLING
+                is_remote_prefill = True
+            else:
+                seq.status = SequenceStatus.RUNNING
+        return is_remote_prefill
 
     def _append_slots(
         self,

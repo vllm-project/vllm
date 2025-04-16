@@ -3,11 +3,12 @@
 import pickle
 import signal
 from contextlib import contextmanager
-from typing import Iterator, List, Optional, Union
+from typing import Iterator, List, Optional, Union, Dict
 
 import cloudpickle
+import time
 import zmq
-
+import msgspec
 from vllm import AsyncEngineArgs, SamplingParams
 from vllm.config import VllmConfig
 from vllm.engine.llm_engine import LLMEngine
@@ -15,8 +16,10 @@ from vllm.engine.llm_engine import LLMEngine
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
-                                         IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
-                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+                                         REQUEST_OUTPUTS_T,
+                                         VLLM_RPC_SUCCESS_STR, IPC_REMOTE_PREFILL_REQUEST_EXT,
+                                         RPCAbortRequest,
+                                         IPC_OUTPUT_EXT, IPC_METRICS_EXT,
                                          RPCAdapterLoadedResponse, RPCError,
                                          RPCIsSleepingRequest,
                                          RPCIsSleepingResponse,
@@ -25,7 +28,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
-                                         RPCUProfileRequest, RPCWakeUpRequest)
+                                         RPCUProfileRequest, RPCWakeUpRequest,
+                                         IPC_REMOTE_NIXL_METADATA_EXT,
+                                         KvMetrics)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -33,11 +38,87 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
 from vllm.worker.model_runner_base import InputProcessingError
+from vllm.remote_prefill import RemotePrefillRequest
+from vllm.distributed.device_communicators.nixl import NixlMetadata
+
+from vllm.engine.metrics_types import StatLoggerBase, Stats, SupportsMetricsInfo
+from dataclasses import dataclass, field
 
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 10000
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
+
+class KvStatLogger(StatLoggerBase):
+    def __init__(
+        self,
+        max_num_seqs: int,
+        num_total_gpu_blocks: int,
+        metrics_socket
+    ):
+        # Must query initialized scheduler for max infos
+        self.request_total_slots = max_num_seqs
+        self.kv_total_blocks = num_total_gpu_blocks
+        self.metrics_socket = metrics_socket
+
+        # KV metrics
+        self._send_kv_metrics(0, 0, 0, 0.0, 0.0)
+
+    def log(self, stats: Stats) -> None:
+        self._send_kv_metrics(
+            stats.num_running_sys,
+            int(stats.gpu_cache_usage_sys * self.kv_total_blocks),
+            stats.num_waiting_sys,
+            stats.gpu_cache_usage_sys,
+            stats.gpu_prefix_cache_hit_rate
+        )
+
+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
+        pass
+
+    def _send_kv_metrics(
+        self,
+        active_slots,
+        active_kv_blocks,
+        num_requests_waiting,
+        gpu_cache_usage_perc,
+        gpu_prefix_cache_hit_rate,
+    ):
+        if not self.metrics_socket.closed:
+            metrics_bytes = pickle.dumps(
+                KvMetrics(
+                    active_slots,
+                    self.request_total_slots,
+                    active_kv_blocks,
+                    self.kv_total_blocks,
+                    num_requests_waiting,
+                    gpu_cache_usage_perc,
+                    gpu_prefix_cache_hit_rate,
+                )
+            )
+            self.metrics_socket.send_multipart((metrics_bytes, ), copy=False)
+
+# TODO: Send entire stats object to the client
+# class StatLogger(StatLoggerBase):
+#     def __init__(
+#         self,
+#         metrics_socket
+#     ):
+#         self.metrics_socket = metrics_socket
+
+#     def log(self, stats: Stats) -> None:
+#         self._send_metrics(stats)
+
+#     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
+#         pass
+
+#     def _send_metrics(self, stats: Stats):
+#         if not self.metrics_socket.closed:
+#             metrics_bytes = pickle.dumps(stats)
+#             self.metrics_socket.send_multipart((metrics_bytes, ), copy=False)
+
+
+
 
 
 class MQLLMEngine:
@@ -101,11 +182,36 @@ class MQLLMEngine:
         self.heartbeat_socket = self.ctx.socket(zmq.constants.PUSH)
         self.heartbeat_socket.bind(f"{ipc_path}{IPC_HEALTH_EXT}")
 
+        # Send metrics back to client.
+        self.metrics_socket = self.ctx.socket(zmq.constants.PUSH)
+        self.metrics_socket.bind(f"{ipc_path}{IPC_METRICS_EXT}")
+
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
 
         # Error state.
         self._errored_with: Optional[BaseException] = None
+
+        self.remote_prefill_request_socket = self.ctx.socket(zmq.constants.PUSH)
+        self.remote_nixl_metadata_socket = self.ctx.socket(zmq.constants.PULL)
+        if self.engine.is_nixl_initialized:
+            self.remote_prefill_request_socket.bind(f"{ipc_path}{IPC_REMOTE_PREFILL_REQUEST_EXT}")
+            self.remote_nixl_metadata_socket.bind(f"{ipc_path}{IPC_REMOTE_NIXL_METADATA_EXT}")
+
+
+        # Attach logger for continuous metrics publishing
+        self.kv_stat_logger = KvStatLogger(
+            self.engine.scheduler_config.max_num_seqs,
+            self.engine.cache_config.num_gpu_blocks,
+            self.metrics_socket
+        )
+        self.engine.add_logger("kv_metrics", self.kv_stat_logger)
+        
+        # TODO investigate sending whole stats object
+        # self.general_stat_logger = StatLogger(
+        #     self.metrics_socket
+        # )
+        # self.engine.add_logger("general_metrics", self.general_stat_logger)
 
     @property
     def dead_error(self) -> BaseException:
@@ -192,8 +298,17 @@ class MQLLMEngine:
                 # Handle the query from the Client.
                 if request == RPCStartupRequest.IS_SERVER_READY:
                     tracing_enabled = self.engine.is_tracing_enabled()
-                    response = RPCStartupResponse(
-                        tracing_enabled=tracing_enabled)
+            
+                    # Send nixl metadata to the client
+                    if self.engine.is_nixl_initialized:
+                        nixl_metadata = self.engine.get_nixl_metadata()
+                        encoded_nixl_metadata = msgspec.msgpack.encode(nixl_metadata)
+                        response = RPCStartupResponse(
+                            tracing_enabled=tracing_enabled,
+                            nixl_metadata=encoded_nixl_metadata)
+                    else:
+                        response = RPCStartupResponse(
+                            tracing_enabled=tracing_enabled)
 
             except Exception as e:
                 response = e
@@ -206,6 +321,7 @@ class MQLLMEngine:
 
         while True:
             if not self.engine.has_unfinished_requests():
+                logger.debug("No unfinished requests")
                 # Poll until there is work to do.
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                     # When there's no work, check on engine health and send
@@ -249,6 +365,13 @@ class MQLLMEngine:
     def handle_new_input(self):
         """Handle new input from the socket"""
         try:
+            if self.engine.is_nixl_initialized:
+                while self.remote_nixl_metadata_socket.poll(timeout=0) != 0:
+                    frames = self.remote_nixl_metadata_socket.recv(copy=False)
+                    nixl_metadata = msgspec.msgpack.decode(frames.buffer, type=NixlMetadata)
+                    logger.debug("Adding remote nixl metadata for engine: %s", nixl_metadata.engine_id)
+                    self.engine.add_remote_nixl_metadata(nixl_metadata)
+
             while self.input_socket.poll(timeout=0) != 0:
                 frames = self.input_socket.recv_multipart(copy=False)
                 request = pickle.loads(frames[0].buffer)
@@ -297,6 +420,11 @@ class MQLLMEngine:
             self._send_outputs(rpc_err)
 
         try:
+            if request.remote_prefill_params is not None and request.remote_prefill_params.is_remote_prefill:
+                def remote_prefill_request_callback(request: RemotePrefillRequest):
+                    logger.debug("Sending remote prefill request: %s", request.request_id)
+                    self.remote_prefill_request_socket.send(msgspec.msgpack.encode(request), copy=False)
+                request.remote_prefill_params.remote_prefill_request_callback = remote_prefill_request_callback
             self.engine.add_request(
                 request_id=request_id,
                 prompt=request.prompt,
@@ -304,7 +432,9 @@ class MQLLMEngine:
                 lora_request=request.lora_request,
                 trace_headers=request.trace_headers,
                 prompt_adapter_request=request.prompt_adapter_request,
-                priority=request.priority)
+                priority=request.priority,
+                remote_prefill_params=request.remote_prefill_params,
+            )
 
             if self.log_requests:
                 logger.info("Added request %s.", request.request_id)

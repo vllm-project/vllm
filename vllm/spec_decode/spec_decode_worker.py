@@ -48,6 +48,7 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    split_batch_by_proposal_len)
 from vllm.utils import resolve_obj_by_qualname
 from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
+from vllm.remote_prefill import RemotePrefillResult
 
 logger = init_logger(__name__)
 
@@ -391,6 +392,22 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     def load_model(self, *args, **kwargs):
         pass
 
+    def initialize_nixl(self, engine_id: str) -> List[bytes]:
+        return self.scorer_worker.initialize_nixl(engine_id)
+
+    def get_nixl_agent_metadata(self) -> bytes:
+        return self.scorer_worker.get_nixl_agent_metadata()
+
+    def add_remote_nixl_metadata(self, engine_id: str, agents_metadata: List[bytes], kv_caches_base_addr: List[List[Tuple[int
+, int]]], num_blocks: int) -> str:
+        return self.scorer_worker.add_remote_nixl_metadata(engine_id, agents_metadata, kv_caches_base_addr, num_blocks)
+
+    def get_nixl_kv_caches_base_addr(self) -> List[bytes]:
+        return self.scorer_worker.get_nixl_kv_caches_base_addr()
+
+    def shutdown_nixl(self) -> None:
+        return self.scorer_worker.shutdown_nixl()
+
     def _configure_model_sampler_for_spec_decode(self):
         """Configure model sampler to emit GPU tensors. This allows spec decode
         to keep data on device without transferring to CPU and serializing,
@@ -669,8 +686,13 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.
         """
-
+        remote_prefill_result = RemotePrefillResult()
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
+        if isinstance(sampler_output, tuple) and len(sampler_output) == 2:
+            sampler_output, remote_prefill_result = sampler_output
+            if remote_prefill_result.is_pending_remote_prefill:
+                return sampler_output, remote_prefill_result
+
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
 
@@ -700,9 +722,11 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             # We prepare the prefill hidden states here so that there no
             # additional complexity in worker for spec_decode vs non_spec_decode
             # flow and execute_model doesn't need additional modifications.
+            previous_hidden_states = hidden_states \
+                if sampler_output.prefill_hidden_states is None \
+                    else sampler_output.prefill_hidden_states
             execute_model_req.previous_hidden_states = \
-                prepare_prefill_hidden_states(
-                    sampler_output.prefill_hidden_states)
+                prepare_prefill_hidden_states(previous_hidden_states)
             for i in range(self._num_spec_prefill_steps):
                 execute_model_req.spec_step_idx = i
                 self.proposer_worker.execute_model(execute_model_req)
@@ -717,7 +741,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         sampler_output.sampled_token_probs = None
         sampler_output.sampled_token_ids = None
         sampler_output.logprobs = None
-        return sampler_output_to_return
+        return sampler_output_to_return, remote_prefill_result
 
     def _run_non_driver_rank(self) -> bool:
         """Run proposer and verifier model in non-driver workers. This is used
@@ -736,7 +760,11 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # In case of prefill, scorer_worker has to be run before proposer so
         # that the hidden states can be propagated to proposer when needed.
         if data["no_spec"]:
-            self.scorer_worker.execute_model()
+            sampler_output = self.scorer_worker.execute_model()
+            if isinstance(sampler_output, tuple) and len(sampler_output) == 2:
+                sampler_output, remote_prefill_result = sampler_output
+                if remote_prefill_result.is_pending_remote_prefill:
+                    return True
 
         if not data["disable_all_speculation"]:
             # Even if num_lookahead_slots is zero, we want to run the
@@ -789,9 +817,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                                "workers generate no tokens")
 
         execute_model_req.previous_hidden_states = None
+        remote_prefill_result = RemotePrefillResult()
 
         with Timer() as scoring_timer:
-            proposal_scores = self.scorer.score_proposals(
+            proposal_scores, remote_prefill_result = self.scorer.score_proposals(
                 execute_model_req,
                 proposals,
             )
@@ -831,7 +860,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             prompt_logprobs=proposal_scores.prompt_logprobs
             if not self._disable_logprobs else None,
             k=execute_model_req.num_lookahead_slots,
-            stage_times=stage_times)
+            stage_times=stage_times), remote_prefill_result
 
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(

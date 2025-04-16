@@ -27,13 +27,13 @@ class KVConnectorFactory:
 
     @classmethod
     def create_connector(cls, rank: int, local_rank: int,
-                         config: "VllmConfig") -> KVConnectorBase:
+                         config: "VllmConfig", world_group) -> KVConnectorBase:
         connector_name = config.kv_transfer_config.kv_connector
         if connector_name not in cls._registry:
             raise ValueError(f"Unsupported connector type: {connector_name}")
 
         connector_cls = cls._registry[connector_name]()
-        return connector_cls(rank, local_rank, config)
+        return connector_cls(rank, local_rank, config, world_group)
 
 
 # Register various connectors here.
@@ -58,3 +58,8 @@ KVConnectorFactory.register_connector(
     "MooncakeStoreConnector",
     "vllm.distributed.kv_transfer.kv_connector.mooncake_store_connector",
     "MooncakeStoreConnector")
+
+KVConnectorFactory.register_connector(
+    "DynamoNcclConnector",
+    "vllm.distributed.kv_transfer.kv_connector.dynamo_connector",
+    "DynamoConnector")

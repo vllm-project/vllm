@@ -3158,6 +3158,9 @@ class KVTransferConfig(BaseModel):
     # The KV connector for vLLM to transmit KV caches between vLLM instances.
     kv_connector: Optional[str] = None
 
+    # Whether to use NIXL prepped xfer for KV cache transfer.
+    use_prepped_xfer: bool = False
+
     # The device used by kv connector to buffer the KV cache.
     # Currently only support 'cuda'.
     kv_buffer_device: Optional[str] = "cuda"
@@ -3167,7 +3170,7 @@ class KVTransferConfig(BaseModel):
     kv_buffer_size: float = 1e9
 
     # Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    # are 'kv_producer', 'kv_consumer', and 'both'.
+    # are 'kv_producer', 'kv_consumer', and 'kv_both'.
     kv_role: Optional[str] = None
 
     # The rank of this vLLM instance in the KV cache transfer. Typical value:
@@ -3187,6 +3190,13 @@ class KVTransferConfig(BaseModel):
 
     # any extra config that the connector may need
     kv_connector_extra_config: dict[str, Any] = {}
+
+    # This does not need to be set by the user. It is set by the connector.
+    kv_producers_parallel_size: Optional[int] = None
+    kv_producers_tensor_parallel_size: Optional[int] = None
+    kv_producers_pipeline_parallel_size: Optional[int] = None
+    kv_consumers_tensor_parallel_size: Optional[int] = None
+    kv_consumers_pipeline_parallel_size: Optional[int] = None
 
     def compute_hash(self) -> str:
         """
@@ -3222,15 +3232,28 @@ class KVTransferConfig(BaseModel):
                 f"Supported roles are `kv_producer`, `kv_consumer`, "
                 f"and `kv_both`")
 
-        if self.kv_connector is not None and self.kv_role is None:
+        if self.kv_connector is not None and self.kv_connector != "DynamoNixlConnector" and self.kv_role is None:
             raise ValueError("Please specify kv_disagg_role when kv_connector "
                              "is set, supported roles are `kv_producer`, "
                              "`kv_consumer`, and `kv_both`")
+
+        if self.use_prepped_xfer is False:
+            logger.warning("`use_prepped_xfer` parameter is deprecated. All transfers will be done using prepped xfer.")
+            self.use_prepped_xfer = True
+
 
     @property
     def is_kv_transfer_instance(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in ["kv_producer", "kv_consumer", "kv_both"]
+
+    @property
+    def need_kv_parallel_group(self) -> bool:
+        # for those database-based connector, vLLM does not need to create
+        # parallel group, and in that case the kv parallel size will be 1.
+        if self.kv_connector == "DynamoNixlConnector":
+            return False
+        return self.kv_connector is not None and self.kv_parallel_size > 1
 
     @property
     def is_kv_producer(self) -> bool:
@@ -3244,6 +3267,18 @@ class KVTransferConfig(BaseModel):
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
+
+    @property
+    def tensor_parallel_multiplier(self) -> int:
+        return self.kv_consumers_tensor_parallel_size // self.kv_producers_tensor_parallel_size
+
+    @property
+    def kv_consumers_parallel_size(self) -> int:
+        return self.kv_parallel_size - self.kv_producers_parallel_size
+
+    @property
+    def kv_world_size(self) -> int:
+        return self.kv_producers_parallel_size + self.kv_consumers_parallel_size * self.tensor_parallel_multiplier
 
 
 class CompilationLevel:

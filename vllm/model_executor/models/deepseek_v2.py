@@ -605,6 +605,8 @@ class DeepseekV2Model(nn.Module):
         quant_config = vllm_config.quant_config
         self.config = config
 
+        self.config = config
+
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank:
