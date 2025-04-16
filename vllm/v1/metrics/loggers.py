@@ -112,7 +112,7 @@ class LoggingStatLogger(StatLoggerBase):
         )
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_metrics.log()
+            self.spec_decoding_metrics.log(log_fn=log_fn)
 
 
 class PrometheusStatLogger(StatLoggerBase):
