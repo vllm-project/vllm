@@ -5,6 +5,7 @@ import argparse
 import dataclasses
 import json
 import re
+import sys
 import threading
 from dataclasses import MISSING, dataclass, fields
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping,
@@ -341,11 +342,12 @@ class EngineArgs:
             return kwargs
 
         # Model arguments
-        parser.add_argument(
-            '--model',
-            type=str,
-            default=EngineArgs.model,
-            help='Name or path of the huggingface model to use.')
+        if 'serve' not in sys.argv[1:] and '--help' not in sys.argv[1:]:
+            parser.add_argument(
+                '--model',
+                type=str,
+                default=EngineArgs.model,
+                help='Name or path of the huggingface model to use.')
         parser.add_argument(
             '--task',
             default=EngineArgs.task,
