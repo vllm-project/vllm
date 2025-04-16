@@ -80,15 +80,20 @@ class CacheEngine:
             )
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_generic_shape)))
-        kv_cache_shape = tuple(kv_cache_generic_shape[i]
-                               for i in kv_cache_stride_order)
+
+        # The allocation respects the backend-defined stride order to ensure
+        # the semantic remains consistent for each backend. We first obtain the
+        # generic kv cache shape and then permute it according to the stride
+        # order which could result in a non-contiguous tensor.
+        kv_cache_allocation_shape = tuple(kv_cache_generic_shape[i]
+                                          for i in kv_cache_stride_order)
 
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
             layer_kv_cache = torch.zeros(
-                kv_cache_shape,
+                kv_cache_allocation_shape,
                 dtype=self.dtype,
                 pin_memory=pin_memory,
                 device=device).permute(*kv_cache_stride_order)
