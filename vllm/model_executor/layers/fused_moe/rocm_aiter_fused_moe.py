@@ -118,7 +118,7 @@ def fmoe_fp8_blockscale_g1u1_impl(
         a1_scale: torch.Tensor,
         block_m: int,
         block_n: int,
-        smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+        smooth_scale: Optional[torch.Tensor] = None) -> None:
     import aiter as rocm_aiter
     rocm_aiter.fmoe_fp8_blockscale_g1u1(out_asm, a1, w1, w2, sorted_token_ids,
                                         sorted_weight_buf, sorted_expert_ids,
@@ -142,7 +142,7 @@ def fmoe_fp8_blockscale_g1u1_fake(
         a1_scale: torch.Tensor,
         block_m: int,
         block_n: int,
-        smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+        smooth_scale: Optional[torch.Tensor] = None) -> None:
     pass
 
 
@@ -223,7 +223,7 @@ def asm_moe_tkw1_impl(sorted_ids: torch.Tensor,
                       fc1_smooth_scale: Optional[torch.Tensor] = None,
                       fc2_smooth_scale: Optional[torch.Tensor] = None,
                       a16: bool = False,
-                      activation_str: str = "silu") -> torch.Tensor:
+                      activation_str: str = "silu") -> None:
     import aiter as rocm_aiter
 
     if activation_str == "silu":
@@ -263,7 +263,7 @@ def asm_moe_tkw1_fake(sorted_ids: torch.Tensor,
                       fc1_smooth_scale: Optional[torch.Tensor] = None,
                       fc2_smooth_scale: Optional[torch.Tensor] = None,
                       a16: bool = False,
-                      activation_str: str = "silu") -> torch.Tensor:
+                      activation_str: str = "silu") -> None:
     pass
 
 
@@ -469,6 +469,17 @@ def rocm_aiter_fused_experts(
     apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
 
+    if apply_router_weight_on_input and not is_rocm_aiter_channel_scaled_moe_enabled(
+    ):
+        _, topk = topk_weights.shape
+        assert (
+            topk == 1
+        ), "Only support topk=1 when `apply_router_weight_on_input` is True"
+
+        hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
+        topk_ids = topk_ids.to(torch.int32)
+        topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
+
     if is_rocm_aiter_block_scaled_moe_enabled() and use_fp8_w8a8:
         assert not apply_router_weight_on_input, (
             "apply_router_weight_on_input is not supported for block scaled moe"
@@ -513,6 +524,9 @@ def rocm_aiter_fused_experts(
         return out_asm
 
     elif is_rocm_aiter_channel_scaled_moe_enabled() and use_fp8_w8a8:
+
+        topk_weights = topk_weights.to(torch.float32)
+        topk_ids = topk_ids.to(torch.int32)
 
         E, model_dim, _ = w2.shape
         dtype = hidden_states.dtype
@@ -578,15 +592,11 @@ def rocm_aiter_fused_experts(
                                                  a16=False,
                                                  activation=activation)
 
-    if apply_router_weight_on_input:
-        hidden_states = hidden_states * topk_weights
-
-    return torch.ops.vllm.rocm_aiter_ck_moe(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        topk_weights=torch.ones_like(topk_weights),
-        topk_ids=topk_ids)
+    return torch.ops.vllm.rocm_aiter_ck_moe(hidden_states=hidden_states,
+                                            w1=w1,
+                                            w2=w2,
+                                            topk_weights=topk_weights,
+                                            topk_ids=topk_ids)
 
 
 def rocm_aiter_topk_softmax_wrapper(
