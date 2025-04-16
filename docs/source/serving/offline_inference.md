@@ -84,9 +84,9 @@ To control which devices are used, please instead set the `CUDA_VISIBLE_DEVICES`
 :::
 
 :::{note}
-With TP enabled, each process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the TP size).
+With tensor parallelism enabled, each process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the size of tensor parallelism).
 
-You can convert the model checkpoint to a sharded checkpoint using <gh-file:examples/offline_inference/save_sharded_state.py>. The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the TP size.
+You can convert the model checkpoint to a sharded checkpoint using <gh-file:examples/offline_inference/save_sharded_state.py>. The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the size of tensor parallelism.
 :::
 
 #### Quantization
