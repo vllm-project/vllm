@@ -60,9 +60,14 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               LoadLoRAAdapterRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
-                                              PoolingRequest, PoolingResponse,
-                                              RerankRequest, RerankResponse,
-                                              ScoreRequest, ScoreResponse,
+                                              PoolingRequest,
+                                              PoolingResponse,
+                                              RerankRequest,
+                                              RerankResponse,
+                                              ResponseRequest,
+                                              ResponseResponse,
+                                              ScoreRequest,
+                                              ScoreResponse,
                                               TokenizeRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
@@ -76,6 +81,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
+from vllm.entrypoints.openai.serving_response import OpenAIServingResponse
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
@@ -352,6 +358,10 @@ def models(request: Request) -> OpenAIServingModels:
     return request.app.state.openai_serving_models
 
 
+def response(request: Request) -> Optional[OpenAIServingResponse]:
+    return request.app.state.openai_serving_response
+
+
 def chat(request: Request) -> Optional[OpenAIServingChat]:
     return request.app.state.openai_serving_chat
 
@@ -399,6 +409,7 @@ async def health(raw_request: Request) -> Response:
 async def get_server_load_metrics(request: Request):
     # This endpoint returns the current server load metrics.
     # It tracks requests utilizing the GPU from the following routes:
+    # - /v1/responses
     # - /v1/chat/completions
     # - /v1/completions
     # - /v1/audio/transcriptions
@@ -461,6 +472,29 @@ async def show_available_models(raw_request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
+
+
+@router.post("/v1/responses",
+             dependencies=[Depends(validate_json_request)])
+@with_cancellation
+@load_aware_call
+async def create_response(request: ResponseRequest,
+                                 raw_request: Request):
+    handler = response(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Response API")
+
+    generator = await handler.create_response(request, raw_request)
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+
+    elif isinstance(generator, ResponseResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 @router.post("/v1/chat/completions",

@@ -32,7 +32,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ScoreRequest,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
-                                              TranscriptionRequest)
+                                              TranscriptionRequest, ResponseRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
@@ -56,7 +56,7 @@ CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
                               ScoreRequest, TokenizeCompletionRequest]
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
-                        TokenizeChatRequest]
+                        ResponseRequest, TokenizeChatRequest]
 
 AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest,
                    TranscriptionRequest]
