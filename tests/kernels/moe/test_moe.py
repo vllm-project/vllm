@@ -144,9 +144,7 @@ def torch_dispatch(
 
 def torch_combine(b_out, topk_weight, topk_ids):
     num_tokens, topk = topk_ids.shape
-
     num_experts = b_out.shape[0]
-    topk = topk_ids.shape[1]
     K = b_out.shape[-1]
     out = torch.zeros((num_tokens, K), dtype=b_out.dtype, device=b_out.device)
     expert_counts = torch.zeros(num_experts, dtype=torch.int, device=b_out.device)

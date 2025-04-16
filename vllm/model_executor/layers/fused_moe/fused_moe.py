@@ -1751,6 +1751,82 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return intermediate_cache3
 
 
+class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
+    def __init__(self,
+                 world_size: int,
+                 rank: int):
+        super().__init__()
+        self.world_size = world_size
+        self.rank = rank
+
+    def dispatch(
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        assert topk_ids.dim() == 2
+        assert topk_ids.shape[0] == a1.shape[0]
+
+        num_tokens = a1.shape[0]
+        topk = topk_ids.shape[1]
+
+        #assert num_experts % self.world_size == 0
+        #num_local_experts = num_experts // self.world_size
+
+        tokens_per_expert = torch.bincount(topk_ids.view(-1), minlength=num_experts)
+        max_num_tokens = tokens_per_expert.max()
+        expert_counts = torch.zeros(num_experts, dtype=torch.int, device=a1.device)
+
+        b_a1 = torch.zeros((num_experts, max_num_tokens, a1.shape[1]),
+                           dtype=a1.dtype, device=a1.device)
+
+        #print(f"START DISPATCH {hex(id(self))}")
+
+        for token in range(num_tokens):
+            for j in range(topk):
+                expert_id = topk_ids[token, j]
+                idx = expert_counts[expert_id]
+                b_a1[expert_id, idx:idx+1, :] = a1[token, :]
+                expert_counts[expert_id] = expert_counts[expert_id] + 1
+
+        #print(f"END DISPATCH {hex(id(self))}: tokens_per_expert {(tokens_per_expert > 0).nonzero().view(-1)}")
+
+        return b_a1, a1_scale, tokens_per_expert
+
+    def combine(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> None:
+        if False:
+            print(f"topk_ids {topk_ids.shape}")
+            print(f"fused_expert_output {fused_expert_output.shape}")
+            print(f"output {output.shape}")
+            print(f"counts {self.expert_counts.shape}")
+
+        #print(f"START COMBINE {hex(id(self))}")
+
+        num_tokens, topk = topk_ids.shape
+        num_experts, _, K = fused_expert_output.shape
+        expert_counts = torch.zeros(num_experts, dtype=torch.int, device=fused_expert_output.device)
+        for token in range(num_tokens):
+            expert_ids = topk_ids[token]
+            for i in range(topk_ids.shape[1]):
+                expert_id = expert_ids[i]
+                if expert_id < num_experts:
+                    idx = expert_counts[expert_id]
+                    output[token, :] = output[token, :] + fused_expert_output[expert_id, idx:idx+1, :] * topk_weights[token, i]
+                    expert_counts[expert_id] = expert_counts[expert_id] + 1
+
+        #print(f"END COMBINE {hex(id(self))}")
+
+
 class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
@@ -1800,21 +1876,28 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
+        expert_num_tokens: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.activation import SiluAndMul
+        #print("START EXPERTS")
         assert hidden_states.dim() == 3
+        assert expert_num_tokens is not None
         num_tokens, topk = topk_ids.shape
         _, max_num_tokens, K = hidden_states.shape
         num_experts = w1.shape[0]
         out = _resize_cache(workspace13, (num_experts, max_num_tokens, w2.shape[1]))
-        # causes deadlock
-        #tokens_per_expert = torch.bincount(topk_ids.view(-1), minlength=num_experts)
         for expert in range(num_experts):
-            num = max_num_tokens #tokens_per_expert[expert]
+            num = expert_num_tokens[expert]
             if num > 0:
                 tmp = _resize_cache(workspace2, (num, w1.shape[1] // 2))
-                torch.ops._C.silu_and_mul(tmp, hidden_states[expert,:num,:] @ w1[expert].transpose(0, 1))
+                self.activation(activation, tmp, hidden_states[expert,:num,:] @ w1[expert].transpose(0, 1))
                 out[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
+                # fill remainder with 0???
+                #out[expert, num:, :].fill_(0)
+            else:
+                #out[expert, :, :].fill_(0) # ??
+                pass
+
+        #print("END EXPERTS")
 
         return out
 

@@ -323,7 +323,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = E
 
-        output = a1 if inplace else torch.empty_like(a1)
+        output = a1 if inplace else torch.zeros_like(a1)
 
         workspace13_shape, workspace2_shape, workspace_dtype = (
             self.fused_experts.workspace_shapes(a1, M, N, K, top_k,

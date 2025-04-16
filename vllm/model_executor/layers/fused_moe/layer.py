@@ -32,7 +32,7 @@ from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda_alike():
     from .dispatch_combine import StandardDispatchCombine
-    from .fused_moe import TritonExperts, BatchedExperts, fused_experts
+    from .fused_moe import TritonExperts, BatchedDispatchCombine, BatchedExperts, fused_experts
     from .modular_kernel import FusedMoEModularKernel, FusedMoEQuantizeDispatchCombine
     from .pplx_dispatch_combine import PplxDispatchCombine
 else:
@@ -124,7 +124,7 @@ class AllToAllCache:
 
         with self._lock:
             instance = self._cache.get(key)
-            if True or instance is None:
+            if instance is None:
                 instance = pplx.AllToAll(**kwargs)
                 self._cache[key] = instance
             return instance
@@ -256,10 +256,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     # Maybe extra args
     def set_dispatch_combine(self, dispatch_combine: FusedMoEQuantizeDispatchCombine) -> bool:
+        assert self.fused_experts == fused_experts
+
         block_m = MOE_DP_CHUNK_SIZE * (self.moe.ep_size // self.moe.dp_size)
         #print(f"block_m = {block_m}")
 
-        if False:
+        if isinstance(dispatch_combine, (BatchedDispatchCombine, PplxDispatchCombine)):
+            logger.info("BatchedExperts")
+            experts = BatchedExperts()
+        else:
             experts = TritonExperts(
                 use_fp8_w8a8 = False,
                 use_int8_w8a16 = False,
@@ -267,8 +272,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 block_shape = None,
                 block_m = None, #block_m,
             )
-        else:
-            experts = BatchedExperts()
 
         self.fused_experts = FusedMoEModularKernel(
             dispatch_combine,
@@ -636,6 +639,7 @@ class FusedMoE(torch.nn.Module):
 
         # TODO: move to method?
         if self.dp_size > 1:
+            logger.info("using pplx dispatch")
             max_num_tokens = MOE_DP_CHUNK_SIZE # // moe.dp_size
             world_size = moe.ep_size
             dp_size = moe.ep_size // moe.dp_size # dp_size actually means TP.
@@ -679,15 +683,22 @@ class FusedMoE(torch.nn.Module):
                 rank, # just for debugging
                 moe.in_dtype,
             )
-
-            success = self.quant_method.set_dispatch_combine(dispatch_combine)
-            if not success:
-                logger.warning("DP+EP not supported for %s.", type(self.quant_method))
-        else:
+        elif False:
+            logger.info("using standard dispatch")
             dispatch_combine = StandardDispatchCombine(
                 moe.in_dtype,
                 quant_config.weight_block_size if quant_config is not None else None,
             )
+        else:
+            logger.info("using batched dispatch")
+            dispatch_combine = BatchedDispatchCombine(
+                moe.ep_size,
+                moe.ep_rank,
+            )
+
+        success = self.quant_method.set_dispatch_combine(dispatch_combine)
+        if not success:
+            logger.warning("DP+EP not supported for %s.", type(self.quant_method))
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
@@ -1054,7 +1065,6 @@ class FusedMoE(torch.nn.Module):
         full_final_hidden_states = torch.empty_like(full_hidden_states)
 
         #print(f"ORIGINAL SHAPE {full_hidden_states.shape}")
-
         #print(f"moe_dp_chunk_size_per_rank = {moe_dp_chunk_size_per_rank}")
 
         for iter in range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank):
@@ -1114,7 +1124,7 @@ class FusedMoE(torch.nn.Module):
             full_final_hidden_states[chunk_start:chunk_end, :].copy_(
                 final_hidden_states)
 
-            #print(f"full final = {full_final_hidden_states.shape}")
+            #print(f"partial final = {full_final_hidden_states.shape}")
 
             # Update bounds
             num_tokens_remaining_across_dp = torch.clamp(
@@ -1133,6 +1143,8 @@ class FusedMoE(torch.nn.Module):
 
             chunk_start = update_chunk_bound(chunk_start)
             chunk_end = update_chunk_bound(chunk_end)
+
+        #print(f"full final shape {full_final_hidden_states.shape}")
 
         return full_final_hidden_states
 
