@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -xue
 
 # Build the docker image.
 docker build -f docker/Dockerfile.tpu -t vllm-tpu .
@@ -38,7 +38,9 @@ docker run --privileged --net host --shm-size=16G -it \
     && echo TEST_7 \
     && pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py \
     && echo TEST_8 \
-    && pytest -s -v /workspace/vllm/tests/v1/tpu/test_topk_topp_sampler.py" \
+    && pytest -s -v /workspace/vllm/tests/v1/tpu/test_topk_topp_sampler.py \
+    && echo TEST_9 \
+    && pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py" \
 
 
 # TODO: This test fails because it uses RANDOM_SEED sampling

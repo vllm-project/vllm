@@ -1090,6 +1090,11 @@ __device__ __forceinline__ c10::BFloat16 convert_from_half<c10::BFloat16>(half v
 #endif  // defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 }
 
+template<>
+__device__ __forceinline__ float convert_from_half<float>(half val) {
+    return __half2float(val);
+}
+
 #if defined(USE_ROCM)
 
 #ifndef __has_builtin

@@ -3,7 +3,7 @@
 set -euox pipefail
 
 if [[ $# -lt 4 ]]; then
-    echo "Usage: .buildkite/run-multi-node-test.sh WORKING_DIR NUM_NODES NUM_GPUS DOCKER_IMAGE COMMAND1 COMMAND2 ... COMMANDN"
+    echo "Usage: .buildkite/scripts/run-multi-node-test.sh WORKING_DIR NUM_NODES NUM_GPUS DOCKER_IMAGE COMMAND1 COMMAND2 ... COMMANDN"
     exit 1
 fi
 
